@@ -12,7 +12,7 @@ Clerk manages multiple long-running Claude Code sessions, each with its own pers
 - **Routes Telegram topics** to the right agent (forked official plugin with topic support)
 - **Integrates Hindsight** for per-agent semantic memory with knowledge graphs
 - **Encrypts secrets** via AES-256-GCM vault
-- **Provides a CLI** for lifecycle management (start, stop, restart, logs, attach)
+- **Provides a CLI and web dashboard** for lifecycle management
 
 ## What Clerk Is NOT
 
@@ -20,26 +20,93 @@ Clerk is **not a harness or wrapper**. It never intercepts Claude's authenticati
 
 ## Quick Start
 
+### Prerequisites
+
+- Linux with systemd (Ubuntu, Debian, Fedora, etc.)
+- [Node.js 22+](https://nodejs.org)
+- [Bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`)
+- [Claude Code CLI](https://code.claude.com) (`npm install -g @anthropic-ai/claude-code`)
+- Claude Pro or Max subscription
+- [tmux](https://github.com/tmux/tmux) (`sudo apt install tmux`)
+- A Telegram bot token ([create one with @BotFather](https://t.me/BotFather))
+- A Telegram group with forum/topics enabled
+
+### 1. Install Clerk
+
 ```bash
-# Install
 npm install -g clerk-ai
+```
 
-# Initialize from example config
-clerk init --example wellness
+### 2. Create your config
 
-# Set up secrets
+```bash
+clerk init --example clerk
+```
+
+This copies an example `clerk.yaml` into your current directory with four agents: health-coach, exec-assistant, coding, and general assistant. Edit it to match your setup:
+
+```bash
+$EDITOR clerk.yaml
+```
+
+At minimum, set your Telegram `forum_chat_id` (the group where topics will be created).
+
+### 3. Set up secrets
+
+```bash
+# Create an encrypted vault for sensitive values
 clerk vault init
+
+# Store your Telegram bot token
 clerk vault set telegram-bot-token
+```
 
-# Authenticate each agent (opens browser for OAuth)
-clerk auth login --all
+The vault uses AES-256-GCM encryption. You'll be prompted for a passphrase.
 
-# Create Telegram forum topics
+### 4. Create Telegram forum topics
+
+```bash
+# Make sure your bot is an admin in the forum group, then:
+export TELEGRAM_BOT_TOKEN=your-bot-token-here
 clerk topics sync
+```
+
+This creates a forum topic for each agent and saves the mapping.
+
+### 5. Authenticate each agent
+
+```bash
+# Login all agents (opens browser for OAuth, one at a time)
+clerk auth login all
+
+# Or login individually
+clerk auth login health-coach
+```
+
+Each agent gets its own OAuth credentials. Your Max subscription is used.
+
+### 6. Initialize and start
+
+```bash
+# Scaffold all agent directories and install systemd units
+clerk init
 
 # Start all agents
 clerk agent start all
+
+# Check status
+clerk agent list
 ```
+
+That's it. Your agents are running headless, each responding in their own Telegram topic.
+
+### Interacting with agents
+
+- **Send a message** in a Telegram forum topic — the assigned agent responds
+- **Attach to a session**: `clerk agent attach health-coach` (tmux, Ctrl+B D to detach)
+- **View logs**: `clerk agent logs health-coach -f`
+- **Web dashboard**: `clerk web` then open http://localhost:8080
+- **Check auth**: `clerk auth status`
 
 ## How It Works
 
@@ -118,54 +185,71 @@ agents:
       allow: [all]
 ```
 
-Add a new agent: add 10 lines to `clerk.yaml`, run `clerk agent create <name>`, authenticate, start.
+Add a new agent: add a few lines to `clerk.yaml`, run `clerk agent create <name>`, authenticate, start.
 
-## CLI
+## CLI Reference
 
 ```bash
-# Lifecycle
-clerk agent list                  # Status of all agents
-clerk agent start <name|all>      # Start agent(s)
-clerk agent stop <name|all>       # Stop agent(s)
-clerk agent attach <name>         # Interactive tmux session
-clerk agent logs <name> -f        # Follow logs
+# Setup
+clerk init [--example <name>]       # Scaffold agents + install systemd units
+clerk vault init                    # Create encrypted vault
+clerk vault set <key>               # Store a secret
+clerk vault get <key>               # Retrieve a secret
+clerk vault list                    # List secret key names
 
-# Auth
-clerk auth login <name|all>       # OAuth login per agent
-clerk auth status                 # Token status for all agents
+# Authentication
+clerk auth login <name|all>         # OAuth login per agent
+clerk auth status                   # Token status for all agents
+clerk auth refresh <name>           # Force token refresh
+
+# Agent lifecycle
+clerk agent list                    # Status of all agents
+clerk agent create <name>           # Scaffold + install one agent
+clerk agent start <name|all>        # Start agent(s)
+clerk agent stop <name|all>         # Stop agent(s)
+clerk agent restart <name|all>      # Restart agent(s)
+clerk agent attach <name>           # Interactive tmux session
+clerk agent logs <name> [-f]        # View/follow logs
+clerk agent destroy <name> [-y]     # Remove agent (with confirmation)
 
 # Telegram
-clerk topics sync                 # Create forum topics from config
-clerk topics list                 # Show topic-to-agent mapping
+clerk topics sync                   # Create forum topics from config
+clerk topics list                   # Show topic-to-agent mapping
 
-# Secrets
-clerk vault set <key>             # Store encrypted secret
-clerk vault list                  # List secret keys
+# Memory (Hindsight)
+clerk memory search <query> [--agent <name>]
+clerk memory stats                  # Per-agent collection info
+clerk memory reflect                # Cross-agent synthesis plan
 
-# Memory
-clerk memory search <query>       # Search across agents
-clerk memory stats                # Per-agent memory counts
+# Systemd
+clerk systemd install               # Generate + enable all units
+clerk systemd status                # Show all service statuses
+clerk systemd uninstall             # Disable + remove units
+
+# Dashboard
+clerk web [--port 8080]             # Start web dashboard
 ```
+
+All commands support `--config <path>` to specify a custom clerk.yaml location. Use `clerk <command> --help` for detailed options.
 
 ## Agent Personas
 
 Each agent has a **SOUL.md** that defines its personality:
 
 ```markdown
-You are Coach, a personal health and fitness accountability partner.
+# Coach
 
-Style: motivational, direct, data-driven
-Approach: ask about goals, track progress, celebrate wins, push through plateaus
+## Communication Style
+Motivational but not cheesy. Direct and honest.
 
-Boundaries:
-- You are not a doctor. Always recommend professional care for medical concerns.
-- Focus on habits, consistency, and sustainable progress.
-- Never prescribe diets or medical treatments.
+## Principles
+- Accountability first
+- Progress over perfection
+- Keep it simple
+- Know your limits — not a doctor, recommend professional care
 ```
 
 And a **CLAUDE.md** that defines its behavior, available tools, and interaction patterns.
-
-Templates are provided for common personas. Create your own or customize the defaults.
 
 ## Templates
 
@@ -175,6 +259,8 @@ Templates are provided for common personas. Create your own or customize the def
 | `health-coach` | Fitness, nutrition, sleep, and wellness coaching |
 | `executive-assistant` | Calendar, tasks, briefings, and executive support |
 | `coding` | Software engineering with full tool access |
+
+Create your own templates in `templates/<name>/` with `CLAUDE.md.hbs`, `SOUL.md.hbs`, and optional `skills/`.
 
 ## Memory
 
@@ -187,28 +273,30 @@ Clerk integrates [Hindsight](https://github.com/vectorize-io/hindsight) for sema
 - Auto-updating mental models
 - Optional cross-agent synthesis via `clerk memory reflect`
 
-## Prerequisites
+Set `isolation: strict` on any agent to prevent its memories from being included in cross-agent reflection.
 
-- Node.js 22+
-- [Bun](https://bun.sh)
-- [Claude Code CLI](https://code.claude.com)
-- Claude Pro or Max subscription
-- tmux
-- A Telegram bot token ([create one with BotFather](https://t.me/BotFather))
+## Security
 
-## Install Methods
+- **Encrypted vault**: AES-256-GCM with scrypt key derivation for secrets
+- **File permissions**: Sensitive files (.env, credentials, settings) created with mode 0600
+- **Agent name validation**: Strict regex prevents command injection
+- **Path traversal protection**: Template and config paths are contained
+- **Web dashboard**: Binds to localhost only, optional bearer token auth via `CLERK_WEB_TOKEN`
+- **No credential interception**: Each agent authenticates directly with Claude Code OAuth
 
-### Host-Native (Recommended)
+## In-Session Management
 
-```bash
-npm install -g clerk-ai
+Install the `/clerk` skill into any agent to manage other agents from within a conversation:
+
+```
+/clerk agents          # List all agents
+/clerk start coding    # Start the coding agent
+/clerk memory "topic"  # Search memories
 ```
 
-Requires systemd (Linux). Uses tmux for terminal management.
+## Docker Support
 
-### Docker Compose (Coming Soon)
-
-Docker support is planned for NAS, VPS, or users who prefer containers. For now, use the host-native method above.
+Docker Compose support is planned. For now, use the host-native systemd + tmux approach.
 
 ## License
 

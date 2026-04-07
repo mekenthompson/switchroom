@@ -66,7 +66,7 @@ Clerk never touches, reads, or proxies the access token, refresh token, or any a
 
 **Source:** [Connect Claude Code to tools via MCP - Claude Code Docs](https://code.claude.com/docs/en/mcp)
 
-**Clerk's compliance:** Both the clerk-channel plugin and the clerk-mcp management server are standard MCP servers. They use the official `@modelcontextprotocol/sdk` package and follow the documented MCP protocol.
+**Clerk's compliance:** The clerk-mcp management server is a standard MCP server. It uses the official `@modelcontextprotocol/sdk` package and follows the documented MCP protocol.
 
 ### 5. systemd/tmux Process Management Is Standard Operations
 

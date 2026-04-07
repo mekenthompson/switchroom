@@ -239,7 +239,17 @@ async function stepBotToken(
 
   if (hasPerAgentTokens) {
     console.log(chalk.gray("  Per-agent bot tokens detected. Each agent gets its own bot."));
-    console.log(chalk.gray("  Tip: Create bots via @BotFather — one per agent.\n"));
+    console.log(chalk.gray("  Tip: Create bots via @BotFather — one per agent."));
+    console.log(
+      chalk.yellow(
+        "  IMPORTANT: Disable privacy mode on each bot BEFORE adding it to the group.",
+      ),
+    );
+    console.log(
+      chalk.yellow(
+        "  In BotFather: /mybots -> select bot -> Bot Settings -> Group Privacy -> Turn off\n",
+      ),
+    );
 
     for (const name of agentNames) {
       const agentConfig = config.agents[name];
@@ -521,6 +531,21 @@ async function detectGroup(
   botUsername: string,
   nonInteractive: boolean,
 ): Promise<string> {
+  console.log(
+    chalk.yellow.bold(
+      "\n  IMPORTANT: Disable privacy mode BEFORE adding the bot to the group.",
+    ),
+  );
+  console.log(
+    chalk.yellow(
+      "  In BotFather: /mybots -> select bot -> Bot Settings -> Group Privacy -> Turn off",
+    ),
+  );
+  console.log(
+    chalk.yellow(
+      "  If you already added the bot, remove it from the group and re-add after disabling privacy.\n",
+    ),
+  );
   console.log(
     chalk.cyan(
       `  Add @${botUsername} to your Telegram forum group as admin.`,

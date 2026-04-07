@@ -181,8 +181,8 @@ describe("scaffoldAgent", () => {
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
     );
 
-    // The clerk-telegram daemon MCP server should NOT be present
-    // Each agent uses the official plugin:telegram@claude-plugins-official instead
+    // Each agent uses the official plugin:telegram@claude-plugins-official
+    // No shared MCP server for Telegram
     expect(settings.mcpServers?.["clerk-telegram"]).toBeUndefined();
   });
 

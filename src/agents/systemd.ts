@@ -62,52 +62,6 @@ export function installAllUnits(config: ClerkConfig): void {
   daemonReload();
 }
 
-// ---------------------------------------------------------------------------
-// Daemon unit (clerk-telegram-daemon)
-// ---------------------------------------------------------------------------
-
-const DAEMON_UNIT_NAME = "clerk-telegram-daemon";
-
-function daemonUnitFilePath(): string {
-  return resolve(SYSTEMD_USER_DIR, `${DAEMON_UNIT_NAME}.service`);
-}
-
-export function generateDaemonUnit(): string {
-  const home = process.env.HOME ?? "/root";
-  // Resolve clerk-daemon path relative to this package
-  const daemonScript = resolve(import.meta.dirname, "../../clerk-daemon/daemon.ts");
-  const envFile = resolve(home, ".clerk/daemon.env");
-  return `[Unit]
-Description=clerk telegram daemon
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/bin/bun ${daemonScript}
-EnvironmentFile=${envFile}
-Restart=always
-RestartSec=5
-WorkingDirectory=${resolve(import.meta.dirname, "../../clerk-daemon")}
-
-[Install]
-WantedBy=default.target
-`;
-}
-
-export function installDaemonUnit(): void {
-  mkdirSync(SYSTEMD_USER_DIR, { recursive: true });
-  const content = generateDaemonUnit();
-  writeFileSync(daemonUnitFilePath(), content, { mode: 0o644 });
-}
-
-export function uninstallDaemonUnit(): void {
-  const path = daemonUnitFilePath();
-  if (existsSync(path)) {
-    unlinkSync(path);
-  }
-}
-
 export function daemonReload(): void {
   try {
     execSync("systemctl --user daemon-reload", { stdio: "pipe" });

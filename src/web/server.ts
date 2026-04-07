@@ -20,22 +20,44 @@ const MIME_TYPES: Record<string, string> = {
   ".ico": "image/x-icon",
 };
 
-function corsHeaders(): Record<string, string> {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-  };
-}
-
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: {
       "Content-Type": "application/json",
-      ...corsHeaders(),
     },
   });
+}
+
+/**
+ * Check bearer token auth if CLERK_WEB_TOKEN is set.
+ * Returns null if auth passes, or a 401 Response if it fails.
+ */
+function checkAuth(req: Request): Response | null {
+  const token = process.env.CLERK_WEB_TOKEN;
+  if (!token) return null; // No token configured, allow all
+
+  const authHeader = req.headers.get("Authorization");
+  if (!authHeader || authHeader !== `Bearer ${token}`) {
+    return new Response(JSON.stringify({ error: "Unauthorized" }), {
+      status: 401,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  return null;
+}
+
+/**
+ * Check bearer token for WebSocket upgrade requests.
+ * Token can be passed as ?token= query param.
+ */
+function checkWsAuth(req: Request): boolean {
+  const token = process.env.CLERK_WEB_TOKEN;
+  if (!token) return true;
+
+  const url = new URL(req.url);
+  const paramToken = url.searchParams.get("token");
+  return paramToken === token;
 }
 
 function parseRoute(
@@ -76,21 +98,24 @@ function parseRoute(
 
 export function startWebServer(config: ClerkConfig, port: number): void {
   const uiDir = resolve(import.meta.dirname, "ui");
-  const wsClients = new Set<any>();
 
   const server = Bun.serve({
     port,
+    hostname: "127.0.0.1",
     fetch(req, server) {
       const url = new URL(req.url);
       const { pathname } = url;
 
-      // Handle CORS preflight
+      // Handle CORS preflight — not needed for localhost-only server
       if (req.method === "OPTIONS") {
-        return new Response(null, { status: 204, headers: corsHeaders() });
+        return new Response(null, { status: 204 });
       }
 
       // WebSocket upgrade
       if (pathname === "/ws") {
+        if (!checkWsAuth(req)) {
+          return new Response("Unauthorized", { status: 401 });
+        }
         const upgraded = server.upgrade(req);
         if (!upgraded) {
           return new Response("WebSocket upgrade failed", { status: 400 });
@@ -98,16 +123,26 @@ export function startWebServer(config: ClerkConfig, port: number): void {
         return undefined as unknown as Response;
       }
 
-      // API routes
+      // API routes — require auth if CLERK_WEB_TOKEN is set
       const route = parseRoute(pathname, req.method);
       if (route) {
+        const authError = checkAuth(req);
+        if (authError) return authError;
+
         switch (route.handler) {
           case "getAgents":
             return jsonResponse(handleGetAgents(config));
 
           case "getLogs": {
-            const lines = parseInt(url.searchParams.get("lines") ?? "50", 10);
-            return jsonResponse(handleGetLogs(route.params.name, lines));
+            const agentName = route.params.name;
+            if (!config.agents[agentName]) {
+              return jsonResponse({ ok: false, error: `Unknown agent: ${agentName}` }, 404);
+            }
+            const rawLines = parseInt(url.searchParams.get("lines") ?? "50", 10);
+            const lines = (!isNaN(rawLines) && rawLines >= 1 && rawLines <= 10000)
+              ? rawLines
+              : 50;
+            return jsonResponse(handleGetLogs(agentName, lines));
           }
 
           case "startAgent": {
@@ -136,7 +171,7 @@ export function startWebServer(config: ClerkConfig, port: number): void {
         }
       }
 
-      // Static files
+      // Static files — no auth required
       let filePath = pathname === "/" ? "/index.html" : pathname;
       const fullPath = join(uiDir, filePath);
 
@@ -150,19 +185,23 @@ export function startWebServer(config: ClerkConfig, port: number): void {
         const contentType = MIME_TYPES[ext] ?? "application/octet-stream";
         const content = readFileSync(fullPath);
         return new Response(content, {
-          headers: { "Content-Type": contentType, ...corsHeaders() },
+          headers: { "Content-Type": contentType },
         });
       }
 
-      return new Response("Not Found", { status: 404, headers: corsHeaders() });
+      return new Response("Not Found", { status: 404 });
     },
 
     websocket: {
-      open(ws) {
-        wsClients.add(ws);
+      open(_ws) {
+        // No-op; tracking handled per-subscription
       },
       close(ws) {
-        wsClients.delete(ws);
+        const proc = (ws as any)._logProcess;
+        if (proc) {
+          proc.kill();
+          (ws as any)._logProcess = null;
+        }
       },
       message(ws, message) {
         // Handle subscription requests for agent logs
@@ -170,6 +209,14 @@ export function startWebServer(config: ClerkConfig, port: number): void {
           const data = JSON.parse(String(message));
           if (data.type === "subscribe" && data.agent) {
             const agentName = String(data.agent).replace(/[^a-zA-Z0-9_-]/g, "");
+
+            // Kill any existing log process before subscribing to a new one
+            const existing = (ws as any)._logProcess;
+            if (existing) {
+              existing.kill();
+              (ws as any)._logProcess = null;
+            }
+
             const child = spawn(
               "journalctl",
               ["--user", "-u", `clerk-${agentName}`, "-f", "--no-pager", "-n", "20"],

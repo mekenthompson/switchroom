@@ -22,7 +22,7 @@ Clerk is **not a harness or wrapper**. It never intercepts Claude's authenticati
 
 ```bash
 # Install
-npm install -g @clerk-ai/clerk
+npm install -g clerk-ai
 
 # Initialize from example config
 clerk init --example wellness
@@ -201,19 +201,14 @@ Clerk integrates [Hindsight](https://github.com/vectorize-io/hindsight) for sema
 ### Host-Native (Recommended)
 
 ```bash
-npm install -g @clerk-ai/clerk
+npm install -g clerk-ai
 ```
 
 Requires systemd (Linux). Uses tmux for terminal management.
 
-### Docker Compose (Optional)
+### Docker Compose (Coming Soon)
 
-```bash
-clerk init --docker
-docker compose up -d
-```
-
-For NAS, VPS, or users who prefer containers.
+Docker support is planned for NAS, VPS, or users who prefer containers. For now, use the host-native method above.
 
 ## License
 

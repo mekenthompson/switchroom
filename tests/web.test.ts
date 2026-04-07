@@ -21,6 +21,7 @@ vi.mock("../src/config/loader.js", () => ({
 // Mock child_process
 vi.mock("node:child_process", () => ({
   execSync: vi.fn(),
+  execFileSync: vi.fn(),
   spawn: vi.fn(),
 }));
 
@@ -34,7 +35,7 @@ import {
 } from "../src/web/api.js";
 import { getAllAgentStatuses, startAgent, stopAgent, restartAgent } from "../src/agents/lifecycle.js";
 import { getAllAuthStatuses } from "../src/auth/manager.js";
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import type { ClerkConfig } from "../src/config/schema.js";
 
 const mockConfig: ClerkConfig = {
@@ -198,29 +199,31 @@ describe("handleGetLogs", () => {
   });
 
   it("returns logs from journalctl", () => {
-    vi.mocked(execSync).mockReturnValue("line 1\nline 2\nline 3\n" as any);
+    vi.mocked(execFileSync).mockReturnValue("line 1\nline 2\nline 3\n" as any);
 
     const result = handleGetLogs("coach", 50);
     expect(result.ok).toBe(true);
     expect(result.logs).toContain("line 1");
-    expect(execSync).toHaveBeenCalledWith(
-      "journalctl --user -u clerk-coach --no-pager -n 50",
+    expect(execFileSync).toHaveBeenCalledWith(
+      "journalctl",
+      ["--user", "-u", "clerk-coach", "--no-pager", "-n", "50"],
       expect.objectContaining({ encoding: "utf-8" })
     );
   });
 
   it("uses default of 50 lines", () => {
-    vi.mocked(execSync).mockReturnValue("output" as any);
+    vi.mocked(execFileSync).mockReturnValue("output" as any);
 
     handleGetLogs("sage");
-    expect(execSync).toHaveBeenCalledWith(
-      "journalctl --user -u clerk-sage --no-pager -n 50",
+    expect(execFileSync).toHaveBeenCalledWith(
+      "journalctl",
+      ["--user", "-u", "clerk-sage", "--no-pager", "-n", "50"],
       expect.any(Object)
     );
   });
 
   it("returns error when journalctl fails", () => {
-    vi.mocked(execSync).mockImplementation(() => {
+    vi.mocked(execFileSync).mockImplementation(() => {
       throw new Error("no journal data");
     });
 

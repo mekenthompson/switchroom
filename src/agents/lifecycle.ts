@@ -1,4 +1,4 @@
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import type { ClerkConfig } from "../config/schema.js";
 
 export interface AgentStatus {
@@ -12,8 +12,8 @@ function serviceName(name: string): string {
   return `clerk-${name}`;
 }
 
-function systemctl(args: string): string {
-  return execSync(`systemctl --user ${args}`, {
+function systemctl(args: string[]): string {
+  return execFileSync("systemctl", ["--user", ...args], {
     encoding: "utf-8",
     stdio: ["pipe", "pipe", "pipe"],
   }).trim();
@@ -21,7 +21,7 @@ function systemctl(args: string): string {
 
 export function startAgent(name: string): void {
   try {
-    systemctl(`start ${serviceName(name)}`);
+    systemctl(["start", serviceName(name)]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to start agent "${name}": ${message}`);
@@ -30,7 +30,7 @@ export function startAgent(name: string): void {
 
 export function stopAgent(name: string): void {
   try {
-    systemctl(`stop ${serviceName(name)}`);
+    systemctl(["stop", serviceName(name)]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to stop agent "${name}": ${message}`);
@@ -39,7 +39,7 @@ export function stopAgent(name: string): void {
 
 export function restartAgent(name: string): void {
   try {
-    systemctl(`restart ${serviceName(name)}`);
+    systemctl(["restart", serviceName(name)]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to restart agent "${name}": ${message}`);
@@ -48,7 +48,7 @@ export function restartAgent(name: string): void {
 
 export function enableAgent(name: string): void {
   try {
-    systemctl(`enable ${serviceName(name)}`);
+    systemctl(["enable", serviceName(name)]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to enable agent "${name}": ${message}`);
@@ -57,7 +57,7 @@ export function enableAgent(name: string): void {
 
 export function disableAgent(name: string): void {
   try {
-    systemctl(`disable ${serviceName(name)}`);
+    systemctl(["disable", serviceName(name)]);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to disable agent "${name}": ${message}`);
@@ -69,7 +69,7 @@ export function getAgentStatus(name: string): AgentStatus {
 
   let active = "unknown";
   try {
-    active = systemctl(`is-active ${service}`);
+    active = systemctl(["is-active", service]);
   } catch {
     active = "inactive";
   }
@@ -80,7 +80,7 @@ export function getAgentStatus(name: string): AgentStatus {
 
   try {
     const output = systemctl(
-      `show ${service} --property=ActiveEnterTimestamp,MemoryCurrent,MainPID`
+      ["show", service, "--property=ActiveEnterTimestamp,MemoryCurrent,MainPID"]
     );
 
     for (const line of output.split("\n")) {
@@ -128,15 +128,20 @@ export function getAllAgentStatuses(
 
 export function attachAgent(name: string): void {
   const session = `clerk-${name}`;
-  const child = spawn("tmux", ["attach", "-t", session], {
+  const result = spawnSync("tmux", ["attach", "-t", session], {
     stdio: "inherit",
   });
 
-  child.on("error", (err) => {
+  if (result.error) {
     throw new Error(
-      `Failed to attach to agent "${name}" (tmux session ${session}): ${err.message}`
+      `Failed to attach to agent "${name}" (tmux session ${session}): ${result.error.message}`
     );
-  });
+  }
+  if (result.status !== 0) {
+    throw new Error(
+      `Failed to attach to agent "${name}" (tmux session ${session}): exited with code ${result.status}`
+    );
+  }
 }
 
 export function getAgentLogs(name: string, follow: boolean): void {

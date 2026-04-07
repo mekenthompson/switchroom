@@ -22,7 +22,7 @@ interface VaultData {
 }
 
 function deriveKey(passphrase: string, salt: Buffer): Buffer {
-  return scryptSync(passphrase, salt, 32) as Buffer;
+  return scryptSync(passphrase, salt, 32, { N: 16384, r: 8, p: 1 }) as Buffer;
 }
 
 function encrypt(key: Buffer, plaintext: string): { iv: string; data: string; tag: string } {
@@ -54,7 +54,7 @@ export function createVault(passphrase: string, vaultPath: string): void {
 
   const dir = dirname(vaultPath);
   if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
   }
 
   const salt = randomBytes(16);
@@ -69,7 +69,7 @@ export function createVault(passphrase: string, vaultPath: string): void {
     tag,
   };
 
-  writeFileSync(vaultPath, JSON.stringify(vaultFile, null, 2), "utf8");
+  writeFileSync(vaultPath, JSON.stringify(vaultFile, null, 2), { encoding: "utf8", mode: 0o600 });
 }
 
 export function openVault(passphrase: string, vaultPath: string): Record<string, string> {
@@ -130,7 +130,7 @@ export function saveVault(
   vaultFile.data = data;
   vaultFile.tag = tag;
 
-  writeFileSync(vaultPath, JSON.stringify(vaultFile, null, 2), "utf8");
+  writeFileSync(vaultPath, JSON.stringify(vaultFile, null, 2), { encoding: "utf8", mode: 0o600 });
 }
 
 export function setSecret(

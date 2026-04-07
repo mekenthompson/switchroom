@@ -2,7 +2,8 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { resolve } from "node:path";
 import { rmSync, existsSync } from "node:fs";
-import { loadConfig, resolveAgentsDir, ConfigError } from "../config/loader.js";
+import { resolveAgentsDir } from "../config/loader.js";
+import { withConfigError, getConfig } from "./helpers.js";
 import { scaffoldAgent } from "../agents/scaffold.js";
 import {
   startAgent,
@@ -59,30 +60,6 @@ function printTable(
     const line = row.map((cell, i) => cell.padEnd(widths[i])).join("  ");
     console.log(`  ${line}`);
   }
-}
-
-function withConfigError(fn: (...args: any[]) => Promise<void>) {
-  return async (...args: any[]) => {
-    try {
-      await fn(...args);
-    } catch (err) {
-      if (err instanceof ConfigError) {
-        console.error(chalk.red(`Config error: ${err.message}`));
-        if (err.details) {
-          for (const d of err.details) {
-            console.error(chalk.gray(d));
-          }
-        }
-        process.exit(1);
-      }
-      throw err;
-    }
-  };
-}
-
-function getConfig(program: Command) {
-  const parentOpts = program.opts();
-  return loadConfig(parentOpts.config);
 }
 
 export function registerAgentCommand(program: Command): void {

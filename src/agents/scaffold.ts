@@ -81,6 +81,7 @@ export function scaffoldAgent(
     () => renderTemplate(join(basePath, "settings.json.hbs"), context),
     created,
     skipped,
+    0o600,
   );
 
   // --- Merge Hindsight MCP config into settings.json ---
@@ -131,6 +132,7 @@ export function scaffoldAgent(
     () => `TELEGRAM_BOT_TOKEN=${telegramConfig.bot_token}\n`,
     created,
     skipped,
+    0o600,
   );
 
   // --- Telegram access.json ---
@@ -139,6 +141,7 @@ export function scaffoldAgent(
     () => buildAccessJson(agentConfig, telegramConfig),
     created,
     skipped,
+    0o600,
   );
 
   // --- Copy skill files from template ---
@@ -156,12 +159,13 @@ function writeIfMissing(
   contentFn: () => string,
   created: string[],
   skipped: string[],
+  mode?: number,
 ): void {
   if (existsSync(filePath)) {
     skipped.push(filePath);
     return;
   }
-  writeFileSync(filePath, contentFn(), "utf-8");
+  writeFileSync(filePath, contentFn(), mode !== undefined ? { encoding: "utf-8", mode } : "utf-8");
   created.push(filePath);
 }
 

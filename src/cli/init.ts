@@ -20,6 +20,12 @@ export function registerInitCommand(program: Command): void {
 
         // If --example is given, copy the example config into cwd
         if (opts.example) {
+          if (!/^[a-z0-9_-]+$/.test(opts.example)) {
+            console.error(
+              chalk.red(`Invalid example name: ${opts.example} (must match /^[a-z0-9_-]+$/)`)
+            );
+            process.exit(1);
+          }
           const exampleFile = resolve(
             import.meta.dirname,
             `../../examples/${opts.example}.yaml`

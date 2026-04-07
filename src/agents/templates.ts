@@ -1,13 +1,9 @@
 import { readFileSync, existsSync, readdirSync, statSync, copyFileSync, mkdirSync } from "node:fs";
-import { resolve, join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolve, join } from "node:path";
 import Handlebars from "handlebars";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
 /** Root of the templates directory (project-level). */
-const TEMPLATES_ROOT = resolve(__dirname, "../../templates");
+const TEMPLATES_ROOT = resolve(import.meta.dirname, "../../templates");
 
 /**
  * Resolve the path for a named template directory.
@@ -15,6 +11,10 @@ const TEMPLATES_ROOT = resolve(__dirname, "../../templates");
  */
 export function getTemplatePath(templateName: string): string {
   const requested = resolve(TEMPLATES_ROOT, templateName);
+  // Prevent path traversal — resolved path must stay within TEMPLATES_ROOT
+  if (!requested.startsWith(TEMPLATES_ROOT)) {
+    throw new Error(`Invalid template name: ${templateName}`);
+  }
   // Check that the template dir exists AND has at least one .hbs file
   if (existsSync(requested) && hasTemplateFiles(requested)) {
     return requested;
@@ -34,7 +34,11 @@ function hasTemplateFiles(dir: string): boolean {
   }
 }
 
-/** Path to the shared _base template directory. */
+/**
+ * Path to the shared _base template directory.
+ * Note: This uses a hardcoded name ("_base"), not external input,
+ * so no path traversal check is needed.
+ */
 export function getBaseTemplatePath(): string {
   return resolve(TEMPLATES_ROOT, "_base");
 }

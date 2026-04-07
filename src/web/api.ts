@@ -1,6 +1,5 @@
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import type { ClerkConfig } from "../config/schema.js";
-import { resolveAgentsDir } from "../config/loader.js";
 import {
   getAllAgentStatuses,
   startAgent,
@@ -90,8 +89,9 @@ export function handleGetLogs(
   lines: number = 50
 ): { ok: boolean; logs?: string; error?: string } {
   try {
-    const output = execSync(
-      `journalctl --user -u clerk-${name} --no-pager -n ${lines}`,
+    const output = execFileSync(
+      "journalctl",
+      ["--user", "-u", `clerk-${name}`, "--no-pager", "-n", String(lines)],
       { encoding: "utf-8", timeout: 5000 }
     );
     return { ok: true, logs: output };

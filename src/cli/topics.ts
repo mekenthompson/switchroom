@@ -1,22 +1,13 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { loadConfig, ConfigError } from "../config/loader.js";
 import { syncTopics, listTopics, resolveBotToken, TopicSyncError } from "../telegram/topic-manager.js";
+import { withConfigError, getConfig } from "./helpers.js";
 
-function withError(fn: (...args: any[]) => Promise<void>) {
-  return async (...args: any[]) => {
+function withTopicError(fn: (...args: any[]) => Promise<void>) {
+  return withConfigError(async (...args: any[]) => {
     try {
       await fn(...args);
     } catch (err) {
-      if (err instanceof ConfigError) {
-        console.error(chalk.red(`Config error: ${err.message}`));
-        if (err.details) {
-          for (const d of err.details) {
-            console.error(chalk.gray(d));
-          }
-        }
-        process.exit(1);
-      }
       if (err instanceof TopicSyncError) {
         console.error(chalk.red(`Topic sync error: ${err.message}`));
         if (err.agent) {
@@ -26,12 +17,7 @@ function withError(fn: (...args: any[]) => Promise<void>) {
       }
       throw err;
     }
-  };
-}
-
-function getConfig(program: Command) {
-  const parentOpts = program.opts();
-  return loadConfig(parentOpts.config);
+  });
 }
 
 function printTable(
@@ -60,7 +46,7 @@ export function registerTopicsCommand(program: Command): void {
     .command("sync")
     .description("Create forum topics for agents that don't have one yet")
     .action(
-      withError(async () => {
+      withTopicError(async () => {
         const config = getConfig(program);
 
         // Warn about vault reference early
@@ -111,7 +97,7 @@ export function registerTopicsCommand(program: Command): void {
     .command("list")
     .description("List agent topic mappings")
     .action(
-      withError(async () => {
+      withTopicError(async () => {
         const config = getConfig(program);
 
         const agentNames = Object.keys(config.agents);

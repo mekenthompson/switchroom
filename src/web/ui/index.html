@@ -219,13 +219,20 @@
 
   <script>
     const API = window.location.origin;
+    const TOKEN = new URLSearchParams(window.location.search).get('token');
     let agents = [];
     let openLogs = new Set();
     let ws = null;
 
+    function authHeaders() {
+      const h = {};
+      if (TOKEN) h['Authorization'] = `Bearer ${TOKEN}`;
+      return h;
+    }
+
     async function fetchAgents() {
       try {
-        const res = await fetch(`${API}/api/agents`);
+        const res = await fetch(`${API}/api/agents`, { headers: authHeaders() });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         agents = await res.json();
         render();
@@ -329,7 +336,7 @@
       if (!el) return;
       el.textContent = 'Loading...';
       try {
-        const res = await fetch(`${API}/api/agents/${encodeURIComponent(name)}/logs?lines=50`);
+        const res = await fetch(`${API}/api/agents/${encodeURIComponent(name)}/logs?lines=50`, { headers: authHeaders() });
         const data = await res.json();
         el.textContent = data.ok ? (data.logs || '(no output)') : `Error: ${data.error}`;
         el.scrollTop = el.scrollHeight;
@@ -341,7 +348,8 @@
     async function agentAction(name, action) {
       try {
         const res = await fetch(`${API}/api/agents/${encodeURIComponent(name)}/${action}`, {
-          method: 'POST'
+          method: 'POST',
+          headers: authHeaders()
         });
         const data = await res.json();
         if (!data.ok) showError(`${action} ${name}: ${data.error}`);
@@ -353,7 +361,8 @@
     }
 
     function connectWebSocket() {
-      const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+      let wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+      if (TOKEN) wsUrl += `?token=${encodeURIComponent(TOKEN)}`;
       ws = new WebSocket(wsUrl);
 
       ws.onmessage = (event) => {

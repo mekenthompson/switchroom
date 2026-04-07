@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { resolve } from "node:path";
-import { loadConfig, resolveAgentsDir, ConfigError } from "../config/loader.js";
+import { resolveAgentsDir } from "../config/loader.js";
 import {
   loginAgent,
   loginAllAgents,
@@ -9,30 +9,7 @@ import {
   getAllAuthStatuses,
   refreshAgent,
 } from "../auth/manager.js";
-
-function withConfigError(fn: (...args: any[]) => Promise<void>) {
-  return async (...args: any[]) => {
-    try {
-      await fn(...args);
-    } catch (err) {
-      if (err instanceof ConfigError) {
-        console.error(chalk.red(`Config error: ${err.message}`));
-        if (err.details) {
-          for (const d of err.details) {
-            console.error(chalk.gray(d));
-          }
-        }
-        process.exit(1);
-      }
-      throw err;
-    }
-  };
-}
-
-function getConfig(program: Command) {
-  const parentOpts = program.opts();
-  return loadConfig(parentOpts.config);
-}
+import { withConfigError, getConfig } from "./helpers.js";
 
 function printAuthTable(
   headers: string[],

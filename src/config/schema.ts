@@ -68,7 +68,7 @@ export const AgentSchema = z.object({
     .optional()
     .describe("Claude model override (e.g., 'claude-sonnet-4-6')"),
   mcp_servers: z
-    .record(z.string(), z.any())
+    .record(z.string(), z.unknown())
     .optional()
     .describe("Additional MCP server configurations"),
 });
@@ -134,7 +134,12 @@ export const ClerkConfigSchema = z.object({
   memory: MemoryBackendConfigSchema.optional(),
   vault: VaultConfigSchema.optional(),
   agents: z
-    .record(z.string(), AgentSchema)
+    .record(
+      z.string().regex(/^[a-z0-9][a-z0-9_-]*$/, {
+        message: "Agent name must start with a letter/digit and contain only lowercase letters, digits, hyphens, and underscores",
+      }),
+      AgentSchema,
+    )
     .describe("Map of agent name to agent configuration"),
 });
 

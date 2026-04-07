@@ -1,0 +1,43 @@
+{
+  "name": "clerk-ai",
+  "version": "0.1.0",
+  "description": "Multi-agent orchestrator for Claude Code. One Telegram group, many specialized agents.",
+  "type": "module",
+  "bin": {
+    "clerk": "./bin/clerk.ts"
+  },
+  "scripts": {
+    "dev": "bun bin/clerk.ts",
+    "build": "bun build bin/clerk.ts --outdir dist --target node",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "chalk": "^5.4.0",
+    "commander": "^13.1.0",
+    "handlebars": "^4.7.8",
+    "yaml": "^2.7.0",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mekenthompson/clerk.git"
+  },
+  "keywords": [
+    "claude-code",
+    "multi-agent",
+    "telegram",
+    "orchestrator",
+    "ai-agent"
+  ]
+}

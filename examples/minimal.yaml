@@ -1,0 +1,15 @@
+# clerk.yaml — Minimal single-agent setup
+
+clerk:
+  version: 1
+
+telegram:
+  bot_token: "vault:telegram-bot-token"
+  forum_chat_id: "-1001234567890"
+
+agents:
+  assistant:
+    template: default
+    topic_name: "General"
+    tools:
+      allow: [all]

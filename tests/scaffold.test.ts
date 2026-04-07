@@ -73,7 +73,9 @@ describe("scaffoldAgent", () => {
     expect(startSh).toContain(`CLAUDE_CONFIG_DIR="${result.agentDir}/.claude"`);
     expect(startSh).toContain(`TELEGRAM_STATE_DIR="${result.agentDir}/telegram"`);
     expect(startSh).toContain('TELEGRAM_TOPIC_ID="42"');
-    expect(startSh).toContain("exec claude --channels plugin:telegram@claude-plugins-official");
+    expect(startSh).toContain("exec claude");
+    expect(startSh).toContain('AGENT_NAME="my-agent"');
+    expect(startSh).toContain("CLERK_SOCKET_PATH");
     expect(startSh).not.toContain("--dangerously-skip-permissions");
   });
 
@@ -177,15 +179,16 @@ describe("scaffoldAgent", () => {
     expect(settings.skipDangerousModePermissionPrompt).toBeUndefined();
   });
 
-  it("includes enabledPlugins for telegram in settings.json", () => {
+  it("includes clerk-telegram MCP server in settings.json", () => {
     const config = makeAgentConfig();
     const result = scaffoldAgent("plugin-agent", config, tmpDir, telegramConfig);
     const settings = JSON.parse(
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
     );
 
-    expect(settings.enabledPlugins).toBeDefined();
-    expect(settings.enabledPlugins["telegram@claude-plugins-official"]).toBe(true);
+    expect(settings.mcpServers).toBeDefined();
+    expect(settings.mcpServers["clerk-telegram"]).toBeDefined();
+    expect(settings.mcpServers["clerk-telegram"].command).toBe("bun");
   });
 
   it("writes comment in .env when bot token is unresolvable vault reference", () => {

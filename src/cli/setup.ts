@@ -23,6 +23,8 @@ import {
   copyExistingCredentials,
   writeAccessJson,
   writeAgentEnv,
+  writeDaemonAccessJson,
+  writeDaemonEnv,
 } from "../setup/onboarding.js";
 import {
   ask,
@@ -609,6 +611,13 @@ async function stepScaffoldAgents(
         chalk.red(`  x ${name}: ${(err as Error).message}`),
       );
     }
+  }
+
+  // Write daemon config files
+  if (userId && userId !== "0") {
+    writeDaemonAccessJson(userId, forumChatId);
+    writeDaemonEnv(botToken);
+    console.log(chalk.gray("  Daemon config written to ~/.clerk/"));
   }
 
   // Install systemd units

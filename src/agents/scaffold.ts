@@ -265,6 +265,9 @@ export function scaffoldAgent(
   // --- Set up plugin symlinks ---
   setupPlugins(agentDir);
 
+  // --- Set up clerk-channel MCP server in settings.json ---
+  setupClerkChannel(agentDir, name, topicId);
+
   return { agentDir, created, skipped };
 }
 
@@ -285,6 +288,42 @@ function writeIfMissing(
   }
   writeFileSync(filePath, contentFn(), mode !== undefined ? { encoding: "utf-8", mode } : "utf-8");
   created.push(filePath);
+}
+
+/**
+ * Set up the clerk-channel MCP server in the agent's settings.json.
+ * This allows the agent to communicate via the shared daemon instead of
+ * running its own Telegram poller.
+ */
+function setupClerkChannel(agentDir: string, agentName: string, topicId?: number): void {
+  const settingsPath = join(agentDir, ".claude", "settings.json");
+  if (!existsSync(settingsPath)) return;
+
+  try {
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    if (!settings.mcpServers) {
+      settings.mcpServers = {};
+    }
+
+    // Add clerk-channel MCP server pointing to the channel plugin
+    const channelServerPath = resolve(import.meta.dirname, "../../clerk-channel/server.ts");
+    if (!settings.mcpServers["clerk-telegram"]) {
+      settings.mcpServers["clerk-telegram"] = {
+        command: "bun",
+        args: [channelServerPath],
+        env: {
+          TELEGRAM_TOPIC_ID: String(topicId ?? ""),
+          AGENT_NAME: agentName,
+          CLERK_SOCKET_PATH: process.env.CLERK_SOCKET_PATH ?? "/tmp/clerk-telegram.sock",
+          TELEGRAM_FORUM_CHAT_ID: process.env.TELEGRAM_FORUM_CHAT_ID ?? "",
+        },
+      };
+    }
+
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+  } catch {
+    // Non-fatal — settings.json may not be valid JSON yet
+  }
 }
 
 function buildAccessJson(

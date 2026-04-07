@@ -120,6 +120,57 @@ export function writeAccessJson(
 }
 
 /**
+ * Build and write the daemon-access.json file that the clerk-telegram-daemon
+ * uses for access control. Combines allowFrom from all agents and groups.
+ */
+export function writeDaemonAccessJson(
+  userId: string,
+  forumChatId: string,
+): void {
+  const home = process.env.HOME ?? "/root";
+  const clerkDir = join(home, ".clerk");
+  mkdirSync(clerkDir, { recursive: true });
+
+  const access = {
+    allowFrom: [userId],
+    groups: {
+      [forumChatId]: {
+        requireMention: false,
+        allowFrom: [userId],
+      },
+    },
+  };
+
+  const accessPath = join(clerkDir, "daemon-access.json");
+  writeFileSync(accessPath, JSON.stringify(access, null, 2) + "\n", {
+    encoding: "utf-8",
+    mode: 0o600,
+  });
+}
+
+/**
+ * Write the daemon.env template file if it doesn't exist.
+ */
+export function writeDaemonEnv(botToken: string): void {
+  const home = process.env.HOME ?? "/root";
+  const clerkDir = join(home, ".clerk");
+  mkdirSync(clerkDir, { recursive: true });
+
+  const envPath = join(clerkDir, "daemon.env");
+  if (existsSync(envPath)) return; // Don't overwrite existing config
+
+  const content = [
+    `TELEGRAM_BOT_TOKEN=${botToken}`,
+    `CLERK_SOCKET_PATH=/tmp/clerk-telegram.sock`,
+    `CLERK_ACCESS_PATH=${join(clerkDir, "daemon-access.json")}`,
+    `CLERK_INBOX_PATH=${join(clerkDir, "inbox")}`,
+    "",
+  ].join("\n");
+
+  writeFileSync(envPath, content, { encoding: "utf-8", mode: 0o600 });
+}
+
+/**
  * Write the .env file with the bot token for an agent.
  */
 export function writeAgentEnv(agentDir: string, botToken: string): void {

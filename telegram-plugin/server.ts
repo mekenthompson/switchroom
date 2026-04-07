@@ -25,6 +25,7 @@ import { z } from 'zod'
 import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
+import { execFileSync } from 'child_process'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
@@ -818,6 +819,218 @@ bot.command('status', async ctx => {
   await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
 })
 
+// ---------------------------------------------------------------------------
+// Clerk CLI bot commands — intercept /commands and run clerk directly.
+// Zero Claude tokens, instant response.
+// ---------------------------------------------------------------------------
+
+const CLERK_CLI = process.env.CLERK_CLI_PATH ?? 'clerk'
+const CLERK_CONFIG = process.env.CLERK_CONFIG
+
+function clerkExec(args: string[], timeoutMs = 15000): string {
+  const fullArgs = CLERK_CONFIG ? ['--config', CLERK_CONFIG, ...args] : args
+  return execFileSync(CLERK_CLI, fullArgs, {
+    encoding: 'utf-8',
+    timeout: timeoutMs,
+    env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+  })
+}
+
+function formatClerkOutput(output: string, maxLen = 4000): string {
+  const trimmed = output.trim()
+  if (trimmed.length <= maxLen) return trimmed
+  return trimmed.slice(0, maxLen - 20) + '\n... (truncated)'
+}
+
+/** Check if a sender is authorized (in allowFrom or in an allowed group). */
+function isAuthorizedSender(ctx: Context): boolean {
+  const from = ctx.from
+  if (!from) return false
+  const senderId = String(from.id)
+  const access = loadAccess()
+
+  if (ctx.chat?.type === 'private') {
+    return access.allowFrom.includes(senderId)
+  }
+  if (ctx.chat?.type === 'group' || ctx.chat?.type === 'supergroup') {
+    const groupId = String(ctx.chat.id)
+    const policy = access.groups[groupId]
+    if (!policy) return false
+    const groupAllowFrom = policy.allowFrom ?? []
+    if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) return false
+    return true
+  }
+  return false
+}
+
+/** Send a reply, respecting message_thread_id for forum topics. */
+async function clerkReply(ctx: Context, text: string): Promise<void> {
+  const chatId = String(ctx.chat!.id)
+  const threadId = resolveThreadId(chatId, ctx.message?.message_thread_id)
+  await ctx.reply(text, {
+    ...(threadId != null ? { message_thread_id: threadId } : {}),
+  })
+}
+
+/** Wrap text in a monospace code block for Telegram. */
+function codeBlock(text: string): string {
+  // Use triple backtick; escape any existing triple backtick inside
+  const escaped = text.replace(/```/g, '` ` `')
+  return '```\n' + escaped + '\n```'
+}
+
+/** Execute a clerk command and reply with the result. */
+async function runClerkCommand(ctx: Context, args: string[], label: string): Promise<void> {
+  try {
+    const output = clerkExec(args)
+    const formatted = formatClerkOutput(output)
+    await clerkReply(ctx, formatted ? codeBlock(formatted) : `${label}: done (no output)`)
+  } catch (err: unknown) {
+    const error = err as { status?: number; stderr?: string; message?: string }
+    if (error.message?.includes('ENOENT')) {
+      await clerkReply(ctx, 'clerk CLI not found. Ensure `clerk` is on PATH or set CLERK_CLI_PATH.')
+      return
+    }
+    if (error.message?.includes('ETIMEDOUT') || error.message?.includes('timed out')) {
+      await clerkReply(ctx, `${label}: command timed out after 15s`)
+      return
+    }
+    const detail = error.stderr?.trim() || error.message || 'unknown error'
+    await clerkReply(ctx, `${label} failed:\n${codeBlock(formatClerkOutput(detail))}`)
+  }
+}
+
+// /agents — list all agents
+bot.command('agents', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  await runClerkCommand(ctx, ['agent', 'list'], 'agent list')
+})
+
+// /clerkstart <name> — start an agent (use clerkstart to avoid conflict with Telegram's built-in /start)
+bot.command('clerkstart', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const name = ctx.match?.trim()
+  if (!name) {
+    await clerkReply(ctx, 'Usage: /clerkstart <agent-name>')
+    return
+  }
+  await runClerkCommand(ctx, ['agent', 'start', name], `start ${name}`)
+})
+
+// /stop <name> — stop an agent
+bot.command('stop', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const name = ctx.match?.trim()
+  if (!name) {
+    await clerkReply(ctx, 'Usage: /stop <agent-name>')
+    return
+  }
+  await runClerkCommand(ctx, ['agent', 'stop', name], `stop ${name}`)
+})
+
+// /restart <name> — restart an agent (supports "all")
+bot.command('restart', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const name = ctx.match?.trim()
+  if (!name) {
+    await clerkReply(ctx, 'Usage: /restart <agent-name|all>')
+    return
+  }
+  await runClerkCommand(ctx, ['agent', 'restart', name], `restart ${name}`)
+})
+
+// /auth — show token/auth health
+bot.command('auth', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  await runClerkCommand(ctx, ['auth', 'status'], 'auth status')
+})
+
+// /topics — show topic mappings
+bot.command('topics', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  await runClerkCommand(ctx, ['topics', 'list'], 'topics list')
+})
+
+// /logs <name> [lines] — show agent logs
+bot.command('logs', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const parts = (ctx.match ?? '').trim().split(/\s+/)
+  const name = parts[0]
+  if (!name) {
+    await clerkReply(ctx, 'Usage: /logs <agent-name> [lines]')
+    return
+  }
+  const lines = parts[1] ? parseInt(parts[1], 10) : 20
+  const lineCount = isNaN(lines) || lines < 1 ? 20 : Math.min(lines, 200)
+  await runClerkCommand(ctx, ['agent', 'logs', name, '--lines', String(lineCount)], `logs ${name}`)
+})
+
+// /memory <query> — search agent memory
+bot.command('memory', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const query = ctx.match?.trim()
+  if (!query) {
+    await clerkReply(ctx, 'Usage: /memory <search query>')
+    return
+  }
+  await runClerkCommand(ctx, ['memory', 'search', query], 'memory search')
+})
+
+// /clerkhelp — show all available bot commands
+bot.command('clerkhelp', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const helpText = [
+    'Clerk Bot Commands',
+    '',
+    '/agents - List all agents and their status',
+    '/clerkstart <name> - Start an agent',
+    '/stop <name> - Stop an agent',
+    '/restart <name|all> - Restart an agent (or all)',
+    '/auth - Show auth/token status',
+    '/topics - Show topic-to-agent mappings',
+    '/logs <name> [lines] - Show agent logs (default: 20 lines)',
+    '/memory <query> - Search agent memory',
+    '/clerkhelp - Show this help message',
+    '',
+    'These commands run the clerk CLI directly — no AI tokens used.',
+  ].join('\n')
+  await clerkReply(ctx, helpText)
+})
+
+// Register clerk commands with BotFather (called during startup alongside existing commands).
+async function registerClerkBotCommands(): Promise<void> {
+  // Register in all_private_chats scope (extends existing commands)
+  const clerkCommands = [
+    { command: 'agents', description: 'List all agents and their status' },
+    { command: 'clerkstart', description: 'Start an agent' },
+    { command: 'stop', description: 'Stop an agent' },
+    { command: 'restart', description: 'Restart an agent (or all)' },
+    { command: 'auth', description: 'Show auth/token status' },
+    { command: 'topics', description: 'Show topic-to-agent mappings' },
+    { command: 'logs', description: 'Show agent logs' },
+    { command: 'memory', description: 'Search agent memory' },
+    { command: 'clerkhelp', description: 'Show all clerk bot commands' },
+  ]
+
+  // Combine with existing base commands
+  const baseCommands = [
+    { command: 'start', description: 'Welcome and setup guide' },
+    { command: 'help', description: 'What this bot can do' },
+    { command: 'status', description: 'Check your pairing status' },
+  ]
+
+  await bot.api.setMyCommands(
+    [...baseCommands, ...clerkCommands],
+    { scope: { type: 'all_private_chats' } },
+  )
+
+  // Also register in group chats where clerk commands are most useful
+  await bot.api.setMyCommands(
+    clerkCommands,
+    { scope: { type: 'all_group_chats' } },
+  )
+}
+
 // Inline-button handler for permission requests. Callback data is
 // `perm:allow:<id>`, `perm:deny:<id>`, or `perm:more:<id>`.
 // Security mirrors the text-reply path: allowFrom must contain the sender.
@@ -1116,14 +1329,7 @@ void (async () => {
           if (TOPIC_ID != null) {
             process.stderr.write(`telegram channel: topic filter active — only thread_id=${TOPIC_ID}\n`)
           }
-          void bot.api.setMyCommands(
-            [
-              { command: 'start', description: 'Welcome and setup guide' },
-              { command: 'help', description: 'What this bot can do' },
-              { command: 'status', description: 'Check your pairing status' },
-            ],
-            { scope: { type: 'all_private_chats' } },
-          ).catch(() => {})
+          void registerClerkBotCommands().catch(() => {})
         },
       })
       return // bot.stop() was called — clean exit from the loop

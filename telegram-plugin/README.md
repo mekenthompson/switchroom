@@ -130,6 +130,47 @@ When a voice message or audio file is received, the inbound metadata includes:
 
 **Whisper transcription**: To auto-transcribe voice messages, set up a Whisper MCP server (e.g. [whisper-mcp](https://github.com/modelcontextprotocol/servers)) and instruct your agent to download voice attachments and pass them to the Whisper tool for transcription.
 
+## Clerk bot commands
+
+The plugin includes built-in `/commands` that execute `clerk` CLI operations directly — no Claude Code tokens consumed, instant response.
+
+### Available commands
+
+| Command | Description |
+|---------|-------------|
+| `/agents` | List all agents and their status |
+| `/clerkstart <name>` | Start an agent |
+| `/stop <name>` | Stop an agent |
+| `/restart <name\|all>` | Restart an agent (or all) |
+| `/auth` | Show auth/token status |
+| `/topics` | Show topic-to-agent mappings |
+| `/logs <name> [lines]` | Show agent logs (default: 20 lines, max: 200) |
+| `/memory <query>` | Search agent memory |
+| `/clerkhelp` | List all available clerk bot commands |
+
+### How it works
+
+Commands are intercepted by Grammy's command handlers *before* reaching the general message handler, so they never trigger Claude Code. Each command:
+
+1. Checks sender authorization (must be in the allowlist or an allowed group)
+2. Runs the corresponding `clerk` CLI command via `execFileSync`
+3. Formats the output for Telegram (monospace code block, truncated at 4000 chars)
+4. Replies in the correct forum topic if applicable
+
+### Configuration
+
+| Env var | Description |
+|---------|-------------|
+| `CLERK_CLI_PATH` | Path to the `clerk` binary (default: `clerk` on PATH) |
+| `CLERK_CONFIG` | Path to clerk config file — passed as `--config` to all commands |
+
+### Notes
+
+- `/clerkstart` is used instead of `/start` to avoid conflicting with Telegram's built-in `/start` command (used for pairing).
+- Commands work in both DM and group/topic contexts.
+- In groups, only users in the group's allowlist can execute commands.
+- Commands are registered with BotFather automatically on startup.
+
 ## Use case: multi-agent orchestration
 
 In a Clerk multi-agent setup, each agent instance can run this plugin with a different `TELEGRAM_TOPIC_ID`, routing each forum topic to a dedicated agent while sharing a single bot token and group chat.

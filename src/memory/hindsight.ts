@@ -21,7 +21,7 @@ export function generateHindsightMcpConfig(
   if (isDocker) {
     return {
       command: "docker",
-      args: ["exec", "hindsight", "hindsight", "mcp", "--collection", collection],
+      args: ["exec", "-i", "clerk-hindsight", "hindsight", "mcp", "--collection", collection],
       env: {},
     };
   }

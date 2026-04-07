@@ -3,6 +3,15 @@ import chalk from "chalk";
 import { getCollectionForAgent, isStrictIsolation } from "../memory/hindsight.js";
 import { searchMemory, getMemoryStats, reflectAcrossAgents } from "../memory/search.js";
 import { withConfigError, getConfig } from "./helpers.js";
+import {
+  isDockerAvailable,
+  isHindsightRunning,
+  isHindsightContainerExists,
+  startHindsight,
+  stopHindsight,
+  getHindsightStatus,
+  generateHindsightComposeSnippet,
+} from "../setup/hindsight.js";
 
 export function registerMemoryCommand(program: Command): void {
   const memory = program
@@ -131,4 +140,81 @@ export function registerMemoryCommand(program: Command): void {
         console.log();
       }),
     );
+
+  // clerk memory setup
+  memory
+    .command("setup")
+    .description("Manage the Hindsight Docker container")
+    .option("--stop", "Stop and remove the Hindsight container")
+    .option("--status", "Show Hindsight container status")
+    .option("--provider <provider>", "LLM provider (ollama, openai, anthropic)")
+    .action(async (opts: { stop?: boolean; status?: boolean; provider?: string }) => {
+      if (opts.status) {
+        if (!isDockerAvailable()) {
+          console.log(chalk.red("  Docker is not available."));
+          process.exit(1);
+        }
+        const status = getHindsightStatus();
+        if (status) {
+          console.log(chalk.bold("\n  Hindsight container status:"));
+          console.log(`  ${chalk.cyan("clerk-hindsight")}: ${status}\n`);
+        } else {
+          console.log(chalk.yellow("\n  Hindsight container not found.\n"));
+          console.log(chalk.gray("  Run 'clerk memory setup' to start it."));
+        }
+        return;
+      }
+
+      if (opts.stop) {
+        if (!isDockerAvailable()) {
+          console.log(chalk.red("  Docker is not available."));
+          process.exit(1);
+        }
+        if (!isHindsightContainerExists()) {
+          console.log(chalk.yellow("  No clerk-hindsight container found."));
+          return;
+        }
+        console.log(chalk.gray("  Stopping clerk-hindsight..."));
+        stopHindsight();
+        console.log(chalk.green("  Hindsight container stopped and removed."));
+        return;
+      }
+
+      // Default: start the container
+      if (!isDockerAvailable()) {
+        console.log(chalk.red("\n  Docker is not available."));
+        console.log(chalk.gray("  Install Docker: https://docs.docker.com/get-docker/\n"));
+        process.exit(1);
+      }
+
+      if (isHindsightRunning()) {
+        console.log(chalk.green("\n  Hindsight container is already running (clerk-hindsight).\n"));
+        return;
+      }
+
+      if (isHindsightContainerExists()) {
+        console.log(chalk.gray("  Removing stopped clerk-hindsight container..."));
+        stopHindsight();
+      }
+
+      console.log(chalk.gray("  Starting Hindsight Docker container..."));
+      try {
+        startHindsight(opts.provider);
+        console.log(chalk.green("\n  Hindsight container started (clerk-hindsight).\n"));
+      } catch (err) {
+        console.error(chalk.red(`\n  Failed to start Hindsight: ${(err as Error).message}\n`));
+        process.exit(1);
+      }
+    });
+
+  // clerk memory docker-compose
+  memory
+    .command("docker-compose")
+    .description("Output a docker-compose snippet for Hindsight")
+    .option("--provider <provider>", "LLM provider (ollama, openai, anthropic)")
+    .action((opts: { provider?: string }) => {
+      console.log(chalk.bold("\n# Add this to your docker-compose.yml:\n"));
+      console.log(generateHindsightComposeSnippet(opts.provider));
+      console.log();
+    });
 }

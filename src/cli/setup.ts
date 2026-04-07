@@ -29,6 +29,13 @@ import {
   createMinimalClaudeConfig,
 } from "../setup/onboarding.js";
 import {
+  isDockerAvailable,
+  isHindsightRunning,
+  isHindsightContainerExists,
+  startHindsight,
+  stopHindsight,
+} from "../setup/hindsight.js";
+import {
   ask,
   askYesNo,
   askChoice,
@@ -102,7 +109,10 @@ export function registerSetupCommand(program: Command): void {
         // ── Step 5: Create topics ────────────────────────────────
         await stepCreateTopics(config, botToken, nonInteractive);
 
-        // ── Step 6: Scaffold agents ──────────────────────────────
+        // ── Step 6: Memory backend ───────────────────────────────
+        await stepMemoryBackend(config, nonInteractive);
+
+        // ── Step 7: Scaffold agents ──────────────────────────────
         await stepScaffoldAgents(
           config,
           agentBots,
@@ -111,10 +121,10 @@ export function registerSetupCommand(program: Command): void {
           nonInteractive,
         );
 
-        // ── Step 7: Agent onboarding guidance ────────────────────
+        // ── Step 8: Agent onboarding guidance ────────────────────
         await stepOnboardingGuidance(config, nonInteractive);
 
-        // ── Step 8: Verification ─────────────────────────────────
+        // ── Step 9: Verification ─────────────────────────────────
         await stepVerification(config, nonInteractive);
 
         console.log(
@@ -644,7 +654,89 @@ async function stepCreateTopics(
   }
 }
 
-// ─── Step 6: Scaffold Agents ─────────────────────────────────────────────────
+// ─── Step 6: Memory Backend ─────────────────────────────────────────────────
+
+async function stepMemoryBackend(
+  config: ClerkConfig,
+  nonInteractive: boolean,
+): Promise<void> {
+  stepHeader(6, "Memory backend", STEP_ACTIVE);
+
+  // Check if memory backend is configured and is hindsight
+  const memoryBackend = config.memory?.backend ?? "hindsight";
+  const envBackend = process.env.CLERK_MEMORY_BACKEND;
+
+  if (envBackend === "none" || memoryBackend === "none") {
+    console.log(chalk.gray("  Memory backend disabled (set to 'none')."));
+    console.log(chalk.green(`  ${STEP_DONE} Skipped`));
+    return;
+  }
+
+  // In non-interactive mode, default to hindsight unless env says otherwise
+  let setupHindsight = true;
+  if (!nonInteractive) {
+    setupHindsight = await askYesNo(
+      "  Set up Hindsight memory? (recommended)",
+      true,
+    );
+  }
+
+  if (!setupHindsight) {
+    console.log(chalk.gray("  Skipping Hindsight setup."));
+    console.log(chalk.green(`  ${STEP_DONE} Skipped`));
+    return;
+  }
+
+  // Check Docker availability
+  if (!isDockerAvailable()) {
+    console.log(
+      chalk.yellow("  Docker is not available on this system."),
+    );
+    console.log(chalk.gray("  To set up Hindsight manually:"));
+    console.log(chalk.gray("    1. Install Docker: https://docs.docker.com/get-docker/"));
+    console.log(chalk.gray("    2. Run: docker run -d --name clerk-hindsight \\"));
+    console.log(chalk.gray("         --restart unless-stopped \\"));
+    console.log(chalk.gray("         -v clerk-hindsight-data:/data \\"));
+    console.log(chalk.gray("         vectorize/hindsight:latest"));
+    console.log(chalk.gray("    3. Re-run: clerk setup"));
+    console.log(chalk.green(`  ${STEP_DONE} Manual setup instructions shown`));
+    return;
+  }
+
+  // Check if already running
+  if (isHindsightRunning()) {
+    console.log(chalk.green(`  ${STEP_DONE} Hindsight container already running (clerk-hindsight)`));
+    return;
+  }
+
+  // Check if container exists but is stopped
+  if (isHindsightContainerExists()) {
+    console.log(chalk.gray("  Found stopped clerk-hindsight container, removing..."));
+    stopHindsight();
+  }
+
+  // Start the container
+  const spin = spinner("Starting Hindsight Docker container...");
+  try {
+    startHindsight();
+
+    // Verify it started
+    if (isHindsightRunning()) {
+      spin.stop(chalk.green(`${STEP_DONE} Hindsight container started (clerk-hindsight)`));
+    } else {
+      spin.stop(chalk.yellow("Container started but may still be initializing"));
+    }
+  } catch (err) {
+    spin.stop(chalk.red(`Failed to start Hindsight: ${(err as Error).message}`));
+    console.log(chalk.gray("  You can start it manually:"));
+    console.log(chalk.gray("    docker run -d --name clerk-hindsight \\"));
+    console.log(chalk.gray("      --restart unless-stopped \\"));
+    console.log(chalk.gray("      -v clerk-hindsight-data:/data \\"));
+    console.log(chalk.gray("      vectorize/hindsight:latest"));
+  }
+}
+
+// ─── Step 7: Scaffold Agents ─────────────────────────────────────────────────
 
 async function stepScaffoldAgents(
   config: ClerkConfig,
@@ -653,7 +745,7 @@ async function stepScaffoldAgents(
   forumChatId: string,
   nonInteractive: boolean,
 ): Promise<void> {
-  stepHeader(6, "Scaffold agents", STEP_ACTIVE);
+  stepHeader(7, "Scaffold agents", STEP_ACTIVE);
 
   const agentsDir = resolveAgentsDir(config);
   const agentNames = Object.keys(config.agents);
@@ -735,13 +827,13 @@ async function stepScaffoldAgents(
   }
 }
 
-// ─── Step 7: Agent Onboarding Guidance ───────────────────────────────────────
+// ─── Step 8: Agent Onboarding Guidance ───────────────────────────────────────
 
 async function stepOnboardingGuidance(
   config: ClerkConfig,
   nonInteractive: boolean,
 ): Promise<void> {
-  stepHeader(7, "Agent onboarding", STEP_ACTIVE);
+  stepHeader(8, "Agent onboarding", STEP_ACTIVE);
 
   const agentsDir = resolveAgentsDir(config);
   const agentNames = Object.keys(config.agents);
@@ -796,13 +888,13 @@ async function stepOnboardingGuidance(
   }
 }
 
-// ─── Step 8: Verification ────────────────────────────────────────────────────
+// ─── Step 9: Verification ────────────────────────────────────────────────────
 
 async function stepVerification(
   config: ClerkConfig,
   nonInteractive: boolean,
 ): Promise<void> {
-  stepHeader(8, "Verification", STEP_ACTIVE);
+  stepHeader(9, "Verification", STEP_ACTIVE);
 
   const agentNames = Object.keys(config.agents);
   const firstName = agentNames[0];

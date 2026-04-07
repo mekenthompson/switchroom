@@ -101,7 +101,22 @@ npm install -g clerk-ai
 clerk setup
 ```
 
-The interactive wizard walks you through: config file, bot tokens (one per agent), DM pairing, group detection, topic creation, agent scaffolding, and onboarding.
+The interactive wizard walks you through: config file, bot tokens (one per agent), DM pairing, group detection, topic creation, memory setup, agent scaffolding, and onboarding.
+
+#### Memory (Hindsight)
+
+`clerk setup` automatically starts a [Hindsight](https://github.com/vectorize-io/hindsight) Docker container for semantic memory. This gives every agent persistent memory with knowledge graphs, semantic search, and cross-agent reflection.
+
+Requirements: Docker must be installed. The setup wizard will check for Docker and start the `clerk-hindsight` container automatically.
+
+To manage Hindsight separately:
+
+```bash
+clerk memory setup            # Start the Hindsight container
+clerk memory setup --status   # Check container status
+clerk memory setup --stop     # Stop and remove the container
+clerk memory docker-compose   # Output a docker-compose snippet
+```
 
 For non-interactive / CI usage:
 
@@ -249,6 +264,10 @@ clerk topics sync                   # Create forum topics from config
 clerk topics list                   # Show topic-to-agent mapping
 
 # Memory (Hindsight)
+clerk memory setup                  # Start Hindsight Docker container
+clerk memory setup --status         # Check container status
+clerk memory setup --stop           # Stop and remove container
+clerk memory docker-compose         # Output docker-compose snippet
 clerk memory search <query> [--agent <name>]
 clerk memory stats                  # Per-agent collection info
 clerk memory reflect                # Cross-agent synthesis plan
@@ -333,7 +352,16 @@ Long-running agents benefit from careful context management. See [docs/session-o
 
 ## Docker Support
 
-Docker Compose support is planned. For now, use the host-native systemd + tmux approach.
+Hindsight memory runs in Docker automatically via `clerk setup`. The container (`clerk-hindsight`) is started with `--restart unless-stopped` so it persists across reboots. Data is stored in the `clerk-hindsight-data` Docker volume.
+
+For docker-compose users, generate a snippet with:
+
+```bash
+clerk memory docker-compose
+clerk memory docker-compose --provider openai
+```
+
+Agent processes themselves use the host-native systemd + tmux approach.
 
 ## License
 

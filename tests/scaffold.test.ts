@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { scaffoldAgent } from "../src/agents/scaffold.js";
 import { renderTemplate } from "../src/agents/templates.js";
-import type { AgentConfig, TelegramConfig } from "../src/config/schema.js";
+import type { AgentConfig, ClerkConfig, TelegramConfig } from "../src/config/schema.js";
 
 const telegramConfig: TelegramConfig = {
   bot_token: "123456:ABC-DEF",
@@ -237,6 +237,39 @@ describe("scaffoldAgent", () => {
     const result = scaffoldAgent("path-check", config, tmpDir, telegramConfig);
 
     expect(result.agentDir).toBe(join(tmpDir, "path-check"));
+  });
+
+  it("injects Hindsight MCP config when memory backend is hindsight", () => {
+    const agentConfig = makeAgentConfig();
+    const clerkConfig: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      memory: {
+        backend: "hindsight",
+        shared_collection: "shared",
+        config: { provider: "ollama", docker_service: true },
+      },
+      agents: { "memory-agent": agentConfig },
+    } as ClerkConfig;
+
+    const result = scaffoldAgent(
+      "memory-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      clerkConfig,
+    );
+
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+
+    expect(settings.mcpServers).toBeDefined();
+    expect(settings.mcpServers.hindsight).toBeDefined();
+    expect(settings.mcpServers.hindsight.command).toBe("docker");
+    expect(settings.mcpServers.hindsight.args).toContain("-i");
+    expect(settings.mcpServers.hindsight.args).toContain("clerk-hindsight");
+    expect(settings.mcpServers.hindsight.args).toContain("memory-agent");
   });
 });
 

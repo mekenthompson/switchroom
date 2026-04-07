@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
   generateHindsightMcpConfig,
   generateDockerComposeSnippet,
@@ -6,6 +6,10 @@ import {
   isStrictIsolation,
 } from "../src/memory/hindsight.js";
 import { reflectAcrossAgents } from "../src/memory/search.js";
+import {
+  getHindsightMcpCommand,
+  generateHindsightComposeSnippet,
+} from "../src/setup/hindsight.js";
 import type { ClerkConfig, MemoryBackendConfig } from "../src/config/schema.js";
 
 function makeMemoryConfig(
@@ -35,14 +39,15 @@ function makeClerkConfig(
 }
 
 describe("generateHindsightMcpConfig", () => {
-  it("generates docker mode config", () => {
+  it("generates docker mode config with -i flag and clerk-hindsight container", () => {
     const memConfig = makeMemoryConfig();
     const result = generateHindsightMcpConfig("my-collection", memConfig);
 
     expect(result.command).toBe("docker");
     expect(result.args).toEqual([
       "exec",
-      "hindsight",
+      "-i",
+      "clerk-hindsight",
       "hindsight",
       "mcp",
       "--collection",
@@ -222,5 +227,43 @@ describe("reflectAcrossAgents", () => {
     expect(result.eligible).toHaveLength(0);
     expect(result.excluded).toHaveLength(1);
     expect(result.commands).toHaveLength(0);
+  });
+});
+
+describe("getHindsightMcpCommand", () => {
+  it("returns docker exec command with -i flag", () => {
+    const result = getHindsightMcpCommand("test-collection");
+
+    expect(result.command).toBe("docker");
+    expect(result.args).toEqual([
+      "exec", "-i", "clerk-hindsight",
+      "hindsight", "mcp", "--collection", "test-collection",
+    ]);
+  });
+
+  it("uses the collection name in args", () => {
+    const result = getHindsightMcpCommand("my-agent");
+
+    expect(result.args).toContain("my-agent");
+    expect(result.args[result.args.length - 1]).toBe("my-agent");
+  });
+});
+
+describe("generateHindsightComposeSnippet", () => {
+  it("generates valid compose snippet without provider", () => {
+    const snippet = generateHindsightComposeSnippet();
+
+    expect(snippet).toContain("clerk-hindsight");
+    expect(snippet).toContain("image: vectorize/hindsight:latest");
+    expect(snippet).toContain("clerk-hindsight-data:/data");
+    expect(snippet).toContain("restart: unless-stopped");
+    expect(snippet).not.toContain("LLM_PROVIDER");
+  });
+
+  it("includes LLM_PROVIDER when provider is specified", () => {
+    const snippet = generateHindsightComposeSnippet("openai");
+
+    expect(snippet).toContain("LLM_PROVIDER=openai");
+    expect(snippet).toContain("environment:");
   });
 });

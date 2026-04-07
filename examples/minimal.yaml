@@ -8,6 +8,10 @@ telegram:
   bot_token: "vault:telegram-bot-token"
   forum_chat_id: "-1001234567890"
 
+memory:
+  backend: hindsight
+  shared_collection: shared
+
 agents:
   assistant:
     template: default

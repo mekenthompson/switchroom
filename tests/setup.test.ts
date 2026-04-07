@@ -199,7 +199,7 @@ describe("copyOnboardingState", () => {
 
     copyOnboardingState(sourceFile, agentDir);
 
-    const destPath = join(agentDir, ".claude", "config.json");
+    const destPath = join(agentDir, ".claude", ".claude.json");
     expect(existsSync(destPath)).toBe(true);
 
     const content = JSON.parse(readFileSync(destPath, "utf-8"));
@@ -215,14 +215,14 @@ describe("copyOnboardingState", () => {
     const claudeDir = join(agentDir, ".claude");
     mkdirSync(claudeDir, { recursive: true });
     writeFileSync(
-      join(claudeDir, "config.json"),
+      join(claudeDir, ".claude.json"),
       JSON.stringify({ source: "original" }),
     );
 
     copyOnboardingState(sourceFile, agentDir);
 
     const content = JSON.parse(
-      readFileSync(join(claudeDir, "config.json"), "utf-8"),
+      readFileSync(join(claudeDir, ".claude.json"), "utf-8"),
     );
     expect(content.source).toBe("original");
   });
@@ -236,7 +236,7 @@ describe("copyOnboardingState", () => {
 
     copyOnboardingState(sourceFile, agentDir);
 
-    expect(existsSync(join(agentDir, ".claude", "config.json"))).toBe(true);
+    expect(existsSync(join(agentDir, ".claude", ".claude.json"))).toBe(true);
   });
 });
 

@@ -102,14 +102,14 @@ describe("preTrustWorkspace", () => {
     const claudeDir = join(agentDir, ".claude");
     mkdirSync(claudeDir, { recursive: true });
     writeFileSync(
-      join(claudeDir, "config.json"),
+      join(claudeDir, ".claude.json"),
       JSON.stringify({ hasCompletedOnboarding: true, numStartups: 1 }),
       "utf-8"
     );
 
     preTrustWorkspace(agentDir);
 
-    const config = JSON.parse(readFileSync(join(claudeDir, "config.json"), "utf-8"));
+    const config = JSON.parse(readFileSync(join(claudeDir, ".claude.json"), "utf-8"));
     const absDir = resolve(agentDir);
     expect(config.projects).toBeDefined();
     expect(config.projects[absDir]).toBeDefined();
@@ -123,7 +123,7 @@ describe("preTrustWorkspace", () => {
     mkdirSync(claudeDir, { recursive: true });
     const absDir = resolve(agentDir);
     writeFileSync(
-      join(claudeDir, "config.json"),
+      join(claudeDir, ".claude.json"),
       JSON.stringify({
         hasCompletedOnboarding: true,
         projects: { [absDir]: { hasTrustDialogAccepted: true, allowedTools: ["Bash"] } },
@@ -133,7 +133,7 @@ describe("preTrustWorkspace", () => {
 
     preTrustWorkspace(agentDir);
 
-    const config = JSON.parse(readFileSync(join(claudeDir, "config.json"), "utf-8"));
+    const config = JSON.parse(readFileSync(join(claudeDir, ".claude.json"), "utf-8"));
     // Should preserve the existing entry with "Bash" tool
     expect(config.projects[absDir].allowedTools).toEqual(["Bash"]);
   });
@@ -146,7 +146,7 @@ describe("preTrustWorkspace", () => {
     preTrustWorkspace(agentDir);
 
     // No config.json should be created
-    expect(existsSync(join(agentDir, ".claude", "config.json"))).toBe(false);
+    expect(existsSync(join(agentDir, ".claude", ".claude.json"))).toBe(false);
   });
 });
 
@@ -158,7 +158,7 @@ describe("createMinimalClaudeConfig", () => {
 
     createMinimalClaudeConfig(agentDir);
 
-    const configPath = join(agentDir, ".claude", "config.json");
+    const configPath = join(agentDir, ".claude", ".claude.json");
     expect(existsSync(configPath)).toBe(true);
 
     const config = JSON.parse(readFileSync(configPath, "utf-8"));
@@ -171,14 +171,14 @@ describe("createMinimalClaudeConfig", () => {
     const claudeDir = join(agentDir, ".claude");
     mkdirSync(claudeDir, { recursive: true });
     writeFileSync(
-      join(claudeDir, "config.json"),
+      join(claudeDir, ".claude.json"),
       JSON.stringify({ hasCompletedOnboarding: true, numStartups: 5 }),
       "utf-8"
     );
 
     createMinimalClaudeConfig(agentDir);
 
-    const config = JSON.parse(readFileSync(join(claudeDir, "config.json"), "utf-8"));
+    const config = JSON.parse(readFileSync(join(claudeDir, ".claude.json"), "utf-8"));
     expect(config.hasCompletedOnboarding).toBe(true);
     expect(config.numStartups).toBe(5);
   });

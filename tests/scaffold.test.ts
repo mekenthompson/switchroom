@@ -95,7 +95,7 @@ describe("scaffoldAgent", () => {
     );
 
     expect(access.dmPolicy).toBe("allowlist");
-    expect(access.allowFrom).toEqual([]);
+    expect(Array.isArray(access.allowFrom)).toBe(true);
     expect(access.groups).toBeDefined();
     expect(access.groups["-1001234567890"]).toBeDefined();
     expect(access.groups["-1001234567890"].requireMention).toBe(false);

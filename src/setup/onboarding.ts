@@ -49,7 +49,9 @@ export function copyOnboardingState(
   const claudeDir = join(agentDir, ".claude");
   mkdirSync(claudeDir, { recursive: true });
 
-  const destPath = join(claudeDir, "config.json");
+  // Claude Code reads onboarding state from .claude.json (with leading dot)
+  // inside the CLAUDE_CONFIG_DIR
+  const destPath = join(claudeDir, ".claude.json");
   if (!existsSync(destPath)) {
     copyFileSync(sourcePath, destPath);
   }
@@ -257,7 +259,7 @@ export function loadUserConfig(): UserConfig | null {
  * with hasTrustDialogAccepted: true, so the agent doesn't prompt for trust.
  */
 export function preTrustWorkspace(agentDir: string): void {
-  const configPath = join(agentDir, ".claude", "config.json");
+  const configPath = join(agentDir, ".claude", ".claude.json");
 
   if (!existsSync(configPath)) {
     return;
@@ -296,7 +298,7 @@ export function createMinimalClaudeConfig(agentDir: string): void {
   const claudeDir = join(agentDir, ".claude");
   mkdirSync(claudeDir, { recursive: true });
 
-  const configPath = join(claudeDir, "config.json");
+  const configPath = join(claudeDir, ".claude.json");
   if (!existsSync(configPath)) {
     const minimal = {
       hasCompletedOnboarding: false,

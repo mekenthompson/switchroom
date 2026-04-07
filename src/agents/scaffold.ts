@@ -1,12 +1,13 @@
-import { existsSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { AgentConfig, TelegramConfig } from "../config/schema.js";
+import type { AgentConfig, ClerkConfig, TelegramConfig } from "../config/schema.js";
 import {
   getTemplatePath,
   getBaseTemplatePath,
   renderTemplate,
   copySkills,
 } from "./templates.js";
+import { getHindsightSettingsEntry } from "../memory/scaffold-integration.js";
 
 export interface ScaffoldResult {
   agentDir: string;
@@ -25,6 +26,7 @@ export function scaffoldAgent(
   agentConfig: AgentConfig,
   agentsDir: string,
   telegramConfig: TelegramConfig,
+  clerkConfig?: ClerkConfig,
 ): ScaffoldResult {
   const agentDir = resolve(agentsDir, name);
   const created: string[] = [];
@@ -80,6 +82,22 @@ export function scaffoldAgent(
     created,
     skipped,
   );
+
+  // --- Merge Hindsight MCP config into settings.json ---
+  if (clerkConfig) {
+    const settingsPath = join(agentDir, ".claude", "settings.json");
+    const hindsightEntry = getHindsightSettingsEntry(name, clerkConfig);
+    if (hindsightEntry && existsSync(settingsPath)) {
+      const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+      if (!settings.mcpServers) {
+        settings.mcpServers = {};
+      }
+      if (!settings.mcpServers[hindsightEntry.key]) {
+        settings.mcpServers[hindsightEntry.key] = hindsightEntry.value;
+        writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+      }
+    }
+  }
 
   // --- Render template-specific files ---
   const templateFiles: Array<{ src: string; dest: string }> = [

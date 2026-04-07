@@ -157,7 +157,7 @@ export function registerAgentCommand(program: Command): void {
         }
 
         console.log(chalk.bold(`\nScaffolding agent: ${name}\n`));
-        scaffoldAgent(name, agentConfig, agentsDir, config.telegram);
+        scaffoldAgent(name, agentConfig, agentsDir, config.telegram, config);
 
         // Also generate and install the systemd unit
         const agentDir = resolve(agentsDir, name);

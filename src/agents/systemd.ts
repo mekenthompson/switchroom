@@ -18,16 +18,17 @@ function unitFilePath(name: string): string {
 }
 
 export function generateUnit(name: string, agentDir: string): string {
-  const session = unitName(name);
+  const logFile = resolve(agentDir, "service.log");
   return `[Unit]
 Description=clerk agent: ${name}
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=forking
-ExecStart=/usr/bin/tmux new-session -d -s ${session} "bash -l ${agentDir}/start.sh"
-ExecStop=/usr/bin/tmux kill-session -t ${session}
+Type=simple
+ExecStart=/usr/bin/script -qfc "/bin/bash -l ${agentDir}/start.sh" ${logFile}
+StandardOutput=journal
+StandardError=journal
 Restart=on-failure
 RestartSec=15
 WorkingDirectory=${agentDir}

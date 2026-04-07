@@ -1,4 +1,6 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { ClerkConfig } from "../config/schema.js";
 
 export interface AgentStatus {
@@ -127,20 +129,22 @@ export function getAllAgentStatuses(
 }
 
 export function attachAgent(name: string): void {
-  const session = `clerk-${name}`;
-  const result = spawnSync("tmux", ["attach", "-t", session], {
+  const agentsDir = process.env.CLERK_AGENTS_DIR ?? resolve(process.env.HOME ?? "/root", ".clerk/agents");
+  const logFile = resolve(agentsDir, name, "service.log");
+
+  if (!existsSync(logFile)) {
+    throw new Error(
+      `No service log found for agent "${name}" at ${logFile}. Is the agent running?`
+    );
+  }
+
+  // Tail the service log interactively
+  const result = spawnSync("tail", ["-f", logFile], {
     stdio: "inherit",
   });
 
   if (result.error) {
-    throw new Error(
-      `Failed to attach to agent "${name}" (tmux session ${session}): ${result.error.message}`
-    );
-  }
-  if (result.status !== 0) {
-    throw new Error(
-      `Failed to attach to agent "${name}" (tmux session ${session}): exited with code ${result.status}`
-    );
+    throw new Error(`Failed to tail logs for agent "${name}": ${result.error.message}`);
   }
 }
 

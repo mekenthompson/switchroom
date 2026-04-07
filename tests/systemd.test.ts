@@ -15,18 +15,15 @@ describe("generateUnit", () => {
     expect(unit).toContain("Description=clerk agent: health-coach");
   });
 
-  it("sets the correct ExecStart with tmux session", () => {
+  it("uses script -qfc for PTY provision", () => {
     const unit = generateUnit("health-coach", "/home/user/.clerk/agents/health-coach");
-    expect(unit).toContain(
-      'ExecStart=/usr/bin/tmux new-session -d -s clerk-health-coach "bash -l /home/user/.clerk/agents/health-coach/start.sh"'
-    );
+    expect(unit).toContain("ExecStart=/usr/bin/script -qfc");
+    expect(unit).toContain("/home/user/.clerk/agents/health-coach/start.sh");
   });
 
-  it("sets the correct ExecStop with tmux session", () => {
+  it("logs to service.log in agent dir", () => {
     const unit = generateUnit("health-coach", "/home/user/.clerk/agents/health-coach");
-    expect(unit).toContain(
-      "ExecStop=/usr/bin/tmux kill-session -t clerk-health-coach"
-    );
+    expect(unit).toContain("/home/user/.clerk/agents/health-coach/service.log");
   });
 
   it("sets the correct WorkingDirectory", () => {
@@ -34,17 +31,10 @@ describe("generateUnit", () => {
     expect(unit).toContain("WorkingDirectory=/home/user/.clerk/agents/health-coach");
   });
 
-  it("uses clerk- prefix for tmux session names", () => {
-    const unit = generateUnit("assistant", "/opt/agents/assistant");
-    expect(unit).toContain("-s clerk-assistant");
-    expect(unit).toContain("-t clerk-assistant");
-  });
-
   it("handles agent names with hyphens correctly", () => {
     const unit = generateUnit("my-cool-agent", "/agents/my-cool-agent");
     expect(unit).toContain("Description=clerk agent: my-cool-agent");
-    expect(unit).toContain("-s clerk-my-cool-agent");
-    expect(unit).toContain("-t clerk-my-cool-agent");
+    expect(unit).toContain("/agents/my-cool-agent/start.sh");
     expect(unit).toContain("WorkingDirectory=/agents/my-cool-agent");
   });
 
@@ -60,9 +50,15 @@ describe("generateUnit", () => {
     expect(unit).toContain("RestartSec=15");
   });
 
-  it("sets Type=forking for tmux background sessions", () => {
+  it("sets Type=simple for script-based execution", () => {
     const unit = generateUnit("test", "/tmp/test");
-    expect(unit).toContain("Type=forking");
+    expect(unit).toContain("Type=simple");
+  });
+
+  it("includes journal output", () => {
+    const unit = generateUnit("test", "/tmp/test");
+    expect(unit).toContain("StandardOutput=journal");
+    expect(unit).toContain("StandardError=journal");
   });
 
   it("targets default.target for user units", () => {

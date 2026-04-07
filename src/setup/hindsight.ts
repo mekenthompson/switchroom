@@ -47,15 +47,19 @@ export function isHindsightContainerExists(): boolean {
  *
  * @param provider - Optional LLM provider (e.g., "ollama", "openai", "anthropic")
  */
-export function startHindsight(provider?: string): void {
-  const envArgs = provider ? ["-e", `LLM_PROVIDER=${provider}`] : [];
+export function startHindsight(provider?: string, apiKey?: string): void {
+  const envArgs: string[] = [];
+  if (provider) envArgs.push("-e", `LLM_PROVIDER=${provider}`);
+  if (apiKey) envArgs.push("-e", `HINDSIGHT_API_LLM_API_KEY=${apiKey}`);
   const args = [
     "run", "-d",
     "--name", "clerk-hindsight",
     "--restart", "unless-stopped",
-    "-v", "clerk-hindsight-data:/data",
+    "-p", "8888:8888",
+    "-p", "9999:9999",
+    "-v", "clerk-hindsight-data:/home/hindsight/.pg0",
     ...envArgs,
-    "vectorize/hindsight:latest",
+    "ghcr.io/vectorize-io/hindsight:latest",
   ];
 
   execSync(`docker ${args.join(" ")}`, { stdio: "pipe" });
@@ -91,19 +95,14 @@ export function getHindsightStatus(): string | null {
 }
 
 /**
- * Get the MCP server config for Hindsight via Docker exec.
- * The -i flag is critical for stdio MCP transport to work in Docker.
+ * Get the MCP server config for Hindsight via HTTP endpoint.
+ * Hindsight exposes MCP via Streamable HTTP at localhost:8888/mcp.
  */
-export function getHindsightMcpCommand(collection: string): {
-  command: string;
-  args: string[];
+export function getHindsightMcpUrl(): {
+  url: string;
 } {
   return {
-    command: "docker",
-    args: [
-      "exec", "-i", "clerk-hindsight",
-      "hindsight", "mcp", "--collection", collection,
-    ],
+    url: "http://localhost:8888/mcp",
   };
 }
 
@@ -118,13 +117,16 @@ export function generateHindsightComposeSnippet(provider?: string): string {
   return [
     "services:",
     "  clerk-hindsight:",
-    "    image: vectorize/hindsight:latest",
+    "    image: ghcr.io/vectorize-io/hindsight:latest",
     "    container_name: clerk-hindsight",
+    "    ports:",
+    "      - \"8888:8888\"",
+    "      - \"9999:9999\"",
     ...(envLines.length > 0
       ? ["    environment:", ...envLines]
       : []),
     "    volumes:",
-    "      - clerk-hindsight-data:/data",
+    "      - clerk-hindsight-data:/home/hindsight/.pg0",
     "    restart: unless-stopped",
     "",
     "volumes:",

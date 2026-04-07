@@ -1,35 +1,24 @@
 import type { ClerkConfig, MemoryBackendConfig } from "../config/schema.js";
 
 export interface McpServerConfig {
-  command: string;
-  args: string[];
-  env: Record<string, string>;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
 }
 
 /**
  * Generate the MCP server config entry for Hindsight.
  *
- * In docker mode (docker_service: true), the command runs via `docker exec`.
- * In local mode, it invokes the `hindsight` binary directly.
+ * Hindsight exposes MCP via Streamable HTTP at http://localhost:8888/mcp.
+ * This works with Claude Code's HTTP MCP transport and is simpler than docker exec.
  */
 export function generateHindsightMcpConfig(
-  collection: string,
-  memoryConfig: MemoryBackendConfig,
+  _collection: string,
+  _memoryConfig: MemoryBackendConfig,
 ): McpServerConfig {
-  const isDocker = memoryConfig.config?.docker_service ?? true;
-
-  if (isDocker) {
-    return {
-      command: "docker",
-      args: ["exec", "-i", "clerk-hindsight", "hindsight", "mcp", "--collection", collection],
-      env: {},
-    };
-  }
-
   return {
-    command: "hindsight",
-    args: ["mcp", "--collection", collection],
-    env: {},
+    url: "http://localhost:8888/mcp",
   };
 }
 
@@ -52,11 +41,14 @@ export function generateDockerComposeSnippet(
 
   return [
     "hindsight:",
-    "  image: vectorize/hindsight:latest",
+    "  image: ghcr.io/vectorize-io/hindsight:latest",
+    "  ports:",
+    "    - \"8888:8888\"",
+    "    - \"9999:9999\"",
     "  environment:",
     ...envLines,
     "  volumes:",
-    "    - hindsight-data:/data",
+    "    - hindsight-data:/home/hindsight/.pg0",
     "  restart: unless-stopped",
   ].join("\n");
 }

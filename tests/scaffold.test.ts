@@ -266,10 +266,7 @@ describe("scaffoldAgent", () => {
 
     expect(settings.mcpServers).toBeDefined();
     expect(settings.mcpServers.hindsight).toBeDefined();
-    expect(settings.mcpServers.hindsight.command).toBe("docker");
-    expect(settings.mcpServers.hindsight.args).toContain("-i");
-    expect(settings.mcpServers.hindsight.args).toContain("clerk-hindsight");
-    expect(settings.mcpServers.hindsight.args).toContain("memory-agent");
+    expect(settings.mcpServers.hindsight.url).toBe("http://localhost:8888/mcp");
   });
 });
 

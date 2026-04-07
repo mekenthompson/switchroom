@@ -107,6 +107,10 @@ The interactive wizard walks you through: config file, bot tokens (one per agent
 
 `clerk setup` automatically starts a [Hindsight](https://github.com/vectorize-io/hindsight) Docker container for semantic memory. This gives every agent persistent memory with knowledge graphs, semantic search, and cross-agent reflection.
 
+- **MCP endpoint**: `http://localhost:8888/mcp` (Streamable HTTP transport)
+- **Web UI**: `http://localhost:9999`
+- **Requires**: An OpenAI API key (or Anthropic/Ollama) for LLM-powered memory features. The setup wizard will prompt for this.
+
 Requirements: Docker must be installed. The setup wizard will check for Docker and start the `clerk-hindsight` container automatically.
 
 To manage Hindsight separately:

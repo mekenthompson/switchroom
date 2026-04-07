@@ -7,7 +7,7 @@ import {
 } from "../src/memory/hindsight.js";
 import { reflectAcrossAgents } from "../src/memory/search.js";
 import {
-  getHindsightMcpCommand,
+  getHindsightMcpUrl,
   generateHindsightComposeSnippet,
 } from "../src/setup/hindsight.js";
 import type { ClerkConfig, MemoryBackendConfig } from "../src/config/schema.js";
@@ -39,32 +39,22 @@ function makeClerkConfig(
 }
 
 describe("generateHindsightMcpConfig", () => {
-  it("generates docker mode config with -i flag and clerk-hindsight container", () => {
+  it("generates HTTP URL config for Hindsight MCP endpoint", () => {
     const memConfig = makeMemoryConfig();
     const result = generateHindsightMcpConfig("my-collection", memConfig);
 
-    expect(result.command).toBe("docker");
-    expect(result.args).toEqual([
-      "exec",
-      "-i",
-      "clerk-hindsight",
-      "hindsight",
-      "mcp",
-      "--collection",
-      "my-collection",
-    ]);
-    expect(result.env).toEqual({});
+    expect(result.url).toBe("http://localhost:8888/mcp");
+    expect(result.command).toBeUndefined();
+    expect(result.args).toBeUndefined();
   });
 
-  it("generates local mode config when docker_service is false", () => {
+  it("generates HTTP URL config regardless of docker_service setting", () => {
     const memConfig = makeMemoryConfig({
       config: { provider: "ollama", docker_service: false },
     });
     const result = generateHindsightMcpConfig("local-col", memConfig);
 
-    expect(result.command).toBe("hindsight");
-    expect(result.args).toEqual(["mcp", "--collection", "local-col"]);
-    expect(result.env).toEqual({});
+    expect(result.url).toBe("http://localhost:8888/mcp");
   });
 });
 
@@ -79,10 +69,10 @@ describe("generateDockerComposeSnippet", () => {
     });
     const yaml = generateDockerComposeSnippet(memConfig);
 
-    expect(yaml).toContain("image: vectorize/hindsight:latest");
+    expect(yaml).toContain("image: ghcr.io/vectorize-io/hindsight:latest");
     expect(yaml).toContain("LLM_PROVIDER=openai");
     expect(yaml).toContain("EMBEDDING_MODEL=text-embedding-3-small");
-    expect(yaml).toContain("hindsight-data:/data");
+    expect(yaml).toContain("hindsight-data:/home/hindsight/.pg0");
     expect(yaml).toContain("restart: unless-stopped");
   });
 
@@ -230,22 +220,11 @@ describe("reflectAcrossAgents", () => {
   });
 });
 
-describe("getHindsightMcpCommand", () => {
-  it("returns docker exec command with -i flag", () => {
-    const result = getHindsightMcpCommand("test-collection");
+describe("getHindsightMcpUrl", () => {
+  it("returns HTTP URL for Hindsight MCP endpoint", () => {
+    const result = getHindsightMcpUrl();
 
-    expect(result.command).toBe("docker");
-    expect(result.args).toEqual([
-      "exec", "-i", "clerk-hindsight",
-      "hindsight", "mcp", "--collection", "test-collection",
-    ]);
-  });
-
-  it("uses the collection name in args", () => {
-    const result = getHindsightMcpCommand("my-agent");
-
-    expect(result.args).toContain("my-agent");
-    expect(result.args[result.args.length - 1]).toBe("my-agent");
+    expect(result.url).toBe("http://localhost:8888/mcp");
   });
 });
 
@@ -254,8 +233,8 @@ describe("generateHindsightComposeSnippet", () => {
     const snippet = generateHindsightComposeSnippet();
 
     expect(snippet).toContain("clerk-hindsight");
-    expect(snippet).toContain("image: vectorize/hindsight:latest");
-    expect(snippet).toContain("clerk-hindsight-data:/data");
+    expect(snippet).toContain("image: ghcr.io/vectorize-io/hindsight:latest");
+    expect(snippet).toContain("clerk-hindsight-data:/home/hindsight/.pg0");
     expect(snippet).toContain("restart: unless-stopped");
     expect(snippet).not.toContain("LLM_PROVIDER");
   });

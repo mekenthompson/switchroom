@@ -121,10 +121,13 @@ export function registerSetupCommand(program: Command): void {
           nonInteractive,
         );
 
-        // ── Step 8: Agent onboarding guidance ────────────────────
+        // ── Step 8: Dangerous mode ──────────────────────────────
+        await stepDangerousMode(config, nonInteractive);
+
+        // ── Step 9: Agent onboarding guidance ────────────────────
         await stepOnboardingGuidance(config, nonInteractive);
 
-        // ── Step 9: Verification ─────────────────────────────────
+        // ── Step 10: Verification ────────────────────────────────
         await stepVerification(config, nonInteractive);
 
         console.log(
@@ -696,8 +699,8 @@ async function stepMemoryBackend(
     console.log(chalk.gray("    1. Install Docker: https://docs.docker.com/get-docker/"));
     console.log(chalk.gray("    2. Run: docker run -d --name clerk-hindsight \\"));
     console.log(chalk.gray("         --restart unless-stopped \\"));
-    console.log(chalk.gray("         -v clerk-hindsight-data:/data \\"));
-    console.log(chalk.gray("         vectorize/hindsight:latest"));
+    console.log(chalk.gray("         -v clerk-hindsight-data:/home/hindsight/.pg0 \\"));
+    console.log(chalk.gray("         ghcr.io/vectorize-io/hindsight:latest"));
     console.log(chalk.gray("    3. Re-run: clerk setup"));
     console.log(chalk.green(`  ${STEP_DONE} Manual setup instructions shown`));
     return;
@@ -715,14 +718,48 @@ async function stepMemoryBackend(
     stopHindsight();
   }
 
+  // Ask for OpenAI API key for Hindsight LLM features
+  let hindsightApiKey: string | undefined;
+  if (!nonInteractive) {
+    const apiKeyInput = await ask(
+      "  Enter your OpenAI API key for Hindsight memory (or press Enter to skip)",
+    );
+    if (apiKeyInput) {
+      hindsightApiKey = apiKeyInput;
+      // Store in vault
+      const vaultPath = resolvePath(config.vault?.path ?? "~/.clerk/vault.enc");
+      try {
+        let passphrase = process.env.CLERK_VAULT_PASSPHRASE;
+        if (!passphrase) {
+          passphrase = await ask("  Vault passphrase");
+        }
+        if (passphrase) {
+          if (!existsSync(vaultPath)) {
+            createVault(passphrase, vaultPath);
+          }
+          setSecret(passphrase, vaultPath, "hindsight-api-key", apiKeyInput);
+          console.log(chalk.green(`  ${STEP_DONE} API key stored in vault as 'hindsight-api-key'`));
+        }
+      } catch (err) {
+        console.log(chalk.yellow(`  Warning: Could not store in vault: ${(err as Error).message}`));
+      }
+    } else {
+      console.log(chalk.yellow("  Skipped. Memory features will be limited without an LLM API key."));
+    }
+  } else {
+    hindsightApiKey = process.env.HINDSIGHT_API_LLM_API_KEY;
+  }
+
   // Start the container
   const spin = spinner("Starting Hindsight Docker container...");
   try {
-    startHindsight();
+    startHindsight("openai", hindsightApiKey);
 
     // Verify it started
     if (isHindsightRunning()) {
       spin.stop(chalk.green(`${STEP_DONE} Hindsight container started (clerk-hindsight)`));
+      console.log(chalk.gray("  API: http://localhost:8888/mcp"));
+      console.log(chalk.gray("  UI:  http://localhost:9999"));
     } else {
       spin.stop(chalk.yellow("Container started but may still be initializing"));
     }
@@ -731,8 +768,9 @@ async function stepMemoryBackend(
     console.log(chalk.gray("  You can start it manually:"));
     console.log(chalk.gray("    docker run -d --name clerk-hindsight \\"));
     console.log(chalk.gray("      --restart unless-stopped \\"));
-    console.log(chalk.gray("      -v clerk-hindsight-data:/data \\"));
-    console.log(chalk.gray("      vectorize/hindsight:latest"));
+    console.log(chalk.gray("      -p 8888:8888 -p 9999:9999 \\"));
+    console.log(chalk.gray("      -v clerk-hindsight-data:/home/hindsight/.pg0 \\"));
+    console.log(chalk.gray("      ghcr.io/vectorize-io/hindsight:latest"));
   }
 }
 
@@ -827,13 +865,77 @@ async function stepScaffoldAgents(
   }
 }
 
-// ─── Step 8: Agent Onboarding Guidance ───────────────────────────────────────
+// ─── Step 8: Dangerous Mode ─────────────────────────────────────────────────
+
+async function stepDangerousMode(
+  config: ClerkConfig,
+  nonInteractive: boolean,
+): Promise<void> {
+  stepHeader(8, "Auto-approve mode", STEP_ACTIVE);
+
+  let enableDangerous = false;
+
+  if (nonInteractive) {
+    enableDangerous = process.env.CLERK_DANGEROUS_MODE === "true" || process.env.CLERK_DANGEROUS_MODE === "1";
+  } else {
+    console.log(chalk.gray("  This skips permission prompts for all tool calls."));
+    console.log(chalk.gray("  Recommended for headless agents. Tool approval can also be done via Telegram DM."));
+    enableDangerous = await askYesNo(
+      "  Enable auto-approve for all tool calls? (skips permission prompts)",
+      false,
+    );
+  }
+
+  if (enableDangerous) {
+    const configPaths = [
+      resolve(process.cwd(), "clerk.yaml"),
+      resolve(process.cwd(), "clerk.yml"),
+    ];
+
+    for (const configPath of configPaths) {
+      if (existsSync(configPath)) {
+        let content = readFileSync(configPath, "utf-8");
+        const agentNames = Object.keys(config.agents);
+
+        for (const name of agentNames) {
+          // Add dangerous_mode and skip_permission_prompt to each agent block
+          // Look for the agent's top-level key and add after it
+          const agentPattern = new RegExp(`(^  ${name}:\\s*\\n)`, "m");
+          if (agentPattern.test(content)) {
+            // Check if dangerous_mode already exists for this agent
+            const blockPattern = new RegExp(`^  ${name}:[\\s\\S]*?(?=^  [a-z]|\\Z)`, "m");
+            const blockMatch = content.match(blockPattern);
+            if (blockMatch && !blockMatch[0].includes("dangerous_mode")) {
+              content = content.replace(
+                agentPattern,
+                `$1    dangerous_mode: true\n    skip_permission_prompt: true\n`,
+              );
+            }
+          }
+
+          // Also update the in-memory config
+          config.agents[name].dangerous_mode = true;
+          config.agents[name].skip_permission_prompt = true;
+        }
+
+        writeFileSync(configPath, content, "utf-8");
+        console.log(chalk.green(`  ${STEP_DONE} Enabled dangerous_mode for all agents in ${configPath}`));
+        break;
+      }
+    }
+  } else {
+    console.log(chalk.gray("  Skipped. Agents will prompt for tool approval."));
+    console.log(chalk.green(`  ${STEP_DONE} Skipped`));
+  }
+}
+
+// ─── Step 9: Agent Onboarding Guidance ───────────────────────────────────────
 
 async function stepOnboardingGuidance(
   config: ClerkConfig,
   nonInteractive: boolean,
 ): Promise<void> {
-  stepHeader(8, "Agent onboarding", STEP_ACTIVE);
+  stepHeader(9, "Agent onboarding", STEP_ACTIVE);
 
   const agentsDir = resolveAgentsDir(config);
   const agentNames = Object.keys(config.agents);
@@ -894,7 +996,7 @@ async function stepVerification(
   config: ClerkConfig,
   nonInteractive: boolean,
 ): Promise<void> {
-  stepHeader(9, "Verification", STEP_ACTIVE);
+  stepHeader(10, "Verification", STEP_ACTIVE);
 
   const agentNames = Object.keys(config.agents);
   const firstName = agentNames[0];

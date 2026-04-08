@@ -83,6 +83,10 @@ export const AgentSchema = z.object({
     .boolean()
     .optional()
     .describe("If true, add skipDangerousModePermissionPrompt to settings.json"),
+  use_clerk_plugin: z
+    .boolean()
+    .optional()
+    .describe("If true, use clerk's enhanced Telegram plugin instead of the official one (requires native Linux for auto-accept)"),
 });
 
 export const TelegramConfigSchema = z.object({

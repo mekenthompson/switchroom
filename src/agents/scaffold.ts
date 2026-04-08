@@ -151,6 +151,7 @@ export function scaffoldAgent(
     forumChatId: telegramConfig.forum_chat_id,
     dangerousMode: agentConfig.dangerous_mode === true,
     skipPermissionPrompt: agentConfig.skip_permission_prompt === true,
+    useClerkPlugin: agentConfig.use_clerk_plugin === true,
   };
 
   // --- Create directory structure ---
@@ -204,6 +205,18 @@ export function scaffoldAgent(
       const clerkMcpEntry = getClerkMcpSettingsEntry();
       if (!settings.mcpServers[clerkMcpEntry.key]) {
         settings.mcpServers[clerkMcpEntry.key] = clerkMcpEntry.value;
+      }
+
+      // Clerk enhanced Telegram plugin (when use_clerk_plugin is enabled)
+      if (agentConfig.use_clerk_plugin && !settings.mcpServers["clerk-telegram"]) {
+        const pluginDir = resolve(import.meta.dirname, "../../telegram-plugin");
+        settings.mcpServers["clerk-telegram"] = {
+          command: "bun",
+          args: ["run", "--cwd", pluginDir, "--shell=bun", "--silent", "start"],
+          env: {
+            TELEGRAM_STATE_DIR: join(agentDir, "telegram"),
+          },
+        };
       }
 
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");

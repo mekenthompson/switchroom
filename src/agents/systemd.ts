@@ -17,8 +17,17 @@ function unitFilePath(name: string): string {
   return resolve(SYSTEMD_USER_DIR, `${unitName(name)}.service`);
 }
 
-export function generateUnit(name: string, agentDir: string): string {
+export function generateUnit(name: string, agentDir: string, useAutoaccept = false): string {
   const logFile = resolve(agentDir, "service.log");
+  const autoaccept = resolve(import.meta.dirname, "../../bin/autoaccept.py");
+
+  // When using dev channels (forked plugin), use autoaccept.py to handle
+  // the interactive confirmation prompt. On native Linux this uses TIOCSTI
+  // for reliable keystroke injection. Falls back to master fd writes on WSL.
+  const execStart = useAutoaccept
+    ? `/usr/bin/python3 ${autoaccept} ${agentDir}/start.sh ${logFile}`
+    : `/usr/bin/script -qfc "/bin/bash -l ${agentDir}/start.sh" ${logFile}`;
+
   return `[Unit]
 Description=clerk agent: ${name}
 After=network-online.target
@@ -26,7 +35,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/script -qfc "/bin/bash -l ${agentDir}/start.sh" ${logFile}
+ExecStart=${execStart}
 StandardOutput=journal
 StandardError=journal
 Restart=on-failure

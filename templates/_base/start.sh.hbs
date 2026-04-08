@@ -3,4 +3,6 @@ export PATH="$HOME/.bun/bin:$HOME/.nvm/versions/node/$(node -v)/bin:$PATH"
 export CLAUDE_CONFIG_DIR="{{agentDir}}/.claude"
 export TELEGRAM_STATE_DIR="{{agentDir}}/telegram"
 cd "{{agentDir}}"
-exec claude --channels plugin:telegram@claude-plugins-official{{#if dangerousMode}} --dangerously-skip-permissions{{/if}}
+{{#if useClerkPlugin}}exec claude --dangerously-load-development-channels server:clerk-telegram{{#if dangerousMode}} --dangerously-skip-permissions{{/if}}
+{{else}}exec claude --channels plugin:telegram@claude-plugins-official{{#if dangerousMode}} --dangerously-skip-permissions{{/if}}
+{{/if}}

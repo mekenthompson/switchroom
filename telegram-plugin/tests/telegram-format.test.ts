@@ -2,7 +2,7 @@
  * Tests for Telegram formatting utilities: markdownToHtml, splitHtmlChunks,
  * file reference wrapping, and message coalescing.
  */
-import { describe, test, expect } from 'bun:test'
+import { describe, test, expect } from 'vitest'
 
 // Import the exported functions from server.ts
 // We use a direct import — Bun handles TS natively.

@@ -3,7 +3,7 @@ import chalk from "chalk";
 import { resolve } from "node:path";
 import { rmSync, existsSync } from "node:fs";
 import { resolveAgentsDir } from "../config/loader.js";
-import { withConfigError, getConfig } from "./helpers.js";
+import { withConfigError, getConfig, getConfigPath } from "./helpers.js";
 import { scaffoldAgent } from "../agents/scaffold.js";
 import {
   startAgent,
@@ -134,7 +134,15 @@ export function registerAgentCommand(program: Command): void {
         }
 
         console.log(chalk.bold(`\nScaffolding agent: ${name}\n`));
-        scaffoldAgent(name, agentConfig, agentsDir, config.telegram, config);
+        scaffoldAgent(
+          name,
+          agentConfig,
+          agentsDir,
+          config.telegram,
+          config,
+          undefined,
+          getConfigPath(program),
+        );
 
         // Also generate and install the systemd unit
         const agentDir = resolve(agentsDir, name);

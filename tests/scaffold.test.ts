@@ -70,6 +70,9 @@ describe("scaffoldAgent", () => {
     const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
 
     expect(startSh).toContain("#!/bin/bash");
+    // start.sh must source nvm so systemd user services find node on PATH
+    expect(startSh).toContain('NVM_DIR="$HOME/.nvm"');
+    expect(startSh).toContain("$NVM_DIR/nvm.sh");
     expect(startSh).toContain(`CLAUDE_CONFIG_DIR="${result.agentDir}/.claude"`);
     expect(startSh).toContain(`TELEGRAM_STATE_DIR="${result.agentDir}/telegram"`);
     expect(startSh).toContain("exec claude --channels plugin:telegram@claude-plugins-official");
@@ -77,6 +80,8 @@ describe("scaffoldAgent", () => {
     expect(startSh).not.toContain("AGENT_NAME");
     expect(startSh).not.toContain("CLERK_SOCKET_PATH");
     expect(startSh).not.toContain("--dangerously-skip-permissions");
+    // Must NOT use $(node -v) since node isn't on PATH under systemd user units
+    expect(startSh).not.toContain("$(node -v)");
   });
 
   it("generates telegram .env with bot token", () => {
@@ -112,6 +117,81 @@ describe("scaffoldAgent", () => {
 
     expect(settings.permissions.allow).toEqual(["calendar", "notion"]);
     expect(settings.permissions.deny).toEqual(["bash"]);
+    expect(settings.permissions.defaultMode).toBeUndefined();
+  });
+
+  it("translates tools.allow: [all] into defaultMode: acceptEdits", () => {
+    // Claude Code rejects the literal string "all" in permissions.allow.
+    // When users write `tools.allow: [all]` in clerk.yaml, the scaffold
+    // should translate that into an empty allow list + defaultMode: acceptEdits.
+    const config = makeAgentConfig({
+      tools: { allow: ["all"], deny: [] },
+    });
+    const result = scaffoldAgent("all-agent", config, tmpDir, telegramConfig);
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+
+    expect(settings.permissions.allow).toEqual([]);
+    expect(settings.permissions.defaultMode).toBe("acceptEdits");
+  });
+
+  it("pre-approves clerk-telegram MCP tool names when use_clerk_plugin is true", () => {
+    const config = makeAgentConfig({
+      tools: { allow: ["calendar"], deny: [] },
+      use_clerk_plugin: true,
+    });
+    const result = scaffoldAgent("fork-agent", config, tmpDir, telegramConfig);
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+
+    expect(settings.permissions.allow).toContain("calendar");
+    expect(settings.permissions.allow).toContain("mcp__clerk-telegram");
+    expect(settings.permissions.allow).toContain("mcp__clerk-telegram__reply");
+    expect(settings.permissions.allow).toContain("mcp__clerk-telegram__react");
+    expect(settings.permissions.allow).toContain("mcp__clerk-telegram__edit_message");
+  });
+
+  it("writes project-level .mcp.json when use_clerk_plugin is true", () => {
+    const agentConfig = makeAgentConfig({ use_clerk_plugin: true });
+    const clerkConfig: ClerkConfig = {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      agents: { "fork-agent": agentConfig },
+    } as ClerkConfig;
+
+    const result = scaffoldAgent(
+      "fork-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      clerkConfig,
+      undefined,
+      "/fake/clerk.yaml",
+    );
+
+    const mcpJsonPath = join(result.agentDir, ".mcp.json");
+    expect(existsSync(mcpJsonPath)).toBe(true);
+
+    const mcpJson = JSON.parse(readFileSync(mcpJsonPath, "utf-8"));
+    expect(mcpJson.mcpServers).toBeDefined();
+    expect(mcpJson.mcpServers["clerk-telegram"]).toBeDefined();
+    expect(mcpJson.mcpServers["clerk-telegram"].command).toBe("bun");
+    expect(mcpJson.mcpServers["clerk-telegram"].env.TELEGRAM_STATE_DIR).toBe(
+      join(result.agentDir, "telegram"),
+    );
+    expect(mcpJson.mcpServers["clerk-telegram"].env.CLERK_CONFIG).toBe(
+      "/fake/clerk.yaml",
+    );
+    expect(mcpJson.mcpServers["clerk-telegram"].env.CLERK_CLI_PATH).toBeDefined();
+  });
+
+  it("does not write .mcp.json when use_clerk_plugin is false", () => {
+    const config = makeAgentConfig({ use_clerk_plugin: false });
+    const result = scaffoldAgent("plain-agent", config, tmpDir, telegramConfig);
+
+    expect(existsSync(join(result.agentDir, ".mcp.json"))).toBe(false);
   });
 
   it("is idempotent — running twice does not overwrite existing files", () => {

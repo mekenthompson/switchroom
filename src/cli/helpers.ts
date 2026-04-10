@@ -1,6 +1,6 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { loadConfig, ConfigError } from "../config/loader.js";
+import { loadConfig, findConfigFile, ConfigError } from "../config/loader.js";
 import type { ClerkConfig } from "../config/schema.js";
 
 /**
@@ -31,4 +31,13 @@ export function withConfigError(fn: (...args: any[]) => Promise<void>) {
 export function getConfig(program: Command): ClerkConfig {
   const parentOpts = program.opts();
   return loadConfig(parentOpts.config);
+}
+
+/**
+ * Resolve the absolute path of the clerk.yaml file that would be loaded
+ * given the parent command's --config option (or by searching cwd).
+ */
+export function getConfigPath(program: Command): string {
+  const parentOpts = program.opts();
+  return parentOpts.config ?? findConfigFile();
 }

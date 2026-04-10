@@ -3,6 +3,16 @@ import { resolve } from "node:path";
 import type { ClerkConfig } from "../config/schema.js";
 import { resolveAgentsDir } from "../config/loader.js";
 
+// TODO: Fetch subscriptionType / rateLimitTier from Anthropic's profile/me
+// endpoint after OAuth token exchange. When users run `clerk auth` manually
+// (instead of `claude auth login`), the resulting .credentials.json is
+// missing subscriptionType and rateLimitTier — Claude Code normally
+// populates these by calling Anthropic's profile/me endpoint after the
+// token exchange. We should replicate that call and write the real values
+// into the credentials file. Do NOT hardcode "max" — use whatever the API
+// returns. Until this is implemented, users running clerk auth manually
+// may need to add these fields to .credentials.json by hand.
+
 export interface AuthStatus {
   authenticated: boolean;
   subscriptionType?: string;

@@ -9,7 +9,10 @@ Clerk manages multiple long-running Claude Code sessions, each with its own pers
 - **Scaffolds agent directories** from templates (persona, behavior, skills, memory)
 - **Manages authentication** per agent via official Claude Code OAuth
 - **Generates systemd + tmux units** for headless operation with interactive access
-- **One bot per agent**: each agent runs the official Telegram plugin with its own bot token
+- **One bot per agent**: each agent runs a Telegram plugin with its own bot token
+- **Two Telegram channel modes**:
+  - **Official plugin** (default): `plugin:telegram@claude-plugins-official`
+  - **Clerk enhanced plugin** (`use_clerk_plugin: true`): forked Telegram plugin with HTML formatting, smart chunking, message coalescing, bot commands, and pre-approved MCP tools. Loaded as a development channel via `.mcp.json` with an `expect`-based auto-accept wrapper for the interactive confirmation prompts.
 - **Integrates Hindsight** for per-agent semantic memory with knowledge graphs
 - **Encrypts secrets** via AES-256-GCM vault
 - **Provides a CLI and web dashboard** for lifecycle management
@@ -51,21 +54,37 @@ Telegram Forum Group
 
 Why one bot per agent:
 - **No routing complexity**: each bot only sees messages in the group (privacy mode off)
-- **Uses the official plugin**: `plugin:telegram@claude-plugins-official` — approved, no prompts
+- **Required by Telegram**: `getUpdates` holds an exclusive long-poll lock per token — two processes on the same token drop messages
 - **Independent lifecycle**: start, stop, restart agents independently
 - **Simple .env**: each agent's `telegram/.env` has its own `TELEGRAM_BOT_TOKEN`
+
+### Two Channel Modes
+
+Clerk supports two Telegram channel implementations per agent:
+
+| Mode | Flag | How it launches | Best for |
+|------|------|-----------------|----------|
+| **Official plugin** | default | `claude --channels plugin:telegram@claude-plugins-official` | Simplicity, Anthropic-approved marketplace plugin, minimal dependencies |
+| **Clerk enhanced plugin** | `use_clerk_plugin: true` | `claude --dangerously-load-development-channels server:clerk-telegram` (via `.mcp.json`) | HTML formatting, smart chunking, message coalescing, bot commands, pre-approved MCP permissions |
+
+The enhanced plugin lives in `telegram-plugin/` as a forked MCP server. It requires:
+
+- Native Linux (WSL2 has additional kernel restrictions)
+- `expect` installed (`apt install expect`) — used by `bin/autoaccept.exp` to answer Claude Code's interactive dev-channel confirmation prompts
+- A per-agent `.mcp.json` (Clerk writes this automatically) pointing at the plugin entry point with `TELEGRAM_STATE_DIR`, `CLERK_CONFIG`, and `CLERK_CLI_PATH` in its env
 
 ## Quick Start
 
 ### Prerequisites
 
-- Linux with systemd (Ubuntu, Debian, Fedora, etc.)
-- [Node.js 22+](https://nodejs.org)
+- Linux with systemd (Ubuntu, Debian, Fedora, etc.) — **native Linux is required for `use_clerk_plugin` mode** (WSL2 has additional kernel restrictions)
+- [Node.js 22+](https://nodejs.org) — install via `nvm` so start.sh can source it
 - [Bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`)
 - [Claude Code CLI](https://code.claude.com) (`npm install -g @anthropic-ai/claude-code`)
 - Claude Pro or Max subscription
 - [tmux](https://github.com/tmux/tmux) (`sudo apt install tmux`)
-- One Telegram bot per agent ([create via @BotFather](https://t.me/BotFather))
+- [expect](https://core.tcl-lang.org/expect) (`sudo apt install expect`) — only required when `use_clerk_plugin: true`
+- One Telegram bot **per agent** ([create via @BotFather](https://t.me/BotFather)) — each bot's long-poller holds an exclusive lock, so sharing a token between agents does not work
 - A Telegram group with forum/topics enabled
 
 ### Create Bots via @BotFather
@@ -86,13 +105,28 @@ Name: Clerk Assistant
 Username: clerk_assistant_bot
 ```
 
-For each bot, disable privacy mode so it can see all messages in the group:
+For each bot, disable privacy mode so it can see all messages in the group. **Do this BEFORE adding the bot to the group** — Telegram caches the privacy state per membership, so changing it after the bot joins does not take effect until you remove and re-add the bot.
 
 ```
 /mybots -> select bot -> Bot Settings -> Group Privacy -> Turn off
 ```
 
+If you already added the bot and then flipped privacy mode, remove the bot from the group and re-add it.
+
 Add all bots to your Telegram forum group as admins.
+
+## Onboarding Lessons
+
+A few gotchas that trip people up during first-time setup:
+
+1. **Telegram privacy mode must be OFF before adding the bot to the group.** Telegram caches the privacy state per-membership; flipping it after the fact does nothing until you kick and re-add the bot.
+2. **One bot token per agent.** Telegram's long-poll API holds an exclusive lock on `getUpdates`. Two processes sharing a token will drop messages at random. Create a separate bot per agent.
+3. **`tools.allow: [all]` is translated, not literal.** Claude Code rejects `"allow": ["all"]` as an invalid permission entry. Clerk writes `"defaultMode": "acceptEdits"` with an empty allow list instead — equivalent behavior, valid schema.
+4. **`start.sh` sources nvm.** Systemd user services inherit a minimal `PATH`, so `node` is not found unless `start.sh` sources `~/.nvm/nvm.sh`. Clerk's generated script does this automatically.
+5. **TIOCSTI keystroke injection is disabled on modern Linux.** Ubuntu 24.04+ and most hardened kernels block `TIOCSTI` by default. For `use_clerk_plugin: true` mode, Clerk uses an `expect` script (`bin/autoaccept.exp`) to answer the interactive dev-channel prompts. Install `expect` via `apt install expect`.
+6. **Dev channels read from `.mcp.json`, not `settings.json`.** When launching with `--dangerously-load-development-channels server:NAME`, Claude Code resolves the MCP server command from a project-level `.mcp.json` in the working directory. Clerk writes this automatically when `use_clerk_plugin: true`.
+7. **MCP tool permissions are pre-approved.** In `use_clerk_plugin` mode, Clerk pre-populates `permissions.allow` with all `mcp__clerk-telegram__*` tool names so the agent never blocks on a permission prompt at runtime.
+8. **Manual OAuth is missing `subscriptionType`.** `claude auth login` (the official path) calls Anthropic's profile/me endpoint after token exchange and writes `subscriptionType` + `rateLimitTier` into `.credentials.json`. If you hand-craft credentials, you may need to add these fields yourself. Clerk does not hardcode `"max"` — use whatever the API returns.
 
 ### Install and Setup
 

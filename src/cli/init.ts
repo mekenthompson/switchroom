@@ -2,7 +2,7 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { copyFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
-import { loadConfig, resolveAgentsDir, ConfigError } from "../config/loader.js";
+import { loadConfig, resolveAgentsDir, findConfigFile, ConfigError } from "../config/loader.js";
 import { scaffoldAgent } from "../agents/scaffold.js";
 import { installAllUnits } from "../agents/systemd.js";
 
@@ -55,6 +55,7 @@ export function registerInitCommand(program: Command): void {
         }
 
         const config = loadConfig(parentOpts.config);
+        const clerkConfigPath = parentOpts.config ?? findConfigFile();
         const agentsDir = resolveAgentsDir(config);
         const agentNames = Object.keys(config.agents);
 
@@ -65,7 +66,15 @@ export function registerInitCommand(program: Command): void {
         for (const name of agentNames) {
           const agentConfig = config.agents[name];
           try {
-            const result = scaffoldAgent(name, agentConfig, agentsDir, config.telegram);
+            const result = scaffoldAgent(
+              name,
+              agentConfig,
+              agentsDir,
+              config.telegram,
+              config,
+              undefined,
+              clerkConfigPath,
+            );
             const detail = result.created.length > 0
               ? `${result.created.length} files created`
               : "up to date";

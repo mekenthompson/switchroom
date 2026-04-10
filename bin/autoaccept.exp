@@ -1,0 +1,47 @@
+#!/usr/bin/expect -f
+#
+# Clerk autoaccept: automatically respond to Claude Code interactive
+# prompts that appear when launching with
+# `--dangerously-load-development-channels`.
+#
+# TIOCSTI is disabled by default on Ubuntu 24.04+ (kernel security), so
+# we use expect instead of the old Python PTY approach. expect is
+# ubiquitous and reliable on every Linux distro.
+#
+# The bounded regex `.{1,30}` is important: Claude's TUI inserts
+# `\033[1C` (cursor right) escape sequences between words in prompt
+# text, so naive literal matching fails.
+#
+# Usage: autoaccept.exp <start-script>
+
+set timeout -1
+set start_sh [lindex $argv 0]
+spawn /bin/bash -l $start_sh
+
+expect {
+    -re {Yes.{0,10}I.{0,5}accept} {
+        # Bypass permissions warning — select option 2 (accept)
+        sleep 0.5
+        send "\033\[B\r"
+        exp_continue
+    }
+    -re {Yes.{0,5}and.{0,5}don't.{0,5}ask.{0,5}again} {
+        # Tool permission prompt — always allow
+        sleep 0.5
+        send "\033\[B\r"
+        exp_continue
+    }
+    -re {Use this and all future MCP servers} {
+        # MCP server trust prompt
+        sleep 0.5
+        send "\r"
+        exp_continue
+    }
+    -re {Enter.{1,30}confirm} {
+        # Generic "Enter to confirm" prompt (dev channels, trust dialog)
+        sleep 0.8
+        send "\r"
+        exp_continue
+    }
+    eof
+}

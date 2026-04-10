@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync, chmodSync, symlinkSync, copyFileSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import type { AgentConfig, ClerkConfig, TelegramConfig } from "../config/schema.js";
 import {
@@ -97,6 +98,41 @@ export function setupPlugins(agentDir: string): void {
 }
 
 /**
+ * Pre-approved MCP tool names for the clerk enhanced Telegram plugin.
+ * When use_clerk_plugin is enabled we pre-approve these so the agent
+ * never has to prompt for MCP tool permissions.
+ */
+const CLERK_TELEGRAM_MCP_TOOLS = [
+  "mcp__clerk-telegram",
+  "mcp__clerk-telegram__reply",
+  "mcp__clerk-telegram__react",
+  "mcp__clerk-telegram__edit_message",
+  "mcp__clerk-telegram__send_typing",
+  "mcp__clerk-telegram__pin_message",
+  "mcp__clerk-telegram__forward_message",
+  "mcp__clerk-telegram__download_attachment",
+];
+
+/**
+ * Attempt to locate the clerk CLI binary. Used to populate CLERK_CLI_PATH
+ * in the .mcp.json env for the clerk-telegram MCP server. Falls back to
+ * the literal string "clerk" if `which clerk` is unavailable.
+ */
+function resolveClerkCliPath(): string {
+  try {
+    const result = execSync("which clerk", { stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .trim();
+    if (result) {
+      return result;
+    }
+  } catch {
+    /* clerk not on PATH */
+  }
+  return "clerk";
+}
+
+/**
  * Scaffold (or reconcile) the directory structure for a single agent.
  *
  * Idempotent: creates missing files and directories but never overwrites
@@ -109,6 +145,7 @@ export function scaffoldAgent(
   telegramConfig: TelegramConfig,
   clerkConfig?: ClerkConfig,
   userIdOverride?: string,
+  clerkConfigPath?: string,
 ): ScaffoldResult {
   const agentDir = resolve(agentsDir, name);
   const created: string[] = [];
@@ -134,6 +171,26 @@ export function scaffoldAgent(
   const rawBotToken = agentConfig.bot_token ?? telegramConfig.bot_token;
   const resolvedBotToken = resolveBotToken(rawBotToken);
 
+  // Compute the effective permissions.allow list for settings.json.
+  //
+  // Special handling:
+  //   - If the user writes `tools.allow: [all]`, Claude Code rejects the
+  //     literal string "all" in the permissions.allow list. The correct
+  //     equivalent is to use defaultMode: "acceptEdits" with an empty
+  //     allow list.
+  //   - If use_clerk_plugin is enabled, pre-approve the clerk-telegram
+  //     MCP tool names so the agent never has to confirm MCP tool
+  //     permissions at runtime.
+  const tools = agentConfig.tools ?? { allow: [], deny: [] };
+  const rawAllow = tools.allow ?? [];
+  const hasAllWildcard = rawAllow.includes("all");
+  const baseAllow = hasAllWildcard
+    ? []
+    : rawAllow.filter((t) => t !== "all");
+  const permissionAllow = agentConfig.use_clerk_plugin === true
+    ? [...baseAllow, ...CLERK_TELEGRAM_MCP_TOOLS]
+    : baseAllow;
+
   // Build the template rendering context
   const context: Record<string, unknown> = {
     name,
@@ -142,7 +199,9 @@ export function scaffoldAgent(
     topicName: agentConfig.topic_name,
     topicEmoji: agentConfig.topic_emoji,
     soul: agentConfig.soul,
-    tools: agentConfig.tools ?? { allow: [], deny: [] },
+    tools,
+    permissionAllow,
+    defaultModeAcceptEdits: hasAllWildcard,
     memory: agentConfig.memory,
     model: agentConfig.model,
     mcpServers: agentConfig.mcp_servers,
@@ -207,19 +266,46 @@ export function scaffoldAgent(
         settings.mcpServers[clerkMcpEntry.key] = clerkMcpEntry.value;
       }
 
-      // Clerk enhanced Telegram plugin (when use_clerk_plugin is enabled)
-      if (agentConfig.use_clerk_plugin && !settings.mcpServers["clerk-telegram"]) {
-        const pluginDir = resolve(import.meta.dirname, "../../telegram-plugin");
-        settings.mcpServers["clerk-telegram"] = {
-          command: "bun",
-          args: ["run", "--cwd", pluginDir, "--shell=bun", "--silent", "start"],
-          env: {
-            TELEGRAM_STATE_DIR: join(agentDir, "telegram"),
-          },
-        };
-      }
-
       writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+    }
+  }
+
+  // --- Write project-level .mcp.json for clerk-telegram development channel ---
+  //
+  // When use_clerk_plugin is enabled, Claude Code's
+  // `--dangerously-load-development-channels server:NAME` flag resolves
+  // the MCP server definition from the project-level .mcp.json in the
+  // working directory — NOT from settings.json mcpServers. Write it here
+  // so the enhanced Telegram plugin can be launched as a dev channel.
+  if (agentConfig.use_clerk_plugin === true) {
+    const mcpJsonPath = join(agentDir, ".mcp.json");
+    if (!existsSync(mcpJsonPath)) {
+      const pluginDir = resolve(import.meta.dirname, "../../telegram-plugin");
+      const clerkCliPath = resolveClerkCliPath();
+      const resolvedConfigPath = clerkConfigPath
+        ? resolve(clerkConfigPath)
+        : resolve(process.cwd(), "clerk.yaml");
+
+      const mcpJson = {
+        mcpServers: {
+          "clerk-telegram": {
+            command: "bun",
+            args: ["run", "--cwd", pluginDir, "--shell=bun", "--silent", "start"],
+            env: {
+              TELEGRAM_STATE_DIR: join(agentDir, "telegram"),
+              CLERK_CONFIG: resolvedConfigPath,
+              CLERK_CLI_PATH: clerkCliPath,
+            },
+          },
+        },
+      };
+
+      writeFileSync(
+        mcpJsonPath,
+        JSON.stringify(mcpJson, null, 2) + "\n",
+        { encoding: "utf-8", mode: 0o600 },
+      );
+      created.push(mcpJsonPath);
     }
   }
 

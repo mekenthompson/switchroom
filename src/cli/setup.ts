@@ -78,7 +78,10 @@ export function registerSetupCommand(program: Command): void {
 
       try {
         // ── Step 1: Config file ──────────────────────────────────
-        const config = await stepConfigFile(parentOpts.config, nonInteractive);
+        const { config, configPath: clerkConfigPath } = await stepConfigFile(
+          parentOpts.config,
+          nonInteractive,
+        );
 
         // ── Step 2: Bot tokens ───────────────────────────────────
         const { botToken, botUsername, agentBots } = await stepBotToken(
@@ -119,6 +122,7 @@ export function registerSetupCommand(program: Command): void {
           userId,
           forumChatId,
           nonInteractive,
+          clerkConfigPath,
         );
 
         // ── Step 8: Dangerous mode ──────────────────────────────
@@ -152,10 +156,15 @@ export function registerSetupCommand(program: Command): void {
 
 // ─── Step 1: Config File ─────────────────────────────────────────────────────
 
+interface LoadedConfig {
+  config: ClerkConfig;
+  configPath: string;
+}
+
 async function stepConfigFile(
   configPath: string | undefined,
   nonInteractive: boolean,
-): Promise<ClerkConfig> {
+): Promise<LoadedConfig> {
   stepHeader(1, "Config file", STEP_ACTIVE);
 
   const cwd = process.cwd();
@@ -183,7 +192,7 @@ async function stepConfigFile(
       chalk.green(`  ${STEP_DONE} Config loaded`) +
         chalk.gray(` (${Object.keys(config.agents).length} agents)`),
     );
-    return config;
+    return { config, configPath: resolve(existingConfig) };
   }
 
   if (nonInteractive) {
@@ -196,7 +205,7 @@ async function stepConfigFile(
 async function copyExampleConfig(
   cwd: string,
   nonInteractive: boolean,
-): Promise<ClerkConfig> {
+): Promise<LoadedConfig> {
   const examplesDir = resolve(import.meta.dirname, "../../examples");
   let choice: string;
 
@@ -228,7 +237,7 @@ async function copyExampleConfig(
     chalk.green(`  ${STEP_DONE} Config loaded`) +
       chalk.gray(` (${Object.keys(config.agents).length} agents)`),
   );
-  return config;
+  return { config, configPath: resolve(destFile) };
 }
 
 // ─── Step 2: Bot Tokens ─────────────────────────────────────────────────────
@@ -782,6 +791,7 @@ async function stepScaffoldAgents(
   userId: string,
   forumChatId: string,
   nonInteractive: boolean,
+  clerkConfigPath?: string,
 ): Promise<void> {
   stepHeader(7, "Scaffold agents", STEP_ACTIVE);
 
@@ -820,6 +830,7 @@ async function stepScaffoldAgents(
         config.telegram,
         config,
         userId !== "0" ? userId : undefined,
+        clerkConfigPath,
       );
 
       // Write access.json with user ID (overwrite with latest from setup)

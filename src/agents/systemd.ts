@@ -19,13 +19,17 @@ function unitFilePath(name: string): string {
 
 export function generateUnit(name: string, agentDir: string, useAutoaccept = false): string {
   const logFile = resolve(agentDir, "service.log");
-  const autoaccept = resolve(import.meta.dirname, "../../bin/autoaccept.py");
+  const autoacceptExp = resolve(import.meta.dirname, "../../bin/autoaccept.exp");
 
-  // When using dev channels (forked plugin), use autoaccept.py to handle
-  // the interactive confirmation prompt. On native Linux this uses TIOCSTI
-  // for reliable keystroke injection. Falls back to master fd writes on WSL.
+  // When using dev channels (forked plugin), use expect to handle the
+  // interactive confirmation prompts. TIOCSTI-based keystroke injection
+  // is disabled on Ubuntu 24.04+ kernels, so expect is the reliable
+  // approach. It's standard on every Linux distro (apt install expect).
+  //
+  // We wrap the expect invocation in `script` so systemd still gets a
+  // single log file with the full output.
   const execStart = useAutoaccept
-    ? `/usr/bin/python3 ${autoaccept} ${agentDir}/start.sh ${logFile}`
+    ? `/usr/bin/script -qfc "/usr/bin/expect -f ${autoacceptExp} ${agentDir}/start.sh" ${logFile}`
     : `/usr/bin/script -qfc "/bin/bash -l ${agentDir}/start.sh" ${logFile}`;
 
   return `[Unit]

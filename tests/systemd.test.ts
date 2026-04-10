@@ -65,4 +65,21 @@ describe("generateUnit", () => {
     const unit = generateUnit("test", "/tmp/test");
     expect(unit).toContain("WantedBy=default.target");
   });
+
+  it("uses expect autoaccept wrapper when useAutoaccept=true", () => {
+    const unit = generateUnit("fork", "/tmp/fork", true);
+    expect(unit).toContain("/usr/bin/expect");
+    expect(unit).toContain("autoaccept.exp");
+    expect(unit).toContain("/tmp/fork/start.sh");
+    // Should NOT reference the old Python autoaccept script
+    expect(unit).not.toContain("autoaccept.py");
+    expect(unit).not.toContain("/usr/bin/python3");
+  });
+
+  it("does not use expect wrapper by default", () => {
+    const unit = generateUnit("plain", "/tmp/plain", false);
+    expect(unit).not.toContain("autoaccept.exp");
+    expect(unit).not.toContain("/usr/bin/expect");
+    expect(unit).toContain("/bin/bash");
+  });
 });

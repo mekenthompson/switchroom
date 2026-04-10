@@ -112,9 +112,24 @@ Hindsight provides 4-strategy retrieval (semantic + BM25 + entity graph + tempor
 
 ### Telegram Model
 
-Each agent gets its own Telegram bot and uses the official `plugin:telegram@claude-plugins-official`:
-- One bot per agent, each with its own `TELEGRAM_BOT_TOKEN` in `telegram/.env`
-- Privacy mode disabled on each bot so it sees all group messages
+Each agent gets its own Telegram bot. Clerk supports **two channel modes** per agent:
+
+**Mode A — Official plugin (default):**
+- Launches with `claude --channels plugin:telegram@claude-plugins-official`
+- Uses Anthropic's approved marketplace plugin — no prompts, no dev-channel flag
+- Simplest path, minimal dependencies
+
+**Mode B — Clerk enhanced plugin (`use_clerk_plugin: true`):**
+- Launches with `claude --dangerously-load-development-channels server:clerk-telegram`
+- MCP server definition is read from a project-level `.mcp.json` in the agent's working directory (NOT from `settings.json`)
+- Adds HTML formatting, smart message chunking, coalescing, bot commands, and richer attachment handling
+- Requires `expect` to auto-accept the dev-channel confirmation prompt at startup (`bin/autoaccept.exp`)
+- MCP tool names (`mcp__clerk-telegram__*`) are pre-approved in `settings.json` so the agent never blocks on a permission prompt
+- Requires native Linux (TIOCSTI is blocked on Ubuntu 24.04+ and WSL2)
+
+Shared across both modes:
+- One bot per agent, each with its own `TELEGRAM_BOT_TOKEN` in `telegram/.env` (Telegram long-poll locks per token — sharing tokens drops messages)
+- Privacy mode disabled on each bot **before** adding it to the group so it sees all messages
 - All bots added to the same forum group as admins
 - `access.json` controls which groups the bot responds in (`requireMention: false`)
 - No daemon, no routing — each bot is an independent Telegram poller
@@ -277,7 +292,12 @@ clerk web [--port 8080]             # Start lightweight dashboard
 ├── .claude/                        # CLAUDE_CONFIG_DIR for this agent
 │   ├── .credentials.json           # OAuth tokens (auto-managed)
 │   ├── config.json                 # Claude Code config
-│   └── settings.json               # MCP servers, permissions
+│   └── settings.json               # MCP servers, permissions (defaultMode acceptEdits
+│                                   #   when tools.allow has "all")
+├── .mcp.json                       # Project-level MCP server config
+│                                   #   (only when use_clerk_plugin: true —
+│                                   #    dev-channel loader reads from here,
+│                                   #    not from settings.json)
 ├── CLAUDE.md                       # Agent behavior instructions
 ├── SOUL.md                         # Agent persona definition
 ├── memory/
@@ -288,7 +308,7 @@ clerk web [--port 8080]             # Start lightweight dashboard
 ├── telegram/
 │   ├── .env                        # Bot token (from vault)
 │   └── access.json                 # Topic filter + allowlist
-└── start.sh                        # Generated launch script
+└── start.sh                        # Generated launch script (sources nvm)
 ```
 
 ## Install Methods
@@ -366,15 +386,17 @@ Use templates and docs to set up your own process supervision.
 - Vault key management
 
 ### Phase 7 — Enhanced Telegram Plugin
-- Read receipt / delivery status indicators
-- Streaming control (typing indicators, progress updates)
-- Rich message formatting improvements
-- Inline keyboard interactions beyond permission buttons
-- Voice message transcription integration
-- Sticker/GIF responses
-- Message pinning
-- Poll creation
-- Scheduled messages
+Opt-in via `use_clerk_plugin: true` on any agent. Implemented as a forked MCP server in `telegram-plugin/`, loaded as a Claude Code development channel.
+
+- HTML message formatting (bold, italics, code blocks, links)
+- Smart message chunking (respects Telegram's 4096-char limit)
+- Message coalescing (groups rapid updates to reduce notification spam)
+- Bot commands registration via `setMyCommands`
+- Typing indicators and progress edits
+- Attachment download helpers (photos, files, voice)
+- Pre-approved MCP tool permissions (no runtime prompts)
+- `expect`-based auto-accept for the dev-channel confirmation prompt at startup
+- Project-level `.mcp.json` scaffolding with `TELEGRAM_STATE_DIR`, `CLERK_CONFIG`, `CLERK_CLI_PATH` env
 
 ### Phase 8 — Docker Support
 - Base agent Dockerfile (Node 22 + Bun + Claude Code + tmux)

@@ -1250,10 +1250,80 @@ async function runClerkCommand(ctx: Context, args: string[], label: string): Pro
   }
 }
 
+/**
+ * Run a clerk command with --json and parse the result.
+ * Returns null if the command fails or output is not valid JSON.
+ */
+function clerkExecJson<T = unknown>(args: string[]): T | null {
+  try {
+    const output = clerkExec([...args, '--json'])
+    return JSON.parse(stripAnsi(output)) as T
+  } catch {
+    return null
+  }
+}
+
+/** Format an icon based on a status string. */
+function statusIcon(status: string): string {
+  if (status === 'active' || status === 'running') return '🟢'
+  if (status === 'inactive' || status === 'stopped' || status === 'dead') return '🔴'
+  if (status === 'failed') return '⚠️'
+  return '⚪'
+}
+
+/**
+ * Send a clerk command's output as a compact, mobile-friendly message.
+ * Uses bullet lists and key:value pairs instead of fixed-width tables.
+ * Falls back to <pre> block if structured parsing fails.
+ */
+async function runClerkCommandFormatted(
+  ctx: Context,
+  args: string[],
+  label: string,
+  formatter: () => string | null,
+): Promise<void> {
+  try {
+    const formatted = formatter()
+    if (formatted) {
+      await clerkReply(ctx, formatted, { html: true })
+      return
+    }
+    // Fall back to plain CLI output if structured formatting failed
+    await runClerkCommand(ctx, args, label)
+  } catch (err: unknown) {
+    const error = err as { stderr?: string; message?: string }
+    const detail = stripAnsi(error.stderr?.trim() || error.message || 'unknown error')
+    await clerkReply(ctx, `<b>${escapeHtmlForTg(label)} failed:</b>\n${preBlock(formatClerkOutput(detail))}`, { html: true })
+  }
+}
+
 // /agents — list all agents
 bot.command('agents', async ctx => {
   if (!isAuthorizedSender(ctx)) return
-  await runClerkCommand(ctx, ['agent', 'list'], 'agent list')
+  await runClerkCommandFormatted(ctx, ['agent', 'list'], 'agent list', () => {
+    type AgentListResp = {
+      agents: Array<{
+        name: string
+        status: string
+        uptime: string
+        template: string
+        topic_name: string
+        topic_emoji?: string
+      }>
+    }
+    const data = clerkExecJson<AgentListResp>(['agent', 'list'])
+    if (!data) return null
+    if (data.agents.length === 0) return '<i>No agents defined</i>'
+    const lines = ['<b>Agents</b>']
+    for (const a of data.agents) {
+      const topic = a.topic_emoji ? `${a.topic_name} ${a.topic_emoji}` : a.topic_name
+      lines.push(
+        `${statusIcon(a.status)} <b>${escapeHtmlForTg(a.name)}</b> · ${escapeHtmlForTg(a.status)} · ${escapeHtmlForTg(a.uptime)}`,
+      )
+      lines.push(`    <i>${escapeHtmlForTg(a.template)} → ${escapeHtmlForTg(topic)}</i>`)
+    }
+    return lines.join('\n')
+  })
 })
 
 // /clerkstart <name> — start an agent (use clerkstart to avoid conflict with Telegram's built-in /start)
@@ -1292,7 +1362,28 @@ bot.command('restart', async ctx => {
 // /auth — show token/auth health
 bot.command('auth', async ctx => {
   if (!isAuthorizedSender(ctx)) return
-  await runClerkCommand(ctx, ['auth', 'status'], 'auth status')
+  await runClerkCommandFormatted(ctx, ['auth', 'status'], 'auth status', () => {
+    type AuthStatusResp = {
+      agents: Array<{
+        name: string
+        authenticated: boolean
+        subscription_type: string | null
+        expires_in: string | null
+        rate_limit_tier: string | null
+      }>
+    }
+    const data = clerkExecJson<AuthStatusResp>(['auth', 'status'])
+    if (!data) return null
+    if (data.agents.length === 0) return '<i>No agents defined</i>'
+    const lines = ['<b>Auth status</b>']
+    for (const a of data.agents) {
+      const icon = a.authenticated ? '✓' : '✗'
+      const sub = a.subscription_type ?? '—'
+      const expires = a.expires_in ?? '—'
+      lines.push(`${icon} <b>${escapeHtmlForTg(a.name)}</b> · ${escapeHtmlForTg(sub)} · expires ${escapeHtmlForTg(expires)}`)
+    }
+    return lines.join('\n')
+  })
 })
 
 // /topics — show topic mappings

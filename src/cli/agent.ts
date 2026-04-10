@@ -71,14 +71,36 @@ export function registerAgentCommand(program: Command): void {
   agent
     .command("list")
     .description("List all agents with their status")
+    .option("--json", "Output as JSON")
     .action(
-      withConfigError(async () => {
+      withConfigError(async (opts: { json?: boolean }) => {
         const config = getConfig(program);
         const statuses = getAllAgentStatuses(config);
         const agentNames = Object.keys(config.agents);
 
         if (agentNames.length === 0) {
-          console.log(chalk.yellow("No agents defined in clerk.yaml"));
+          if (opts.json) {
+            console.log(JSON.stringify({ agents: [] }));
+          } else {
+            console.log(chalk.yellow("No agents defined in clerk.yaml"));
+          }
+          return;
+        }
+
+        if (opts.json) {
+          const data = agentNames.map((name) => {
+            const agentConfig = config.agents[name];
+            const status = statuses[name];
+            return {
+              name,
+              status: status?.active ?? "unknown",
+              uptime: formatUptime(status?.uptime ?? null),
+              template: agentConfig.template,
+              topic_name: agentConfig.topic_name,
+              topic_emoji: agentConfig.topic_emoji,
+            };
+          });
+          console.log(JSON.stringify({ agents: data }, null, 2));
           return;
         }
 

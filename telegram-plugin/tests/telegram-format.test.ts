@@ -4,9 +4,9 @@
  */
 import { describe, test, expect } from 'vitest'
 
-// Import the exported functions from server.ts
-// We use a direct import — Bun handles TS natively.
-import { markdownToHtml, splitHtmlChunks, isLikelyTelegramHtml } from '../server'
+// Import from the side-effect-free format module so tests don't trigger
+// server.ts's startup (env load, token check, grammy init).
+import { markdownToHtml, splitHtmlChunks, isLikelyTelegramHtml } from '../format.js'
 
 // ---------------------------------------------------------------------------
 // markdownToHtml

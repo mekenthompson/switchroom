@@ -650,6 +650,17 @@ export interface ReconcileResult {
  *
  * Throws if the agent directory does not exist.
  */
+export interface ReconcileOptions {
+  /**
+   * If true, also re-render CLAUDE.md from the template.
+   * Default false (CLAUDE.md is user-protected). Use this when the
+   * template itself has changed and you want to force the new version
+   * onto an existing agent — e.g., after a `clerk update` that ships
+   * a template fix.
+   */
+  forceClaudeMd?: boolean;
+}
+
 export function reconcileAgent(
   name: string,
   agentConfig: AgentConfig,
@@ -657,6 +668,7 @@ export function reconcileAgent(
   telegramConfig: TelegramConfig,
   clerkConfig: ClerkConfig,
   clerkConfigPath?: string,
+  options: ReconcileOptions = {},
 ): ReconcileResult {
   const agentDir = resolve(agentsDir, name);
   const changes: string[] = [];
@@ -715,6 +727,37 @@ export function reconcileAgent(
       writeFileSync(startShPath, afterStartSh, "utf-8");
       chmodSync(startShPath, 0o755);
       changes.push(startShPath);
+    }
+  }
+
+  // --- Force-reconcile CLAUDE.md (only when --force-claude-md given) ---
+  // CLAUDE.md is normally user-protected because users hand-edit it for
+  // persona/behavior tuning. The --force flag lets `clerk update` push
+  // template fixes through (e.g., the {{memory}} → [object Object] bug
+  // we shipped earlier). Same context as scaffold's CLAUDE.md render.
+  if (options.forceClaudeMd) {
+    const templatePath = getTemplatePath(agentConfig.template);
+    const claudeMdSrc = join(templatePath, "CLAUDE.md.hbs");
+    const claudeMdDest = join(agentDir, "CLAUDE.md");
+    if (existsSync(claudeMdSrc) && existsSync(claudeMdDest)) {
+      const claudeContext: Record<string, unknown> = {
+        name,
+        agentDir,
+        topicName: agentConfig.topic_name,
+        topicEmoji: agentConfig.topic_emoji,
+        soul: agentConfig.soul,
+        tools: agentConfig.tools ?? { allow: [], deny: [] },
+        memory: agentConfig.memory,
+        model: agentConfig.model,
+        schedule: agentConfig.schedule,
+        useClerkPlugin: agentConfig.use_clerk_plugin === true,
+      };
+      const beforeMd = readFileSync(claudeMdDest, "utf-8");
+      const afterMd = renderTemplate(claudeMdSrc, claudeContext);
+      if (afterMd !== beforeMd) {
+        writeFileSync(claudeMdDest, afterMd, "utf-8");
+        changes.push(claudeMdDest);
+      }
     }
   }
 

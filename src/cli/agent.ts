@@ -300,11 +300,15 @@ export function registerAgentCommand(program: Command): void {
   agent
     .command("reconcile <name>")
     .description(
-      "Re-apply clerk.yaml to an existing agent (rewrites .mcp.json + settings.json without touching CLAUDE.md/SOUL.md)"
+      "Re-apply clerk.yaml to an existing agent (rewrites .mcp.json + settings.json + start.sh without touching CLAUDE.md/SOUL.md)"
     )
     .option("--restart", "Restart the agent after reconciling")
+    .option(
+      "--force-claude-md",
+      "Also re-render CLAUDE.md from the template (overwrites user customizations — use after a template fix)"
+    )
     .action(
-      withConfigError(async (name: string, opts: { restart?: boolean }) => {
+      withConfigError(async (name: string, opts: { restart?: boolean; forceClaudeMd?: boolean }) => {
         const config = getConfig(program);
         const agentsDir = resolveAgentsDir(config);
         const configPath = getConfigPath(program);
@@ -329,6 +333,7 @@ export function registerAgentCommand(program: Command): void {
               config.telegram,
               config,
               configPath,
+              { forceClaudeMd: opts.forceClaudeMd },
             );
             if (result.changes.length === 0) {
               console.log(chalk.gray(`  ${n}: already in sync`));

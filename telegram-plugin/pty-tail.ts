@@ -212,7 +212,7 @@ export interface PtyTailHandle {
  * complexity for an edge case.
  */
 export function startPtyTail(config: PtyTailConfig): PtyTailHandle {
-  const throttleMs = config.throttleMs ?? 750
+  const throttleMs = config.throttleMs ?? 150
   const extractor = config.extractor ?? new V1Extractor()
   const log = config.log
   const cols = config.cols ?? 132
@@ -227,6 +227,7 @@ export function startPtyTail(config: PtyTailConfig): PtyTailHandle {
 
   let cursor = 0
   let lastEmittedText: string | null = null
+  let lastEmitAt = 0
   let pendingEmit: ReturnType<typeof setTimeout> | null = null
   let stopped = false
   let watcher: FSWatcher | null = null
@@ -242,6 +243,7 @@ export function startPtyTail(config: PtyTailConfig): PtyTailHandle {
       return
     }
     lastEmittedText = text
+    lastEmitAt = Date.now()
     try {
       config.onPartial(text)
     } catch (err) {
@@ -251,10 +253,18 @@ export function startPtyTail(config: PtyTailConfig): PtyTailHandle {
 
   function scheduleEmit(): void {
     if (pendingEmit != null) return
+    // Fire immediately if the throttle window is open (this is critical
+    // for first-paint latency — without this, the very first emit waits
+    // a full throttleMs even though there's nothing to throttle against).
+    const sinceLastEmit = Date.now() - lastEmitAt
+    if (sinceLastEmit >= throttleMs) {
+      emitIfChanged()
+      return
+    }
     pendingEmit = setTimeout(() => {
       pendingEmit = null
       emitIfChanged()
-    }, throttleMs)
+    }, Math.max(0, throttleMs - sinceLastEmit))
   }
 
   function readNew(): void {
@@ -313,12 +323,14 @@ export function startPtyTail(config: PtyTailConfig): PtyTailHandle {
     }
   }
 
-  // Initial scan + retry loop in case the log file doesn't exist yet
+  // Initial scan + retry loop in case the log file doesn't exist yet.
+  // Poll interval is 200ms — short enough that fs.watch misses don't
+  // add visible latency, infrequent enough that idle CPU stays minimal.
   attachWatcher()
   pollTimer = setInterval(() => {
     if (!watcher) attachWatcher()
     readNew()
-  }, 500)
+  }, 200)
 
   return {
     stop(): void {

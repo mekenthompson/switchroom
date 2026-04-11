@@ -188,7 +188,7 @@ export interface SessionTailConfig {
   cwd?: string
   /** CLAUDE_CONFIG_DIR override. Defaults to env or ~/.claude. */
   claudeHome?: string
-  /** How often to re-scan for a new active session file (ms). Default 2000. */
+  /** How often to re-scan for a new active session file (ms). Default 500. */
   rescanIntervalMs?: number
   /** Optional logger. */
   log?: (msg: string) => void
@@ -217,7 +217,7 @@ export function startSessionTail(config: SessionTailConfig): SessionTailHandle {
   const cwd = config.cwd ?? process.cwd()
   const claudeHome = config.claudeHome ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), '.claude')
   const projectsDir = getProjectsDirForCwd(cwd, claudeHome)
-  const rescanMs = config.rescanIntervalMs ?? 2000
+  const rescanMs = config.rescanIntervalMs ?? 500
   const log = config.log
   const onEvent = config.onEvent
 

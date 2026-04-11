@@ -1284,7 +1284,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
                 { threadId, chat_id },
               )
             },
-            { throttleMs: 1000 },
+            { throttleMs: 600 },
           )
           activeDraftStreams.set(sKey, stream)
         }
@@ -1497,16 +1497,29 @@ if (ptyTailEnabled) {
 }
 
 /**
+ * If a PTY partial arrives before the JSONL session-tail has set
+ * currentSessionChatId, stash it here. Once the chatId becomes known
+ * (via the next enqueue event), we flush the pending partial through
+ * handlePtyPartial. This closes the race where a fast model starts
+ * generating reply text before our session-tail has caught up to the
+ * enqueue line in the JSONL.
+ */
+let pendingPtyPartial: string | null = null
+
+/**
  * Called by the PTY tail when the extracted reply text changes. Pushes
  * the new full text into a draft stream for the chat the model is
  * currently working on, creating the stream on the first delta.
  *
  * If we don't know which chat is in flight (no enqueue seen yet from
- * the JSONL tail), drop the partial — it might belong to a previous
- * turn's leftover bytes in the buffer.
+ * the JSONL tail), buffer the partial — when the next enqueue event
+ * lands we'll flush it.
  */
 function handlePtyPartial(text: string): void {
-  if (currentSessionChatId == null) return
+  if (currentSessionChatId == null) {
+    pendingPtyPartial = text
+    return
+  }
   const chatId = currentSessionChatId
   const threadId = currentSessionThreadId
   const sKey = streamKey(chatId, threadId)
@@ -1514,7 +1527,13 @@ function handlePtyPartial(text: string): void {
   // Ignore previews that match what we already showed (avoids redundant
   // edits when the extractor re-fires on a still-frame buffer).
   if (lastPtyPreviewByChat.get(sKey) === text) return
+  const isFirstPartial = !lastPtyPreviewByChat.has(sKey)
   lastPtyPreviewByChat.set(sKey, text)
+  if (isFirstPartial) {
+    process.stderr.write(
+      `telegram channel: pty first partial — chat=${chatId} chars=${text.length}\n`,
+    )
+  }
 
   let stream = activeDraftStreams.get(sKey)
   if (!stream) {
@@ -1537,7 +1556,7 @@ function handlePtyPartial(text: string): void {
           { threadId, chat_id: chatId },
         )
       },
-      { throttleMs: 1000 },
+      { throttleMs: 600 },
     )
     activeDraftStreams.set(sKey, stream)
   }
@@ -1577,6 +1596,15 @@ function handleSessionEvent(ev: SessionEvent): void {
         currentSessionThreadId = ev.threadId != null ? Number(ev.threadId) : undefined
         currentTurnReplyCalled = false
         currentTurnCapturedText = []
+
+        // Flush any PTY partial that arrived before we knew the chat id.
+        // This is the race-fix: a fast model can start generating reply
+        // text before the session-tail has read the enqueue line.
+        if (pendingPtyPartial != null) {
+          const pending = pendingPtyPartial
+          pendingPtyPartial = null
+          handlePtyPartial(pending)
+        }
       }
       return
     }
@@ -1688,6 +1716,10 @@ function handleSessionEvent(ev: SessionEvent): void {
       // would see the OLD reply block in the xterm buffer and we'd
       // suppress emits until enough new text differed.
       lastPtyPreviewByChat.delete(statusKey(chatId, threadId))
+      // Also clear any buffered partial — turn is done, that text is
+      // either already shown or about to be replaced by the canonical
+      // reply.
+      pendingPtyPartial = null
       currentSessionChatId = null
       currentSessionThreadId = undefined
       currentTurnReplyCalled = false

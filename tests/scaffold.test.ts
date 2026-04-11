@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { scaffoldAgent } from "../src/agents/scaffold.js";
+import { scaffoldAgent, reconcileAgent } from "../src/agents/scaffold.js";
 import { renderTemplate } from "../src/agents/templates.js";
 import type { AgentConfig, ClerkConfig, TelegramConfig } from "../src/config/schema.js";
 
@@ -380,6 +380,198 @@ describe("scaffoldAgent", () => {
     );
 
     expect(settings.mcpServers.hindsight.url).toBe("http://localhost:18888/mcp/");
+  });
+});
+
+describe("reconcileAgent", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "clerk-reconcile-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function buildClerkConfig(
+    agentConfig: AgentConfig,
+    memory?: ClerkConfig["memory"],
+  ): ClerkConfig {
+    return {
+      clerk: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      memory,
+      agents: { "test-agent": agentConfig },
+    } as ClerkConfig;
+  }
+
+  it("throws when the agent directory does not exist", () => {
+    const agentConfig = makeAgentConfig();
+    expect(() =>
+      reconcileAgent(
+        "missing-agent",
+        agentConfig,
+        tmpDir,
+        telegramConfig,
+        buildClerkConfig(agentConfig),
+      ),
+    ).toThrow(/Agent directory does not exist/);
+  });
+
+  it("adds Hindsight MCP entry to settings.json after enabling memory backend", () => {
+    // Step 1: scaffold an agent without memory
+    const agentConfig = makeAgentConfig();
+    const initialConfig = buildClerkConfig(agentConfig);
+    scaffoldAgent("test-agent", agentConfig, tmpDir, telegramConfig, initialConfig);
+
+    const settingsPath = join(tmpDir, "test-agent", ".claude", "settings.json");
+    const before = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    expect(before.mcpServers?.hindsight).toBeUndefined();
+
+    // Step 2: turn on hindsight in clerk.yaml and reconcile
+    const updatedConfig = buildClerkConfig(agentConfig, {
+      backend: "hindsight",
+      shared_collection: "shared",
+      config: {
+        provider: "openai",
+        docker_service: true,
+        url: "http://localhost:18888/mcp/",
+      },
+    });
+
+    const result = reconcileAgent(
+      "test-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      updatedConfig,
+    );
+
+    expect(result.changes).toContain(settingsPath);
+    const after = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    expect(after.mcpServers.hindsight).toBeDefined();
+    expect(after.mcpServers.hindsight.url).toBe("http://localhost:18888/mcp/");
+    expect(after.permissions.allow).toContain("mcp__hindsight__*");
+  });
+
+  it("rewrites .mcp.json for use_clerk_plugin agents to include hindsight", () => {
+    const agentConfig = makeAgentConfig({ use_clerk_plugin: true });
+    const initialConfig = buildClerkConfig(agentConfig);
+    scaffoldAgent(
+      "test-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      initialConfig,
+      undefined,
+      "/tmp/clerk.yaml",
+    );
+
+    const mcpJsonPath = join(tmpDir, "test-agent", ".mcp.json");
+    const before = JSON.parse(readFileSync(mcpJsonPath, "utf-8"));
+    expect(before.mcpServers["clerk-telegram"]).toBeDefined();
+    expect(before.mcpServers.hindsight).toBeUndefined();
+
+    const updatedConfig = buildClerkConfig(agentConfig, {
+      backend: "hindsight",
+      shared_collection: "shared",
+      config: {
+        provider: "openai",
+        docker_service: true,
+        url: "http://localhost:18888/mcp/",
+      },
+    });
+
+    const result = reconcileAgent(
+      "test-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      updatedConfig,
+      "/tmp/clerk.yaml",
+    );
+
+    expect(result.changes).toContain(mcpJsonPath);
+    const after = JSON.parse(readFileSync(mcpJsonPath, "utf-8"));
+    expect(after.mcpServers["clerk-telegram"]).toBeDefined();
+    expect(after.mcpServers.hindsight).toBeDefined();
+    expect(after.mcpServers.hindsight.url).toBe("http://localhost:18888/mcp/");
+  });
+
+  it("does not touch CLAUDE.md, SOUL.md, start.sh, or telegram files", () => {
+    const agentConfig = makeAgentConfig();
+    const initialConfig = buildClerkConfig(agentConfig);
+    scaffoldAgent("test-agent", agentConfig, tmpDir, telegramConfig, initialConfig);
+
+    const userEditedFiles = [
+      join(tmpDir, "test-agent", "CLAUDE.md"),
+      join(tmpDir, "test-agent", "SOUL.md"),
+      join(tmpDir, "test-agent", "start.sh"),
+      join(tmpDir, "test-agent", "telegram", ".env"),
+      join(tmpDir, "test-agent", "telegram", "access.json"),
+    ];
+
+    // Hand-edit each file with a marker the user "wrote"
+    for (const f of userEditedFiles) {
+      if (existsSync(f)) {
+        writeFileSync(f, readFileSync(f, "utf-8") + "\n# USER EDIT\n", "utf-8");
+      }
+    }
+
+    const updatedConfig = buildClerkConfig(agentConfig, {
+      backend: "hindsight",
+      shared_collection: "shared",
+    });
+    reconcileAgent("test-agent", agentConfig, tmpDir, telegramConfig, updatedConfig);
+
+    for (const f of userEditedFiles) {
+      if (existsSync(f)) {
+        expect(readFileSync(f, "utf-8")).toContain("# USER EDIT");
+      }
+    }
+  });
+
+  it("returns no changes when settings already match", () => {
+    const agentConfig = makeAgentConfig();
+    const config = buildClerkConfig(agentConfig);
+    scaffoldAgent("test-agent", agentConfig, tmpDir, telegramConfig, config);
+
+    // First reconcile may apply scaffold->reconcile drift (e.g. clerk-mcp entry)
+    reconcileAgent("test-agent", agentConfig, tmpDir, telegramConfig, config);
+    // Second should be a no-op
+    const result = reconcileAgent(
+      "test-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      config,
+    );
+    expect(result.changes).toEqual([]);
+  });
+
+  it("removes hindsight MCP entry when backend is disabled", () => {
+    const agentConfig = makeAgentConfig();
+    const withMemory = buildClerkConfig(agentConfig, {
+      backend: "hindsight",
+      shared_collection: "shared",
+    });
+    scaffoldAgent("test-agent", agentConfig, tmpDir, telegramConfig, withMemory);
+
+    const settingsPath = join(tmpDir, "test-agent", ".claude", "settings.json");
+    const beforeReconcile = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    expect(beforeReconcile.permissions.allow).toContain("mcp__hindsight__*");
+
+    // Reconcile against a config with backend=none
+    const withoutMemory = buildClerkConfig(agentConfig, {
+      backend: "none",
+      shared_collection: "shared",
+    });
+    reconcileAgent("test-agent", agentConfig, tmpDir, telegramConfig, withoutMemory);
+
+    const after = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    expect(after.permissions.allow).not.toContain("mcp__hindsight__*");
+    expect(after.mcpServers.hindsight).toBeUndefined();
   });
 });
 

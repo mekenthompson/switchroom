@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { rmSync } from "node:fs";
 
+import { createServer } from "node:net";
 import { validateBotToken } from "../src/setup/telegram-api.js";
 import {
   buildAccessJson,
@@ -11,6 +12,13 @@ import {
   copyOnboardingState,
   copyExistingCredentials,
 } from "../src/setup/onboarding.js";
+import {
+  isPortFree,
+  findFreePort,
+  pickHindsightPorts,
+  HINDSIGHT_DEFAULT_API_PORT,
+  HINDSIGHT_DEFAULT_UI_PORT,
+} from "../src/setup/hindsight.js";
 
 // ─── validateBotToken ────────────────────────────────────────────────────────
 
@@ -294,5 +302,105 @@ describe("copyExistingCredentials", () => {
 
     const result = copyExistingCredentials(agentDir);
     expect(result).toBe(true);
+  });
+});
+
+// ─── Hindsight port detection ────────────────────────────────────────────────
+
+/**
+ * Open a TCP listener on 127.0.0.1:port and return the server so the test
+ * can close it. Used to simulate "port already in use".
+ */
+function bindPort(port: number): Promise<ReturnType<typeof createServer>> {
+  return new Promise((resolve, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.once("listening", () => resolve(server));
+    server.listen(port, "127.0.0.1");
+  });
+}
+
+describe("isPortFree / findFreePort", () => {
+  it("returns true for a free port", async () => {
+    // Use a high port unlikely to be bound
+    const free = await isPortFree(45123);
+    expect(free).toBe(true);
+  });
+
+  it("returns false when something is listening on the port", async () => {
+    const server = await bindPort(45124);
+    try {
+      const free = await isPortFree(45124);
+      expect(free).toBe(false);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("findFreePort skips occupied ports and returns the next free one", async () => {
+    const server = await bindPort(45125);
+    try {
+      const port = await findFreePort(45125, 5);
+      expect(port).not.toBeNull();
+      expect(port).toBeGreaterThan(45125);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("findFreePort returns null when all attempts are taken", async () => {
+    // Bind a contiguous range of 3 ports
+    const a = await bindPort(45200);
+    const b = await bindPort(45201);
+    const c = await bindPort(45202);
+    try {
+      const port = await findFreePort(45200, 3);
+      expect(port).toBeNull();
+    } finally {
+      a.close();
+      b.close();
+      c.close();
+    }
+  });
+});
+
+describe("pickHindsightPorts", () => {
+  it("uses upstream defaults when both are free", async () => {
+    // If something on the test host happens to be using 8888/9999, skip.
+    const apiFree = await isPortFree(HINDSIGHT_DEFAULT_API_PORT);
+    const uiFree = await isPortFree(HINDSIGHT_DEFAULT_UI_PORT);
+    if (!apiFree || !uiFree) {
+      // Test host has 8888/9999 occupied — skip the assertion that depends
+      // on them being free, but the pickHindsightPorts call should still
+      // succeed by falling back.
+      const ports = await pickHindsightPorts();
+      expect(ports.apiPort).toBeGreaterThanOrEqual(1024);
+      expect(ports.uiPort).toBeGreaterThanOrEqual(1024);
+      return;
+    }
+
+    const ports = await pickHindsightPorts();
+    expect(ports.apiPort).toBe(HINDSIGHT_DEFAULT_API_PORT);
+    expect(ports.uiPort).toBe(HINDSIGHT_DEFAULT_UI_PORT);
+  });
+
+  it("falls back to alternative ports when 8888 is taken", async () => {
+    const apiFree = await isPortFree(HINDSIGHT_DEFAULT_API_PORT);
+    if (!apiFree) {
+      // Already taken on this host; the fallback path is already exercised
+      // by the test above. Skip the bind step.
+      const ports = await pickHindsightPorts();
+      expect(ports.apiPort).not.toBe(HINDSIGHT_DEFAULT_API_PORT);
+      return;
+    }
+
+    const blocker = await bindPort(HINDSIGHT_DEFAULT_API_PORT);
+    try {
+      const ports = await pickHindsightPorts();
+      expect(ports.apiPort).not.toBe(HINDSIGHT_DEFAULT_API_PORT);
+      expect(ports.apiPort).toBeGreaterThanOrEqual(18888);
+    } finally {
+      blocker.close();
+    }
   });
 });

@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { rmSync, existsSync } from "node:fs";
 import { resolveAgentsDir } from "../config/loader.js";
 import { withConfigError, getConfig, getConfigPath } from "./helpers.js";
-import { scaffoldAgent } from "../agents/scaffold.js";
+import { scaffoldAgent, reconcileAgent } from "../agents/scaffold.js";
 import {
   startAgent,
   stopAgent,
@@ -292,6 +292,87 @@ export function registerAgentCommand(program: Command): void {
         }
 
         getAgentLogs(name, opts.follow ?? false);
+      })
+    );
+
+  // clerk agent reconcile <name|all>
+  agent
+    .command("reconcile <name>")
+    .description(
+      "Re-apply clerk.yaml to an existing agent (rewrites .mcp.json + settings.json without touching CLAUDE.md/SOUL.md)"
+    )
+    .option("--restart", "Restart the agent after reconciling")
+    .action(
+      withConfigError(async (name: string, opts: { restart?: boolean }) => {
+        const config = getConfig(program);
+        const agentsDir = resolveAgentsDir(config);
+        const configPath = getConfigPath(program);
+
+        const names = name === "all" ? Object.keys(config.agents) : [name];
+        let totalChanges = 0;
+        let agentsTouched = 0;
+
+        for (const n of names) {
+          const agentConfig = config.agents[n];
+          if (!agentConfig) {
+            console.error(
+              chalk.red(`Agent "${n}" is not defined in clerk.yaml`)
+            );
+            continue;
+          }
+          try {
+            const result = reconcileAgent(
+              n,
+              agentConfig,
+              agentsDir,
+              config.telegram,
+              config,
+              configPath,
+            );
+            if (result.changes.length === 0) {
+              console.log(chalk.gray(`  ${n}: already in sync`));
+            } else {
+              agentsTouched++;
+              totalChanges += result.changes.length;
+              console.log(chalk.green(`  ${n}: updated`));
+              for (const f of result.changes) {
+                console.log(chalk.gray(`    - ${f}`));
+              }
+            }
+
+            if (opts.restart && result.changes.length > 0) {
+              try {
+                restartAgent(n);
+                console.log(chalk.green(`  ${n}: restarted`));
+              } catch (err) {
+                console.error(
+                  chalk.red(`  ${n}: restart failed: ${(err as Error).message}`)
+                );
+              }
+            }
+          } catch (err) {
+            console.error(
+              chalk.red(`  ${n}: ${(err as Error).message}`)
+            );
+          }
+        }
+
+        if (totalChanges === 0 && agentsTouched === 0) {
+          console.log(chalk.gray("\nNothing to do."));
+        } else {
+          console.log(
+            chalk.bold(
+              `\nReconciled ${agentsTouched} agent(s), ${totalChanges} file(s) changed.`
+            )
+          );
+          if (!opts.restart) {
+            console.log(
+              chalk.gray(
+                "  Tip: pass --restart to apply changes immediately, or run `clerk agent restart <name>`."
+              )
+            );
+          }
+        }
       })
     );
 

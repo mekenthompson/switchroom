@@ -4,6 +4,74 @@ Multi-agent orchestrator for Claude Code. One Telegram group, many specialized a
 
 Clerk manages multiple long-running Claude Code sessions, each with its own persona, memory, tools, and Telegram topic — all using your official Claude Pro/Max subscription.
 
+## Recommended Setup (Best Practice)
+
+Clerk is designed to run **24/7 on a small Linux server** that you talk to from Telegram. This is the path we recommend for almost everyone — it has the fewest moving parts and the most reliable behavior.
+
+### Hardware
+
+- **A small Linux VPS** with 4 GB RAM and 20 GB disk. Hetzner CX22 (€4/mo), DigitalOcean $6 droplet, a spare home server, or any Ubuntu 24.04 LTS box works.
+- **Not WSL.** WSL2 has kernel restrictions (TIOCSTI, networking quirks) that we patch around but cannot fully fix. Use real Linux.
+- **Not your laptop.** Agents need to be online when you're not. Putting them on a sleeping laptop defeats the point.
+- **Single user account with sudo.** Run everything as one regular user (not root). Clerk uses systemd *user* services so it never needs root for daily life.
+
+### One-time install
+
+```bash
+# 1. Install dependencies (Ubuntu 24.04)
+sudo apt update && sudo apt install -y tmux expect docker.io
+curl -fsSL https://bun.sh/install | bash         # Bun
+curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash && \
+  source ~/.bashrc && nvm install 22             # Node 22 via nvm
+npm install -g @anthropic-ai/claude-code         # Claude Code CLI
+sudo usermod -aG docker $USER && newgrp docker   # Docker without sudo
+
+# 2. Install Clerk
+git clone https://github.com/mekenthompson/clerk.git ~/code/clerk
+cd ~/code/clerk && bun install && bun link
+# (npm publish coming — once available: `npm install -g clerk-ai`)
+
+# 3. Run the interactive setup wizard
+clerk setup
+```
+
+`clerk setup` walks you through everything: Telegram pairing, Claude OAuth, vault creation, Hindsight memory, scaffolding a default `assistant` agent, and starting it as a systemd user service.
+
+### Daily life
+
+Once set up, you don't touch the server. You talk to your agent from Telegram:
+
+- Send messages in the agent's forum topic — it replies
+- `/agents`, `/auth`, `/memory <query>` for management
+- Agents auto-restart on reboot, auto-recall memory, and auto-update when you redeploy
+
+### When something looks broken
+
+```bash
+clerk doctor         # Diagnoses dependencies, vault, hindsight, MCP wireup, services
+clerk agent logs assistant -f
+systemctl --user status clerk-assistant
+```
+
+### When you change `clerk.yaml`
+
+```bash
+clerk agent reconcile all --restart
+```
+
+This re-applies your config to existing agents (rewriting `.mcp.json` and `settings.json` without touching `CLAUDE.md` or `SOUL.md`) and restarts them. Use this whenever you add a new MCP server, enable memory, change the tool allowlist, etc. — never edit the agent's generated files by hand.
+
+### What we deliberately avoid
+
+- **WSL/macOS for production agents.** Fine for development; not reliable for 24/7 use.
+- **Sharing one Telegram bot token across agents.** Telegram's long-poll lock means messages get dropped at random. One bot per agent, always.
+- **Running as root or via Docker-in-Docker.** Clerk's agents are systemd *user* units. Hindsight is the only Docker container we run, and only because the upstream image bundles Postgres.
+- **Hand-editing files in `~/.clerk/agents/<name>/`.** Use `clerk agent reconcile` instead. Anything you edit in `clerk.yaml` is the source of truth.
+
+If your situation rules out the recommended path (you're on macOS, you only have a laptop, you want to use Ollama instead of OpenAI for embeddings, etc.), the rest of this README covers the manual flags and lower-level commands. But if you can take the recommended path, take it — every gotcha we know about is already paved over by the wizard.
+
+---
+
 ## What Clerk Does
 
 - **Scaffolds agent directories** from templates (persona, behavior, skills, memory)
@@ -141,9 +209,11 @@ The interactive wizard walks you through: config file, bot tokens (one per agent
 
 `clerk setup` automatically starts a [Hindsight](https://github.com/vectorize-io/hindsight) Docker container for semantic memory. This gives every agent persistent memory with knowledge graphs, semantic search, and cross-agent reflection.
 
-- **MCP endpoint**: `http://localhost:8888/mcp` (Streamable HTTP transport)
-- **Web UI**: `http://localhost:9999`
-- **Requires**: An OpenAI API key (or Anthropic/Ollama) for LLM-powered memory features. The setup wizard will prompt for this.
+- **MCP endpoint**: `http://127.0.0.1:8888/mcp/` by default (Streamable HTTP transport)
+- **Auto-port-detection**: if 8888 is already taken (Coolify, another service, etc.), Clerk falls back to 18888 automatically and writes the chosen URL into `clerk.yaml` under `memory.config.url`
+- **Web UI**: `http://127.0.0.1:9999` (or 19999)
+- **Requires**: An OpenAI API key (or Anthropic/Ollama) for LLM-powered memory features. The setup wizard will prompt for this. If `CLERK_VAULT_PASSPHRASE` is set and you've stored `openai-api-key` in the vault, `clerk memory setup` will pull from the vault automatically.
+- **Apply to existing agents**: after `clerk memory setup` updates `clerk.yaml`, run `clerk agent reconcile all --restart` so the running agents pick up the new MCP wireup.
 
 Requirements: Docker must be installed. The setup wizard will check for Docker and start the `clerk-hindsight` container automatically.
 
@@ -276,6 +346,8 @@ Add a new agent: add a few lines to `clerk.yaml`, create a bot via @BotFather, r
 
 ```bash
 # Setup
+clerk setup                         # Interactive wizard (recommended path)
+clerk doctor [--json]               # Health check: deps, vault, memory, MCP, services
 clerk init [--example <name>]       # Scaffold agents + install systemd units
 clerk vault init                    # Create encrypted vault
 clerk vault set <key>               # Store a secret
@@ -284,12 +356,14 @@ clerk vault list                    # List secret key names
 
 # Authentication
 clerk auth login <name|all>         # Show onboarding instructions for agent(s)
-clerk auth status                   # Token status for all agents
+clerk auth status [--json]          # Token status for all agents
 clerk auth refresh <name>           # Show instructions to refresh tokens
 
 # Agent lifecycle
-clerk agent list                    # Status of all agents
+clerk agent list [--json]           # Status of all agents
 clerk agent create <name>           # Scaffold + install one agent
+clerk agent reconcile <name|all> [--restart]
+                                    # Re-apply clerk.yaml to existing agent(s)
 clerk agent start <name|all>        # Start agent(s)
 clerk agent stop <name|all>         # Stop agent(s)
 clerk agent restart <name|all>      # Restart agent(s)

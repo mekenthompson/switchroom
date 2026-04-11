@@ -420,6 +420,153 @@ export function scaffoldAgent(
 }
 
 /**
+ * Result of reconciling an existing agent against the current clerk.yaml.
+ */
+export interface ReconcileResult {
+  agentDir: string;
+  changes: string[];
+}
+
+/**
+ * Re-apply clerk.yaml-derived state to an existing agent without touching
+ * user-edited files (CLAUDE.md, SOUL.md, start.sh, telegram/.env, etc.).
+ *
+ * Specifically rewrites:
+ *   - .mcp.json (when use_clerk_plugin is true)
+ *   - .claude/settings.json mcpServers
+ *   - .claude/settings.json permissions.allow / .deny / defaultMode
+ *
+ * This is the operation a non-developer needs after editing clerk.yaml —
+ * e.g., adding a new MCP server, enabling memory, changing the tool
+ * allowlist. It is the lifecycle gap between `clerk agent create` (which
+ * scaffolds once) and a full re-scaffold (which would clobber CLAUDE.md).
+ *
+ * Throws if the agent directory does not exist.
+ */
+export function reconcileAgent(
+  name: string,
+  agentConfig: AgentConfig,
+  agentsDir: string,
+  telegramConfig: TelegramConfig,
+  clerkConfig: ClerkConfig,
+  clerkConfigPath?: string,
+): ReconcileResult {
+  void telegramConfig; // reserved for future use (telegram/.env reconciliation)
+  const agentDir = resolve(agentsDir, name);
+  const changes: string[] = [];
+
+  if (!existsSync(agentDir)) {
+    throw new Error(
+      `Agent directory does not exist: ${agentDir}. Run \`clerk agent create ${name}\` first.`,
+    );
+  }
+
+  // Compute the desired permissions.allow list from current config
+  const tools = agentConfig.tools ?? { allow: [], deny: [] };
+  const rawAllow = tools.allow ?? [];
+  const hasAllWildcard = rawAllow.includes("all");
+  const baseAllow = hasAllWildcard
+    ? []
+    : rawAllow.filter((t) => t !== "all");
+  const memoryBackend = clerkConfig.memory?.backend;
+  const hindsightEnabled = memoryBackend === "hindsight";
+  const desiredAllow = [
+    ...baseAllow,
+    ...(agentConfig.use_clerk_plugin === true ? CLERK_TELEGRAM_MCP_TOOLS : []),
+    ...(hindsightEnabled ? HINDSIGHT_MCP_TOOLS : []),
+  ];
+  const desiredDeny = tools.deny ?? [];
+
+  // --- Reconcile settings.json ---
+  const settingsPath = join(agentDir, ".claude", "settings.json");
+  if (existsSync(settingsPath)) {
+    const before = readFileSync(settingsPath, "utf-8");
+    const settings = JSON.parse(before);
+
+    // Permissions: clerk-managed keys are allow, deny, defaultMode.
+    // Preserve any other keys the user may have added under permissions.
+    settings.permissions = settings.permissions ?? {};
+    settings.permissions.allow = desiredAllow;
+    settings.permissions.deny = desiredDeny;
+    if (hasAllWildcard) {
+      settings.permissions.defaultMode = "acceptEdits";
+    } else {
+      delete settings.permissions.defaultMode;
+    }
+
+    // mcpServers: rebuild from current clerk.yaml. Preserves user-defined
+    // mcp_servers from agentConfig.mcp_servers in addition to the built-ins.
+    const mcpServers: Record<string, unknown> = {};
+
+    // Hindsight first (so it's the most visible to a reader)
+    const hindsightEntry = getHindsightSettingsEntry(name, clerkConfig);
+    if (hindsightEntry) {
+      mcpServers[hindsightEntry.key] = hindsightEntry.value;
+    }
+
+    // Clerk management MCP
+    const clerkMcpEntry = getClerkMcpSettingsEntry(clerkConfigPath);
+    mcpServers[clerkMcpEntry.key] = clerkMcpEntry.value;
+
+    // User-defined extras from clerk.yaml agents.<name>.mcp_servers
+    if (agentConfig.mcp_servers) {
+      for (const [key, value] of Object.entries(agentConfig.mcp_servers)) {
+        mcpServers[key] = value;
+      }
+    }
+
+    settings.mcpServers = mcpServers;
+
+    const after = JSON.stringify(settings, null, 2) + "\n";
+    if (after !== before) {
+      writeFileSync(settingsPath, after, { encoding: "utf-8", mode: 0o600 });
+      changes.push(settingsPath);
+    }
+  }
+
+  // --- Reconcile .mcp.json (use_clerk_plugin agents only) ---
+  if (agentConfig.use_clerk_plugin === true) {
+    const mcpJsonPath = join(agentDir, ".mcp.json");
+    const pluginDir = resolve(import.meta.dirname, "../../telegram-plugin");
+    const clerkCliPath = resolveClerkCliPath();
+    const resolvedConfigPath = clerkConfigPath
+      ? resolve(clerkConfigPath)
+      : resolve(process.cwd(), "clerk.yaml");
+
+    const mcpServers: Record<string, McpServerConfig> = {
+      "clerk-telegram": {
+        command: "bun",
+        args: ["run", "--cwd", pluginDir, "--shell=bun", "--silent", "start"],
+        env: {
+          TELEGRAM_STATE_DIR: join(agentDir, "telegram"),
+          CLERK_CONFIG: resolvedConfigPath,
+          CLERK_CLI_PATH: clerkCliPath,
+        },
+      },
+    };
+
+    if (hindsightEnabled) {
+      const hindsightEntry = getHindsightSettingsEntry(name, clerkConfig);
+      if (hindsightEntry) {
+        mcpServers[hindsightEntry.key] = hindsightEntry.value;
+      }
+    }
+
+    const mcpJson = { mcpServers };
+    const after = JSON.stringify(mcpJson, null, 2) + "\n";
+    const before = existsSync(mcpJsonPath)
+      ? readFileSync(mcpJsonPath, "utf-8")
+      : "";
+    if (after !== before) {
+      writeFileSync(mcpJsonPath, after, { encoding: "utf-8", mode: 0o600 });
+      changes.push(mcpJsonPath);
+    }
+  }
+
+  return { agentDir, changes };
+}
+
+/**
  * Write a file only if it doesn't already exist.
  * Tracks what was created vs skipped for reporting.
  */

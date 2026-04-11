@@ -34,6 +34,8 @@ import { execFileSync, execSync } from 'child_process'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
+import { StatusReactionController } from './status-reactions.js'
+import { createDraftStream, type DraftStreamHandle } from './draft-stream.js'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -62,6 +64,52 @@ const TOPIC_ID = process.env.TELEGRAM_TOPIC_ID ? Number(process.env.TELEGRAM_TOP
 // Auto-capture: stores the last seen message_thread_id per chat_id.
 // When replying, if no explicit message_thread_id is provided, use the captured one.
 const chatThreadMap = new Map<string, number>()
+
+/**
+ * Active status reaction controllers, keyed by `${chat_id}:${thread_id ?? "_"}`.
+ *
+ * One controller per (chat, thread) — when a new inbound message arrives we
+ * cancel the prior controller (if any) and start fresh on the new message.
+ * The `reply` tool handler looks up the controller by chat+thread to mark
+ * it done after the final message lands.
+ *
+ * See ./status-reactions.ts for the controller implementation. The model
+ * never sees this — it's pure plumbing driven by the inbound/outbound flow.
+ */
+const activeStatusReactions = new Map<string, StatusReactionController>()
+
+function statusKey(chatId: string, threadId?: number): string {
+  return `${chatId}:${threadId ?? '_'}`
+}
+
+function endStatusReaction(
+  chatId: string,
+  threadId: number | undefined,
+  outcome: 'done' | 'error',
+): void {
+  const key = statusKey(chatId, threadId)
+  const ctrl = activeStatusReactions.get(key)
+  if (!ctrl) return
+  if (outcome === 'done') ctrl.setDone()
+  else ctrl.setError()
+  activeStatusReactions.delete(key)
+}
+
+/**
+ * Active draft streams, keyed by `${chat_id}:${thread_id ?? "_"}`.
+ *
+ * One stream per (chat, thread). The model calls stream_reply with a full
+ * snapshot of its current message, optionally marking done=true to lock.
+ * Mid-stream updates throttle to ~1/sec via createDraftStream's flush loop.
+ *
+ * If a new turn starts (new inbound message) while a stream is still
+ * open, we finalize the prior stream silently before starting fresh.
+ */
+const activeDraftStreams = new Map<string, DraftStreamHandle>()
+
+function streamKey(chatId: string, threadId?: number): string {
+  return `${chatId}:${threadId ?? '_'}`
+}
 
 if (!TOKEN) {
   process.stderr.write(
@@ -125,6 +173,12 @@ type Access = {
   disableLinkPreview?: boolean
   /** Milliseconds to wait for additional rapid messages before delivering combined inbound. Default: 1500. */
   coalescingGapMs?: number
+  /**
+   * Enable the openclaw-style status reaction lifecycle: 👀 received → 🤔
+   * thinking → 🔥/👨‍💻/⚡ working → 👍 done → 😱 error. Defaults to true.
+   * Set false to fall back to the legacy single-emoji ackReaction path.
+   */
+  statusReactions?: boolean
 }
 
 function defaultAccess(): Access {
@@ -172,6 +226,7 @@ function readAccessFile(): Access {
       parseMode: parsed.parseMode,
       disableLinkPreview: parsed.disableLinkPreview,
       coalescingGapMs: parsed.coalescingGapMs,
+      statusReactions: parsed.statusReactions,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -431,6 +486,15 @@ export function markdownToHtml(text: string): string {
     return `${BLOCK_PH}${idx}\x00`
   })
 
+  // Convert markdown headings (# / ## / ### ...) to bold lines on their
+  // own. Telegram has no <h1> tag, and rendering ## as plain text leaves
+  // ugly hash marks in the message. Drop the leading `#`s and bold the
+  // remaining text. Must run BEFORE inline code extraction so we don't
+  // accidentally bold a `# something` inside an inline-code span.
+  result = result.replace(/^(#{1,6})\s+(.+?)\s*$/gm, (_m, _hashes, title: string) => {
+    return `**${title}**`
+  })
+
   // Inline code: `code`
   const inlineCodes: string[] = []
   result = result.replace(/`([^`\n]+)`/g, (_m, code: string) => {
@@ -504,6 +568,11 @@ export function splitHtmlChunks(html: string, maxLen = 4000): string[] {
       cut = spaceIdx
     }
 
+    // Defense-in-depth: refuse to split inside an HTML entity (&amp;,
+    // &lt;, &#x1f4a9;). If the cut would land mid-entity, back up to
+    // before the `&`. Telegram rejects messages with broken entities.
+    cut = backOffEntity(rest, cut)
+
     let segment = rest.slice(0, cut)
     rest = rest.slice(cut).replace(/^\n+/, '')
 
@@ -528,6 +597,38 @@ export function splitHtmlChunks(html: string, maxLen = 4000): string[] {
   }
 
   return chunks
+}
+
+/**
+ * If `cut` lies inside an HTML entity (a `&...;` sequence), back it up to
+ * just before the `&` so the chunk boundary doesn't bisect the entity.
+ *
+ * Telegram's HTML parser rejects malformed entities — splitting `&amp;`
+ * into `&am` + `p;` would 400 the entire message. We scan backward up to
+ * 10 chars (longest realistic entity is `&#x1FAFF;` at ~10 chars) for a
+ * `&`; if we find one without a closing `;` before our cut point, the
+ * entity straddles the boundary and we move the cut left.
+ */
+function backOffEntity(text: string, cut: number): number {
+  if (cut <= 0 || cut >= text.length) return cut
+  // Look backward up to 10 chars for an unterminated entity
+  const lookback = Math.max(0, cut - 10)
+  for (let i = cut - 1; i >= lookback; i--) {
+    const ch = text[i]
+    if (ch === ';') return cut // entity already closed before cut → safe
+    if (ch === '&') {
+      // Found a `&` with no `;` between it and the cut. Look forward from
+      // cut to confirm there IS a `;` later (otherwise it's a stray `&`,
+      // which is technically legal in Telegram HTML).
+      const closeIdx = text.indexOf(';', cut)
+      if (closeIdx !== -1 && closeIdx - i <= 10) {
+        // The entity spans the cut — back up to just before the `&`
+        return i
+      }
+      return cut
+    }
+  }
+  return cut
 }
 
 /** Parse an HTML fragment and return the list of tags still open at the end. */
@@ -766,6 +867,32 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
+      name: 'stream_reply',
+      description:
+        'Send or update a streaming reply that edits one message in-place rather than sending many. Call repeatedly during long tasks with full snapshots of your current message; the plugin throttles edits to ~1/sec to respect Telegram\'s rate limit. Set done=true on your final call to lock the message. The first call sends a fresh message; subsequent calls edit it. Use this instead of `reply` when you want to show progressive updates ("reading file..." → "found it, now searching..." → "here\'s the answer") without spamming the chat. Hard-stops at 4096 chars.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string' },
+          text: { type: 'string', description: 'Full text snapshot. NOT a delta — pass the complete current content each call.' },
+          done: {
+            type: 'boolean',
+            description: 'True if this is the final update. After done=true the stream is locked and further calls are no-ops. Default false.',
+          },
+          message_thread_id: {
+            type: 'string',
+            description: 'Forum topic thread ID. Auto-applied from the last inbound message if not specified.',
+          },
+          format: {
+            type: 'string',
+            enum: ['html', 'markdownv2', 'text'],
+            description: "Rendering mode. 'html' (default) converts markdown to Telegram HTML.",
+          },
+        },
+        required: ['chat_id', 'text'],
+      },
+    },
+    {
       name: 'react',
       description: 'Add an emoji reaction to a Telegram message. Telegram only accepts a fixed whitelist (👍 👎 ❤ 🔥 👀 🎉 etc) — non-whitelisted emoji will be rejected.',
       inputSchema: {
@@ -983,7 +1110,98 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           sentIds.length === 1
             ? `sent (id: ${sentIds[0]})`
             : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
+
+        // Final reply landed — mark the status reaction controller done so
+        // the user's inbound message gets the 👍 terminal emoji.
+        endStatusReaction(chat_id, threadId, 'done')
+
+        // If a draft stream is still open for this chat/thread, finalize it
+        // silently. The reply tool is the canonical "done" signal even if
+        // the model forgot to call stream_reply with done=true.
+        const sKey = streamKey(chat_id, threadId)
+        const openStream = activeDraftStreams.get(sKey)
+        if (openStream && !openStream.isFinal()) {
+          await openStream.finalize().catch(() => {})
+          activeDraftStreams.delete(sKey)
+        }
+
         return { content: [{ type: 'text', text: result }] }
+      }
+      case 'stream_reply': {
+        const chat_id = args.chat_id as string
+        const text = args.text as string
+        const done = Boolean(args.done)
+        const access = loadAccess()
+        const configParseMode = access.parseMode ?? 'html'
+        const format = (args.format as string | undefined) ?? configParseMode
+
+        let parseMode: 'HTML' | 'MarkdownV2' | undefined
+        let effectiveText: string
+        if (format === 'html') {
+          parseMode = 'HTML' as const
+          effectiveText = markdownToHtml(text)
+        } else if (format === 'markdownv2') {
+          parseMode = 'MarkdownV2' as const
+          effectiveText = escapeMarkdownV2(text)
+        } else {
+          parseMode = undefined
+          effectiveText = text
+        }
+
+        assertAllowedChat(chat_id)
+        const threadId = resolveThreadId(
+          chat_id,
+          args.message_thread_id as string | undefined,
+        )
+
+        const sKey = streamKey(chat_id, threadId)
+        let stream = activeDraftStreams.get(sKey)
+
+        // No active stream → create one bound to this chat+thread.
+        if (!stream) {
+          const sendOpts = {
+            ...(parseMode ? { parse_mode: parseMode } : {}),
+            ...(threadId != null ? { message_thread_id: threadId } : {}),
+            ...(access.disableLinkPreview !== false
+              ? { link_preview_options: { is_disabled: true } }
+              : {}),
+          }
+          stream = createDraftStream(
+            async (sendText) => {
+              const sent = await robustApiCall(
+                () => bot.api.sendMessage(chat_id, sendText, sendOpts),
+                { threadId, chat_id },
+              )
+              return sent.message_id
+            },
+            async (id, editText) => {
+              await robustApiCall(
+                () => bot.api.editMessageText(chat_id, id, editText, sendOpts),
+                { threadId, chat_id },
+              )
+            },
+            { throttleMs: 1000 },
+          )
+          activeDraftStreams.set(sKey, stream)
+        }
+
+        await stream.update(effectiveText)
+
+        if (done) {
+          await stream.finalize()
+          activeDraftStreams.delete(sKey)
+          // The stream becoming final is the equivalent of `reply` landing
+          // — mark the status reaction controller done.
+          endStatusReaction(chat_id, threadId, 'done')
+        }
+
+        const id = stream.getMessageId()
+        const status = done ? 'finalized' : 'updated'
+        return {
+          content: [
+            { type: 'text', text: `${status} (id: ${id ?? 'pending'})` },
+          ],
+        }
       }
       case 'react': {
         assertAllowedChat(args.chat_id as string)
@@ -1039,10 +1257,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         return { content: [{ type: 'text', text: `edited (id: ${id})` }] }
       }
       case 'send_typing': {
-        assertAllowedChat(args.chat_id as string)
-        startTypingLoop(args.chat_id as string)
+        const stChatId = args.chat_id as string
+        assertAllowedChat(stChatId)
+        startTypingLoop(stChatId)
         // Auto-stop after 30s to prevent runaway loops
-        setTimeout(() => stopTypingLoop(args.chat_id as string), 30000)
+        setTimeout(() => stopTypingLoop(stChatId), 30000)
+        // The model is actively working — promote the status reaction to
+        // the generic tool/fire emoji so the user sees ongoing progress.
+        // We don't know the thread here, so try both keys.
+        for (const [key, ctrl] of activeStatusReactions.entries()) {
+          if (key.startsWith(`${stChatId}:`)) ctrl.setTool()
+        }
         return { content: [{ type: 'text', text: 'typing indicator sent (auto-refreshes every 4s, stops after 30s or next reply)' }] }
       }
       case 'pin_message': {
@@ -1072,6 +1297,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
+    // If a reply tool just failed, mark the corresponding status reaction
+    // controller as error so the user sees 😱 on their inbound message.
+    if (req.params.name === 'reply') {
+      const failedChatId = (req.params.arguments as Record<string, unknown> | undefined)?.chat_id as
+        | string
+        | undefined
+      if (failedChatId) {
+        const failedThreadId = (req.params.arguments as Record<string, unknown> | undefined)
+          ?.message_thread_id
+        endStatusReaction(
+          failedChatId,
+          failedThreadId != null ? Number(failedThreadId) : undefined,
+          'error',
+        )
+      }
+    }
     return {
       content: [{ type: 'text', text: `${req.params.name} failed: ${msg}` }],
       isError: true,
@@ -1970,15 +2211,77 @@ async function handleInbound(
   // Typing indicator — signals "processing" until we reply (or ~5s elapses).
   void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
 
-  // Ack reaction — lets the user know we're processing. Fire-and-forget.
-  // Telegram only accepts a fixed emoji whitelist — if the user configures
-  // something outside that set the API rejects it and we swallow.
-  if (access.ackReaction && msgId != null) {
-    void bot.api
-      .setMessageReaction(chat_id, msgId, [
-        { type: 'emoji', emoji: access.ackReaction as ReactionTypeEmoji['emoji'] },
-      ])
-      .catch(() => {})
+  // Status reaction controller — gives the user a glanceable lifecycle
+  // signal on their inbound message: 👀 received → 🤔 thinking → 🔥/👨‍💻/⚡
+  // working → 👍 done → 😱 error. The reply tool handler marks it done
+  // when the final message lands. See ./status-reactions.ts.
+  //
+  // Steering detection: if a previous turn is STILL ACTIVE for this
+  // chat/thread when a new message arrives, this message is a "steer" —
+  // the user is adding context or redirecting mid-flight. We:
+  //   1. Mark it with 🤝 (acknowledgment, distinct from 👀)
+  //   2. Don't terminate the prior controller — let it continue, since
+  //      its reply is what the model is producing for the original turn.
+  //   3. Set a meta.steering flag in the MCP notification so the model
+  //      can see "this came in while you were working on something" and
+  //      decide whether to incorporate, defer, or restart.
+  //
+  // Only run when we have a message_id to react to. If the user has set a
+  // custom ackReaction in access.json, fall through to the legacy single-
+  // emoji path so we don't break their existing config.
+  let isSteering = false
+  if (msgId != null) {
+    const key = statusKey(chat_id, messageThreadId)
+    const priorActive = activeStatusReactions.get(key)
+    isSteering = priorActive != null
+
+    if (access.statusReactions !== false) {
+      if (isSteering) {
+        // Steering: react on the NEW message with 🤝, leave the prior
+        // controller running so it can finalize the original turn.
+        void bot.api
+          .setMessageReaction(chat_id, msgId, [
+            { type: 'emoji', emoji: '🤝' },
+          ])
+          .catch(() => {})
+      } else {
+        // Normal new turn: cancel any (defunct) prior controller and any
+        // leftover draft stream, start fresh.
+        if (priorActive) {
+          priorActive.cancel()
+          activeStatusReactions.delete(key)
+        }
+        const sKey = streamKey(chat_id, messageThreadId)
+        const priorStream = activeDraftStreams.get(sKey)
+        if (priorStream && !priorStream.isFinal()) {
+          void priorStream.finalize().catch(() => {})
+          activeDraftStreams.delete(sKey)
+        }
+
+        const ctrl = new StatusReactionController(async (emoji) => {
+          await bot.api.setMessageReaction(chat_id, msgId, [
+            { type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] },
+          ])
+        })
+        activeStatusReactions.set(key, ctrl)
+
+        // 👀 immediately
+        ctrl.setQueued()
+
+        // 🤔 after 2s — the model has had time to start generating. If it
+        // finishes before then (very fast reply), the controller's
+        // emoji-already-current dedupe ensures the transition is cheap.
+        setTimeout(() => ctrl.setThinking(), 2000)
+      }
+    } else if (access.ackReaction) {
+      // Legacy single-emoji ack path — only used if statusReactions is
+      // explicitly disabled in access.json. Fire-and-forget.
+      void bot.api
+        .setMessageReaction(chat_id, msgId, [
+          { type: 'emoji', emoji: access.ackReaction as ReactionTypeEmoji['emoji'] },
+        ])
+        .catch(() => {})
+    }
   }
 
   const imagePath = downloadImage ? await downloadImage() : undefined
@@ -1997,6 +2300,7 @@ async function handleInbound(
         ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
         ...(messageThreadId != null ? { message_thread_id: String(messageThreadId) } : {}),
         ...(imagePath ? { image_path: imagePath } : {}),
+        ...(isSteering ? { steering: 'true' } : {}),
         ...(attachment ? {
           attachment_kind: attachment.kind,
           attachment_file_id: attachment.file_id,

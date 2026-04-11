@@ -106,6 +106,7 @@ export function setupPlugins(agentDir: string): void {
 const CLERK_TELEGRAM_MCP_TOOLS = [
   "mcp__clerk-telegram",
   "mcp__clerk-telegram__reply",
+  "mcp__clerk-telegram__stream_reply",
   "mcp__clerk-telegram__react",
   "mcp__clerk-telegram__edit_message",
   "mcp__clerk-telegram__send_typing",

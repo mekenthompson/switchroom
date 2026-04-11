@@ -107,6 +107,33 @@ describe('markdownToHtml', () => {
     expect(result).toContain('First paragraph')
     expect(result).toContain('Second paragraph')
   })
+
+  test('converts ## headings to bold (Telegram has no <h1>)', () => {
+    const result = markdownToHtml('## My Heading\n\nbody text')
+    expect(result).toContain('<b>My Heading</b>')
+    expect(result).not.toContain('## ')
+  })
+
+  test('converts # headings to bold', () => {
+    const result = markdownToHtml('# Top heading\n\nbody')
+    expect(result).toContain('<b>Top heading</b>')
+    expect(result).not.toMatch(/^# /m)
+  })
+
+  test('converts deep ### #### headings to bold without losing content', () => {
+    const result = markdownToHtml('### Section\n#### Subsection\nbody')
+    expect(result).toContain('<b>Section</b>')
+    expect(result).toContain('<b>Subsection</b>')
+    expect(result).not.toContain('###')
+    expect(result).not.toContain('####')
+  })
+
+  test('does not convert # inside code blocks', () => {
+    const input = '```bash\n# this is a comment\n```'
+    const result = markdownToHtml(input)
+    expect(result).toContain('# this is a comment')
+    expect(result).not.toContain('<b># this is a comment</b>')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -172,6 +199,35 @@ describe('splitHtmlChunks', () => {
     const text = 'a'.repeat(3999)
     const chunks = splitHtmlChunks(text)
     expect(chunks).toEqual([text])
+  })
+
+  test('does not split inside an HTML entity (&amp;)', () => {
+    // Construct text where the natural cut would land inside &amp;
+    // Position the entity so that maxLen falls between & and ;
+    const filler = 'x'.repeat(20)
+    // Cut would be at position 22, mid-entity
+    const html = filler + ' &amp; more text after the entity'
+    const chunks = splitHtmlChunks(html, 22)
+    // The entity should not be broken — we should see the full &amp; in
+    // some chunk, never &am or amp;.
+    for (const c of chunks) {
+      expect(c).not.toMatch(/&am$/)
+      expect(c).not.toMatch(/^p;/)
+      expect(c).not.toMatch(/^amp;/)
+    }
+    // Recombined text should equal original (allowing for the chunker's
+    // tag-rebalancing trim of leading newlines)
+    expect(chunks.join('')).toContain('&amp;')
+  })
+
+  test('does not split inside a numeric HTML entity (&#x1F4A9;)', () => {
+    const filler = 'a'.repeat(15)
+    const html = filler + ' &#x1F4A9; more'
+    const chunks = splitHtmlChunks(html, 20)
+    for (const c of chunks) {
+      expect(c).not.toMatch(/&#x1F$/)
+      expect(c).not.toMatch(/^4A9;/)
+    }
   })
 })
 

@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { execSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { resolveAgentsDir } from "../config/loader.js";
 import { getConfig, getConfigPath, withConfigError } from "./helpers.js";
@@ -33,7 +33,35 @@ function statusGlyph(status: CheckStatus): string {
 }
 
 /**
+ * Search ~/.nvm/versions/node/*\/bin for a binary. Returns the path or null.
+ *
+ * Doctor runs in a non-login shell where nvm.sh has not been sourced, so
+ * `command -v node` would otherwise miss nvm-installed Node and anything
+ * installed globally via that Node (claude, npm, npx, etc.).
+ */
+function findInNvm(bin: string): string | null {
+  const nvmRoot = join(process.env.HOME ?? "", ".nvm", "versions", "node");
+  if (!existsSync(nvmRoot)) return null;
+  try {
+    const versions = readdirSync(nvmRoot).sort().reverse(); // newest first
+    for (const v of versions) {
+      const candidate = join(nvmRoot, v, "bin", bin);
+      try {
+        const s = statSync(candidate);
+        if (s.isFile() || s.isSymbolicLink()) {
+          return candidate;
+        }
+      } catch { /* not in this version */ }
+    }
+  } catch { /* unreadable */ }
+  return null;
+}
+
+/**
  * Check whether a binary is on PATH. Returns the resolved path or null.
+ *
+ * Falls back to scanning ~/.nvm/versions/node/* for nvm-installed binaries
+ * since doctor runs in a non-login shell.
  */
 function which(bin: string): string | null {
   try {
@@ -42,10 +70,11 @@ function which(bin: string): string | null {
     })
       .toString()
       .trim();
-    return out || null;
-  } catch {
-    return null;
-  }
+    if (out) return out;
+  } catch { /* not on PATH */ }
+
+  // Fallback: nvm
+  return findInNvm(bin);
 }
 
 function checkBinary(

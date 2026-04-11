@@ -125,7 +125,7 @@ Each agent gets its own Telegram bot. Clerk supports **two channel modes** per a
 - Adds HTML formatting, smart message chunking, coalescing, bot commands, and richer attachment handling
 - Requires `expect` to auto-accept the dev-channel confirmation prompt at startup (`bin/autoaccept.exp`)
 - MCP tool names (`mcp__clerk-telegram__*`) are pre-approved in `settings.json` so the agent never blocks on a permission prompt
-- Requires native Linux (TIOCSTI is blocked on Ubuntu 24.04+ and WSL2)
+- Targets Ubuntu 24.04 LTS (TIOCSTI is blocked on modern kernels; we use `expect` instead)
 
 Shared across both modes:
 - One bot per agent, each with its own `TELEGRAM_BOT_TOKEN` in `telegram/.env` (Telegram long-poll locks per token — sharing tokens drops messages)

@@ -10,8 +10,8 @@ Clerk is designed to run **24/7 on a small Linux server** that you talk to from 
 
 ### Hardware
 
-- **A small Linux VPS** with 4 GB RAM and 20 GB disk. Hetzner CX22 (€4/mo), DigitalOcean $6 droplet, a spare home server, or any Ubuntu 24.04 LTS box works.
-- **Not WSL.** WSL2 has kernel restrictions (TIOCSTI, networking quirks) that we patch around but cannot fully fix. Use real Linux.
+- **A small Ubuntu 24.04 LTS server** with 4 GB RAM and 20 GB disk. Hetzner CX22 (€4/mo), DigitalOcean $6 droplet, or a spare home server all work.
+- **Ubuntu 24.04 LTS is the only fully supported target.** Other systemd-based distros (Debian, Fedora) usually work but are not part of the test matrix.
 - **Not your laptop.** Agents need to be online when you're not. Putting them on a sleeping laptop defeats the point.
 - **Single user account with sudo.** Run everything as one regular user (not root). Clerk uses systemd *user* services so it never needs root for daily life.
 
@@ -63,7 +63,7 @@ This re-applies your config to existing agents (rewriting `.mcp.json` and `setti
 
 ### What we deliberately avoid
 
-- **WSL/macOS for production agents.** Fine for development; not reliable for 24/7 use.
+- **Anything other than Ubuntu 24.04 LTS for production.** Other distros may work but aren't tested. Don't run agents on macOS or a laptop you sleep.
 - **Sharing one Telegram bot token across agents.** Telegram's long-poll lock means messages get dropped at random. One bot per agent, always.
 - **Running as root or via Docker-in-Docker.** Clerk's agents are systemd *user* units. Hindsight is the only Docker container we run, and only because the upstream image bundles Postgres.
 - **Hand-editing files in `~/.clerk/agents/<name>/`.** Use `clerk agent reconcile` instead. Anything you edit in `clerk.yaml` is the source of truth.
@@ -137,7 +137,6 @@ Clerk supports two Telegram channel implementations per agent:
 
 The enhanced plugin lives in `telegram-plugin/` as a forked MCP server. It requires:
 
-- Native Linux (WSL2 has additional kernel restrictions)
 - `expect` installed (`apt install expect`) — used by `bin/autoaccept.exp` to answer Claude Code's interactive dev-channel confirmation prompts
 - A per-agent `.mcp.json` (Clerk writes this automatically) pointing at the plugin entry point with `TELEGRAM_STATE_DIR`, `CLERK_CONFIG`, and `CLERK_CLI_PATH` in its env
 
@@ -145,7 +144,7 @@ The enhanced plugin lives in `telegram-plugin/` as a forked MCP server. It requi
 
 ### Prerequisites
 
-- Linux with systemd (Ubuntu, Debian, Fedora, etc.) — **native Linux is required for `use_clerk_plugin` mode** (WSL2 has additional kernel restrictions)
+- **Ubuntu 24.04 LTS** (the only fully supported target)
 - [Node.js 22+](https://nodejs.org) — install via `nvm` so start.sh can source it
 - [Bun](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`)
 - [Claude Code CLI](https://code.claude.com) (`npm install -g @anthropic-ai/claude-code`)

@@ -30,7 +30,7 @@ import { z } from 'zod'
 import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
-import { execFileSync } from 'child_process'
+import { execFileSync, execSync } from 'child_process'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
@@ -1169,6 +1169,29 @@ function clerkExec(args: string[], timeoutMs = 15000): string {
     encoding: 'utf-8',
     timeout: timeoutMs,
     env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+    maxBuffer: 4 * 1024 * 1024,
+  })
+}
+
+/**
+ * Run a clerk command, capturing both stdout and stderr together.
+ *
+ * Some commands (`update`, `doctor` with failures) write progress to
+ * stderr; the user wants to see that in their Telegram reply too. This
+ * helper merges them via /bin/sh so we don't lose anything.
+ */
+function clerkExecCombined(args: string[], timeoutMs = 15000): string {
+  const fullArgs = CLERK_CONFIG ? ['--config', CLERK_CONFIG, ...args] : args
+  // Quote each arg for the shell
+  const quoted = [CLERK_CLI, ...fullArgs]
+    .map((a) => `'${String(a).replace(/'/g, "'\\''")}'`)
+    .join(' ')
+  return execSync(`${quoted} 2>&1`, {
+    encoding: 'utf-8',
+    timeout: timeoutMs,
+    env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+    maxBuffer: 4 * 1024 * 1024,
+    shell: '/bin/bash',
   })
 }
 
@@ -1417,20 +1440,127 @@ bot.command('memory', async ctx => {
   await runClerkCommand(ctx, ['memory', 'search', query], 'memory search')
 })
 
+// /doctor — health check (deps, vault, hindsight, services, MCP wireup)
+bot.command('doctor', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  try {
+    // doctor exits non-zero if anything is failing — capture combined output
+    let output: string
+    try {
+      output = clerkExecCombined(['doctor'], 30000)
+    } catch (err: unknown) {
+      // Non-zero exit is expected when checks fail; the combined output is on the error
+      const e = err as { stdout?: string; message?: string }
+      output = e.stdout ?? e.message ?? 'doctor failed'
+    }
+    const trimmed = stripAnsi(output).trim()
+    if (!trimmed) {
+      await clerkReply(ctx, 'doctor: no output')
+      return
+    }
+    // Replace ✓/✗/! glyphs with emoji for mobile readability
+    const pretty = trimmed
+      .replace(/^( *)✓ /gm, '$1🟢 ')
+      .replace(/^( *)✗ /gm, '$1🔴 ')
+      .replace(/^( *)! /gm, '$1🟡 ')
+    await clerkReply(ctx, preBlock(formatClerkOutput(pretty)), { html: true })
+  } catch (err: unknown) {
+    const error = err as { message?: string }
+    await clerkReply(
+      ctx,
+      `<b>doctor failed:</b>\n${preBlock(formatClerkOutput(error.message ?? 'unknown error'))}`,
+      { html: true },
+    )
+  }
+})
+
+// /reconcile [name|all] — re-apply clerk.yaml to existing agents
+bot.command('reconcile', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const arg = (ctx.match ?? '').trim() || 'all'
+  await runClerkCommand(
+    ctx,
+    ['agent', 'reconcile', arg, '--restart'],
+    `reconcile ${arg}`,
+  )
+})
+
+// /update — git pull, reinstall, reconcile, restart agents
+bot.command('update', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  // Send a "working on it" reply first since update can take 30+ seconds
+  let progressMsg: number | undefined
+  try {
+    const sent = await ctx.reply('🔄 Running clerk update — git pull, deps, reconcile, restart...', {
+      ...(ctx.message?.message_thread_id != null
+        ? { message_thread_id: ctx.message.message_thread_id }
+        : {}),
+    })
+    progressMsg = sent.message_id
+  } catch { /* ignore */ }
+
+  try {
+    const output = clerkExecCombined(['update'], 180000) // 3 minute timeout
+    const trimmed = stripAnsi(output).trim()
+    const formatted = formatClerkOutput(trimmed || 'update: complete')
+    if (progressMsg) {
+      try {
+        await ctx.api.editMessageText(
+          ctx.chat!.id,
+          progressMsg,
+          `✅ Update complete\n\n<pre>${escapeHtmlForTg(formatted)}</pre>`,
+          { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
+        )
+        return
+      } catch { /* fall through to a fresh reply */ }
+    }
+    await clerkReply(ctx, `✅ Update complete\n${preBlock(formatted)}`, { html: true })
+  } catch (err: unknown) {
+    const error = err as { stdout?: string; stderr?: string; message?: string }
+    const detail = stripAnsi(
+      error.stdout?.trim() || error.stderr?.trim() || error.message || 'unknown error',
+    )
+    if (progressMsg) {
+      try {
+        await ctx.api.editMessageText(
+          ctx.chat!.id,
+          progressMsg,
+          `❌ Update failed\n\n<pre>${escapeHtmlForTg(formatClerkOutput(detail))}</pre>`,
+          { parse_mode: 'HTML', link_preview_options: { is_disabled: true } },
+        )
+        return
+      } catch { /* fall through */ }
+    }
+    await clerkReply(
+      ctx,
+      `❌ <b>Update failed</b>\n${preBlock(formatClerkOutput(detail))}`,
+      { html: true },
+    )
+  }
+})
+
 // /clerkhelp — show all available bot commands
 bot.command('clerkhelp', async ctx => {
   if (!isAuthorizedSender(ctx)) return
   const helpText = [
     'Clerk Bot Commands',
     '',
+    'Status & lifecycle',
     '/agents - List all agents and their status',
+    '/auth - Show auth/token status',
+    '/topics - Show topic-to-agent mappings',
+    '/logs <name> [lines] - Show agent logs (default: 20)',
+    '/memory <query> - Search agent memory',
+    '',
+    'Operate',
     '/clerkstart <name> - Start an agent',
     '/stop <name> - Stop an agent',
     '/restart <name|all> - Restart an agent (or all)',
-    '/auth - Show auth/token status',
-    '/topics - Show topic-to-agent mappings',
-    '/logs <name> [lines] - Show agent logs (default: 20 lines)',
-    '/memory <query> - Search agent memory',
+    '',
+    'Maintain',
+    '/doctor - Health check (deps, vault, hindsight, services, MCP)',
+    '/reconcile [name|all] - Re-apply clerk.yaml to existing agents',
+    '/update - Pull latest, reinstall deps, reconcile, restart',
     '/clerkhelp - Show this help message',
     '',
     'These commands run the clerk CLI directly — no AI tokens used.',
@@ -1443,13 +1573,16 @@ async function registerClerkBotCommands(): Promise<void> {
   // Register in all_private_chats scope (extends existing commands)
   const clerkCommands = [
     { command: 'agents', description: 'List all agents and their status' },
-    { command: 'clerkstart', description: 'Start an agent' },
-    { command: 'stop', description: 'Stop an agent' },
-    { command: 'restart', description: 'Restart an agent (or all)' },
     { command: 'auth', description: 'Show auth/token status' },
     { command: 'topics', description: 'Show topic-to-agent mappings' },
     { command: 'logs', description: 'Show agent logs' },
     { command: 'memory', description: 'Search agent memory' },
+    { command: 'clerkstart', description: 'Start an agent' },
+    { command: 'stop', description: 'Stop an agent' },
+    { command: 'restart', description: 'Restart an agent (or all)' },
+    { command: 'doctor', description: 'Health check (deps, vault, services, MCP)' },
+    { command: 'reconcile', description: 'Re-apply clerk.yaml to existing agents' },
+    { command: 'update', description: 'Pull latest, reinstall, reconcile, restart' },
     { command: 'clerkhelp', description: 'Show all clerk bot commands' },
   ]
 

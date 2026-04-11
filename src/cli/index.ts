@@ -11,6 +11,7 @@ import { registerMemoryCommand } from "./memory.js";
 import { registerWebCommand } from "./web.js";
 import { registerSetupCommand } from "./setup.js";
 import { registerDoctorCommand } from "./doctor.js";
+import { registerUpdateCommand } from "./update.js";
 
 const pkg = JSON.parse(
   readFileSync(resolve(import.meta.dirname, "../../package.json"), "utf-8")
@@ -26,6 +27,7 @@ export const program = new Command()
 
 registerSetupCommand(program);
 registerDoctorCommand(program);
+registerUpdateCommand(program);
 registerInitCommand(program);
 registerAgentCommand(program);
 registerSystemdCommand(program);

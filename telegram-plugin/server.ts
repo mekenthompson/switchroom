@@ -1681,12 +1681,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         // edit-in-place onto the existing preview message instead of
         // leaving a stale duplicate in the chat.
 
-        // Early unpin: the model's final answer has landed. Unpin any
-        // active progress card for this chat+thread so the user doesn't
-        // have to wait for turn_end (which may be delayed or missed).
-        // unpinProgressCardForChat is null when streamMode !== 'checklist'.
-        unpinProgressCardForChat?.(chat_id, threadId)
-
         return { content: [{ type: 'text', text: result }] }
       }
       case 'stream_reply': {
@@ -1775,16 +1769,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
             progressCardActive: streamMode === 'checklist',
           },
         )
-        // Early unpin: when stream_reply(done=true) finalizes the model's
-        // answer, unpin any active progress card for this chat+thread.
-        // This MCP case is always the default lane (the model never passes
-        // lane:'progress' — only the internal progress-card driver does,
-        // and it bypasses this MCP handler entirely).
-        if (result.status === 'finalized') {
-          const srChatId = args.chat_id as string
-          const srThreadId = resolveThreadId(srChatId, args.message_thread_id as string | undefined)
-          unpinProgressCardForChat?.(srChatId, srThreadId)
-        }
         return {
           content: [
             {

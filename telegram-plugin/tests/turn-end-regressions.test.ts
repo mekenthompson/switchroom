@@ -492,17 +492,28 @@ describe('bug 3 — progress-card unpin fires on first of turn_end / reply / str
     expect(serverSrc).not.toMatch(/maxIdleMs:\s*30\s*\*\s*60_000/)
   })
 
-  it('server.ts wires early-unpin in the reply() handler', () => {
+  // The `reply` and `stream_reply` handlers used to call
+  // unpinProgressCardForChat on every successful send — that pre-empted
+  // the progress card mid-turn whenever the agent emitted an interim
+  // reply, leaving the user's screen without the pinned "still working"
+  // card. The pin lifecycle now belongs exclusively to the progress-card
+  // driver's turn_end path (pinMgr.completeTurn) plus the external
+  // /restart / context-exhaustion hook (unpinProgressCardForChat). These
+  // assertions guard that the early-unpin does not reappear in either
+  // MCP handler or the gateway's executeReply/executeStreamReply paths.
+  it('server.ts reply() handler does NOT early-unpin the progress card', () => {
     const serverSrc = readFileSync(join(__dirname, '..', 'server.ts'), 'utf-8')
-    // Find the reply case block and confirm unpinProgressCardForChat is called.
-    // Use a broad search so minor whitespace changes don't break this.
-    expect(serverSrc).toContain('unpinProgressCardForChat?.(chat_id, threadId)')
+    expect(serverSrc).not.toContain('unpinProgressCardForChat?.(chat_id, threadId)')
   })
 
-  it('server.ts wires early-unpin in the stream_reply handler', () => {
+  it('server.ts stream_reply handler does NOT early-unpin on finalize', () => {
     const serverSrc = readFileSync(join(__dirname, '..', 'server.ts'), 'utf-8')
-    // The stream_reply case should call unpinProgressCardForChat after finalization.
-    expect(serverSrc).toContain("if (result.status === 'finalized')")
-    expect(serverSrc).toContain('unpinProgressCardForChat?.(srChatId, srThreadId)')
+    expect(serverSrc).not.toContain('unpinProgressCardForChat?.(srChatId, srThreadId)')
+  })
+
+  it('gateway.ts executeReply/executeStreamReply do NOT early-unpin', () => {
+    const gatewaySrc = readFileSync(join(__dirname, '..', 'gateway', 'gateway.ts'), 'utf-8')
+    expect(gatewaySrc).not.toContain('unpinProgressCardForChat?.(chat_id, threadId)')
+    expect(gatewaySrc).not.toContain('unpinProgressCardForChat?.(srChatId, srThreadId)')
   })
 })

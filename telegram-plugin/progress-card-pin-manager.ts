@@ -46,6 +46,10 @@ export interface ActivePinEntry {
   readonly pinnedAt: number
 }
 
+export interface TimerHandle {
+  cancel(): void
+}
+
 export interface PinManagerDeps {
   /** Underlying `bot.api.pinChatMessage` wrapper. */
   pin: (
@@ -69,6 +73,18 @@ export interface PinManagerDeps {
   log?: (line: string) => void
   /** Clock injection for test determinism. Defaults to `Date.now`. */
   now?: () => number
+  /**
+   * How long to wait after the first emit before actually pinning. Short
+   * turns that complete before this delay never produce a pinned card —
+   * cuts the Telegram noise for quick back-and-forths. Defaults to 30s.
+   */
+  pinDelayMs?: number
+  /**
+   * Injectable timer scheduler. Defaults to `setTimeout` + `clearTimeout`.
+   * Tests pass a fake that captures callbacks and fires them manually so
+   * they can assert on the before/after states without real clocks.
+   */
+  scheduleTimer?: (fn: () => void, ms: number) => TimerHandle
 }
 
 export interface PinManager {
@@ -109,10 +125,26 @@ export interface PinManager {
 export function createPinManager(deps: PinManagerDeps): PinManager {
   const now = deps.now ?? Date.now
   const log = deps.log ?? (() => {})
+  const pinDelayMs = deps.pinDelayMs ?? 30_000
+  const scheduleTimer: (fn: () => void, ms: number) => TimerHandle =
+    deps.scheduleTimer ??
+    ((fn, ms) => {
+      const t = setTimeout(fn, ms)
+      return { cancel: () => clearTimeout(t) }
+    })
 
   // Turn -> pinned message id. Populated only after a successful pin
   // call returns; cleared on completeTurn.
   const pinned = new Map<string, number>()
+  // Turn -> pending pin state. Holds the candidate + timer handle while
+  // we wait pinDelayMs before actually calling the Telegram pin API. If
+  // completeTurn fires before the timer, we cancel and never pin — fast
+  // turns stay silent. Removed when the timer fires (moved to `pinned`)
+  // or when completeTurn cancels it.
+  const pendingPins = new Map<
+    string,
+    { chatId: string; messageId: number; timer: TimerHandle }
+  >()
   // Turns whose unpin has already fired. Guards against duplicate
   // completeTurn calls causing a second unpin (the gateway fires
   // onTurnComplete exactly once today, but the reducer's zombie path
@@ -175,39 +207,62 @@ export function createPinManager(deps: PinManagerDeps): PinManager {
     track(p)
   }
 
+  function firePin(turnKey: string, chatId: string, messageId: number): void {
+    // Called when the pin-delay timer fires. Promote from pendingPins
+    // into pinned, then issue the Telegram pin API call.
+    pendingPins.delete(turnKey)
+    if (pinned.has(turnKey) || unpinned.has(turnKey)) {
+      // Either we already pinned (shouldn't happen — timer is the only
+      // path that sets `pinned`) or the turn completed between scheduling
+      // and firing and the pending entry was cleared elsewhere. Bail.
+      return
+    }
+    pinned.set(turnKey, messageId)
+    log(`telegram gateway: progress-card: pinned turnKey=${turnKey} msgId=${messageId}\n`)
+    if (deps.addPin) {
+      deps.addPin({
+        chatId,
+        messageId,
+        turnKey,
+        pinnedAt: now(),
+      })
+    }
+    const p = deps.pin(chatId, messageId, { disable_notification: true }).catch(
+      (err: Error) => {
+        log(`telegram gateway: progress-card pin failed: ${err?.message ?? err}\n`)
+        if (deps.removePin) deps.removePin(chatId, messageId)
+      },
+    )
+    track(p)
+  }
+
   return {
     considerPin(c) {
       if (!c.isFirstEmit) return
       if (pinned.has(c.turnKey)) return
-      // Lock the slot BEFORE the async pin call so a second emit for the
-      // same turnKey arriving during the API round-trip doesn't also
-      // trigger a pin. The sidecar write happens here too so a crash
-      // between these writes and the pin call still leaves a recovery
-      // record for the startup sweep.
-      pinned.set(c.turnKey, c.messageId)
-      log(`telegram gateway: progress-card: pinned turnKey=${c.turnKey} msgId=${c.messageId}\n`)
-      if (deps.addPin) {
-        deps.addPin({
-          chatId: c.chatId,
-          messageId: c.messageId,
-          turnKey: c.turnKey,
-          pinnedAt: now(),
-        })
-      }
-      const p = deps.pin(c.chatId, c.messageId, { disable_notification: true }).catch(
-        (err: Error) => {
-          log(`telegram gateway: progress-card pin failed: ${err?.message ?? err}\n`)
-          // Roll back the sidecar — the pin didn't land. We leave the
-          // in-memory `pinned` entry untouched so a later completeTurn
-          // still attempts an unpin (harmless if the pin really failed;
-          // correct if it partially landed on Telegram's side).
-          if (deps.removePin) deps.removePin(c.chatId, c.messageId)
-        },
-      )
-      track(p)
+      if (pendingPins.has(c.turnKey)) return
+      // Defer the actual pin until pinDelayMs has elapsed. Fast turns
+      // that complete before the timer fires never produce a pin — cuts
+      // Telegram noise on quick back-and-forths. Only slow turns get a
+      // pinned "Working..." card.
+      const timer = scheduleTimer(() => {
+        firePin(c.turnKey, c.chatId, c.messageId)
+      }, pinDelayMs)
+      pendingPins.set(c.turnKey, {
+        chatId: c.chatId,
+        messageId: c.messageId,
+        timer,
+      })
     },
 
     completeTurn({ chatId, turnKey }) {
+      // Fast-turn path: if the pin is still pending, cancel the timer
+      // and we're done — no pin ever landed, no unpin needed.
+      const pending = pendingPins.get(turnKey)
+      if (pending != null) {
+        pending.timer.cancel()
+        pendingPins.delete(turnKey)
+      }
       const pinnedId = pinned.get(turnKey)
       if (pinnedId != null) doUnpin(turnKey, chatId, pinnedId)
       // Once the turn is complete we never see the same turnKey again
@@ -218,6 +273,19 @@ export function createPinManager(deps: PinManagerDeps): PinManager {
 
     unpinForChat(chatId, threadId) {
       const base = threadId != null ? `${chatId}:${threadId}` : chatId
+      // Cancel any pending (not-yet-fired) timers for this chat/thread
+      // first — otherwise they'd pin after we thought we cleaned up.
+      const pendingMatching: string[] = []
+      for (const [turnKey] of pendingPins) {
+        if (turnKey.startsWith(`${base}:`)) pendingMatching.push(turnKey)
+      }
+      for (const turnKey of pendingMatching) {
+        const pending = pendingPins.get(turnKey)
+        if (pending != null) {
+          pending.timer.cancel()
+          pendingPins.delete(turnKey)
+        }
+      }
       // Snapshot the keys so doUnpin's map mutation doesn't invalidate
       // iteration mid-loop.
       const matching: Array<[string, number]> = []

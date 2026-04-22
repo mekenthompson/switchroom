@@ -1654,7 +1654,19 @@ function handleSessionEvent(ev: SessionEvent): void {
       lastPtyPreviewByChat.delete(statusKey(chatId, threadId))
       pendingPtyPartial = null
       closeActivityLane(chatId, threadId)
-      closeProgressLane(chatId, threadId)
+      // Notification-spam fix (2026-04-23): when the progress-card driver is
+      // still managing a deferred-completion card (parent turn_end arrived
+      // but sub-agents are still running), tearing down the draft stream
+      // here forces every subsequent sub-agent emit to create a fresh
+      // `sendMessage` — which Telegram delivers as a new push notification.
+      // The driver is authoritative for its own stream lifecycle: it
+      // calls `emit(done=true)` exactly once when the card is truly final,
+      // and `handleStreamReply` finalizes + deletes the stream entry at
+      // that point. Skip the backstop while the driver still owns the card.
+      const driverThreadId = threadId != null ? String(threadId) : undefined
+      if (progressDriver == null || !progressDriver.hasActiveCard(chatId, driverThreadId)) {
+        closeProgressLane(chatId, threadId)
+      }
       currentSessionChatId = null
       currentSessionThreadId = undefined
       currentTurnReplyCalled = false

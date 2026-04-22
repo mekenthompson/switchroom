@@ -3169,7 +3169,18 @@ function handleSessionEvent(ev: SessionEvent): void {
       // Close the progress lane as well so the next turn posts a fresh
       // progress-card Telegram message instead of re-editing the prior
       // turn's card (see closeProgressLane for the full rationale).
-      closeProgressLane(chatId, threadId)
+      //
+      // Notification-spam fix (2026-04-23): skip this backstop while the
+      // progress-card driver still owns the card (deferred-completion
+      // state with in-flight sub-agents). Tearing down the stream here
+      // forces every subsequent sub-agent emit to create a fresh
+      // sendMessage — which Telegram delivers as a new push notification.
+      // The driver's own emit(done=true) path will finalize the stream
+      // cleanly when the last sub-agent lands.
+      const driverThreadIdStr = threadId != null ? String(threadId) : undefined
+      if (progressDriver == null || !progressDriver.hasActiveCard(chatId, driverThreadIdStr)) {
+        closeProgressLane(chatId, threadId)
+      }
       currentSessionChatId = null
       currentSessionThreadId = undefined
       currentTurnReplyCalled = false

@@ -234,6 +234,17 @@ export interface ProgressDriver {
   forceCompleteTurn(args: { chatId: string; threadId?: string }): void
   /** Current state for a chat (for tests / inspection). */
   peek(chatId: string, threadId?: string): ProgressCardState | undefined
+  /**
+   * True when the driver is still managing an active card for this chat+
+   * thread — either a normal turn or a deferred-completion turn waiting on
+   * in-flight sub-agents. Used by the gateway's `closeProgressLane`
+   * backstop to avoid tearing down the draft stream while the driver is
+   * still going to emit into it. Without this guard, parent turn_end
+   * closes the stream, sub-agent tool_use events fire fresh emits, and
+   * each emit creates a new `sendMessage` on Telegram (= new push
+   * notification) instead of editing the pinned card.
+   */
+  hasActiveCard(chatId: string, threadId?: string): boolean
 }
 
 export function createProgressDriver(config: ProgressDriverConfig): ProgressDriver {
@@ -580,12 +591,32 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     recordEdit(chatState.turnKey)
     const isFirst = chatState.isFirstEmit
     chatState.isFirstEmit = false
+    // Notification-spam fix (2026-04-23): never emit done=true while the
+    // card is still waiting on in-flight sub-agents. The reducer sets
+    // `stage='done'` the moment parent turn_end lands, so a naive
+    // `done: stage==='done'` passes done=true on every subsequent sub-
+    // agent event. handleStreamReply finalizes + deletes the draft
+    // stream after every done=true call, so the NEXT emit creates a
+    // fresh sendMessage — which Telegram delivers as a new push
+    // notification. Ken observed ~13 identical "✅ Done" notifications
+    // while two parallel review sub-agents were grinding.
+    //
+    // Safe to gate on `hasInFlightSubAgents`: the completion paths
+    // (`completeTurnFully` / `closeZombie` / `maybeCompleteDeferredTurn`)
+    // either (a) ran when !hasInFlightSubAgents or (b) explicitly marked
+    // every running sub-agent as done in the reducer state BEFORE the
+    // final flush. So at the instant the terminal emit fires, the
+    // condition evaluates to "no running sub-agents" and done=true
+    // flows through correctly.
+    const terminal =
+      (forceDone || chatState.state.stage === 'done')
+      && !hasInFlightSubAgents(chatState.state)
     config.emit({
       chatId: chatState.chatId,
       threadId: chatState.threadId,
       turnKey: chatState.turnKey,
       html,
-      done: forceDone || chatState.state.stage === 'done',
+      done: terminal,
       isFirstEmit: isFirst,
     })
   }
@@ -918,6 +949,19 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         if (cs.chatId === chatId && cs.threadId === threadId) return cs.state
       }
       return undefined
+    },
+
+    hasActiveCard(chatId, threadId) {
+      for (const cs of chats.values()) {
+        if (
+          cs.chatId === chatId
+          && cs.threadId === threadId
+          && !cs.completionFired
+        ) {
+          return true
+        }
+      }
+      return false
     },
 
     dispose() {

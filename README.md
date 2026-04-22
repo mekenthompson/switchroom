@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/switchroom-logo.jpg" alt="Switchroom" width="420">
+  <img src="docs/assets/switchroom-hero-wide.png" alt="Switchroom — opinionated Telegram UX for Claude Code on your Pro or Max subscription" width="100%">
 </p>
 
 # Switchroom

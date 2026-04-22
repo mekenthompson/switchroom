@@ -9,7 +9,9 @@
 [![Trigger evals](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fmekenthompson%2F002f3482b19111d35e57c1903b3733e2%2Fraw%2Fswitchroom-trigger-evals.json)](https://buildkite.com/ken-thompson/switchroom)
 [![Quality evals](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fmekenthompson%2F002f3482b19111d35e57c1903b3733e2%2Fraw%2Fswitchroom-quality-evals.json)](https://buildkite.com/ken-thompson/switchroom)
 
-**Your Claude Pro or Max, as a fleet of always-on agents in Telegram.**
+**Your Claude Pro or Max, as a fleet of always-on agents in Telegram. Opinionated UX, done properly.**
+
+> *I loved OpenClaw + Telegram. I wanted my Claude subscription. And the UX done properly. So I built this.*
 
 ## Right, so what's this about
 

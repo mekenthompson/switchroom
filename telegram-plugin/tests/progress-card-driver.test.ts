@@ -1505,4 +1505,273 @@ describe('forceCompleteTurn — external completion signal', () => {
     expect(emitted).toHaveLength(1)
     expect(emitted[0]).toEqual({ chatId: 'c', threadId: 't1' })
   })
+
+  // ─── Bug repro: progress-card "✅ Done" notification spam ──────────────────
+  //
+  // Bug (2026-04-22): while two parallel review sub-agents were running after
+  // the parent agent's turn_end, the user received ~13 identical "✅ Done
+  // ⏱ XX:XX" progress-card notifications in ~30 minutes. Each sub-agent
+  // tool_use event triggered a fresh emit with `done=true` (because the
+  // reducer sets `stage='done'` on turn_end), and `handleStreamReply`
+  // finalizes + deletes the draft stream after every `done=true` call — so
+  // the next emit on the same card came back through as a brand-new
+  // `sendMessage` (= new Telegram push notification), not an edit.
+  //
+  // Fix: while the driver is in the deferred-completion state (parent
+  // turn_end landed but sub-agents still running), emits must carry
+  // `done=false`. Only the truly-final emit — the one produced by
+  // `maybeCompleteDeferredTurn` / `closeZombie` / normal turn_end-with-no-
+  // sub-agents — may set `done=true`.
+
+  it('deferred completion: sub-agent events after parent turn_end emit done=false', () => {
+    // Reproduces the notification-spam bug. Setup: parent enqueue → Agent
+    // tool_use → sub_agent_started → parent turn_end. Sub-agent then emits
+    // a burst of tool_use events while still running.
+    const { driver, emits, advance } = harness(500, 400, {
+      initialDelayMs: 0,
+    })
+
+    driver.ingest(enqueue('c'), null)
+    driver.ingest(
+      { kind: 'tool_use', toolName: 'Agent', toolUseId: 'p1', input: { description: 'review', prompt: 'P' } },
+      'c',
+    )
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'X', firstPromptText: 'P' }, 'c')
+    driver.ingest({ kind: 'turn_end', durationMs: 1000 }, 'c')
+    advance(0)
+
+    // The turn_end flush may emit done=true on the transition frame, BUT the
+    // subsequent sub-agent emits must NOT. Snapshot the emit count so we
+    // can distinguish the frames we care about.
+    const afterTurnEnd = emits.length
+
+    // Simulate the sub-agent grinding through 20 tool calls over 30s.
+    for (let i = 0; i < 20; i++) {
+      driver.ingest(
+        { kind: 'sub_agent_tool_use', agentId: 'X', toolUseId: `t${i}`, toolName: 'Read' },
+        'c',
+      )
+      advance(1500) // 30s / 20 = 1.5s between events
+      driver.ingest(
+        { kind: 'sub_agent_tool_result', agentId: 'X', toolUseId: `t${i}` },
+        'c',
+      )
+    }
+    advance(5000) // drain any pending coalesce timers
+
+    // Every emit AFTER the deferred-completion transition must be done=false.
+    // The bug produced a stream of done=true emits, each one closing the
+    // stream controller and forcing handleStreamReply to sendMessage fresh
+    // (= new push notification) on the next event.
+    const postDeferred = emits.slice(afterTurnEnd)
+    const doneTrueDuringDeferred = postDeferred.filter((e) => e.done === true)
+    expect(doneTrueDuringDeferred).toHaveLength(0)
+  })
+
+  it('deferred completion: burst of 30 sub-agent events produces bounded emit count', () => {
+    // Independent of the done-flag bug: a burst of sub-agent events while
+    // the card is in deferred-completion state must be coalesced. The edit-
+    // budget guardrail (>18 edits in 60s → expand coalesce window) must
+    // apply during the deferred phase just as it does during an active turn.
+    const { driver, emits, advance } = harness(500, 400, {
+      initialDelayMs: 0,
+    })
+
+    driver.ingest(enqueue('c'), null)
+    driver.ingest(
+      { kind: 'tool_use', toolName: 'Agent', toolUseId: 'p1', input: { description: 'review', prompt: 'P' } },
+      'c',
+    )
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'X', firstPromptText: 'P' }, 'c')
+    driver.ingest({ kind: 'turn_end', durationMs: 1000 }, 'c')
+    advance(0)
+    emits.length = 0
+
+    // 30 sub-agent tool_use events over 60s
+    for (let i = 0; i < 30; i++) {
+      driver.ingest(
+        { kind: 'sub_agent_tool_use', agentId: 'X', toolUseId: `t${i}`, toolName: 'Read' },
+        'c',
+      )
+      advance(2000)
+    }
+    advance(5000)
+
+    // With 500ms min interval + 400ms coalesce + budget-hot expansion,
+    // 60s should produce at most ~30 emits (one per 2s tool_use) and at
+    // least ~10 (enough to show progress). Assert the budget guardrail
+    // kept the edits well below the 60-event worst case.
+    expect(emits.length).toBeLessThanOrEqual(30)
+  })
+
+  it('deferred completion: no duplicate onTurnComplete during sub-agent bursts', () => {
+    // Race-condition check. A burst of sub-agent events while
+    // pendingCompletion=true must not re-fire the completion callback.
+    const completions: string[] = []
+    const { driver, advance } = harness(0, 0, {
+      initialDelayMs: 0,
+      onTurnComplete: (args) => completions.push(args.turnKey),
+    })
+
+    driver.ingest(enqueue('c'), null)
+    driver.ingest(
+      { kind: 'tool_use', toolName: 'Agent', toolUseId: 'p1', input: { description: 'r', prompt: 'P' } },
+      'c',
+    )
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'X', firstPromptText: 'P' }, 'c')
+    driver.ingest({ kind: 'turn_end', durationMs: 1000 }, 'c')
+    advance(0)
+    expect(completions).toHaveLength(0)
+
+    for (let i = 0; i < 10; i++) {
+      driver.ingest({ kind: 'sub_agent_tool_use', agentId: 'X', toolUseId: `t${i}`, toolName: 'Read' }, 'c')
+      advance(100)
+    }
+    advance(1000)
+    expect(completions).toHaveLength(0)
+
+    // Last sub-agent finishes → completion fires exactly once.
+    driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'X', durationMs: 5000 }, 'c')
+    advance(0)
+    expect(completions).toHaveLength(1)
+
+    // Post-completion events routed to no turn should be ignored — they
+    // must not re-fire the callback.
+    driver.ingest({ kind: 'sub_agent_tool_use', agentId: 'X', toolUseId: 'late', toolName: 'Read' }, 'c')
+    advance(1000)
+    expect(completions).toHaveLength(1)
+  })
+
+  it('deferred completion: final emit (from maybeCompleteDeferredTurn) sets done=true exactly once', () => {
+    // After the bug is fixed, we still need the final frame to carry
+    // done=true so handleStreamReply finalizes the stream and the unpin
+    // path runs. Verify the terminal emit lands with done=true.
+    const { driver, emits, advance } = harness(0, 0, {
+      initialDelayMs: 0,
+    })
+
+    driver.ingest(enqueue('c'), null)
+    driver.ingest(
+      { kind: 'tool_use', toolName: 'Agent', toolUseId: 'p1', input: { description: 'r', prompt: 'P' } },
+      'c',
+    )
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'X', firstPromptText: 'P' }, 'c')
+    driver.ingest({ kind: 'turn_end', durationMs: 1000 }, 'c')
+    driver.ingest({ kind: 'sub_agent_tool_use', agentId: 'X', toolUseId: 't0', toolName: 'Read' }, 'c')
+    advance(1000)
+    driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'X', durationMs: 5000 }, 'c')
+    advance(0)
+
+    // Exactly one terminal emit with done=true.
+    const doneEmits = emits.filter((e) => e.done === true)
+    expect(doneEmits).toHaveLength(1)
+    // …and it must be the very last one.
+    expect(emits[emits.length - 1].done).toBe(true)
+  })
+
+  it('deferred completion: two parallel sub-agents — original spam scenario', () => {
+    // Reproduces Ken's exact scenario from 2026-04-22: two parallel review
+    // sub-agents running in the background, one still running while the
+    // other has finished. The card should show [Sub-agents · 1 running,
+    // 1 done] and keep ticking, but every emit must be done=false until
+    // both sub-agents report in.
+    const { driver, emits, advance } = harness(500, 400, {
+      initialDelayMs: 0,
+    })
+
+    driver.ingest(enqueue('c'), null)
+    driver.ingest({ kind: 'tool_use', toolName: 'Agent', toolUseId: 'p1', input: { description: 'a', prompt: 'P1' } }, 'c')
+    driver.ingest({ kind: 'tool_use', toolName: 'Agent', toolUseId: 'p2', input: { description: 'b', prompt: 'P2' } }, 'c')
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'X', firstPromptText: 'P1' }, 'c')
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'Y', firstPromptText: 'P2' }, 'c')
+    driver.ingest({ kind: 'turn_end', durationMs: 1000 }, 'c')
+    advance(0)
+    emits.length = 0
+
+    // X finishes first, Y keeps grinding.
+    driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'X', durationMs: 2000 }, 'c')
+    advance(1000)
+
+    for (let i = 0; i < 13; i++) {
+      driver.ingest({ kind: 'sub_agent_tool_use', agentId: 'Y', toolUseId: `y${i}`, toolName: 'Read' }, 'c')
+      advance(120_000 / 13)
+    }
+    advance(5000)
+
+    // None of the emits during this "one running, one done" phase may be
+    // done=true — that was the spam bug.
+    const doneTrue = emits.filter((e) => e.done === true)
+    expect(doneTrue).toHaveLength(0)
+
+    // Now Y finishes → the terminal emit fires done=true, exactly once.
+    driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'Y', durationMs: 3000 }, 'c')
+    advance(0)
+    expect(emits.filter((e) => e.done === true)).toHaveLength(1)
+    expect(emits[emits.length - 1].done).toBe(true)
+  })
+
+  it('hasActiveCard: reports true during deferred completion, false after', () => {
+    // Backstop guard for the gateway's closeProgressLane call: while the
+    // driver is in pendingCompletion state, the stream must NOT be torn
+    // down by the backstop. hasActiveCard() is how closeProgressLane
+    // knows to skip.
+    const { driver, advance } = harness(0, 0, {
+      initialDelayMs: 0,
+    })
+
+    // No card yet.
+    expect(driver.hasActiveCard('c')).toBe(false)
+
+    driver.ingest(enqueue('c'), null)
+    advance(0)
+    expect(driver.hasActiveCard('c')).toBe(true)
+
+    driver.ingest({ kind: 'tool_use', toolName: 'Agent', toolUseId: 'p1', input: { description: 'r', prompt: 'P' } }, 'c')
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'X', firstPromptText: 'P' }, 'c')
+    driver.ingest({ kind: 'turn_end', durationMs: 1000 }, 'c')
+    advance(0)
+
+    // Deferred-completion phase — card still managed by the driver.
+    expect(driver.hasActiveCard('c')).toBe(true)
+
+    driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'X', durationMs: 5000 }, 'c')
+    advance(0)
+
+    // Completion fired → card gone from driver.
+    expect(driver.hasActiveCard('c')).toBe(false)
+  })
+
+  it('hasActiveCard: false for wrong threadId', () => {
+    const { driver, advance } = harness(0, 0, { initialDelayMs: 0 })
+    driver.startTurn({ chatId: 'c', threadId: 't1', userText: 'q' })
+    advance(0)
+    expect(driver.hasActiveCard('c', 't1')).toBe(true)
+    expect(driver.hasActiveCard('c', 't2')).toBe(false)
+    expect(driver.hasActiveCard('other')).toBe(false)
+  })
+
+  it('content-equality guard: no emit when render would produce identical HTML', () => {
+    // An event that mutates internal state but doesn't change the rendered
+    // card must not fire an emit — this is the existing visibleDiff guard.
+    // Verify it still holds for sub-agent events during deferred completion.
+    const { driver, emits, advance } = harness(500, 400, {
+      initialDelayMs: 0,
+    })
+
+    driver.ingest(enqueue('c'), null)
+    driver.ingest({ kind: 'tool_use', toolName: 'Agent', toolUseId: 'p1', input: { description: 'r', prompt: 'P' } }, 'c')
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'X', firstPromptText: 'P' }, 'c')
+    driver.ingest({ kind: 'turn_end', durationMs: 1000 }, 'c')
+    advance(0)
+    emits.length = 0
+
+    // Two identical sub_agent_text events in a row — second one should
+    // be a no-op visibility-wise.
+    driver.ingest({ kind: 'sub_agent_text', agentId: 'X', text: 'same text' }, 'c')
+    advance(1000)
+    const afterFirst = emits.length
+    driver.ingest({ kind: 'sub_agent_text', agentId: 'X', text: 'same text' }, 'c')
+    advance(1000)
+    expect(emits.length).toBe(afterFirst)
+  })
 })

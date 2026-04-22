@@ -183,7 +183,45 @@ export function toolLabel(
     case 'SlashCommand':
       return truncate(str('command') ?? '')
 
+    case 'ToolSearch': {
+      const q = str('query') ?? ''
+      if (!q) return ''
+      // "select:Foo,Bar" — the model is loading schemas for named tools.
+      // Strip the prefix and show just the names so the checklist reads
+      // "ToolSearch Loading schema: Foo, Bar" rather than echoing the raw
+      // colon-delimited string.
+      const selectMatch = q.match(/^\s*select\s*:\s*(.+)$/i)
+      if (selectMatch) {
+        const names = selectMatch[1]
+          .split(',')
+          .map((n) => n.trim())
+          .filter((n) => n.length > 0)
+          .join(', ')
+        return truncate(`Loading schema: ${names}`)
+      }
+      return truncate(`Searching tools: ${q}`)
+    }
+
     default:
+      // MCP tools (`mcp__<server>__<action>`) share a single prefix and a
+      // handful of common shapes. Dispatch them here before the generic
+      // key-sweep fallback, which would otherwise echo raw query strings.
+      if (tool.startsWith('mcp__')) {
+        const description = str('description')
+        if (description) return truncate(firstLine(description), MAX_DESCRIPTION_CHARS)
+        const label = mcpBaseLabel(tool)
+        const query = str('query') ?? str('text') ?? str('name')
+        if (label && query) {
+          // Reserve room for the " (…)" wrapping so the total label stays
+          // under MAX_LABEL_CHARS. 4 chars of framing: " (" + "…" + ")".
+          const budget = Math.max(8, MAX_LABEL_CHARS - label.length - 4)
+          const preview = truncate(firstLine(query), budget)
+          return `${label} (${preview})`
+        }
+        if (label) return truncate(label)
+        // No derivable base label — fall through to the generic sweep.
+      }
+
       // Unknown tool — try common keys in priority order. `description`
       // is checked first because it's the agent's human-readable summary
       // (when present) and beats raw command/path strings.
@@ -198,4 +236,36 @@ export function toolLabel(
       }
       return ''
   }
+}
+
+/**
+ * Derive a "<Server>: <action>" label from an `mcp__<server>__<action>`
+ * tool name. Returns the empty string when the name doesn't match the
+ * expected shape so callers can fall back to the generic sweep.
+ *
+ * Servers sometimes ship with noisy machine names (e.g.
+ * `switchroom-telegram`) — we map a small allowlist to friendlier
+ * labels, and otherwise capitalise the first letter and keep the rest
+ * verbatim so unknown servers still render cleanly.
+ */
+function mcpBaseLabel(tool: string): string {
+  if (!tool.startsWith('mcp__')) return ''
+  const parts = tool.slice('mcp__'.length).split('__')
+  if (parts.length < 2) return ''
+  const rawServer = parts[0]
+  // Action may itself contain `__` in theory; preserve anything after
+  // the first separator verbatim. In practice actions are single tokens
+  // like `recall` or `stream_reply`.
+  const action = parts.slice(1).join('__')
+  if (!rawServer || !action) return ''
+  return `${prettifyServer(rawServer)}: ${action}`
+}
+
+function prettifyServer(name: string): string {
+  const LABELS: Record<string, string> = {
+    'switchroom-telegram': 'Telegram',
+  }
+  if (LABELS[name]) return LABELS[name]
+  if (!name) return name
+  return name.charAt(0).toUpperCase() + name.slice(1)
 }

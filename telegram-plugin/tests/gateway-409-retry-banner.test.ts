@@ -91,7 +91,13 @@ describe("source-level guard present", () => {
       "utf8",
     );
     expect(src).toContain("let didOneTimeSetup = false");
-    expect(src).toContain("if (!didOneTimeSetup)");
+    // After the runWithRetry wire-in, the gate lives inside beforeRun as
+    // `if (didOneTimeSetup) return` (early-exit). Accept either shape so
+    // this guard stays meaningful across refactors.
+    expect(
+      /if\s*\(!didOneTimeSetup\)/.test(src) ||
+        /if\s*\(didOneTimeSetup\)\s*return/.test(src),
+    ).toBe(true);
     // Sanity-check the banner still exists — fix is gating, not deleting.
     expect(src).toContain("Recovered from unexpected restart");
   });
@@ -103,7 +109,10 @@ describe("source-level guard present", () => {
       "utf8",
     );
     expect(src).toContain("let didOneTimeSetup = false");
-    expect(src).toContain("if (!didOneTimeSetup)");
+    expect(
+      /if\s*\(!didOneTimeSetup\)/.test(src) ||
+        /if\s*\(didOneTimeSetup\)\s*return/.test(src),
+    ).toBe(true);
     expect(src).toContain("Recovered from unexpected restart");
   });
 });

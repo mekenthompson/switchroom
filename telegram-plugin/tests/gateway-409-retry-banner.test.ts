@@ -107,3 +107,72 @@ describe("source-level guard present", () => {
     expect(src).toContain("Recovered from unexpected restart");
   });
 });
+
+/**
+ * Regression guard for the 2026-04-22 banner-cascade bug. Root cause:
+ * server.ts's dual-mode probe used to call rmSync(_gatewaySocket) when
+ * Bun.connect failed, even when the failure was transient and the
+ * gateway was actually alive. Deleting the socket file orphaned the
+ * live listener — every subsequent sidecar spawn then saw
+ * existsSync===false, entered legacy monolith mode, sent a spurious
+ * "⚡ Recovered from unexpected restart" banner, and started polling
+ * the bot token. That polling conflicted with the real gateway's
+ * long-poll (→ 409 Conflict storm) and produced the banner spam the
+ * user saw while PID/systemd were unchanged.
+ *
+ * Fix: the probe logs and falls through on failure, but NEVER deletes
+ * the socket. The gateway owns its socket's lifecycle (ipc-server.ts
+ * already calls unlinkSync at startup for genuine stale-socket
+ * recovery). This test pins that contract at the source level.
+ */
+describe("server.ts dual-mode probe must not delete live gateway socket", () => {
+  it("never calls rmSync on the gateway socket path in the probe block", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync(
+      new URL("../server.ts", import.meta.url),
+      "utf8",
+    );
+
+    // Isolate the dual-mode block. We key off the block's distinctive
+    // comment header so a rename/move doesn't silently neuter the check.
+    const blockStart = src.indexOf("─── Dual-mode detection ───");
+    expect(blockStart).toBeGreaterThan(-1);
+    // Block ends at the bridge import line that follows the probe.
+    const blockEnd = src.indexOf(
+      "import { type DraftStreamHandle }",
+      blockStart,
+    );
+    expect(blockEnd).toBeGreaterThan(blockStart);
+    const block = src.slice(blockStart, blockEnd);
+
+    // The probe must not attempt to delete the gateway socket under
+    // any circumstance. rmSync / unlinkSync against _gatewaySocket are
+    // both banned here — the gateway owns lifecycle.
+    expect(block).not.toMatch(/rmSync\s*\(\s*_gatewaySocket/);
+    expect(block).not.toMatch(/unlinkSync\s*\(\s*_gatewaySocket/);
+
+    // The probe must still run (we haven't accidentally removed the
+    // liveness check entirely and reverted to "existsSync → bridge").
+    expect(block).toContain("Bun.connect");
+    expect(block).toContain("_gatewayLive = true");
+  });
+
+  it("documents the no-delete posture in a comment so future edits understand why", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync(
+      new URL("../server.ts", import.meta.url),
+      "utf8",
+    );
+    // Keep this loose — intent, not exact wording. Any comment in the
+    // dual-mode block mentioning "rmSync" + "never" (or equivalent)
+    // satisfies the guard. We pin at least the rmSync keyword so a
+    // future maintainer grepping for the symbol lands here.
+    const blockStart = src.indexOf("─── Dual-mode detection ───");
+    const blockEnd = src.indexOf(
+      "import { type DraftStreamHandle }",
+      blockStart,
+    );
+    const block = src.slice(blockStart, blockEnd);
+    expect(block).toMatch(/never rmSync/i);
+  });
+});

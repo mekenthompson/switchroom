@@ -74,14 +74,30 @@ installPluginLogger()
 // delegate to the thin bridge. Just checking file existence is not enough:
 // if the gateway crashes without cleanup, a stale socket file remains on disk
 // and every new session would silently fail to deliver messages.
+//
+// IMPORTANT: never rmSync the socket here. A transient Bun.connect failure
+// against a LIVE gateway (EAGAIN, EMFILE, accept-backlog saturation, race
+// with the gateway's Bun.listen handshake) would otherwise delete the
+// gateway's socket file and orphan the listener. Once orphaned, every
+// subsequent sidecar sees existsSync===false, falls through to legacy
+// monolith mode, sends a spurious "⚡ Recovered from unexpected restart"
+// banner, and starts polling the bot token — which conflicts with the
+// real gateway's long-poll (→ 409 Conflict retry storm). Observed on
+// 2026-04-22: user received 4+ false-restart banners while the gateway
+// PID and systemd state were unchanged. The gateway self-heals stale
+// sockets at its own startup (see ipc-server.ts unlinkSync), so the
+// correct posture here is to fall through on probe failure WITHOUT
+// touching the socket file.
 {
   const _stateDir = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
   const _gatewaySocket = process.env.SWITCHROOM_GATEWAY_SOCKET ?? join(_stateDir, 'gateway.sock')
   let _gatewayLive = false
   if (existsSync(_gatewaySocket)) {
     // Probe the socket: attempt a TCP-level connect then immediately close.
-    // If the gateway is alive, connect succeeds; if the socket is stale
-    // (process gone), we get ECONNREFUSED and fall through to legacy mode.
+    // If the gateway is alive, connect succeeds; if the listener is gone
+    // (ECONNREFUSED) or the probe fails transiently, we fall through to
+    // legacy mode WITHOUT deleting the socket — see banner-incident note
+    // above.
     try {
       await Bun.connect({
         unix: _gatewaySocket,
@@ -94,12 +110,12 @@ installPluginLogger()
         },
       })
       _gatewayLive = true
-    } catch {
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
       process.stderr.write(
-        `telegram channel: socket ${_gatewaySocket} exists but gateway is not responding — ` +
-        `removing stale socket and running legacy monolith\n`,
+        `telegram channel: socket ${_gatewaySocket} exists but probe failed (${msg}) — ` +
+        `falling through to legacy monolith. Socket left intact; gateway owns lifecycle.\n`,
       )
-      try { rmSync(_gatewaySocket, { force: true }) } catch {}
     }
   }
   if (_gatewayLive) {

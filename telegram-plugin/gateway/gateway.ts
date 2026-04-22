@@ -717,6 +717,7 @@ const ipcServer: IpcServer = createIpcServer({
   },
 
   async onToolCall(client: IpcClient, msg: ToolCallMessage): Promise<ToolCallResult> {
+    process.stderr.write(`telegram gateway: ipc: tool_call tool=${msg.tool} agent=${client.agentName ?? '-'} clientId=${client.id ?? '-'} callId=${msg.id}\n`)
     try {
       const result = await executeToolCall(msg.tool, msg.args)
       return { type: 'tool_call_result', id: msg.id, success: true, result }
@@ -862,6 +863,7 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
   const rawText = args.text as string | undefined
   if (rawText == null || rawText === '') throw new Error('reply: text is required and cannot be empty')
   const text = repairEscapedWhitespace(rawText)
+  process.stderr.write(`telegram channel: reply: invoked chatId=${chat_id} charCount=${text.length} preview=${JSON.stringify(text.slice(0, 80))}\n`)
   const files = (args.files as string[] | undefined) ?? []
   const quoteOptIn = args.quote !== false
   let reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
@@ -1055,6 +1057,7 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
     }
   }
 
+  process.stderr.write(`telegram channel: reply: finalized chatId=${chat_id} messageIds=[${sentIds.join(',')}] chunks=${chunks.length}\n`)
   return { content: [{ type: 'text', text: result }] }
 }
 

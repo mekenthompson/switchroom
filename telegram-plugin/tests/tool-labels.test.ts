@@ -169,4 +169,100 @@ describe('toolLabel', () => {
       ).toBe('Explore')
     })
   })
+
+  describe('ToolSearch', () => {
+    it('select form → "Loading schema: <names>"', () => {
+      expect(
+        toolLabel('ToolSearch', { query: 'select:mcp__hindsight__recall' }),
+      ).toBe('Loading schema: mcp__hindsight__recall')
+    })
+
+    it('select form with multiple names → comma-separated', () => {
+      expect(
+        toolLabel('ToolSearch', {
+          query: 'select:mcp__hindsight__recall,mcp__switchroom-telegram__stream_reply',
+        }),
+      ).toBe(
+        // Truncated at ~60 chars with an ellipsis suffix — just assert the prefix
+        // and that the output is bounded.
+        'Loading schema: mcp__hindsight__recall, mcp__switchroom-tel…',
+      )
+    })
+
+    it('keyword form → "Searching tools: <query>"', () => {
+      expect(
+        toolLabel('ToolSearch', { query: 'notebook jupyter' }),
+      ).toBe('Searching tools: notebook jupyter')
+    })
+
+    it('empty / missing query → empty string', () => {
+      expect(toolLabel('ToolSearch', {})).toBe('')
+      expect(toolLabel('ToolSearch', { query: '' })).toBe('')
+    })
+
+    it('label stays under MAX_LABEL_CHARS', () => {
+      const long = 'x'.repeat(500)
+      expect(toolLabel('ToolSearch', { query: long }).length).toBeLessThanOrEqual(60)
+      expect(
+        toolLabel('ToolSearch', { query: `select:${long}` }).length,
+      ).toBeLessThanOrEqual(60)
+    })
+  })
+
+  describe('MCP tools (mcp__*)', () => {
+    it('derives "<Server>: <action>" with no query', () => {
+      expect(toolLabel('mcp__hindsight__recall', {})).toBe('Hindsight: recall')
+      expect(toolLabel('mcp__hindsight__reflect', {})).toBe('Hindsight: reflect')
+    })
+
+    it('switchroom-telegram → "Telegram: <action>"', () => {
+      expect(toolLabel('mcp__switchroom-telegram__reply', {})).toBe('Telegram: reply')
+      expect(toolLabel('mcp__switchroom-telegram__stream_reply', {})).toBe('Telegram: stream_reply')
+    })
+
+    it('prefers input.description when present', () => {
+      expect(
+        toolLabel('mcp__hindsight__retain', { description: 'Remember Ken prefers TypeScript' }),
+      ).toBe('Remember Ken prefers TypeScript')
+    })
+
+    it('appends truncated query preview', () => {
+      expect(
+        toolLabel('mcp__hindsight__recall', { query: '4 phase Claude auth management' }),
+      ).toBe('Hindsight: recall (4 phase Claude auth management)')
+    })
+
+    it('long query gets truncated, total stays bounded', () => {
+      const q = '4 phase Claude auth management switchroom agents plan phases'
+      const out = toolLabel('mcp__hindsight__recall', { query: q })
+      expect(out.startsWith('Hindsight: recall (')).toBe(true)
+      expect(out.endsWith(')')).toBe(true)
+      // Budget: MAX_LABEL_CHARS (60) + some framing slack — assert under ~80.
+      expect(out.length).toBeLessThanOrEqual(80)
+    })
+
+    it('uses input.text or input.name when no query present', () => {
+      expect(
+        toolLabel('mcp__hindsight__create_directive', { text: 'Prefer TypeScript' }),
+      ).toBe('Hindsight: create_directive (Prefer TypeScript)')
+      expect(
+        toolLabel('mcp__hindsight__get_mental_model', { name: 'User Profile' }),
+      ).toBe('Hindsight: get_mental_model (User Profile)')
+    })
+
+    it('malformed mcp name falls back to generic sweep', () => {
+      // Only one `__` segment after prefix — no action half.
+      expect(toolLabel('mcp__broken', { query: 'foo' })).toBe('foo')
+    })
+  })
+
+  describe('regression: existing cases still pass with new defaults', () => {
+    it('Bash still wins its explicit case', () => {
+      expect(toolLabel('Bash', { description: 'Check file size' })).toBe('Check file size')
+    })
+
+    it('unknown non-mcp tool still uses generic sweep', () => {
+      expect(toolLabel('SomeRandomTool', { description: 'doing a thing' })).toBe('doing a thing')
+    })
+  })
 })

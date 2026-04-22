@@ -32,6 +32,7 @@ import { createChatLock } from '../chat-lock.js'
 import { createRetryApiCall } from '../retry-api-call.js'
 import { buildAttachmentPath, assertInsideInbox } from '../attachment-path.js'
 import { createPinManager } from '../progress-card-pin-manager.js'
+import { createPinWatchdog } from '../progress-card-pin-watchdog.js'
 import { logStreamingEvent } from '../streaming-metrics.js'
 import { type SessionEvent } from '../session-tail.js'
 import { createProgressDriver, type ProgressDriver } from '../progress-card-driver.js'
@@ -1050,8 +1051,6 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
     }
   }
 
-  unpinProgressCardForChat?.(chat_id, threadId)
-
   return { content: [{ type: 'text', text: result }] }
 }
 
@@ -1091,11 +1090,6 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
       progressCardActive: streamMode === 'checklist',
     },
   )
-  if (result.status === 'finalized') {
-    const srChatId = args.chat_id as string
-    const srThreadId = resolveThreadId(srChatId, args.message_thread_id as string | undefined)
-    unpinProgressCardForChat?.(srChatId, srThreadId)
-  }
   return { content: [{ type: 'text', text: `${result.status} (id: ${result.messageId ?? 'pending'})` }] }
 }
 
@@ -3728,6 +3722,24 @@ if (streamMode === 'checklist') {
     })
   })
 
+  // Watchdog: re-pin if Telegram's current pin drifts away from ours
+  // mid-turn. Probed on heartbeat emits, rate-limited per turnKey.
+  const pinWatchdog = createPinWatchdog({
+    getCurrentPinned: async (chatId) => {
+      const chat = await lockedBot.api.getChat(chatId)
+      // `pinned_message` is present on groups/supergroups when a pin
+      // exists; `message_id` is the pinned message's id. Private-chat
+      // shape is the same — the field is absent when nothing is pinned.
+      const pinnedMessage =
+        'pinned_message' in chat
+          ? (chat as { pinned_message?: { message_id: number } }).pinned_message
+          : undefined
+      return pinnedMessage?.message_id
+    },
+    pin: (chatId, messageId, opts) => lockedBot.api.pinChatMessage(chatId, messageId, opts),
+    log: (line) => process.stderr.write(line),
+  })
+
   unpinProgressCardForChat = (chatId: string, threadId: number | undefined): void => {
     pinMgr.unpinForChat(chatId, threadId)
   }
@@ -3753,6 +3765,15 @@ if (streamMode === 'checklist') {
           messageId: result.messageId,
           isFirstEmit,
         })
+        // Heartbeat watchdog: after the initial pin has been recorded,
+        // every subsequent (non-final) emit probes Telegram to confirm
+        // our pin is still the one on display. Rate-limited internally.
+        if (!isFirstEmit && !done) {
+          const expectedId = pinMgr.pinnedMessageId(turnKey)
+          if (expectedId != null) {
+            void pinWatchdog.verify({ chatId, turnKey, expectedMessageId: expectedId })
+          }
+        }
       }).catch((err: Error) => {
         process.stderr.write(`telegram gateway: progress-card emit failed: ${err.message}\n`)
       })
@@ -3764,6 +3785,7 @@ if (streamMode === 'checklist') {
     onTurnComplete: ({ chatId, threadId, turnKey, summary }) => {
       process.stderr.write(`telegram gateway: progress-card: onTurnComplete callback turnKey=${turnKey}\n`)
       pinMgr.completeTurn({ chatId, threadId, turnKey })
+      pinWatchdog.clear(turnKey)
       if (threadId != null) {
         lockedBot.api.sendMessage(chatId, `✅ Done — ${summary}`).catch((err: Error) => {
           process.stderr.write(`telegram gateway: completion message failed: ${err.message}\n`)

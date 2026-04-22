@@ -14,8 +14,16 @@ import {
   type PinManager,
   type PinManagerDeps,
   type ActivePinEntry,
+  type TimerHandle,
 } from '../progress-card-pin-manager.js'
 import { errors } from './fake-bot-api.js'
+
+interface PendingTimer {
+  fn: () => void
+  ms: number
+  cancelled: boolean
+  fired: boolean
+}
 
 interface Harness {
   mgr: PinManager
@@ -29,11 +37,16 @@ interface Harness {
   }
   /** Recorded sidecar state — tests assert on this directly. */
   sidecar: ActivePinEntry[]
+  /** Captured pin-delay timers — tests fire them manually. */
+  timers: PendingTimer[]
+  /** Fire every pending (not-yet-fired, not-cancelled) timer. */
+  fireTimers(): void
 }
 
 /** Build a harness with sensible defaults. `now` is fixed at 10_000. */
 function mkHarness(overrides: Partial<PinManagerDeps> = {}): Harness {
   const sidecar: ActivePinEntry[] = []
+  const timers: PendingTimer[] = []
 
   const deps = {
     pin: vi.fn(async () => true),
@@ -49,13 +62,34 @@ function mkHarness(overrides: Partial<PinManagerDeps> = {}): Harness {
     log: vi.fn(),
   }
 
+  const scheduleTimer = (fn: () => void, ms: number): TimerHandle => {
+    const entry: PendingTimer = { fn, ms, cancelled: false, fired: false }
+    timers.push(entry)
+    return {
+      cancel() {
+        entry.cancelled = true
+      },
+    }
+  }
+
   const mgr = createPinManager({
     ...deps,
     now: () => 10_000,
+    scheduleTimer,
     ...overrides,
   })
 
-  return { mgr, deps, sidecar }
+  const fireTimers = (): void => {
+    // Snapshot so timers pushed during firing don't run this pass.
+    const snapshot = [...timers]
+    for (const t of snapshot) {
+      if (t.cancelled || t.fired) continue
+      t.fired = true
+      t.fn()
+    }
+  }
+
+  return { mgr, deps, sidecar, timers, fireTimers }
 }
 
 describe('createPinManager', () => {
@@ -69,6 +103,7 @@ describe('createPinManager', () => {
         messageId: 500,
         isFirstEmit: true,
       })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       // Bot API was called with the exact shape the gateway used inline.
@@ -91,6 +126,7 @@ describe('createPinManager', () => {
         messageId: 500,
         isFirstEmit: false,
       })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       expect(h.deps.pin).not.toHaveBeenCalled()
@@ -108,6 +144,7 @@ describe('createPinManager', () => {
       }
       h.mgr.considerPin(c)
       h.mgr.considerPin({ ...c, messageId: 501 })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       // Only the first pin landed.
@@ -121,6 +158,7 @@ describe('createPinManager', () => {
       const h = mkHarness()
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:2', messageId: 501, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       expect(h.deps.pin).toHaveBeenCalledTimes(2)
@@ -130,6 +168,7 @@ describe('createPinManager', () => {
     it('works without a sidecar (no agentDir in production = no addPin wired)', async () => {
       const h = mkHarness({ addPin: undefined, removePin: undefined })
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       expect(h.deps.pin).toHaveBeenCalled()
@@ -148,6 +187,7 @@ describe('createPinManager', () => {
         messageId: 500,
         isFirstEmit: true,
       })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       // Sidecar was rolled back when the pin rejected.
@@ -167,6 +207,7 @@ describe('createPinManager', () => {
       h.deps.pin.mockRejectedValueOnce(errors.floodWait(3, 'pinChatMessage'))
 
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       expect(h.deps.pin).toHaveBeenCalledTimes(1)
@@ -178,6 +219,7 @@ describe('createPinManager', () => {
     it('unpins the pinned message and clears the sidecar', async () => {
       const h = mkHarness()
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
       expect(h.sidecar).toHaveLength(1)
 
@@ -199,6 +241,7 @@ describe('createPinManager', () => {
     it('duplicate completeTurn does not double-unpin', async () => {
       const h = mkHarness()
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       h.mgr.completeTurn({ chatId: 'c', turnKey: 'c:1' })
@@ -213,6 +256,7 @@ describe('createPinManager', () => {
       const h = mkHarness()
       h.deps.unpin.mockRejectedValueOnce(errors.badRequest('chat not found', 'unpinChatMessage'))
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       h.mgr.completeTurn({ chatId: 'c', turnKey: 'c:1' })
@@ -234,6 +278,7 @@ describe('createPinManager', () => {
       h.mgr.considerPin({ chatId: 'c', threadId: '42', turnKey: 'c:42:1', messageId: 500, isFirstEmit: true })
       h.mgr.considerPin({ chatId: 'c', threadId: '42', turnKey: 'c:42:2', messageId: 501, isFirstEmit: true })
       h.mgr.considerPin({ chatId: 'c', threadId: '99', turnKey: 'c:99:1', messageId: 502, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
       expect(h.mgr.pinnedTurnKeys()).toHaveLength(3)
 
@@ -251,6 +296,7 @@ describe('createPinManager', () => {
       const h = mkHarness()
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
       h.mgr.considerPin({ chatId: 'c', threadId: '42', turnKey: 'c:42:1', messageId: 501, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       h.mgr.unpinForChat('c', undefined)
@@ -278,6 +324,7 @@ describe('createPinManager', () => {
       for (let i = 1; i <= 5; i++) {
         h.mgr.considerPin({ chatId: 'c', threadId: '42', turnKey: `c:42:${i}`, messageId: 499 + i, isFirstEmit: true })
       }
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       // Snapshot-before-iterate is important: the doUnpin path mutates
@@ -297,6 +344,7 @@ describe('createPinManager', () => {
 
       // Turn 1
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
       h.mgr.completeTurn({ chatId: 'c', turnKey: 'c:1' })
       await h.mgr.drainInFlight()
@@ -305,6 +353,7 @@ describe('createPinManager', () => {
 
       // Turn 2 on the same chat
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:2', messageId: 501, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
       h.mgr.completeTurn({ chatId: 'c', turnKey: 'c:2' })
       await h.mgr.drainInFlight()
@@ -320,6 +369,7 @@ describe('createPinManager', () => {
 
       h.mgr.considerPin({ chatId: 'A', turnKey: 'A:1', messageId: 500, isFirstEmit: true })
       h.mgr.considerPin({ chatId: 'B', turnKey: 'B:1', messageId: 501, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
       expect(h.mgr.pinnedTurnKeys().sort()).toEqual(['A:1', 'B:1'])
 
@@ -336,6 +386,7 @@ describe('createPinManager', () => {
       const h = mkHarness()
 
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
       h.mgr.completeTurn({ chatId: 'c', turnKey: 'c:1' })
       await h.mgr.drainInFlight()
@@ -343,6 +394,7 @@ describe('createPinManager', () => {
       // Unlikely but defensive: if the driver ever reuses the same
       // turnKey, the manager starts clean.
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 777, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       expect(h.deps.pin).toHaveBeenCalledTimes(2)
@@ -354,6 +406,7 @@ describe('createPinManager', () => {
     it('deletes the service message when it wraps a tracked pin', async () => {
       const h = mkHarness()
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       h.mgr.captureServiceMessage({ chatId: 'c', pinnedMessageId: 500, serviceMessageId: 9001 })
@@ -365,6 +418,7 @@ describe('createPinManager', () => {
     it('ignores service messages wrapping pins we did not track', async () => {
       const h = mkHarness()
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       h.mgr.captureServiceMessage({ chatId: 'c', pinnedMessageId: 999, serviceMessageId: 9001 })
@@ -376,6 +430,7 @@ describe('createPinManager', () => {
     it('no-op when deleteMessage is not wired', async () => {
       const h = mkHarness({ deleteMessage: undefined })
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       expect(() => {
@@ -389,6 +444,7 @@ describe('createPinManager', () => {
       h.deps.deleteMessage.mockRejectedValueOnce(errors.badRequest('message to delete not found', 'deleteMessage'))
 
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       h.mgr.captureServiceMessage({ chatId: 'c', pinnedMessageId: 500, serviceMessageId: 9001 })
@@ -407,6 +463,7 @@ describe('createPinManager', () => {
       // Here we test the safety-net path: no capture → no stray delete.
       const h = mkHarness()
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       await h.mgr.drainInFlight()
 
       // No captureServiceMessage call — simulates a lost/unmatched update.
@@ -433,6 +490,7 @@ describe('createPinManager', () => {
       h.deps.unpin.mockImplementationOnce(() => new Promise<true>((r) => { resolveUnpin = () => r(true) }))
 
       h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
       h.mgr.completeTurn({ chatId: 'c', turnKey: 'c:1' })
 
       const drained = h.mgr.drainInFlight()
@@ -442,6 +500,117 @@ describe('createPinManager', () => {
 
       // After drain, removePin should have fired (from unpin's finally).
       expect(h.deps.removePin).toHaveBeenCalled()
+    })
+  })
+
+  describe('deferred pin timing — fast turns stay silent', () => {
+    it('considerPin does not call pin synchronously — timer is scheduled', async () => {
+      const h = mkHarness()
+      h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      await h.mgr.drainInFlight()
+
+      // Timer scheduled, but not fired → no pin yet.
+      expect(h.timers).toHaveLength(1)
+      expect(h.timers[0].ms).toBe(30_000)
+      expect(h.deps.pin).not.toHaveBeenCalled()
+      expect(h.deps.addPin).not.toHaveBeenCalled()
+      expect(h.mgr.pinnedTurnKeys()).toEqual([])
+    })
+
+    it('fast turn: completeTurn before timer fires → never pins, never unpins', async () => {
+      const h = mkHarness()
+      h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      // Turn completes before pinDelayMs elapses. The timer is cancelled
+      // and no pin/unpin ever touches Telegram.
+      h.mgr.completeTurn({ chatId: 'c', turnKey: 'c:1' })
+      // Even if the timer somehow fires later (belt-and-braces), it should
+      // be marked cancelled and skipped.
+      h.fireTimers()
+      await h.mgr.drainInFlight()
+
+      expect(h.deps.pin).not.toHaveBeenCalled()
+      expect(h.deps.unpin).not.toHaveBeenCalled()
+      expect(h.deps.addPin).not.toHaveBeenCalled()
+      expect(h.sidecar).toEqual([])
+    })
+
+    it('slow turn: pin fires when timer elapses, then completeTurn unpins', async () => {
+      const h = mkHarness()
+      h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+      await h.mgr.drainInFlight()
+      expect(h.deps.pin).not.toHaveBeenCalled()
+
+      // Timer elapses → pin lands.
+      h.fireTimers()
+      await h.mgr.drainInFlight()
+      expect(h.deps.pin).toHaveBeenCalledWith('c', 500, { disable_notification: true })
+      expect(h.mgr.pinnedMessageId('c:1')).toBe(500)
+
+      // completeTurn after the pin → unpin lands.
+      h.mgr.completeTurn({ chatId: 'c', turnKey: 'c:1' })
+      await h.mgr.drainInFlight()
+      expect(h.deps.unpin).toHaveBeenCalledWith('c', 500)
+      expect(h.mgr.pinnedMessageId('c:1')).toBeUndefined()
+    })
+
+    it('unpinForChat cancels pending (not-yet-fired) timers', async () => {
+      const h = mkHarness()
+      h.mgr.considerPin({ chatId: 'c', threadId: '42', turnKey: 'c:42:1', messageId: 500, isFirstEmit: true })
+      h.mgr.considerPin({ chatId: 'c', threadId: '42', turnKey: 'c:42:2', messageId: 501, isFirstEmit: true })
+
+      // Clear pending pins before any timer fires.
+      h.mgr.unpinForChat('c', 42)
+      h.fireTimers()
+      await h.mgr.drainInFlight()
+
+      // No pins, no unpins — the timers were cancelled and never fired.
+      expect(h.deps.pin).not.toHaveBeenCalled()
+      expect(h.deps.unpin).not.toHaveBeenCalled()
+    })
+
+    it('unpinForChat cancels pending timers AND unpins already-fired pins', async () => {
+      const h = mkHarness()
+      // First pin: fire its timer → already pinned.
+      h.mgr.considerPin({ chatId: 'c', threadId: '42', turnKey: 'c:42:1', messageId: 500, isFirstEmit: true })
+      h.fireTimers()
+      await h.mgr.drainInFlight()
+      expect(h.deps.pin).toHaveBeenCalledTimes(1)
+
+      // Second pin: timer still pending.
+      h.mgr.considerPin({ chatId: 'c', threadId: '42', turnKey: 'c:42:2', messageId: 501, isFirstEmit: true })
+
+      h.mgr.unpinForChat('c', 42)
+      h.fireTimers() // noop — second timer was cancelled.
+      await h.mgr.drainInFlight()
+
+      // First pin got unpinned; second never pinned.
+      expect(h.deps.pin).toHaveBeenCalledTimes(1)
+      expect(h.deps.unpin).toHaveBeenCalledWith('c', 500)
+      expect(h.deps.unpin).not.toHaveBeenCalledWith('c', 501)
+    })
+
+    it('custom pinDelayMs overrides the default', async () => {
+      const h = mkHarness({ pinDelayMs: 5_000 })
+      h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+
+      expect(h.timers).toHaveLength(1)
+      expect(h.timers[0].ms).toBe(5_000)
+    })
+
+    it('pinDelayMs=0 still defers through the timer (no sync pin)', async () => {
+      // Guards against a tempting optimization: "if pinDelayMs === 0,
+      // pin synchronously." We pass it through the timer anyway so the
+      // contract is uniform (considerPin never blocks, never pins
+      // before control returns).
+      const h = mkHarness({ pinDelayMs: 0 })
+      h.mgr.considerPin({ chatId: 'c', turnKey: 'c:1', messageId: 500, isFirstEmit: true })
+
+      expect(h.deps.pin).not.toHaveBeenCalled()
+      expect(h.timers).toHaveLength(1)
+
+      h.fireTimers()
+      await h.mgr.drainInFlight()
+      expect(h.deps.pin).toHaveBeenCalledTimes(1)
     })
   })
 })

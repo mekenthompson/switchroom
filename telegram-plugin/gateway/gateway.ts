@@ -671,18 +671,22 @@ const ipcServer: IpcServer = createIpcServer({
     // notify the user so Telegram doesn't stay stuck on "restarting…".
     const marker = readRestartMarker()
     if (marker) {
-      clearRestartMarker()
       const ageMs = Date.now() - marker.ts
+      const ageSec = Math.max(1, Math.round(ageMs / 1000))
+      process.stderr.write(`telegram gateway: bridge-reconnect: restart-marker present, chat_id=${marker.chat_id} age=${ageSec}s within5min=${ageMs < 5 * 60_000} agent=${client.agentName}\n`)
+      clearRestartMarker()
       if (ageMs < 5 * 60_000) {
-        const ageSec = Math.max(1, Math.round(ageMs / 1000))
         const text = `🎛️ Switchroom restarted — ready. (took ~${ageSec}s)`
+        process.stderr.write(`telegram gateway: bridge-reconnect: posting 'restarted — ready' banner chat_id=${marker.chat_id} thread_id=${marker.thread_id ?? '-'} ackReply=${marker.ack_message_id ?? '-'}\n`)
         lockedBot.api.sendMessage(marker.chat_id, text, {
           parse_mode: 'HTML', link_preview_options: { is_disabled: true },
           ...(marker.thread_id != null ? { message_thread_id: marker.thread_id } : {}),
           ...(marker.ack_message_id != null ? { reply_parameters: { message_id: marker.ack_message_id } } : {}),
         }).then(sent => {
           if (HISTORY_ENABLED) { try { recordOutbound({ chat_id: marker.chat_id, thread_id: marker.thread_id, message_ids: [sent.message_id], texts: [text], attachment_kinds: [] }) } catch {} }
-        }).catch(() => {})
+        }).catch((err: Error) => {
+          process.stderr.write(`telegram gateway: bridge-reconnect: 'restarted — ready' banner send failed: ${err.message}\n`)
+        })
       }
     }
   },
@@ -2197,7 +2201,10 @@ function restartMarkerPath(): string | null {
 }
 function writeRestartMarker(marker: RestartMarker): void {
   const p = restartMarkerPath(); if (!p) return
-  try { writeFileSync(p, JSON.stringify(marker)) } catch (err) {
+  try {
+    writeFileSync(p, JSON.stringify(marker))
+    process.stderr.write(`telegram gateway: restart-marker: write chat_id=${marker.chat_id} thread_id=${marker.thread_id ?? '-'} ack=${marker.ack_message_id ?? '-'} path=${p}\n`)
+  } catch (err) {
     process.stderr.write(`telegram gateway: writeRestartMarker failed: ${err}\n`)
   }
 }
@@ -2207,7 +2214,10 @@ function readRestartMarker(): RestartMarker | null {
 }
 function clearRestartMarker(): void {
   const p = restartMarkerPath(); if (!p) return
-  try { rmSync(p, { force: true }) } catch {}
+  try {
+    rmSync(p, { force: true })
+    process.stderr.write(`telegram gateway: restart-marker: cleared path=${p}\n`)
+  } catch {}
 }
 
 /**
@@ -3864,11 +3874,13 @@ void (async () => {
         try {
           const marker = readRestartMarker()
           if (marker) {
-            clearRestartMarker()
             const ageMs = Date.now() - marker.ts
+            const ageSec = Math.max(1, Math.round(ageMs / 1000))
+            process.stderr.write(`telegram gateway: boot: restart-marker present, chat_id=${marker.chat_id} age=${ageSec}s within5min=${ageMs < 5 * 60_000}\n`)
+            clearRestartMarker()
             if (ageMs < 5 * 60_000) {
-              const ageSec = Math.max(1, Math.round(ageMs / 1000))
               const text = `🎛️ Switchroom restarted — ready. (took ~${ageSec}s)`
+              process.stderr.write(`telegram gateway: boot: posting 'restarted — ready' banner chat_id=${marker.chat_id} thread_id=${marker.thread_id ?? '-'} ackReply=${marker.ack_message_id ?? '-'}\n`)
               try {
                 const sent = await lockedBot.api.sendMessage(marker.chat_id, text, {
                   parse_mode: 'HTML', link_preview_options: { is_disabled: true },
@@ -3876,8 +3888,12 @@ void (async () => {
                   ...(marker.ack_message_id != null ? { reply_parameters: { message_id: marker.ack_message_id } } : {}),
                 })
                 if (HISTORY_ENABLED) { try { recordOutbound({ chat_id: marker.chat_id, thread_id: marker.thread_id, message_ids: [sent.message_id], texts: [text], attachment_kinds: [] }) } catch {} }
-              } catch {}
+              } catch (err) {
+                process.stderr.write(`telegram gateway: boot: 'restarted — ready' banner send failed: ${err}\n`)
+              }
             }
+          } else {
+            process.stderr.write(`telegram gateway: boot: no restart-marker found (clean start or crash recovery path)\n`)
           }
         } catch {}
 
@@ -3893,11 +3909,14 @@ void (async () => {
                 if (recent.length > 0) {
                   const lastTs = recent[0].ts * 1000
                   const downtime = Date.now() - lastTs
+                  const downSec = Math.max(1, Math.round(downtime / 1000))
                   if (downtime < 30 * 60_000) {
-                    const downSec = Math.max(1, Math.round(downtime / 1000))
                     const text = `⚡ Recovered from unexpected restart. (down ~${downSec}s)`
+                    process.stderr.write(`telegram gateway: boot: posting 'recovered from unexpected restart' banner chat_id=${ownerChatId} down=${downSec}s (no marker present, last msg ${downSec}s ago)\n`)
                     const sent = await lockedBot.api.sendMessage(ownerChatId, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } })
                     if (HISTORY_ENABLED) { try { recordOutbound({ chat_id: ownerChatId, thread_id: null, message_ids: [sent.message_id], texts: [text], attachment_kinds: [] }) } catch {} }
+                  } else {
+                    process.stderr.write(`telegram gateway: boot: suppressed 'recovered' banner — last msg ${downSec}s ago exceeds 30min window\n`)
                   }
                 }
               } catch {}
@@ -3921,6 +3940,7 @@ void (async () => {
         }
       }
 
+      process.stderr.write(`telegram gateway: starting bot polling pid=${process.pid} agent=${process.env.SWITCHROOM_AGENT_NAME ?? '-'} stateDir=${STATE_DIR} historyEnabled=${HISTORY_ENABLED} streamMode=${process.env.SWITCHROOM_TG_STREAM_MODE ?? 'checklist'}\n`)
       runnerHandle = run(bot)
       await runnerHandle.task()
       return

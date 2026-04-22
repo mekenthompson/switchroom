@@ -327,8 +327,10 @@ export function reduce(
           })
           subAgents = next
           adopted = true
+          process.stderr.write(`telegram gateway: progress-card: tool_use → agent correlation toolUseId=${event.toolUseId} agentId=${bestAgentId} (reverse-race adopt orphan)\n`)
         }
         if (!adopted) {
+          process.stderr.write(`telegram gateway: progress-card: tool_use → agent correlation toolUseId=${event.toolUseId} agentId=pending (awaiting sub_agent_started)\n`)
           const nextPending = new Map(pendingAgentSpawns)
           nextPending.set(event.toolUseId, {
             parentToolUseId: event.toolUseId,
@@ -463,6 +465,7 @@ export function reduce(
       }
       const subAgents = new Map(state.subAgents)
       subAgents.set(event.agentId, sub)
+      process.stderr.write(`telegram gateway: progress-card: sub_agent_started agentId=${event.agentId} correlated=${parentToolUseId != null ? 'yes' : 'orphan'}${parentToolUseId != null ? ` parentToolUseId=${parentToolUseId}` : ''}\n`)
       return { ...state, subAgents, pendingAgentSpawns, items }
     }
 

@@ -458,15 +458,18 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
           clearT(chatState.deferredFirstEmitTimer)
           chatState.deferredFirstEmitTimer = null
         }
+        process.stderr.write(`telegram gateway: progress-card: fast-turn suppression turnKey=${chatState.turnKey} (turn ended before initialDelayMs=${initialDelayMs}ms)\n`)
         return
       }
       // Defer the first emit — schedule it for initialDelayMs from now
       // if not already scheduled.
       if (chatState.deferredFirstEmitTimer == null) {
         const capturedTurnKey = chatState.turnKey
+        process.stderr.write(`telegram gateway: progress-card: scheduled initial-delay timer turnKey=${capturedTurnKey} delay=${initialDelayMs}ms\n`)
         chatState.deferredFirstEmitTimer = setT(() => {
           if (!chats.has(capturedTurnKey)) return
           chatState.deferredFirstEmitTimer = DELAY_ELAPSED
+          process.stderr.write(`telegram gateway: progress-card: initial-delay timer fired turnKey=${capturedTurnKey}\n`)
           flush(chatState, false)
         }, initialDelayMs)
       }

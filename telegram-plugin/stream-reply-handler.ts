@@ -207,6 +207,9 @@ export async function handleStreamReply(
   const rawText = deps.repairEscapedWhitespace(args.text)
   const done = Boolean(args.done)
   const format = args.format ?? deps.defaultFormat
+  if (done) {
+    process.stderr.write(`telegram channel: stream_reply: invoked done=true chatId=${chat_id} lane=${args.lane ?? 'default'} charCount=${rawText.length}\n`)
+  }
 
   // Access check runs BEFORE the progress-card short-circuit: a denied
   // chat id must throw regardless of streaming mode. Previously the
@@ -428,8 +431,12 @@ export async function handleStreamReply(
     }
   }
 
+  const finalMessageId = stream.getMessageId()
+  if (done) {
+    process.stderr.write(`telegram channel: stream_reply: finalized done=true chatId=${chat_id} lane=${args.lane ?? 'default'} messageId=${finalMessageId ?? 'null'}\n`)
+  }
   return {
-    messageId: stream.getMessageId(),
+    messageId: finalMessageId,
     status: done ? 'finalized' : 'updated',
   }
 }

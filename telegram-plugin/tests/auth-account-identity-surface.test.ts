@@ -13,16 +13,16 @@ function slot(o: Partial<DashboardSlot> = {}): DashboardSlot {
 /**
  * 2026-04-22 — account-identity surface.
  *
- * Context: Ken tried to reauth lawgpt onto his pixsoul@gmail.com Max
- * 20x account. The OAuth browser flow got hijacked by Telegram's
- * in-app WebView (separate cookie jar from his main browser) and the
- * saved token ended up for his Outlook Max 5x account instead. The
+ * Context: a user reauths an agent onto their Max 20x account, but the
+ * OAuth browser flow gets hijacked by Telegram's in-app WebView (which
+ * uses a separate cookie jar from their main browser) and the saved
+ * token ends up for a different account (e.g. a Max 5x) instead. The
  * dashboard header showed 'Plan: max' \u2014 indistinguishable between
- * 5x and 20x \u2014 so the mismatch was silent until he hit a quota wall
+ * 5x and 20x \u2014 so the mismatch was silent until the user hit a quota wall
  * hours later.
  *
  * Fix: surface the full `rateLimitTier` string on the dashboard so a
- * wrong-account reauth is IMMEDIATELY visible. Ken expected max_20x,
+ * wrong-account reauth is IMMEDIATELY visible. User expected max_20x,
  * sees max_5x, acts.
  *
  * Pair fixes (out of scope for these tests but covered in the PR):

@@ -457,7 +457,7 @@ export const AgentSchema = z.object({
     .string()
     .optional()
     .describe(
-      "Human-readable identity for the session-start greeting (e.g. 'pixsoul@gmail.com'). " +
+      "Human-readable identity for the session-start greeting (e.g. 'user@example.com'). " +
       "Anthropic does not expose a public user-profile endpoint for OAuth tokens, so the " +
       "email/account cannot be read locally; the user declares it here. Appears in the Auth " +
       "row as '✓ max · <label> · expires ...'."

@@ -541,7 +541,7 @@ printf '%s' "$MODEL" > "$MODEL_CACHE" 2>/dev/null || true
 # but merge in subscriptionType + rateLimitTier from .credentials.json when
 # both files exist — the oauth-token flow alone does not carry plan metadata.
 #
-# AUTH_LABEL is a user-declared identity (e.g. pixsoul@gmail.com) for the
+# AUTH_LABEL is a user-declared identity (e.g. user@example.com) for the
 # greeting row. Anthropic does not expose a public endpoint to read the
 # OAuth account's email from the token, so we rely on the user declaring it
 # in switchroom.yaml (agents.<name>.auth_label). Empty string means no

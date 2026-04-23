@@ -31,7 +31,10 @@ import {
   enableScheduleTimers,
   daemonReload,
   resolveGatewayUnitName,
+  unitFilePath,
 } from "../agents/systemd.js";
+import { usesSwitchroomTelegramPlugin, resolveAgentConfig } from "../config/merge.js";
+import { resolveTimezone } from "../config/timezone.js";
 import { detectInFlight, waitUntilIdle } from "../agents/in-flight.js";
 import { askYesNo } from "../setup/prompt.js";
 import {
@@ -317,6 +320,170 @@ export function updateAgentExtendsInConfig(
   const agentNode = agents.get(name) as YAML.YAMLMap;
   agentNode.set("extends", profile);
   writeFileSync(configPath, doc.toString(), "utf-8");
+}
+
+/**
+ * Reconcile the agent's scaffolded state against switchroom.yaml, then
+ * restart it. This is the single codepath every `switchroom agent
+ * restart` invocation goes through — the CLI entry point thin-wraps
+ * this so we can unit-test "restart always reconciles first, and skips
+ * restart if reconcile fails" without booting commander.
+ *
+ * Why reconcile before every restart? Restart was historically a
+ * pure `systemctl restart` — which meant hand-patched systemd units
+ * (and any other scaffold-owned artifact) survived across restarts.
+ * That silently rotted: the next `switchroom systemd install` or
+ * `agent reconcile` would wipe the hand-patch with no warning. By
+ * folding reconcile into restart, every restart picks up template
+ * changes and regenerates scaffold files from the canonical config,
+ * making the framework self-healing. Ken's manual `EnvironmentFile=`
+ * patches can now live in the template itself (generateUnit /
+ * generateGatewayUnit), and operators can edit switchroom.yaml
+ * → restart → done, no extra commands to remember.
+ *
+ * If reconcile fails, we do NOT proceed to restart — a broken config
+ * shouldn't be applied on top of a working process.
+ *
+ * Exported for tests. `deps` lets tests inject reconcile/restart stubs
+ * so the sequencing assertion doesn't require real fs/systemctl.
+ */
+export interface ReconcileAndRestartDeps {
+  reconcileAgent: typeof reconcileAgent;
+  restartAgent: typeof restartAgent;
+  gracefulRestartAgent: typeof gracefulRestartAgent;
+  /** Regenerate + diff + install systemd units. Skippable in tests. */
+  regenerateSystemdUnits?: (
+    name: string,
+    config: SwitchroomConfig,
+    agentsDir: string,
+  ) => string[];
+}
+
+export interface ReconcileAndRestartOpts {
+  graceful?: boolean;
+  /** Suppress stdout logging (tests). */
+  silent?: boolean;
+}
+
+/**
+ * Re-render the agent's systemd unit (and its telegram gateway unit
+ * when applicable), write them if they differ from disk, and
+ * daemon-reload. Returns the list of unit paths that changed.
+ *
+ * This is what makes the self-healing loop work for the systemd layer
+ * specifically: templates can evolve (e.g. adding `EnvironmentFile=-`)
+ * and every restart picks them up without the operator having to
+ * remember to run `switchroom systemd install`.
+ */
+export function regenerateSystemdUnitsForAgent(
+  name: string,
+  config: SwitchroomConfig,
+  agentsDir: string,
+): string[] {
+  const agentConfig = config.agents[name];
+  if (!agentConfig) return [];
+
+  const agentDir = resolve(agentsDir, name);
+  const useAutoaccept = usesSwitchroomTelegramPlugin(agentConfig);
+  const gwName = resolveGatewayUnitName(config, name);
+
+  const resolved = resolveAgentConfig(config.defaults, config.profiles, agentConfig);
+  const timezone = resolveTimezone(config, resolved);
+
+  const changed: string[] = [];
+
+  const desiredUnit = generateUnit(name, agentDir, useAutoaccept, gwName, timezone);
+  const agentUnitPath = unitFilePath(name);
+  const currentUnit = existsSync(agentUnitPath) ? readFileSync(agentUnitPath, "utf-8") : "";
+  if (currentUnit !== desiredUnit) {
+    installUnit(name, desiredUnit);
+    changed.push(agentUnitPath);
+  }
+
+  if (useAutoaccept && gwName) {
+    const stateDir = resolve(agentDir, "telegram");
+    const desiredGw = generateGatewayUnit(stateDir, name);
+    const gwUnitPath = unitFilePath(gwName);
+    const currentGw = existsSync(gwUnitPath) ? readFileSync(gwUnitPath, "utf-8") : "";
+    if (currentGw !== desiredGw) {
+      installUnit(gwName, desiredGw);
+      changed.push(gwUnitPath);
+    }
+  }
+
+  if (changed.length > 0) {
+    // Re-read disk so systemd picks up the new ExecStart / Environment /
+    // EnvironmentFile directives before the next `restart` fires.
+    daemonReload();
+  }
+
+  return changed;
+}
+
+export async function reconcileAndRestartAgent(
+  name: string,
+  config: SwitchroomConfig,
+  agentsDir: string,
+  configPath: string | undefined,
+  opts: ReconcileAndRestartOpts = {},
+  deps: ReconcileAndRestartDeps = {
+    reconcileAgent,
+    restartAgent,
+    gracefulRestartAgent,
+    regenerateSystemdUnits: regenerateSystemdUnitsForAgent,
+  },
+): Promise<{ reconciled: boolean; restarted: boolean; waitingForTurn?: boolean; changes: string[] }> {
+  const log = opts.silent ? () => {} : (msg: string) => console.log(msg);
+  const agentConfig = config.agents[name];
+  if (!agentConfig) {
+    throw new Error(`Agent "${name}" is not defined in switchroom.yaml`);
+  }
+
+  // Reconcile first. If this throws, we stop here — never restart on
+  // top of a broken config.
+  const result = deps.reconcileAgent(
+    name,
+    agentConfig,
+    agentsDir,
+    config.telegram,
+    config,
+    configPath,
+  );
+
+  // Also regenerate systemd units. reconcileAgent intentionally only
+  // touches in-agent-dir files; the systemd unit template lives at a
+  // different layer (per-user ~/.config/systemd/user/). Without this
+  // step, template changes like the vault `EnvironmentFile=-` directive
+  // wouldn't propagate until the operator remembered to run
+  // `switchroom systemd install` — defeating the whole self-healing
+  // point of restart=reconcile+restart.
+  const unitChanges = deps.regenerateSystemdUnits
+    ? deps.regenerateSystemdUnits(name, config, agentsDir)
+    : [];
+
+  const allChanges = [...result.changes, ...unitChanges];
+
+  if (allChanges.length === 0) {
+    log(chalk.gray(`  ${name}: already in sync`));
+  } else {
+    log(chalk.green(`  ${name}: reconciled (${allChanges.length} file${allChanges.length === 1 ? "" : "s"})`));
+    for (const f of allChanges) {
+      log(chalk.gray(`    - ${f}`));
+    }
+  }
+
+  if (opts.graceful) {
+    const r = await deps.gracefulRestartAgent(name);
+    return {
+      reconciled: true,
+      restarted: r.restartedImmediately,
+      waitingForTurn: r.waitingForTurn,
+      changes: allChanges,
+    };
+  }
+
+  deps.restartAgent(name);
+  return { reconciled: true, restarted: true, changes: allChanges };
 }
 
 export function registerAgentCommand(program: Command): void {
@@ -846,15 +1013,26 @@ export function registerAgentCommand(program: Command): void {
               // greeting shows the real user-facing attribution rather
               // than being overwritten by the downstream CLI.
               writeRestartReasonMarker(n, reason, { preserveExisting: true });
+
+              // Reconcile + restart in one call. If reconcile throws, we
+              // never reach the restart — a broken config must not be
+              // applied on top of a running process. See
+              // reconcileAndRestartAgent for the full rationale.
+              const res = await reconcileAndRestartAgent(
+                n,
+                config,
+                agentsDir,
+                getConfigPath(program),
+                { graceful: opts.gracefulRestart },
+              );
+
               if (opts.gracefulRestart) {
-                const result = await gracefulRestartAgent(n);
-                if (result.restartedImmediately) {
+                if (res.restarted) {
                   await printReadyOutcome(n, config, agentsDir, "Restarted");
-                } else if (result.waitingForTurn) {
+                } else if (res.waitingForTurn) {
                   console.log(chalk.yellow(`Restart scheduled for ${n} (waiting for current turn to complete)`));
                 }
               } else {
-                restartAgent(n);
                 await printReadyOutcome(n, config, agentsDir, "Restarted");
               }
             } catch (err) {

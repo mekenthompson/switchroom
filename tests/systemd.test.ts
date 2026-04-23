@@ -112,6 +112,25 @@ describe("generateUnit", () => {
     expect(unit).not.toContain("/usr/bin/expect");
     expect(unit).toContain("/bin/bash");
   });
+
+  // Regression: Ken had been hand-patching EnvironmentFile=- into
+  // installed units because the scaffold didn't emit it, so every
+  // systemd install / reconcile silently wiped his patch. The
+  // template now includes it unconditionally. `-` prefix makes the
+  // file optional (no error if absent); %h is systemd's user-home
+  // specifier which resolves per-user under `systemd --user`.
+  it("includes optional EnvironmentFile for vault-decrypted env", () => {
+    const unit = generateUnit("clerk", "/tmp/clerk");
+    expect(unit).toContain("EnvironmentFile=-%h/.switchroom/.env.vault");
+  });
+
+  it("uses the '-' prefix so a missing vault env file is not a fatal error", () => {
+    const unit = generateUnit("clerk", "/tmp/clerk");
+    // The `-` before the path is the bit that makes it tolerant of
+    // the file being absent. Without it, systemd refuses to start
+    // units on fresh installs where vault init hasn't run yet.
+    expect(unit).toMatch(/EnvironmentFile=-/);
+  });
 });
 
 describe("cronToOnCalendar", () => {
@@ -251,6 +270,15 @@ describe("generateGatewayUnit", () => {
     expect(lawgptUnit).toContain("Environment=SWITCHROOM_AGENT_NAME=lawgpt");
     expect(clerkUnit).not.toContain("SWITCHROOM_AGENT_NAME=lawgpt");
     expect(lawgptUnit).not.toContain("SWITCHROOM_AGENT_NAME=clerk");
+  });
+
+  // Same vault-env regression as the agent unit — the gateway also
+  // pulls from ~/.switchroom/.env.vault for (e.g.) bot tokens set at
+  // the user level rather than per-agent.
+  it("includes optional EnvironmentFile for vault-decrypted env", () => {
+    const unit = generateGatewayUnit("/tmp/telegram", "clerk");
+    expect(unit).toContain("EnvironmentFile=-%h/.switchroom/.env.vault");
+    expect(unit).toMatch(/EnvironmentFile=-/);
   });
 });
 

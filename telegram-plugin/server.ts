@@ -203,10 +203,6 @@ import {
   parseQueuePrefix,
   formatPriorAssistantPreview,
 } from './steering.js'
-import { runPipeline } from './secret-detect/pipeline.js'
-import { StagingMap } from './secret-detect/staging.js'
-import { maskToken } from './secret-detect/mask.js'
-import { defaultVaultWrite, defaultVaultList } from './secret-detect/vault-write.js'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -1137,24 +1133,6 @@ type PendingVaultOp =
   | { kind: 'value'; op: 'set'; key: string; passphrase: string; startedAt: number }
 const VAULT_INPUT_TTL_MS = 5 * 60 * 1000  // 5 min before prompts expire
 const pendingVaultOps = new Map<string, PendingVaultOp>()
-
-// Secret-detection staging: ambiguous hits the user must confirm before we
-// store/delete. Also holds the "we need a passphrase to store this high-
-// confidence hit" cases so the re-run after passphrase entry is seamless.
-const secretStaging = new StagingMap()
-// Keyed (chat_id, message_id): detections that are high-confidence but we
-// couldn't store because no passphrase was cached. When the user sends
-// their passphrase via /vault, we re-run the pipeline. Same TTL as staging.
-interface DeferredSecret {
-  chat_id: string
-  original_message_id: number
-  text: string
-  staged_at: number
-}
-const deferredSecrets = new Map<string, DeferredSecret>()
-function deferredKey(chat_id: string, message_id: number): string {
-  return `${chat_id}:${message_id}`
-}
 
 /** A single token (no spaces) that looks like a Claude OAuth browser code. */
 export function looksLikeAuthCode(text: string): boolean {
@@ -5182,51 +5160,11 @@ async function handleInbound(
   // Typing indicator — signals "processing" until we reply (or ~5s elapses).
   void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
 
-  // --- Secret-detect follow-up command intercept ---
-  // `stash NAME` / `ignore` / `rename X` / `forget` on a pending ambiguous
-  // detection. The user is replying to our "looks like a high-entropy
-  // string — reply `stash NAME` or `ignore`" prompt. We look up the most
-  // recent staged detection for this chat and act on it.
-  const stagedMatch = /^\s*(stash|ignore|rename|forget)\b\s*(\S+)?/i.exec(text)
-  if (stagedMatch) {
-    const staged = secretStaging.latestForChat(chat_id)
-    if (staged != null) {
-      const verb = stagedMatch[1]!.toLowerCase()
-      const arg = stagedMatch[2]?.trim()
-      if (verb === 'ignore' || verb === 'forget') {
-        secretStaging.delete(staged.chat_id, staged.message_id)
-        await switchroomReply(ctx, 'ok — ignored. nothing stored.', { html: true })
-        if (msgId != null) void bot.api.deleteMessage(chat_id, msgId).catch(() => {})
-        return
-      }
-      if (verb === 'stash' || verb === 'rename') {
-        // Need a passphrase to write to the vault.
-        const cached = vaultPassphraseCache.get(chat_id)
-        if (!cached || cached.expiresAt <= Date.now()) {
-          await switchroomReply(ctx, 'No vault passphrase cached. Run <code>/vault list</code> first (or any /vault command) to unlock, then re-send <code>stash NAME</code>.', { html: true })
-          return
-        }
-        const slugBase = arg && arg.length > 0 ? arg : staged.detection.suggested_slug
-        const listed = defaultVaultList(cached.passphrase)
-        const existing = new Set(listed.ok ? listed.keys : [])
-        let slug = slugBase
-        let n = 2
-        while (existing.has(slug)) slug = `${slugBase}_${n++}`
-        const write = defaultVaultWrite(slug, staged.detection.matched_text, cached.passphrase)
-        if (!write.ok) {
-          await switchroomReply(ctx, `<b>vault write failed:</b>\n${preBlock(write.output)}`, { html: true })
-          return
-        }
-        secretStaging.delete(staged.chat_id, staged.message_id)
-        // Delete the user's inbound (both the original and this reply).
-        if (msgId != null) void bot.api.deleteMessage(chat_id, msgId).catch(() => {})
-        void bot.api.deleteMessage(chat_id, staged.message_id).catch(() => {})
-        await switchroomReply(ctx, `✅ stored as <code>vault:${slug}</code> (masked: <code>${maskToken(staged.detection.matched_text)}</code>)`, { html: true })
-        return
-      }
-    }
-    // No staged entry to act on — fall through to normal handling.
-  }
+  // NOTE: Secret detection now lives in the gateway (gateway/gateway.ts)
+  // which is the process that actually polls Telegram. server.ts's
+  // bot polling stack loses 409 to the gateway and never runs in
+  // production — leaving the intercept here was dead code that let
+  // raw secrets reach the agent. See PR #54 / fix/secret-detect-on-gateway.
 
   // `/queue ` opt-in: strip the prefix before anything else so downstream
   // history and notification see the "real" body. The flag is forwarded
@@ -5234,111 +5172,7 @@ async function handleInbound(
   // task, not a steer" declaration from the user.
   const parsedQueue = parseQueuePrefix(text)
   const isQueuedPrefix = parsedQueue.queued
-  let effectiveText = isQueuedPrefix ? parsedQueue.body : text
-
-  // --- Secret detection + vault-scrub ---
-  // If the user pasted a secret, we intercept before recording to history or
-  // emitting to Claude: write to vault, delete the message, rewrite the
-  // prompt so the downstream session .jsonl, Hindsight memory, and logs
-  // never see the raw bytes. If there's no cached vault passphrase, high-
-  // confidence hits are staged as ambiguous so the user can unlock first.
-  try {
-    const cachedPp = vaultPassphraseCache.get(chat_id)
-    const passphrase = cachedPp && cachedPp.expiresAt > Date.now() ? cachedPp.passphrase : null
-    if (passphrase) {
-      const pipeRes = runPipeline({
-        chat_id,
-        message_id: msgId ?? null,
-        text: effectiveText,
-        passphrase,
-        vaultWrite: defaultVaultWrite,
-        vaultList: defaultVaultList,
-      })
-      if (pipeRes.stored.length > 0) {
-        effectiveText = pipeRes.rewritten_text
-        // Delete the Telegram message with the raw bytes.
-        if (msgId != null) {
-          try {
-            await bot.api.deleteMessage(chat_id, msgId)
-          } catch (err) {
-            process.stderr.write(`[secret-detect] deleteMessage failed: ${(err as Error).message}\n`)
-          }
-        }
-        // Post a replacement bot message with the masked summary.
-        const lines = pipeRes.stored.map((s) =>
-          `• <code>${s.masked}</code> → <code>vault:${s.actual_slug}</code>`,
-        )
-        await switchroomReply(
-          ctx,
-          [`🔒 captured ${pipeRes.stored.length} secret${pipeRes.stored.length === 1 ? '' : 's'}:`, ...lines, '', 'reply <code>rename X</code> or <code>forget</code>.'].join('\n'),
-          { html: true },
-        )
-        // Record the stored detections as "latest" so a follow-up rename/forget works.
-        for (const s of pipeRes.stored) {
-          secretStaging.set({
-            chat_id,
-            message_id: msgId ?? 0,
-            detection: { ...s.detection, suggested_slug: s.actual_slug },
-            staged_at: Date.now(),
-          })
-        }
-      } else if (pipeRes.ambiguous.length > 0) {
-        // Stage ambiguous hits and ask the user.
-        for (const d of pipeRes.ambiguous) {
-          secretStaging.set({ chat_id, message_id: msgId ?? 0, detection: d, staged_at: Date.now() })
-        }
-        const top = pipeRes.ambiguous[0]!
-        await switchroomReply(
-          ctx,
-          `👀 looks like a high-entropy string (rule: <code>${escapeHtmlForTg(top.rule_id)}</code>). reply <code>stash NAME</code> to store in vault, or <code>ignore</code>.`,
-          { html: true },
-        )
-        // For ambiguous, we do NOT delete the message or rewrite — let the
-        // user confirm first.
-      }
-    } else {
-      // No passphrase cached — detect, but defer. Tell the user once per
-      // message so they can /vault unlock and we'll rescue on the next try.
-      const { detectSecrets: peek } = await import('./secret-detect/index.js')
-      const detections = peek(effectiveText)
-      const hasHigh = detections.some((d) => d.confidence === 'high' && !d.suppressed)
-      if (hasHigh) {
-        deferredSecrets.set(deferredKey(chat_id, msgId ?? 0), {
-          chat_id,
-          original_message_id: msgId ?? 0,
-          text: effectiveText,
-          staged_at: Date.now(),
-        })
-        await switchroomReply(
-          ctx,
-          '⚠️ detected a secret but no vault passphrase is cached — run <code>/vault list</code> to unlock, then re-paste. this message was NOT stored.',
-          { html: true },
-        )
-        if (msgId != null) {
-          try { await bot.api.deleteMessage(chat_id, msgId) } catch {}
-        }
-        return
-      }
-    }
-  } catch (err) {
-    // FAIL-CLOSED: if the detector throws, we must NOT fall through to
-    // recordInbound() with the raw text — that would stamp the secret
-    // into SQLite and emit it to Claude unscrubbed. Drop the message on
-    // the floor and warn the user. See secret-detect-fail-closed.test.ts
-    // for the regression test.
-    process.stderr.write(`[secret-detect] pipeline error: ${(err as Error).message}\n`)
-    try {
-      await switchroomReply(
-        ctx,
-        '⚠️ secret-detect pipeline crashed; this message was dropped for safety. please try again or check the agent log.',
-        { html: true },
-      )
-    } catch {}
-    if (msgId != null) {
-      try { await bot.api.deleteMessage(chat_id, msgId) } catch {}
-    }
-    return
-  }
+  const effectiveText = isQueuedPrefix ? parsedQueue.body : text
 
   // Status reaction controller — gives the user a glanceable lifecycle
   // signal on their inbound message: 👀 received → 🤔 thinking → 🔥/👨‍💻/⚡

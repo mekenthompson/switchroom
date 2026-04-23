@@ -1739,8 +1739,9 @@ describe("scaffoldAgent with global defaults cascade", () => {
         ],
       },
     ]);
-    // User's Stop hook + switchroom-owned handoff Stop hook (added
-    // automatically when session_continuity is enabled; default on).
+    // User's Stop hook + switchroom-owned Stop hooks (handoff + secret-scrub).
+    // secret-scrub is added when the switchroom telegram plugin is used
+    // (the default in this test's telegramConfig).
     expect(settings.hooks.Stop).toEqual([
       {
         hooks: [
@@ -1753,6 +1754,12 @@ describe("scaffoldAgent with global defaults cascade", () => {
             type: "command",
             command: "switchroom handoff hooks-agent",
             timeout: 35,
+            async: true,
+          },
+          {
+            type: "command",
+            command: expect.stringContaining("secret-scrub-stop.mjs"),
+            timeout: 15,
             async: true,
           },
         ],
@@ -2845,7 +2852,11 @@ describe("session freshness in start.sh", () => {
     const settings = JSON.parse(
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
     );
-    expect(settings.hooks.Stop).toBeUndefined();
+    // The handoff Stop hook is omitted (that's what session_continuity.enabled
+    // gates). The secret-scrub Stop hook may still be present — it's gated
+    // on the telegram plugin, not on session_continuity.
+    const stopStr = JSON.stringify(settings.hooks.Stop ?? []);
+    expect(stopStr).not.toContain("switchroom handoff");
     const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
     // The session-mode detection block always references .handoff.md
     // (it's the signal that a handoff briefing was written by a prior
@@ -2871,6 +2882,109 @@ describe("session freshness in start.sh", () => {
     expect(startSh).toContain("SWITCHROOM_HANDOFF_SHOW_LINE=false");
   });
 
+});
+
+describe("secret-detect hook wiring", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "switchroom-secret-detect-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function makeConfig(name: string, agentConfig: AgentConfig): SwitchroomConfig {
+    return {
+      switchroom: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      agents: { [name]: agentConfig },
+    } as SwitchroomConfig;
+  }
+
+  it("wires secret-guard-pretool.mjs into settings.json PreToolUse when plugin is switchroom", () => {
+    const agentConfig = makeAgentConfig();
+    const result = scaffoldAgent(
+      "sd-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      makeConfig("sd-agent", agentConfig),
+    );
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+    const pre = settings.hooks.PreToolUse as Array<{ hooks: Array<{ command: string }> }>;
+    expect(pre).toBeDefined();
+    const commands = pre.flatMap((e) => e.hooks).map((h) => h.command);
+    expect(commands.some((c) => c.includes("secret-guard-pretool.mjs"))).toBe(true);
+    // Ends in .mjs and uses node
+    const guardCmd = commands.find((c) => c.includes("secret-guard-pretool.mjs"))!;
+    expect(guardCmd.startsWith("node ")).toBe(true);
+  });
+
+  it("wires secret-scrub-stop.mjs into settings.json Stop when plugin is switchroom", () => {
+    const agentConfig = makeAgentConfig();
+    const result = scaffoldAgent(
+      "sd-stop-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      makeConfig("sd-stop-agent", agentConfig),
+    );
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+    const stop = settings.hooks.Stop as Array<{ hooks: Array<{ command: string; async?: boolean }> }>;
+    const scrub = stop
+      .flatMap((e) => e.hooks)
+      .find((h) => h.command.includes("secret-scrub-stop.mjs"));
+    expect(scrub).toBeDefined();
+    // Async so it can't block session shutdown.
+    expect(scrub!.async).toBe(true);
+  });
+
+  it("does not wire secret-detect hooks when plugin is 'official' (upstream)", () => {
+    const agentConfig = makeAgentConfig({
+      channels: { telegram: { plugin: "official" } },
+    });
+    const result = scaffoldAgent(
+      "sd-official-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      makeConfig("sd-official-agent", agentConfig),
+    );
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+    const serialized = JSON.stringify(settings.hooks ?? {});
+    expect(serialized).not.toContain("secret-guard-pretool.mjs");
+    expect(serialized).not.toContain("secret-scrub-stop.mjs");
+    // PreToolUse should be entirely absent (no user hooks configured).
+    expect(settings.hooks?.PreToolUse).toBeUndefined();
+  });
+
+  it("preserves user-declared PreToolUse hooks alongside secret-guard", () => {
+    const agentConfig = makeAgentConfig({
+      hooks: { PreToolUse: [{ command: "/opt/audit.sh", timeout: 5 }] },
+    });
+    const result = scaffoldAgent(
+      "sd-user-pre-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      makeConfig("sd-user-pre-agent", agentConfig),
+    );
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+    const pre = settings.hooks.PreToolUse as Array<{ hooks: Array<{ command: string }> }>;
+    const commands = pre.flatMap((e) => e.hooks).map((h) => h.command);
+    expect(commands).toContain("/opt/audit.sh");
+    expect(commands.some((c) => c.includes("secret-guard-pretool.mjs"))).toBe(true);
+  });
 });
 
 describe("scaffoldAgent with inline profiles (extends cascade)", () => {

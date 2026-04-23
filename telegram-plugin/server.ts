@@ -51,7 +51,6 @@ import {
   TELEGRAM_SWITCHROOM_COMMANDS,
 } from './welcome-text.js'
 import { run, type RunnerHandle } from '@grammyjs/runner'
-import { runWithRetry, withTimeout } from './gateway/run-with-retry.js'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { execFileSync, execSync, spawn } from 'child_process'
@@ -62,6 +61,18 @@ import { installPluginLogger } from './plugin-logger.js'
 import { sanitizeChannelBody } from './channel-envelope-safety.js'
 import { StatusReactionController } from './status-reactions.js'
 import { isTelegramReplyTool, isTelegramSurfaceTool } from './tool-names.js'
+import { createTypingWrapper } from './typing-wrap.js'
+import {
+  readPidFile,
+  isPidAlive,
+  shouldFallBackToLegacy,
+} from './gateway/pid-file.js'
+import {
+  readSessionMarker,
+  writeSessionMarker,
+  shouldFireRestartBanner,
+  type SessionMarker,
+} from './gateway/session-marker.js'
 
 // Route all process.stderr.write calls (including downstream "telegram channel:",
 // "[streaming-metrics] ...", and draft-stream edit-error lines) to a rotating
@@ -92,13 +103,12 @@ installPluginLogger()
 {
   const _stateDir = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
   const _gatewaySocket = process.env.SWITCHROOM_GATEWAY_SOCKET ?? join(_stateDir, 'gateway.sock')
+  const _gatewayPidPath = process.env.SWITCHROOM_GATEWAY_PID_FILE ?? join(_stateDir, 'gateway.pid.json')
+
   let _gatewayLive = false
-  if (existsSync(_gatewaySocket)) {
-    // Probe the socket: attempt a TCP-level connect then immediately close.
-    // If the gateway is alive, connect succeeds; if the listener is gone
-    // (ECONNREFUSED) or the probe fails transiently, we fall through to
-    // legacy mode WITHOUT deleting the socket — see banner-incident note
-    // above.
+
+  async function probeSocketOnce(): Promise<void> {
+    if (!existsSync(_gatewaySocket)) return
     try {
       await Bun.connect({
         unix: _gatewaySocket,
@@ -111,18 +121,64 @@ installPluginLogger()
         },
       })
       _gatewayLive = true
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      process.stderr.write(
-        `telegram channel: socket ${_gatewaySocket} exists but probe failed (${msg}) — ` +
-        `falling through to legacy monolith. Socket left intact; gateway owns lifecycle.\n`,
-      )
+    } catch {
+      /* swallow — caller inspects _gatewayLive */
     }
   }
+
+  // Retry-before-fallback: if the socket is momentarily unreachable
+  // but the gateway PID file exists AND the PID is alive, the gateway
+  // is just briefly not listening (accept-backlog, handshake race, or
+  // a sub-ms window during gateway's own restart). Retry with backoff
+  // rather than spawning a second grammY poller. See pid-file.ts for
+  // the 2026-04-22 incident this closes.
+  await probeSocketOnce()
+  if (!_gatewayLive) {
+    const BACKOFFS_MS = [200, 500, 1000, 2000, 4000]
+    for (const delay of BACKOFFS_MS) {
+      const rec = readPidFile(_gatewayPidPath)
+      const pidFileExists = rec !== null
+      const pidAlive = rec != null && isPidAlive(rec.pid)
+      const decision = shouldFallBackToLegacy({
+        socketReachable: false,
+        pidFileExists,
+        pidAlive,
+      })
+      if (decision) break
+      process.stderr.write(
+        `telegram channel: socket ${_gatewaySocket} unreachable but gateway PID ${rec?.pid} alive — retrying in ${delay}ms\n`,
+      )
+      await new Promise((r) => setTimeout(r, delay))
+      await probeSocketOnce()
+      if (_gatewayLive) break
+    }
+  }
+
   if (_gatewayLive) {
     process.stderr.write(`telegram channel: gateway detected at ${_gatewaySocket}, running as bridge\n`)
     await import('./bridge/bridge.js')
     await new Promise(() => {})
+  }
+
+  // Final fallback-or-not decision after retries exhausted. We reach
+  // here only if the socket is still not reachable; log which branch
+  // of the decision tree we took.
+  const _finalRec = readPidFile(_gatewayPidPath)
+  const _finalPidFileExists = _finalRec !== null
+  const _finalPidAlive = _finalRec != null && isPidAlive(_finalRec.pid)
+  if (!shouldFallBackToLegacy({
+    socketReachable: false,
+    pidFileExists: _finalPidFileExists,
+    pidAlive: _finalPidAlive,
+  })) {
+    // The PID is alive but the socket stayed unreachable across all
+    // retries. Something is genuinely wrong with the gateway — don't
+    // make it worse by spawning a second poller. Abort this sidecar.
+    process.stderr.write(
+      `telegram channel: gateway PID ${_finalRec?.pid} alive but socket ${_gatewaySocket} unreachable after retries — ` +
+      `refusing to fall back to legacy monolith (would 409-conflict against live gateway). Exiting sidecar.\n`,
+    )
+    process.exit(0)
   }
   process.stderr.write('telegram channel: no gateway socket found, running legacy monolith\n')
 }
@@ -147,11 +203,16 @@ import {
   parseQueuePrefix,
   formatPriorAssistantPreview,
 } from './steering.js'
+import { runPipeline } from './secret-detect/pipeline.js'
+import { StagingMap } from './secret-detect/staging.js'
+import { maskToken } from './secret-detect/mask.js'
+import { defaultVaultWrite, defaultVaultList } from './secret-detect/vault-write.js'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const APPROVED_DIR = join(STATE_DIR, 'approved')
 const ENV_FILE = join(STATE_DIR, '.env')
+const LEGACY_STARTED_AT_MS = Date.now()
 
 // Load ~/.claude/channels/telegram/.env into process.env. Real env wins.
 // Plugin-spawned servers don't get an env block — this is where the token lives.
@@ -889,6 +950,12 @@ function stopTypingLoop(chat_id: string): void {
   }
 }
 
+const typingWrapper = createTypingWrapper({
+  startTypingLoop,
+  stopTypingLoop,
+  isSurfaceTool: isTelegramSurfaceTool,
+})
+
 // ---------------------------------------------------------------------------
 // Robust API call wrapper — handles 429, 400 edge cases, network retries
 // ---------------------------------------------------------------------------
@@ -1070,6 +1137,24 @@ type PendingVaultOp =
   | { kind: 'value'; op: 'set'; key: string; passphrase: string; startedAt: number }
 const VAULT_INPUT_TTL_MS = 5 * 60 * 1000  // 5 min before prompts expire
 const pendingVaultOps = new Map<string, PendingVaultOp>()
+
+// Secret-detection staging: ambiguous hits the user must confirm before we
+// store/delete. Also holds the "we need a passphrase to store this high-
+// confidence hit" cases so the re-run after passphrase entry is seamless.
+const secretStaging = new StagingMap()
+// Keyed (chat_id, message_id): detections that are high-confidence but we
+// couldn't store because no passphrase was cached. When the user sends
+// their passphrase via /vault, we re-run the pipeline. Same TTL as staging.
+interface DeferredSecret {
+  chat_id: string
+  original_message_id: number
+  text: string
+  staged_at: number
+}
+const deferredSecrets = new Map<string, DeferredSecret>()
+function deferredKey(chat_id: string, message_id: number): string {
+  return `${chat_id}:${message_id}`
+}
 
 /** A single token (no spaces) that looks like a Claude OAuth browser code. */
 export function looksLikeAuthCode(text: string): boolean {
@@ -2792,6 +2877,9 @@ function closeProgressLane(chatId: string, threadId: number | undefined): void {
 function handleSessionEvent(ev: SessionEvent): void {
   switch (ev.kind) {
     case 'enqueue': {
+      // Drain any orphaned typing-wrap entries left over from a crashed
+      // prior turn before resetting focus.
+      typingWrapper.drainAll()
       // The model is about to process this chat. Reset turn tracking and
       // capture the focus so subsequent events route correctly.
       if (ev.chatId) {
@@ -2863,6 +2951,9 @@ function handleSessionEvent(ev: SessionEvent): void {
       }
       // Everything else is the model doing real work — drive a tool reaction.
       ctrl.setTool(name)
+      if (ev.toolUseId) {
+        typingWrapper.onToolUse(ev.toolUseId, currentSessionChatId, name)
+      }
       return
     }
     case 'text': {
@@ -2934,9 +3025,23 @@ function handleSessionEvent(ev: SessionEvent): void {
       return
     }
     case 'tool_result': {
+      if (ev.toolUseId) typingWrapper.onToolResult(ev.toolUseId)
+      return
+    }
+    case 'sub_agent_tool_use': {
+      if (currentSessionChatId == null) return
+      if (!ev.toolUseId) return
+      typingWrapper.onToolUse(ev.toolUseId, currentSessionChatId, ev.toolName)
+      return
+    }
+    case 'sub_agent_tool_result': {
+      if (ev.toolUseId) typingWrapper.onToolResult(ev.toolUseId)
       return
     }
     case 'turn_end': {
+      // Drain any still-pending tool dispatch typing entries — covers
+      // transcript truncation or a Claude Code crash mid-tool.
+      typingWrapper.drainAll()
       // Cancel orphaned-reply timeout — turn_end arrived normally
       if (orphanedReplyTimeoutId != null) {
         clearTimeout(orphanedReplyTimeoutId)
@@ -3086,18 +3191,7 @@ function handleSessionEvent(ev: SessionEvent): void {
       // Close the progress lane as well so the next turn posts a fresh
       // progress-card Telegram message instead of re-editing the prior
       // turn's card (see closeProgressLane for the full rationale).
-      //
-      // Notification-spam fix (2026-04-23): skip this backstop while the
-      // progress-card driver still owns the card (deferred-completion
-      // state with in-flight sub-agents). Tearing down the stream here
-      // forces every subsequent sub-agent emit to create a fresh
-      // sendMessage — which Telegram delivers as a new push notification.
-      // The driver's own emit(done=true) path will finalize the stream
-      // cleanly when the last sub-agent lands.
-      const driverThreadIdStr = threadId != null ? String(threadId) : undefined
-      if (progressDriver == null || !progressDriver.hasActiveCard(chatId, driverThreadIdStr)) {
-        closeProgressLane(chatId, threadId)
-      }
+      closeProgressLane(chatId, threadId)
       currentSessionChatId = null
       currentSessionThreadId = undefined
       currentTurnReplyCalled = false
@@ -3124,16 +3218,10 @@ function shutdown(): void {
   // The runner has its own .stop() that signals graceful shutdown of the
   // background fetch loop. Force-exit after 2s if it hangs.
   setTimeout(() => process.exit(0), 2000)
-  // Null the handle after stop() so a double-SIGTERM or a post-shutdown
-  // retry-loop resume can't double-stop it (grammy's stop() is idempotent
-  // but the defensive null keeps the invariant "at most one live handle"
-  // intact — mirror of gateway.ts shutdown()).
   if (runnerHandle != null) {
-    const h = runnerHandle
-    runnerHandle = null
-    void withTimeout(Promise.resolve(h.stop()), 2000).catch(() => {}).finally(() => process.exit(0))
+    void Promise.resolve(runnerHandle.stop()).finally(() => process.exit(0))
   } else {
-    void withTimeout(Promise.resolve(bot.stop()), 2000).catch(() => {}).finally(() => process.exit(0))
+    void Promise.resolve(bot.stop()).finally(() => process.exit(0))
   }
 }
 process.stdin.on('end', shutdown)
@@ -5094,13 +5182,163 @@ async function handleInbound(
   // Typing indicator — signals "processing" until we reply (or ~5s elapses).
   void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
 
+  // --- Secret-detect follow-up command intercept ---
+  // `stash NAME` / `ignore` / `rename X` / `forget` on a pending ambiguous
+  // detection. The user is replying to our "looks like a high-entropy
+  // string — reply `stash NAME` or `ignore`" prompt. We look up the most
+  // recent staged detection for this chat and act on it.
+  const stagedMatch = /^\s*(stash|ignore|rename|forget)\b\s*(\S+)?/i.exec(text)
+  if (stagedMatch) {
+    const staged = secretStaging.latestForChat(chat_id)
+    if (staged != null) {
+      const verb = stagedMatch[1]!.toLowerCase()
+      const arg = stagedMatch[2]?.trim()
+      if (verb === 'ignore' || verb === 'forget') {
+        secretStaging.delete(staged.chat_id, staged.message_id)
+        await switchroomReply(ctx, 'ok — ignored. nothing stored.', { html: true })
+        if (msgId != null) void bot.api.deleteMessage(chat_id, msgId).catch(() => {})
+        return
+      }
+      if (verb === 'stash' || verb === 'rename') {
+        // Need a passphrase to write to the vault.
+        const cached = vaultPassphraseCache.get(chat_id)
+        if (!cached || cached.expiresAt <= Date.now()) {
+          await switchroomReply(ctx, 'No vault passphrase cached. Run <code>/vault list</code> first (or any /vault command) to unlock, then re-send <code>stash NAME</code>.', { html: true })
+          return
+        }
+        const slugBase = arg && arg.length > 0 ? arg : staged.detection.suggested_slug
+        const listed = defaultVaultList(cached.passphrase)
+        const existing = new Set(listed.ok ? listed.keys : [])
+        let slug = slugBase
+        let n = 2
+        while (existing.has(slug)) slug = `${slugBase}_${n++}`
+        const write = defaultVaultWrite(slug, staged.detection.matched_text, cached.passphrase)
+        if (!write.ok) {
+          await switchroomReply(ctx, `<b>vault write failed:</b>\n${preBlock(write.output)}`, { html: true })
+          return
+        }
+        secretStaging.delete(staged.chat_id, staged.message_id)
+        // Delete the user's inbound (both the original and this reply).
+        if (msgId != null) void bot.api.deleteMessage(chat_id, msgId).catch(() => {})
+        void bot.api.deleteMessage(chat_id, staged.message_id).catch(() => {})
+        await switchroomReply(ctx, `✅ stored as <code>vault:${slug}</code> (masked: <code>${maskToken(staged.detection.matched_text)}</code>)`, { html: true })
+        return
+      }
+    }
+    // No staged entry to act on — fall through to normal handling.
+  }
+
   // `/queue ` opt-in: strip the prefix before anything else so downstream
   // history and notification see the "real" body. The flag is forwarded
   // as meta.queued below so the model knows this was an explicit "new
   // task, not a steer" declaration from the user.
   const parsedQueue = parseQueuePrefix(text)
   const isQueuedPrefix = parsedQueue.queued
-  const effectiveText = isQueuedPrefix ? parsedQueue.body : text
+  let effectiveText = isQueuedPrefix ? parsedQueue.body : text
+
+  // --- Secret detection + vault-scrub ---
+  // If the user pasted a secret, we intercept before recording to history or
+  // emitting to Claude: write to vault, delete the message, rewrite the
+  // prompt so the downstream session .jsonl, Hindsight memory, and logs
+  // never see the raw bytes. If there's no cached vault passphrase, high-
+  // confidence hits are staged as ambiguous so the user can unlock first.
+  try {
+    const cachedPp = vaultPassphraseCache.get(chat_id)
+    const passphrase = cachedPp && cachedPp.expiresAt > Date.now() ? cachedPp.passphrase : null
+    if (passphrase) {
+      const pipeRes = runPipeline({
+        chat_id,
+        message_id: msgId ?? null,
+        text: effectiveText,
+        passphrase,
+        vaultWrite: defaultVaultWrite,
+        vaultList: defaultVaultList,
+      })
+      if (pipeRes.stored.length > 0) {
+        effectiveText = pipeRes.rewritten_text
+        // Delete the Telegram message with the raw bytes.
+        if (msgId != null) {
+          try {
+            await bot.api.deleteMessage(chat_id, msgId)
+          } catch (err) {
+            process.stderr.write(`[secret-detect] deleteMessage failed: ${(err as Error).message}\n`)
+          }
+        }
+        // Post a replacement bot message with the masked summary.
+        const lines = pipeRes.stored.map((s) =>
+          `• <code>${s.masked}</code> → <code>vault:${s.actual_slug}</code>`,
+        )
+        await switchroomReply(
+          ctx,
+          [`🔒 captured ${pipeRes.stored.length} secret${pipeRes.stored.length === 1 ? '' : 's'}:`, ...lines, '', 'reply <code>rename X</code> or <code>forget</code>.'].join('\n'),
+          { html: true },
+        )
+        // Record the stored detections as "latest" so a follow-up rename/forget works.
+        for (const s of pipeRes.stored) {
+          secretStaging.set({
+            chat_id,
+            message_id: msgId ?? 0,
+            detection: { ...s.detection, suggested_slug: s.actual_slug },
+            staged_at: Date.now(),
+          })
+        }
+      } else if (pipeRes.ambiguous.length > 0) {
+        // Stage ambiguous hits and ask the user.
+        for (const d of pipeRes.ambiguous) {
+          secretStaging.set({ chat_id, message_id: msgId ?? 0, detection: d, staged_at: Date.now() })
+        }
+        const top = pipeRes.ambiguous[0]!
+        await switchroomReply(
+          ctx,
+          `👀 looks like a high-entropy string (rule: <code>${escapeHtmlForTg(top.rule_id)}</code>). reply <code>stash NAME</code> to store in vault, or <code>ignore</code>.`,
+          { html: true },
+        )
+        // For ambiguous, we do NOT delete the message or rewrite — let the
+        // user confirm first.
+      }
+    } else {
+      // No passphrase cached — detect, but defer. Tell the user once per
+      // message so they can /vault unlock and we'll rescue on the next try.
+      const { detectSecrets: peek } = await import('./secret-detect/index.js')
+      const detections = peek(effectiveText)
+      const hasHigh = detections.some((d) => d.confidence === 'high' && !d.suppressed)
+      if (hasHigh) {
+        deferredSecrets.set(deferredKey(chat_id, msgId ?? 0), {
+          chat_id,
+          original_message_id: msgId ?? 0,
+          text: effectiveText,
+          staged_at: Date.now(),
+        })
+        await switchroomReply(
+          ctx,
+          '⚠️ detected a secret but no vault passphrase is cached — run <code>/vault list</code> to unlock, then re-paste. this message was NOT stored.',
+          { html: true },
+        )
+        if (msgId != null) {
+          try { await bot.api.deleteMessage(chat_id, msgId) } catch {}
+        }
+        return
+      }
+    }
+  } catch (err) {
+    // FAIL-CLOSED: if the detector throws, we must NOT fall through to
+    // recordInbound() with the raw text — that would stamp the secret
+    // into SQLite and emit it to Claude unscrubbed. Drop the message on
+    // the floor and warn the user. See secret-detect-fail-closed.test.ts
+    // for the regression test.
+    process.stderr.write(`[secret-detect] pipeline error: ${(err as Error).message}\n`)
+    try {
+      await switchroomReply(
+        ctx,
+        '⚠️ secret-detect pipeline crashed; this message was dropped for safety. please try again or check the agent log.',
+        { html: true },
+      )
+    } catch {}
+    if (msgId != null) {
+      try { await bot.api.deleteMessage(chat_id, msgId) } catch {}
+    }
+    return
+  }
 
   // Status reaction controller — gives the user a glanceable lifecycle
   // signal on their inbound message: 👀 received → 🤔 thinking → 🔥/👨‍💻/⚡
@@ -5382,266 +5620,259 @@ let runnerHandle: RunnerHandle | null = null
 // 2026-04-22 — same bug in the gateway).
 let didOneTimeSetup = false
 
-// ─── 409 retry teardown ───
-// Production flow delegates to the unit-tested runWithRetry helper. Same
-// code path as gateway.ts — the "drain before retry" invariant is pinned
-// by tests in gateway-409-retry-leak.test.ts.
-async function doOneTimeSetup(): Promise<void> {
-  // Pre-fetch bot info (the runner doesn't expose an onStart callback
-  // like bot.start does, so we have to call getMe ourselves).
-  const me = await bot.api.getMe()
-  botUsername = me.username
-  process.stderr.write(`telegram channel: polling as @${me.username}\n`)
-  if (TOPIC_ID != null) {
-    process.stderr.write(`telegram channel: topic filter active — only thread_id=${TOPIC_ID}\n`)
-  }
-
-  void registerSwitchroomBotCommands().catch(() => {})
-
-  // Boot-time stale-pin sweep. Complements the sidecar-driven
-  // `sweepActivePins` above: walks every allowlisted chat and
-  // unpins any bot-authored pins that are still visible on
-  // Telegram. Needed because pins can leak past the sidecar (pin
-  // API succeeded but sidecar write failed, or the sidecar file
-  // was lost). Fire-and-forget — never block polling on a slow
-  // or flaky Telegram API.
-  try {
-    const bootAccess = loadAccess()
-    const chatSet = new Set<string>(bootAccess.allowFrom)
-    for (const gid of Object.keys(bootAccess.groups)) chatSet.add(gid)
-    const chatIds = [...chatSet]
-    if (chatIds.length > 0) {
-      // Snapshot the sidecar BEFORE the sweep so the audit metric
-      // below can distinguish "orphan pin the sidecar knew about"
-      // (expected — we just swept it) from "orphan pin the sidecar
-      // did NOT know about" (real divergence — alarm-worthy).
-      const sidecarSnapshot = (() => {
-        const agentDir = resolveAgentDirFromEnv()
-        if (agentDir == null) return new Set<string>()
-        return new Set(
-          readActivePins(agentDir).map((p) => `${p.chatId}:${p.messageId}`),
-        )
-      })()
-      const orphanUntracked: Array<{ chatId: string; messageId: number }> = []
-      void sweepBotAuthoredPins(
-        chatIds,
-        me.id,
-        async (chatId) => {
-          const chat = await lockedBot.api.getChat(chatId)
-          const pinned = (chat as { pinned_message?: { message_id: number; from?: { id: number } } }).pinned_message
-          if (!pinned) return null
-          return {
-            messageId: pinned.message_id,
-            fromId: pinned.from?.id ?? null,
-          }
-        },
-        async (chatId, messageId) => {
-          const started = Date.now()
-          if (!sidecarSnapshot.has(`${chatId}:${messageId}`)) {
-            orphanUntracked.push({ chatId, messageId })
-          }
-          try {
-            await lockedBot.api.unpinChatMessage(chatId, messageId)
-            logPinEvent({
-              event: 'sweep-auth',
-              chatId,
-              messageId,
-              outcome: 'ok',
-              durationMs: Date.now() - started,
-            })
-          } catch (err) {
-            logPinEvent({
-              event: 'sweep-auth',
-              chatId,
-              messageId,
-              outcome: classifyPinError(err),
-              error: errorMessage(err),
-              durationMs: Date.now() - started,
-            })
-            throw err
-          }
-        },
-        {
-          log: (msg) =>
-            process.stderr.write(`telegram channel: bot-authored pin sweep — ${msg}\n`),
-        },
-      )
-        .then((result) => {
-          // Audit metric: pins the sweep found that the sidecar never
-          // tracked. Steady-state this should be 0; a non-zero count
-          // on a freshly-restarted bot means a prior pin landed on
-          // Telegram without a matching sidecar entry (pin API
-          // succeeded but sidecar write failed, or sidecar file was
-          // lost). One line per-chat gives ops a grep-friendly alarm.
-          const perChat: Record<string, number> = {}
-          for (const o of orphanUntracked) {
-            perChat[o.chatId] = (perChat[o.chatId] ?? 0) + 1
-          }
-          for (const [chatId, count] of Object.entries(perChat)) {
-            logPinEvent({
-              event: 'audit-orphan',
-              chatId,
-              outcome: 'observed',
-              durationMs: count,
-            })
-          }
-          if (result.total === 0 && orphanUntracked.length === 0) {
-            logPinEvent({
-              event: 'audit-orphan',
-              chatId: '*',
-              outcome: 'ok',
-              durationMs: 0,
-            })
-          }
-        })
-        .catch((err: Error) =>
-          process.stderr.write(
-            `telegram channel: bot-authored pin sweep failed: ${err.message}\n`,
-          ),
-        )
-    }
-  } catch (err) {
-    process.stderr.write(
-      `telegram channel: bot-authored pin sweep setup failed: ${err}\n`,
-    )
-  }
-
-  // Restart follow-up: if a marker was dropped by the previous bot
-  // process before it got SIGTERM'd, send a "✅ restarted — ready"
-  // message so the user sees an explicit completion signal instead
-  // of just silence after the "🔄 Restarting…" ack.
-  try {
-    const marker = readRestartMarker()
-    if (marker) {
-      clearRestartMarker()
-      const ageMs = Date.now() - marker.ts
-      // Skip stale markers (>5 min) — that's not this restart.
-      if (ageMs < 5 * 60_000) {
-        const ageSec = Math.max(1, Math.round(ageMs / 1000))
-        const text = `🎛️ Switchroom restarted — ready. (took ~${ageSec}s)`
-        try {
-          const sent = await lockedBot.api.sendMessage(marker.chat_id, text, {
-            parse_mode: 'HTML',
-            link_preview_options: { is_disabled: true },
-            ...(marker.thread_id != null ? { message_thread_id: marker.thread_id } : {}),
-            ...(marker.ack_message_id != null
-              ? { reply_parameters: { message_id: marker.ack_message_id } }
-              : {}),
-          })
-          if (HISTORY_ENABLED) {
-            try {
-              recordOutbound({
-                chat_id: marker.chat_id,
-                thread_id: marker.thread_id,
-                message_ids: [sent.message_id],
-                texts: [text],
-                attachment_kinds: [],
-              })
-            } catch (err) {
-              process.stderr.write(`telegram channel: recordOutbound(restart followup) failed: ${err}\n`)
-            }
-          }
-        } catch (err) {
-          process.stderr.write(`telegram channel: restart followup send failed: ${err}\n`)
-        }
+void (async () => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      // Pre-fetch bot info (the runner doesn't expose an onStart callback
+      // like bot.start does, so we have to call getMe ourselves).
+      const me = await bot.api.getMe()
+      botUsername = me.username
+      process.stderr.write(`telegram channel: polling as @${me.username}\n`)
+      if (TOPIC_ID != null) {
+        process.stderr.write(`telegram channel: topic filter active — only thread_id=${TOPIC_ID}\n`)
       }
-    }
-  } catch (err) {
-    process.stderr.write(`telegram channel: restart marker check failed: ${err}\n`)
-  }
 
-  // Crash recovery notification: if there was no restart marker (i.e.
-  // this wasn't a graceful /restart or /update) but the service was
-  // previously running (we have history and an allowlisted DM chat),
-  // notify the owner that we recovered from an unexpected crash/kill.
-  // This covers SIGKILL, OOM, systemd auto-restart after exit-on-failure.
-  try {
-    const marker = readRestartMarker()
-    if (!marker) {
-      const bootAccess = loadAccess()
-      const ownerChatId = bootAccess.allowFrom[0]
-      if (ownerChatId && HISTORY_ENABLED) {
-        try {
-          const recent = queryHistory({ chat_id: ownerChatId, limit: 1 })
-          if (recent.length > 0) {
-            const lastTs = recent[0].ts * 1000
-            const downtime = Date.now() - lastTs
-            // Only notify if last activity was within 30 min (suggests unexpected crash, not a long idle)
-            if (downtime < 30 * 60_000) {
-              const downSec = Math.max(1, Math.round(downtime / 1000))
-              const text = `⚡ Recovered from unexpected restart. (down ~${downSec}s)`
-              const sent = await lockedBot.api.sendMessage(ownerChatId, text, {
+      if (!didOneTimeSetup) {
+        didOneTimeSetup = true
+        void registerSwitchroomBotCommands().catch(() => {})
+
+      // Boot-time stale-pin sweep. Complements the sidecar-driven
+      // `sweepActivePins` above: walks every allowlisted chat and
+      // unpins any bot-authored pins that are still visible on
+      // Telegram. Needed because pins can leak past the sidecar (pin
+      // API succeeded but sidecar write failed, or the sidecar file
+      // was lost). Fire-and-forget — never block polling on a slow
+      // or flaky Telegram API.
+      try {
+        const bootAccess = loadAccess()
+        const chatSet = new Set<string>(bootAccess.allowFrom)
+        for (const gid of Object.keys(bootAccess.groups)) chatSet.add(gid)
+        const chatIds = [...chatSet]
+        if (chatIds.length > 0) {
+          // Snapshot the sidecar BEFORE the sweep so the audit metric
+          // below can distinguish "orphan pin the sidecar knew about"
+          // (expected — we just swept it) from "orphan pin the sidecar
+          // did NOT know about" (real divergence — alarm-worthy).
+          const sidecarSnapshot = (() => {
+            const agentDir = resolveAgentDirFromEnv()
+            if (agentDir == null) return new Set<string>()
+            return new Set(
+              readActivePins(agentDir).map((p) => `${p.chatId}:${p.messageId}`),
+            )
+          })()
+          const orphanUntracked: Array<{ chatId: string; messageId: number }> = []
+          void sweepBotAuthoredPins(
+            chatIds,
+            me.id,
+            async (chatId) => {
+              const chat = await lockedBot.api.getChat(chatId)
+              const pinned = (chat as { pinned_message?: { message_id: number; from?: { id: number } } }).pinned_message
+              if (!pinned) return null
+              return {
+                messageId: pinned.message_id,
+                fromId: pinned.from?.id ?? null,
+              }
+            },
+            async (chatId, messageId) => {
+              const started = Date.now()
+              if (!sidecarSnapshot.has(`${chatId}:${messageId}`)) {
+                orphanUntracked.push({ chatId, messageId })
+              }
+              try {
+                await lockedBot.api.unpinChatMessage(chatId, messageId)
+                logPinEvent({
+                  event: 'sweep-auth',
+                  chatId,
+                  messageId,
+                  outcome: 'ok',
+                  durationMs: Date.now() - started,
+                })
+              } catch (err) {
+                logPinEvent({
+                  event: 'sweep-auth',
+                  chatId,
+                  messageId,
+                  outcome: classifyPinError(err),
+                  error: errorMessage(err),
+                  durationMs: Date.now() - started,
+                })
+                throw err
+              }
+            },
+            {
+              log: (msg) =>
+                process.stderr.write(`telegram channel: bot-authored pin sweep — ${msg}\n`),
+            },
+          )
+            .then((result) => {
+              // Audit metric: pins the sweep found that the sidecar never
+              // tracked. Steady-state this should be 0; a non-zero count
+              // on a freshly-restarted bot means a prior pin landed on
+              // Telegram without a matching sidecar entry (pin API
+              // succeeded but sidecar write failed, or sidecar file was
+              // lost). One line per-chat gives ops a grep-friendly alarm.
+              const perChat: Record<string, number> = {}
+              for (const o of orphanUntracked) {
+                perChat[o.chatId] = (perChat[o.chatId] ?? 0) + 1
+              }
+              for (const [chatId, count] of Object.entries(perChat)) {
+                logPinEvent({
+                  event: 'audit-orphan',
+                  chatId,
+                  outcome: 'observed',
+                  durationMs: count,
+                })
+              }
+              if (result.total === 0 && orphanUntracked.length === 0) {
+                logPinEvent({
+                  event: 'audit-orphan',
+                  chatId: '*',
+                  outcome: 'ok',
+                  durationMs: 0,
+                })
+              }
+            })
+            .catch((err: Error) =>
+              process.stderr.write(
+                `telegram channel: bot-authored pin sweep failed: ${err.message}\n`,
+              ),
+            )
+        }
+      } catch (err) {
+        process.stderr.write(
+          `telegram channel: bot-authored pin sweep setup failed: ${err}\n`,
+        )
+      }
+
+      // Restart follow-up: if a marker was dropped by the previous bot
+      // process before it got SIGTERM'd, send a "✅ restarted — ready"
+      // message so the user sees an explicit completion signal instead
+      // of just silence after the "🔄 Restarting…" ack.
+      try {
+        const marker = readRestartMarker()
+        if (marker) {
+          clearRestartMarker()
+          const ageMs = Date.now() - marker.ts
+          // Skip stale markers (>5 min) — that's not this restart.
+          if (ageMs < 5 * 60_000) {
+            const ageSec = Math.max(1, Math.round(ageMs / 1000))
+            const text = `🎛️ Switchroom restarted — ready. (took ~${ageSec}s)`
+            try {
+              const sent = await lockedBot.api.sendMessage(marker.chat_id, text, {
                 parse_mode: 'HTML',
                 link_preview_options: { is_disabled: true },
+                ...(marker.thread_id != null ? { message_thread_id: marker.thread_id } : {}),
+                ...(marker.ack_message_id != null
+                  ? { reply_parameters: { message_id: marker.ack_message_id } }
+                  : {}),
               })
               if (HISTORY_ENABLED) {
                 try {
                   recordOutbound({
-                    chat_id: ownerChatId,
-                    thread_id: null,
+                    chat_id: marker.chat_id,
+                    thread_id: marker.thread_id,
                     message_ids: [sent.message_id],
                     texts: [text],
                     attachment_kinds: [],
                   })
-                } catch { /* best effort */ }
+                } catch (err) {
+                  process.stderr.write(`telegram channel: recordOutbound(restart followup) failed: ${err}\n`)
+                }
               }
+            } catch (err) {
+              process.stderr.write(`telegram channel: restart followup send failed: ${err}\n`)
             }
           }
-        } catch (histErr) {
-          process.stderr.write(`telegram channel: crash recovery history check failed: ${histErr}\n`)
         }
+      } catch (err) {
+        process.stderr.write(`telegram channel: restart marker check failed: ${err}\n`)
       }
-    }
-  } catch (err) {
-    process.stderr.write(`telegram channel: crash recovery notification failed: ${err}\n`)
-  }
-}
 
-void runWithRetry<RunnerHandle>({
-  // Heavy setup runs once on attempt 1 only. Gated on !didOneTimeSetup so
-  // 409 retries don't re-issue API calls — the retry branch is purely
-  // "stop old → run new".
-  beforeRun: async () => {
-    if (didOneTimeSetup) return
-    await doOneTimeSetup()
-    didOneTimeSetup = true
-  },
-  run: () => {
-    // run() returns a RunnerHandle. Call .task() to await background completion.
-    runnerHandle = run(bot)
-    return runnerHandle
-  },
-  shouldRetry: (err) => err instanceof GrammyError && err.error_code === 409,
-  sleep: async (attempt) => {
-    const delay = Math.min(1000 * attempt, 15000)
-    await new Promise((r) => setTimeout(r, delay))
-  },
-  stopTimeoutMs: 3000,
-  onRetry: (err, attempt) => {
-    const delay = Math.min(1000 * attempt, 15000)
-    // Existing log line — kept verbatim so existing log-greps keep matching.
-    if (err instanceof GrammyError && err.error_code === 409) {
-      const detail = attempt === 1
-        ? ' — another instance is polling (zombie session, or a second Claude Code running?)'
-        : ''
-      process.stderr.write(
-        `telegram channel: 409 Conflict${detail}, retrying in ${delay / 1000}s\n`,
-      )
+      // Crash recovery notification: if there was no restart marker (i.e.
+      // this wasn't a graceful /restart or /update) but the service was
+      // previously running (we have history and an allowlisted DM chat),
+      // notify the owner that we recovered from an unexpected crash/kill.
+      // This covers SIGKILL, OOM, systemd auto-restart after exit-on-failure.
+      //
+      // Gated on a session marker (pid + startedAt) so a grammY
+      // poll-restart within one process lifetime does NOT refire the
+      // banner. See session-marker.ts for the 2026-04-22 incident.
+      try {
+        const marker = readRestartMarker()
+        const _sessionMarkerPath = process.env.SWITCHROOM_LEGACY_SESSION_MARKER ?? join(STATE_DIR, 'legacy-session.json')
+        const currentSession: SessionMarker = { pid: process.pid, startedAtMs: LEGACY_STARTED_AT_MS }
+        const storedSession = readSessionMarker(_sessionMarkerPath)
+        const bannerOK = shouldFireRestartBanner({ stored: storedSession, current: currentSession })
+        if (!marker && !bannerOK) {
+          process.stderr.write(`telegram channel: boot: suppressed 'recovered' banner — session marker matches current process (pid=${process.pid})\n`)
+        }
+        if (!marker && bannerOK) {
+          const bootAccess = loadAccess()
+          const ownerChatId = bootAccess.allowFrom[0]
+          if (ownerChatId && HISTORY_ENABLED) {
+            try {
+              const recent = queryHistory({ chat_id: ownerChatId, limit: 1 })
+              if (recent.length > 0) {
+                const lastTs = recent[0].ts * 1000
+                const downtime = Date.now() - lastTs
+                // Only notify if last activity was within 30 min (suggests unexpected crash, not a long idle)
+                if (downtime < 30 * 60_000) {
+                  const downSec = Math.max(1, Math.round(downtime / 1000))
+                  const text = `⚡ Recovered from unexpected restart. (down ~${downSec}s)`
+                  const sent = await lockedBot.api.sendMessage(ownerChatId, text, {
+                    parse_mode: 'HTML',
+                    link_preview_options: { is_disabled: true },
+                  })
+                  if (HISTORY_ENABLED) {
+                    try {
+                      recordOutbound({
+                        chat_id: ownerChatId,
+                        thread_id: null,
+                        message_ids: [sent.message_id],
+                        texts: [text],
+                        attachment_kinds: [],
+                      })
+                    } catch { /* best effort */ }
+                  }
+                }
+              }
+            } catch (histErr) {
+              process.stderr.write(`telegram channel: crash recovery history check failed: ${histErr}\n`)
+            }
+          }
+        }
+        // Always record this process in the session marker — subsequent
+        // banner-gates within this process lifetime see "stored === current"
+        // and stay silent on poll-restarts.
+        try {
+          writeSessionMarker(_sessionMarkerPath, currentSession)
+        } catch (err) {
+          process.stderr.write(`telegram channel: writeSessionMarker failed: ${err}\n`)
+        }
+      } catch (err) {
+        process.stderr.write(`telegram channel: crash recovery notification failed: ${err}\n`)
+      }
+      } // end if (!didOneTimeSetup)
+
+      // run() returns a RunnerHandle. Call .task() to await background completion.
+      runnerHandle = run(bot)
+      await runnerHandle.task()
+      return // graceful stop
+    } catch (err) {
+      if (err instanceof GrammyError && err.error_code === 409) {
+        const delay = Math.min(1000 * attempt, 15000)
+        const detail = attempt === 1
+          ? ' — another instance is polling (zombie session, or a second Claude Code running?)'
+          : ''
+        process.stderr.write(
+          `telegram channel: 409 Conflict${detail}, retrying in ${delay / 1000}s\n`,
+        )
+        await new Promise(r => setTimeout(r, delay))
+        continue
+      }
+      if (err instanceof Error && err.message === 'Aborted delay') return
+      process.stderr.write(`telegram channel: polling failed: ${err}\n`)
+      return
     }
-    // NEW retry-specific line (distinct from first boot). Mirrors gateway.ts.
-    const code = err instanceof GrammyError ? err.error_code : 'unknown'
-    const reason = err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120)
-    process.stderr.write(`telegram channel: retry attempt=${attempt + 1} reason=${code} detail=${JSON.stringify(reason)} teardown_ms=3000 next_in_ms=${delay}\n`)
-  },
-  onStopFailure: (stopErr) => {
-    process.stderr.write(`telegram channel: runner stop() during 409 teardown failed: ${stopErr}\n`)
-  },
-  onFatal: (err) => {
-    runnerHandle = null
-    if (err instanceof Error && err.message === 'Aborted delay') return
-    process.stderr.write(`telegram channel: polling failed: ${err}\n`)
-  },
-}).then(() => {
-  // Loop exited cleanly (graceful resolution).
-  runnerHandle = null
-})
+  }
+})()

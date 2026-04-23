@@ -195,6 +195,16 @@ describe("generateGatewayUnit", () => {
     expect(unit).toContain("RestartSec=3");
   });
 
+  // Regression test for the 2026-04-23 409-conflict loop: if
+  // TimeoutStopSec is too short, systemd SIGKILLs the gateway before
+  // its 35s drain budget elapses, leaving the long-poll TCP socket in
+  // FIN_WAIT and the next gateway races it on getUpdates. The drain
+  // budget in gateway.ts is 35_000ms; this unit must give it room.
+  it("sets TimeoutStopSec=45 to allow the 35s SIGTERM drain to complete", () => {
+    const unit = generateGatewayUnit("/tmp/telegram", "assistant");
+    expect(unit).toContain("TimeoutStopSec=45");
+  });
+
   it("sets TELEGRAM_STATE_DIR environment", () => {
     const unit = generateGatewayUnit("/home/user/.claude/channels/telegram", "assistant");
     expect(unit).toContain("Environment=TELEGRAM_STATE_DIR=/home/user/.claude/channels/telegram");

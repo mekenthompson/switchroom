@@ -3784,8 +3784,11 @@ async function shutdown(signal: string): Promise<void> {
 
   for (const t of [...coalesceBuffer.values()].map((e) => e.timer)) clearTimeout(t)
   // NOTE: don't clear coalesceBuffer yet — the drain wants to observe
-  // its size as in_flight. It'll be empty by the time stopPolling
-  // returns because we cleared the timers above.
+  // its size as in_flight. Caveat: clearTimeout cancels the timer but
+  // doesn't purge the entry (entries are normally removed by the timer
+  // callback itself), so countInFlight() may report phantom coalesce
+  // entries during drain. Benign: coalesceBuffer.clear() runs after
+  // drain completes, and the drain budget covers the wait.
 
   clearInterval(pendingStateReaper)
   vaultPassphraseCache.clear()
@@ -3801,6 +3804,9 @@ async function shutdown(signal: string): Promise<void> {
   // Hard force-exit safety net at budget + 5s. systemd's TimeoutStopSec
   // is 45s; if we're not done by 40s something is genuinely wedged and
   // we'd rather exit than block the unit.
+  // NOTE: this path intentionally skips releaseStartupLock — it only fires
+  // when drain genuinely hung, and the next boot's stale-PID auto-recovery
+  // (acquireStartupLock) reclaims the lock cleanly.
   const forceExitTimer = setTimeout(() => {
     process.stderr.write('telegram gateway: shutdown.force_exit budget_exceeded\n')
     process.exit(0)
@@ -3986,11 +3992,18 @@ if (streamMode === 'checklist') {
 // ─── Startup ──────────────────────────────────────────────────────────────
 initHandoffContinuity()
 
+// Top-level error handlers route through shutdown() so the startup lock is
+// released cleanly. Without this, a top-level throw would leave the lock
+// held until the next boot's stale-PID auto-recovery — workable, but noisy.
+// The `shuttingDown` guard inside shutdown() prevents double-invocation if
+// SIGTERM races with one of these handlers.
 process.on('unhandledRejection', err => {
   process.stderr.write(`telegram gateway: unhandled rejection: ${err}\n`)
+  void shutdown('unhandledRejection')
 })
 process.on('uncaughtException', err => {
   process.stderr.write(`telegram gateway: uncaught exception: ${err}\n`)
+  void shutdown('uncaughtException')
 })
 
 let runnerHandle: RunnerHandle | null = null

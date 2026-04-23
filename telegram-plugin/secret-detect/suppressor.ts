@@ -1,11 +1,24 @@
 /**
- * Context-based suppressor — downgrades or suppresses hits that look like
- * examples, fixtures, or test data based on nearby keywords.
+ * Context-based suppressor — downgrades hits that look like examples,
+ * fixtures, or test data based on nearby keywords.
  *
  * Spec: if any of `test`, `mock`, `example`, `fixture`, `dummy` appears as a
  * whole word within 40 characters of the matched secret, mark the hit as
- * `suppressed`. The caller decides how to treat suppressed hits — typically
- * they become "ambiguous" (ask, don't auto-store) rather than "confirmed".
+ * `suppressed: true`.
+ *
+ * IMPORTANT — suppressed does NOT mean "silent-allow":
+ *   The pipeline routes `confidence: 'high' && suppressed: true` hits into
+ *   the AMBIGUOUS tier (see pipeline.ts), so the user is explicitly asked
+ *   `stash NAME` / `ignore` / `forget` / `rename`. We never silently pass
+ *   a structured-pattern match just because the word "test" is nearby.
+ *
+ *   Asymmetric risk: a false-negative leaks a real credential into the
+ *   agent's session log forever; a false-positive briefly redacts a fake
+ *   one and the user dismisses it with a single word. We bias toward the
+ *   user being the final arbiter on every structured-pattern hit.
+ *
+ *   See secret-detect-suppressor-no-silent-allow.test.ts for the
+ *   regression contract.
  */
 const MARKERS = ['test', 'mock', 'example', 'fixture', 'dummy']
 const WINDOW = 40

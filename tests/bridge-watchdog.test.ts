@@ -357,6 +357,40 @@ describe("bridge-watchdog.sh — behavioural integration", () => {
     expect(existsSync(join(h.stateDir, ".watchdog-disconnect-since"))).toBe(false);
   });
 
+  it("sustained disconnect writes clean-shutdown.json with the watchdog reason BEFORE restarting", () => {
+    // PR feat/restart-reason-greeting: every restart initiator stamps a
+    // reason into the clean-shutdown marker so the next agent greeting
+    // can render "Restarted  <reason>". Watchdog restarts are the
+    // trickiest of the five — the agent is sick, so we pre-seed the
+    // reason from bash rather than node.
+    setEstabCount(h, 0);
+    writeGatewayLog(h, ["telegram gateway: bridge registered"]);
+    const longAgo = Math.floor(Date.now() / 1000) - 200;
+    writeFileSync(join(h.stateDir, ".watchdog-disconnect-since"), String(longAgo));
+
+    const r = runWatchdog(h, { DISCONNECT_GRACE_SECS: "120" });
+    expect(r.code).toBe(0);
+
+    // The file must exist after the watchdog runs — the restart is via
+    // the stub systemctl so nothing has consumed the marker yet.
+    const markerPath = join(h.stateDir, "clean-shutdown.json");
+    expect(existsSync(markerPath)).toBe(true);
+    const marker = JSON.parse(readFileSync(markerPath, "utf8")) as {
+      ts: number;
+      signal: string;
+      reason: string;
+    };
+    expect(typeof marker.ts).toBe("number");
+    expect(marker.signal).toBe("SIGTERM");
+    expect(marker.reason).toMatch(/^watchdog: bridge disconnected for \d+s$/);
+
+    // And the marker write MUST appear before the systemctl restart in
+    // the script so the new boot picks it up. The audit log is ordered
+    // (stub systemctl appends in real-time), so the restart line should
+    // only exist *after* the marker file has been written.
+    expect(restartIssued(r.audit, "switchroom-klanker.service")).toBe(true);
+  });
+
   it("empty gateway.log + fresh uptime (within grace) → no restart", () => {
     writeGatewayLog(h, []);
     // Override: agent started 10s ago.

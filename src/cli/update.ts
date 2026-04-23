@@ -5,7 +5,7 @@ import { existsSync, realpathSync, readFileSync } from "node:fs";
 import { dirname, resolve, join } from "node:path";
 import { withConfigError, getConfig } from "./helpers.js";
 import { reconcileAgent } from "../agents/scaffold.js";
-import { restartAgent } from "../agents/lifecycle.js";
+import { restartAgent, writeRestartReasonMarker } from "../agents/lifecycle.js";
 import { installAllUnits } from "../agents/systemd.js";
 import { resolveAgentsDir } from "../config/loader.js";
 import { getConfigPath } from "./helpers.js";
@@ -248,9 +248,25 @@ export function registerUpdateCommand(program: Command): void {
         const toRestart = sourceChanged ? agentNames : restartCandidates;
 
         if (shouldRestart && toRestart.length > 0) {
+          // Derive a one-line reason per restart so the next greeting
+          // card can show WHY the agent bounced. `update: pulled <sha>
+          // <subject>` when we actually fast-forwarded; otherwise
+          // `update: reconciled config` for the reconcile-only path.
+          const afterShort = runCaptured("git rev-parse --short HEAD", installDir!)?.trim() ?? null;
+          let updateReason: string;
+          if (sourceChanged && afterShort) {
+            let subject = runCaptured(`git log -1 --pretty=%s ${afterShort}`, installDir!)?.trim() ?? "";
+            if (subject.length > 60) subject = `${subject.slice(0, 57)}…`;
+            updateReason = subject
+              ? `update: pulled ${afterShort} ${subject}`
+              : `update: pulled ${afterShort}`;
+          } else {
+            updateReason = "update: reconciled config";
+          }
           console.log(chalk.bold(`\n  Restarting ${toRestart.length} agent(s)...`));
           for (const name of toRestart) {
             try {
+              writeRestartReasonMarker(name, updateReason);
               restartAgent(name);
               console.log(chalk.green(`    ${name}: restarted`));
             } catch (err) {

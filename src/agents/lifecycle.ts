@@ -1,9 +1,118 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, renameSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { connect } from "node:net";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { resolveStatePath } from "../config/paths.js";
+
+/**
+ * Resolve the per-agent gateway clean-shutdown marker path.
+ *
+ * Mirrors `GATEWAY_CLEAN_SHUTDOWN_MARKER_PATH` in
+ * `telegram-plugin/gateway/gateway.ts` — the gateway runs with
+ * `TELEGRAM_STATE_DIR=<agentDir>/telegram` and writes the marker as
+ * `clean-shutdown.json` inside that directory. Callers that want to
+ * stamp WHY a restart happened (so the next greeting card can show it)
+ * write to the same path BEFORE issuing systemctl restart.
+ */
+export function cleanShutdownMarkerPathForAgent(name: string): string {
+  const agentsDir = process.env.SWITCHROOM_AGENTS_DIR ?? resolveStatePath("agents");
+  return join(agentsDir, name, "telegram", "clean-shutdown.json");
+}
+
+/**
+ * Atomically write a clean-shutdown marker for `name` annotated with a
+ * human-readable `reason`. Intended for the CLI/watchdog/IPC paths that
+ * initiate a restart — they call this BEFORE the systemctl restart so
+ * the file is on disk by the time the next gateway/agent boots.
+ *
+ * Best-effort: if the directory doesn't exist or the write fails, we
+ * swallow. The restart still proceeds; the next greeting will just omit
+ * the Restarted row (the same as a cold start).
+ */
+export function writeRestartReasonMarker(
+  name: string,
+  reason: string,
+  opts: { preserveExisting?: boolean } = {},
+): void {
+  const path = cleanShutdownMarkerPathForAgent(name);
+  try {
+    mkdirSync(join(path, ".."), { recursive: true });
+    // Cooperative race guard. The gateway's user-/restart path writes a
+    // marker with reason="user: /restart from chat" BEFORE spawning the
+    // detached `switchroom agent restart --force` CLI. When that CLI
+    // then tries to write its own `cli: restart` marker, we'd blow away
+    // the user attribution. `preserveExisting: true` means: if a marker
+    // already exists on disk that's younger than a few seconds, leave it.
+    if (opts.preserveExisting && existsSync(path)) {
+      try {
+        const prev = JSON.parse(readFileSync(path, "utf-8")) as {
+          ts?: number;
+          reason?: string;
+        };
+        if (prev && typeof prev.ts === "number" && Date.now() - prev.ts < 30_000 && prev.reason) {
+          return;
+        }
+      } catch {
+        /* fall through and overwrite */
+      }
+    }
+    const marker = { ts: Date.now(), signal: "SIGTERM", reason };
+    const tmp = `${path}.tmp-${process.pid}-${Date.now()}`;
+    writeFileSync(tmp, JSON.stringify(marker), "utf-8");
+    renameSync(tmp, path);
+  } catch {
+    /* best effort — restart proceeds even if we can't stamp the reason */
+  }
+}
+
+/**
+ * Build a deploy-aware "cli: …" reason for `switchroom agent restart`.
+ *
+ *   - When the running build's commit (BUILD_COMMIT) differs from the
+ *     repo's current HEAD, the user is restarting to ship new code →
+ *     `cli: deploying <sha-short> <subject>`.
+ *   - Otherwise (or when commit info is unavailable) → `cli: restart`.
+ *
+ * The commit lookup is best-effort: if we can't read git, we degrade to
+ * the plain reason rather than crash the restart path.
+ */
+export function buildCliRestartReason(opts: {
+  buildCommit: string | null;
+  cwd?: string;
+}): string {
+  const { buildCommit, cwd } = opts;
+  if (!buildCommit) return "cli: restart";
+  try {
+    const head = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: cwd ?? process.cwd(),
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+    const headShort = head.slice(0, 7);
+    const buildShort = buildCommit.slice(0, 7);
+    if (headShort === buildShort) return "cli: restart";
+    let subject = "";
+    try {
+      subject = execFileSync(
+        "git",
+        ["log", "-1", "--pretty=%s", head],
+        {
+          cwd: cwd ?? process.cwd(),
+          encoding: "utf-8",
+          stdio: ["ignore", "pipe", "ignore"],
+        },
+      ).trim();
+    } catch {
+      /* subject is optional */
+    }
+    // Trim aggressively: the greeting card row gets long fast.
+    if (subject.length > 60) subject = `${subject.slice(0, 57)}…`;
+    return subject ? `cli: deploying ${headShort} ${subject}` : `cli: deploying ${headShort}`;
+  } catch {
+    return "cli: restart";
+  }
+}
 
 export interface AgentStatus {
   active: string;
@@ -94,7 +203,12 @@ export function stopAgent(name: string): void {
   }
 }
 
-export function restartAgent(name: string): void {
+export function restartAgent(name: string, reason?: string): void {
+  // Stamp WHY before killing so the next agent boot can render it in the
+  // greeting card. cleanShutdownMarkerPathForAgent matches the gateway's
+  // own path resolution; writeRestartReasonMarker is a best-effort no-op
+  // if the dir is missing.
+  if (reason) writeRestartReasonMarker(name, reason);
   try {
     // Gateway owns the long-running Telegram connection and loads
     // telegram-plugin code at process start. Restart it alongside the agent

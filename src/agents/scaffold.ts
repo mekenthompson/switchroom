@@ -369,6 +369,12 @@ function buildSessionGreetingScript(
   // runtime by the shell script so the greeting always reflects current
   // state (Session row picks a continuity signal: resumed mid-turn,
   // handoff-briefed fresh, reset-by-user fresh, or cold start).
+  // __SWITCHROOM_RESTARTED__ is resolved at runtime from the gateway's
+  // clean-shutdown marker (written by whichever actor initiated the
+  // restart — CLI, /restart, /reconcile, watchdog, update). The row is
+  // RENDERED ONLY IF the marker exists and carries a `reason`; cold
+  // starts and admin-systemctl restarts leave no marker → no row. See
+  // the RESTARTED_STATUS block below for the resolution logic.
   const text = [
     `<b>🎛️ Switchroom · ${escapeHtml(name)} online</b>`,
     ``,
@@ -377,6 +383,7 @@ function buildSessionGreetingScript(
     `<b>Plan</b>  __SWITCHROOM_PLAN__`,
     `<b>Quota</b>  __SWITCHROOM_QUOTA__`,
     `<b>Session</b>  __SWITCHROOM_SESSION__`,
+    `__SWITCHROOM_RESTARTED_ROW__`,
     `<b>Memory</b>  __SWITCHROOM_MEMORY__`,
     `<b>Version</b>  ${escapeHtml(formatVersionRow())}`,
     `<b>Profile</b>  ${escapeHtml(profile)}`,
@@ -942,6 +949,47 @@ except Exception:
   MEMORY_STATUS=$(_bank_stats 2>/dev/null || echo "—")
 fi
 
+# Resolve the Restarted row from the gateway's clean-shutdown marker.
+#
+# WHY: every restart initiator (switchroom agent restart, watchdog,
+# /restart, /reconcile, update) stamps $TELEGRAM_STATE_DIR/clean-shutdown.json
+# with a human-readable reason BEFORE issuing systemctl restart. On the
+# next boot we read that file, render the reason as a row, and DELETE
+# the file so the next greeting doesn't show stale data.
+#
+# If there's no marker (cold start, or an admin-systemctl bounce with
+# no initiator), OMIT the row entirely — cold starts stay quiet rather
+# than showing "unknown".
+#
+# CAVEAT: the gateway's own boot path also reads this file to decide
+# banner suppression but no longer deletes it (see
+# telegram-plugin/gateway/clean-shutdown-marker.ts) — cleanup is owned
+# here because the gateway and agent boot in parallel and we want the
+# agent-side greeting to be the authoritative consumer.
+RESTARTED_ROW=""
+_clean_marker="$TELEGRAM_STATE_DIR/clean-shutdown.json"
+if [ -f "$_clean_marker" ]; then
+  _restart_reason=""
+  if command -v jq >/dev/null 2>&1; then
+    _restart_reason="$(jq -r '.reason // empty' "$_clean_marker" 2>/dev/null || true)"
+  else
+    # jq-less fallback: crude grep for "reason":"..." — good enough for
+    # a single-line JSON literal written by our own writers. If it fails
+    # we leave the row empty, which is the conservative choice.
+    _restart_reason="$(sed -n 's/.*"reason"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' "$_clean_marker" 2>/dev/null | head -1)"
+  fi
+  # HTML-escape minimally: the reason is operator-supplied but not
+  # user-untrusted. & < > cover Telegram HTML parse-mode safety.
+  if [ -n "$_restart_reason" ]; then
+    _restart_reason_esc="$(printf '%s' "$_restart_reason" | sed 's/&/\\&amp;/g; s/</\\&lt;/g; s/>/\\&gt;/g')"
+    RESTARTED_ROW="<b>Restarted</b>  $_restart_reason_esc"
+  fi
+  # Consume the marker. Leaving it would make the NEXT greeting show the
+  # same stale reason. rm is best-effort — a readonly fs just means the
+  # next greeting repeats the row, which is annoying but not broken.
+  rm -f "$_clean_marker" 2>/dev/null || true
+fi
+
 TEXT=${shellSingleQuote(text)}
 TEXT="\${TEXT//__SWITCHROOM_MODEL__/$MODEL}"
 TEXT="\${TEXT//__SWITCHROOM_AUTH__/$AUTH_STATUS}"
@@ -949,6 +997,15 @@ TEXT="\${TEXT//__SWITCHROOM_PLAN__/$PLAN_STATUS}"
 TEXT="\${TEXT//__SWITCHROOM_QUOTA__/$QUOTA_STATUS}"
 TEXT="\${TEXT//__SWITCHROOM_SESSION__/$SESSION_STATUS}"
 TEXT="\${TEXT//__SWITCHROOM_MEMORY__/$MEMORY_STATUS}"
+# Conditional row: when RESTARTED_ROW is empty we want the whole line
+# (including the newline that followed the placeholder) to disappear
+# so the rendered card doesn't have a blank gap.
+if [ -n "$RESTARTED_ROW" ]; then
+  TEXT="\${TEXT//__SWITCHROOM_RESTARTED_ROW__/$RESTARTED_ROW}"
+else
+  # Strip the placeholder line along with its trailing newline.
+  TEXT="$(printf '%s' "$TEXT" | awk '!/__SWITCHROOM_RESTARTED_ROW__/ { print }')"
+fi
 
 ${curlCalls.join("\n\n")}
 `;

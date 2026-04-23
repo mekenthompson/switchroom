@@ -27,6 +27,7 @@ export default defineConfig({
       "**/telegram-plugin/tests/history.test.ts",
       "**/telegram-plugin/tests/ipc-server-client.test.ts",
       "**/telegram-plugin/tests/gateway-bridge.test.ts",
+      "**/telegram-plugin/tests/gateway-startup-mutex.test.ts",
     ],
     coverage: {
       provider: "v8",

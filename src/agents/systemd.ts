@@ -218,6 +218,13 @@ StandardOutput=journal
 StandardError=journal
 Restart=always
 RestartSec=3
+# Give the gateway 45s to drain its long-poll on SIGTERM. The drain
+# itself budgets 35s (SHUTDOWN_DRAIN_BUDGET_MS in gateway.ts) plus a
+# 5s force-exit safety; the extra 5s is systemd-side headroom before
+# SIGKILL. Without enough drain time the OLD process's getUpdates TCP
+# socket hasn't FIN'd before the NEW process tries to poll, and both
+# 409 against each other. See 2026-04-23 incident in startup-mutex.ts.
+TimeoutStopSec=45
 WorkingDirectory=${stateDir}
 Environment=PATH=${unitPath}
 Environment=SWITCHROOM_CLI_PATH=${switchroomCli}

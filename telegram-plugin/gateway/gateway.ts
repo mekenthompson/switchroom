@@ -128,6 +128,8 @@ import type {
   InboundMessage,
 } from './ipc-protocol.js'
 import { writePidFile, clearPidFile } from './pid-file.js'
+import { acquireStartupLock, releaseStartupLock } from './startup-mutex.js'
+import { drainShutdown } from './shutdown-drain.js'
 import {
   writeSessionMarker,
   readSessionMarker,
@@ -683,11 +685,64 @@ const GATEWAY_PID_PATH = process.env.SWITCHROOM_GATEWAY_PID_FILE ?? join(STATE_D
 const GATEWAY_SESSION_MARKER_PATH = process.env.SWITCHROOM_GATEWAY_SESSION_MARKER ?? join(STATE_DIR, 'gateway-session.json')
 const GATEWAY_STARTED_AT_MS = Date.now()
 
-try {
-  writePidFile(GATEWAY_PID_PATH, { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS })
-  process.stderr.write(`telegram gateway: wrote PID file ${GATEWAY_PID_PATH} pid=${process.pid} startedAt=${GATEWAY_STARTED_AT_MS}\n`)
-} catch (err) {
-  process.stderr.write(`telegram gateway: writePidFile failed: ${err}\n`)
+// Startup mutex. Atomic single-writer claim on the PID file so two
+// gateway processes can't race on Telegram's getUpdates long-poll.
+// See startup-mutex.ts for the 2026-04-23 incident this closes
+// (clerk-gateway looped 13+ times on 409 Conflict because the OLD
+// process's long-poll TCP socket hadn't FIN'd before the NEW one
+// started polling).
+//
+// Behaviour:
+//   - acquired       → we own the file, log boot.lock_acquired, continue
+//   - blocked (alive holder)  → log boot.lock_blocked, exit(1).
+//                                systemd's restart-burst limiter
+//                                (StartLimitBurst=10/IntervalSec=60)
+//                                handles the back-off so we don't
+//                                hot-loop spawning processes.
+//   - acquired with stale recovery → log boot.lock_stale_recovered then
+//                                     boot.lock_acquired
+//
+// We use top-level await so the mutex resolves BEFORE any other module
+// code runs (in particular before the bot.start IIFE further down).
+{
+  const SWITCHROOM_AGENT_NAME = process.env.SWITCHROOM_AGENT_NAME ?? '-'
+  try {
+    const outcome = await acquireStartupLock({
+      path: GATEWAY_PID_PATH,
+      record: { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS },
+      agentName: SWITCHROOM_AGENT_NAME,
+    })
+    if (outcome.status === 'blocked') {
+      // Another live gateway already owns the lock. Exit non-zero so
+      // systemd applies its restart-burst backoff. Logging done by
+      // acquireStartupLock; add one extra line so the operator sees
+      // WHY we're exiting.
+      process.stderr.write(
+        `telegram gateway: boot.aborting another_gateway_is_live holder_pid=${outcome.holder.pid} agent=${SWITCHROOM_AGENT_NAME}\n`,
+      )
+      process.exit(1)
+    }
+    // Backwards compatibility: the non-atomic writePidFile() that this
+    // block REPLACES used to log a `wrote PID file` line. Keep an
+    // equivalent so anything grepping older logs still finds it.
+    process.stderr.write(
+      `telegram gateway: wrote PID file ${GATEWAY_PID_PATH} pid=${process.pid} startedAt=${GATEWAY_STARTED_AT_MS}\n`,
+    )
+  } catch (err) {
+    process.stderr.write(
+      `telegram gateway: boot.lock_acquire_failed err=${(err as Error).message} agent=${SWITCHROOM_AGENT_NAME}\n`,
+    )
+    // Fall through to the legacy non-atomic write so we don't make
+    // things WORSE on filesystems where link() doesn't work (FAT, some
+    // FUSE mounts). The mutex is best-effort defence-in-depth; the
+    // existing pid-file probe + 409-retry loop are still in place.
+    try {
+      writePidFile(GATEWAY_PID_PATH, { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS })
+      process.stderr.write(`telegram gateway: wrote PID file ${GATEWAY_PID_PATH} pid=${process.pid} startedAt=${GATEWAY_STARTED_AT_MS} (mutex-fallback)\n`)
+    } catch (writeErr) {
+      process.stderr.write(`telegram gateway: writePidFile failed: ${writeErr}\n`)
+    }
+  }
 }
 
 const ipcServer: IpcServer = createIpcServer({
@@ -3689,10 +3744,34 @@ bot.catch(err => {
 })
 
 // ─── Shutdown ─────────────────────────────────────────────────────────────
+//
+// 35-second drain budget. The 2026-04-23 incident showed that a 3-second
+// hard exit was NOT enough — the kernel hadn't FIN'd the long-poll TCP
+// socket before the new gateway process started, so Telegram returned
+// 409 Conflict to both pollers for 13+ retries (10–12s backoffs each).
+// systemd's TimeoutStopSec is set to 45s in generateGatewayUnit so we
+// have headroom.
+const SHUTDOWN_DRAIN_BUDGET_MS = 35_000
+
+/** Best-effort in-flight counter for the drain loop. Sums the maps that
+ * track outstanding side-effects: permission prompts the user hasn't
+ * answered, vault operations mid-passphrase-entry, coalesce timers
+ * still buffering an outbound, and reauth flows. The IPC server is
+ * stopped explicitly via close() so its inflight isn't counted here. */
+function countInFlight(): number {
+  return (
+    pendingPermissions.size +
+    pendingVaultOps.size +
+    coalesceBuffer.size +
+    pendingReauthFlows.size
+  )
+}
+
 let shuttingDown = false
-async function shutdown(): Promise<void> {
+async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return
   shuttingDown = true
+  const agentName = process.env.SWITCHROOM_AGENT_NAME ?? '-'
   process.stderr.write('telegram gateway: shutting down\n')
 
   // Clean up all timers and pending state.
@@ -3704,12 +3783,11 @@ async function shutdown(): Promise<void> {
   typingRetryTimers.clear()
 
   for (const t of [...coalesceBuffer.values()].map((e) => e.timer)) clearTimeout(t)
-  coalesceBuffer.clear()
+  // NOTE: don't clear coalesceBuffer yet — the drain wants to observe
+  // its size as in_flight. It'll be empty by the time stopPolling
+  // returns because we cleared the timers above.
 
   clearInterval(pendingStateReaper)
-  pendingReauthFlows.clear()
-  pendingVaultOps.clear()
-  pendingPermissions.clear()
   vaultPassphraseCache.clear()
 
   if (orphanedReplyTimeoutId != null) {
@@ -3717,33 +3795,64 @@ async function shutdown(): Promise<void> {
     orphanedReplyTimeoutId = null
   }
 
-  // Notify bridges and close IPC
+  // Notify bridges so they can mark themselves disconnected.
   ipcServer.broadcast({ type: 'status', status: 'gateway_shutting_down' })
-  await ipcServer.close()
 
-  // Clear PID file so the next bridge spawn sees "no PID file" = gateway
-  // truly gone, rather than racing a stale file against an already-dead
-  // process. Session marker is left on disk intentionally — it's read
-  // by the NEXT gateway process's banner-gate.
-  clearPidFile(GATEWAY_PID_PATH)
-
-  // Safety net: force exit after 3 seconds if graceful stop hangs
-  const forceExitTimer = setTimeout(() => process.exit(0), 3000)
+  // Hard force-exit safety net at budget + 5s. systemd's TimeoutStopSec
+  // is 45s; if we're not done by 40s something is genuinely wedged and
+  // we'd rather exit than block the unit.
+  const forceExitTimer = setTimeout(() => {
+    process.stderr.write('telegram gateway: shutdown.force_exit budget_exceeded\n')
+    process.exit(0)
+  }, SHUTDOWN_DRAIN_BUDGET_MS + 5_000)
   forceExitTimer.unref()
 
+  // Drain: stop polling, then await in-flight to settle. The drain
+  // module logs shutdown.drain_start and shutdown.drain_complete so
+  // operators can see exactly how long the long-poll took to die — the
+  // KEY signal for diagnosing the next 409-conflict report.
+  await drainShutdown({
+    signal,
+    stopPolling: async () => {
+      if (runnerHandle != null) {
+        await runnerHandle.stop()
+      } else {
+        await bot.stop()
+      }
+    },
+    inFlight: countInFlight,
+    budgetMs: SHUTDOWN_DRAIN_BUDGET_MS,
+    agentName,
+  })
+
+  // Now finish the cleanup the drain didn't touch.
+  coalesceBuffer.clear()
+  pendingReauthFlows.clear()
+  pendingVaultOps.clear()
+  pendingPermissions.clear()
+
   try {
-    if (runnerHandle != null) {
-      await runnerHandle.stop()
-    } else {
-      await bot.stop()
-    }
+    await ipcServer.close()
   } catch (err) {
-    process.stderr.write(`telegram gateway: error during bot stop: ${err}\n`)
+    process.stderr.write(`telegram gateway: ipc close error: ${err}\n`)
   }
+
+  // Release the startup mutex / clear PID file. Logs shutdown.lock_released.
+  // Session marker is intentionally left on disk — it's read by the
+  // NEXT gateway process's banner-gate.
+  await releaseStartupLock({
+    path: GATEWAY_PID_PATH,
+    pid: process.pid,
+    agentName,
+  })
+  // Belt-and-braces: legacy clearPidFile is a no-op if the file is
+  // already gone (which it should be after releaseStartupLock).
+  clearPidFile(GATEWAY_PID_PATH)
+
   process.exit(0)
 }
-process.on('SIGTERM', () => void shutdown())
-process.on('SIGINT', () => void shutdown())
+process.on('SIGTERM', () => void shutdown('SIGTERM'))
+process.on('SIGINT', () => void shutdown('SIGINT'))
 
 // ─── Stale reaction sweep (gateway crash recovery) ────────────────────────
 {
@@ -4030,6 +4139,20 @@ void (async () => {
     } catch (err) {
       if (err instanceof GrammyError && err.error_code === 409) {
         const delay = Math.min(1000 * attempt, 15000)
+        const agentName = process.env.SWITCHROOM_AGENT_NAME ?? '-'
+        // Two log lines so journalctl has both the WHY (detected) and
+        // the WHEN (scheduled). The architectural fix (startup mutex
+        // + 35s SIGTERM drain) should eliminate the OLD-process race
+        // entirely — if these still appear together with the OLD pid
+        // alive, the mutex isn't being honoured and we need to look
+        // harder. Keep both lines so the next incident has signal.
+        process.stderr.write(
+          `telegram gateway: poll.409.detected attempt=${attempt} retry_in_ms=${delay} agent=${agentName}\n`,
+        )
+        process.stderr.write(
+          `telegram gateway: poll.retry_scheduled reason=409 attempt=${attempt} delay_ms=${delay} agent=${agentName}\n`,
+        )
+        // Legacy line preserved so older grep patterns keep working.
         process.stderr.write(`telegram gateway: 409 Conflict, retrying in ${delay / 1000}s\n`)
         await new Promise(r => setTimeout(r, delay))
         continue

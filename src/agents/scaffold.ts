@@ -1965,8 +1965,39 @@ export function scaffoldAgent(
           async: true,
         });
       }
+      // Switchroom-owned secret-scrub Stop hook: scans transcript at shutdown
+      // and rewrites any currently-active vault values to vault:${slug}.
+      // Gated on telegram-plugin being in use (the hook script ships with
+      // the plugin and only makes sense when the plugin-backed vault flow
+      // is active). Async so it can't block session shutdown.
+      const useSwitchroomPluginHook = usesSwitchroomTelegramPlugin(agentConfig);
+      if (useSwitchroomPluginHook) {
+        switchroomStopHooks.push({
+          type: "command",
+          command: `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "secret-scrub-stop.mjs")}"`,
+          timeout: 15,
+          async: true,
+        });
+      }
       const switchroomStop = switchroomStopHooks.length > 0
         ? [{ hooks: switchroomStopHooks }]
+        : [];
+      // Switchroom-owned PreToolUse hook: blocks any tool call whose input
+      // contains a currently-active vault value verbatim (second-line
+      // defense against secrets leaking past the ingest-side detector).
+      // Same plugin gating as the Stop hook.
+      const switchroomPreToolUse = useSwitchroomPluginHook
+        ? [
+            {
+              hooks: [
+                {
+                  type: "command",
+                  command: `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "secret-guard-pretool.mjs")}"`,
+                  timeout: 10,
+                },
+              ],
+            },
+          ]
         : [];
       // Switchroom-owned UserPromptSubmit hooks: inject workspace content at
       // the start of every turn. When hotReloadStable is true, the stable
@@ -2027,6 +2058,14 @@ export function scaffoldAgent(
             ...((userHooks.UserPromptSubmit as unknown[]) ?? []),
             ...switchroomUserPromptSubmit,
           ],
+          ...(switchroomPreToolUse.length > 0
+            ? {
+                PreToolUse: [
+                  ...((userHooks.PreToolUse as unknown[]) ?? []),
+                  ...switchroomPreToolUse,
+                ],
+              }
+            : {}),
           ...(switchroomStop.length > 0
             ? {
                 Stop: [
@@ -2040,6 +2079,7 @@ export function scaffoldAgent(
         settings.hooks = {
           SessionStart: switchroomSessionStart,
           UserPromptSubmit: switchroomUserPromptSubmit,
+          ...(switchroomPreToolUse.length > 0 ? { PreToolUse: switchroomPreToolUse } : {}),
           ...(switchroomStop.length > 0 ? { Stop: switchroomStop } : {}),
         };
       }
@@ -2908,8 +2948,34 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
         async: true,
       });
     }
+    // Switchroom-owned secret-scrub Stop hook (mirror of scaffoldAgent
+    // above — keep these two blocks in sync). See scaffold.ts secret-detect
+    // commit for context.
+    const useSwitchroomPluginReconcile = usesSwitchroomTelegramPlugin(agentConfig);
+    if (useSwitchroomPluginReconcile) {
+      switchroomStopHooksReconcile.push({
+        type: "command",
+        command: `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "secret-scrub-stop.mjs")}"`,
+        timeout: 15,
+        async: true,
+      });
+    }
     const switchroomStop = switchroomStopHooksReconcile.length > 0
       ? [{ hooks: switchroomStopHooksReconcile }]
+      : [];
+    // Switchroom-owned PreToolUse hook: secret-guard (same as scaffoldAgent).
+    const switchroomPreToolUse = useSwitchroomPluginReconcile
+      ? [
+          {
+            hooks: [
+              {
+                type: "command",
+                command: `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "secret-guard-pretool.mjs")}"`,
+                timeout: 10,
+              },
+            ],
+          },
+        ]
       : [];
     // Switchroom-owned UserPromptSubmit hooks (same as scaffoldAgent above)
     const useHotReloadStableReconcile = agentConfig.channels?.telegram?.hotReloadStable === true;
@@ -2958,6 +3024,14 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
           ...((userHooks.UserPromptSubmit as unknown[]) ?? []),
           ...switchroomUserPromptSubmit,
         ],
+        ...(switchroomPreToolUse.length > 0
+          ? {
+              PreToolUse: [
+                ...((userHooks.PreToolUse as unknown[]) ?? []),
+                ...switchroomPreToolUse,
+              ],
+            }
+          : {}),
         ...(switchroomStop.length > 0
           ? {
               Stop: [
@@ -2971,6 +3045,7 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
       settings.hooks = {
         SessionStart: switchroomSessionStart,
         UserPromptSubmit: switchroomUserPromptSubmit,
+        ...(switchroomPreToolUse.length > 0 ? { PreToolUse: switchroomPreToolUse } : {}),
         ...(switchroomStop.length > 0 ? { Stop: switchroomStop } : {}),
       };
     }

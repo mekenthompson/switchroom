@@ -38,7 +38,12 @@ steps:
       - "telegram-plugin/bun.lock"
       - ".buildkite/pipeline.yml"
     command: |
-      curl -fsSL https://bun.sh/install | bash
+      # Skip bun install if the ~/.bun cache already restored the binary.
+      # The cache is keyed by bun.lock checksum (see `cache.key` below), so
+      # hitting this path means the lockfile is unchanged since the last build.
+      if [ ! -x "$$HOME/.bun/bin/bun" ]; then
+        curl -fsSL https://bun.sh/install | bash
+      fi
       export PATH="$$HOME/.bun/bin:$$PATH"
       bun install --frozen-lockfile
       bun lint
@@ -68,7 +73,9 @@ steps:
       - "telegram-plugin/bun.lock"
       - ".buildkite/pipeline.yml"
     command: |
-      curl -fsSL https://bun.sh/install | bash
+      if [ ! -x "$$HOME/.bun/bin/bun" ]; then
+        curl -fsSL https://bun.sh/install | bash
+      fi
       export PATH="$$HOME/.bun/bin:$$PATH"
       bun install --frozen-lockfile
       # vitest also runs telegram-plugin/tests/*.test.ts (excluding bun-only
@@ -125,7 +132,9 @@ steps:
       - "telegram-plugin/**"
       - ".buildkite/pipeline.yml"
     command: |
-      curl -fsSL https://bun.sh/install | bash
+      if [ ! -x "$$HOME/.bun/bin/bun" ]; then
+        curl -fsSL https://bun.sh/install | bash
+      fi
       export PATH="$$HOME/.bun/bin:$$PATH"
       cd telegram-plugin
       bun install --frozen-lockfile
@@ -152,6 +161,12 @@ steps:
 
   - label: ":compass: Skills evals — trigger routing"
     key: evals-trigger
+    # Serialize eval runs across parallel builds: Anthropic API calls on the
+    # subscription OAuth token share a weekly quota, and bunches of evals
+    # racing in parallel can burn through it or hit rate limits. Two builds
+    # trigger → second one queues until the first finishes.
+    concurrency: 1
+    concurrency_group: "switchroom/evals-trigger"
     if_changed:
       # Skill text changes can flip routing decisions
       - "skills/**/SKILL.md"
@@ -191,6 +206,10 @@ steps:
 
   - label: ":sparkles: Skills evals — quality"
     key: evals-quality
+    # Same reasoning as evals-trigger above: serialize to protect the
+    # subscription quota + rate limits.
+    concurrency: 1
+    concurrency_group: "switchroom/evals-quality"
     if_changed:
       - "skills/**/SKILL.md"
       - "evals/run_quality.py"

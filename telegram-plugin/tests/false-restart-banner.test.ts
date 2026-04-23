@@ -225,8 +225,29 @@ describe("session-marker round-trip", () => {
 });
 
 /**
- * Source-level guards removed: the PID file + session marker wiring in
- * gateway.ts and server.ts was replaced by the runWithRetry refactor in
- * commit 3a0f92e. The pure-function tests above still cover the
- * pid-file and session-marker modules in isolation.
+ * Source-level guards: make sure the fix is actually wired in at the
+ * two call sites. Refactor catches.
  */
+describe("source-level wiring", () => {
+  it("gateway.ts writes a PID file and session marker on startup", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync(
+      new URL("../gateway/gateway.ts", import.meta.url),
+      "utf8",
+    );
+    expect(src).toContain("writePidFile");
+    expect(src).toContain("writeSessionMarker");
+    expect(src).toContain("shouldFireRestartBanner");
+  });
+
+  it("server.ts dual-mode probe consults the PID file before falling back", async () => {
+    const fs = await import("node:fs");
+    const src = fs.readFileSync(
+      new URL("../server.ts", import.meta.url),
+      "utf8",
+    );
+    expect(src).toContain("shouldFallBackToLegacy");
+    expect(src).toContain("readPidFile");
+    expect(src).toContain("isPidAlive");
+  });
+});

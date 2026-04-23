@@ -249,8 +249,9 @@ describe("drainShutdown", () => {
     expect(result.timedOut).toBe(true);
     expect(result.inFlightRemaining).toBe(5);
     expect(result.elapsedMs).toBeGreaterThanOrEqual(250);
-    // Generous upper bound — wall clock tolerance under load.
-    expect(result.elapsedMs).toBeLessThan(1500);
+    // Tight upper bound — 2× headroom over budget catches obvious
+    // slow-drain regressions without flaking under normal load.
+    expect(result.elapsedMs).toBeLessThan(500);
 
     const complete = lines.find((l) => l.includes("shutdown.drain_complete"));
     expect(complete).toBeDefined();

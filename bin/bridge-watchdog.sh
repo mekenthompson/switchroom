@@ -196,6 +196,28 @@ for gateway_svc in "${gateway_services[@]}"; do
   # the still-old tail. The uptime grace will cover the startup window
   # anyway, but removing the marker keeps state clean.
   rm -f "$disconnect_marker" 2>/dev/null || true
+  # Stamp WHY before killing so the next agent greeting card can show
+  # "Restarted  watchdog: bridge disconnected for ${disc_duration}s".
+  # The gateway's own SIGTERM handler writes `clean-shutdown.json` on
+  # shutdown too — but its marker carries no `reason`, so the greeting
+  # omits the row. Pre-seeding here wins the race: we write it BEFORE
+  # issuing systemctl restart so it's on disk by the time the new
+  # processes boot. Best-effort: if jq is unavailable fall back to a
+  # printf-shaped JSON literal.
+  _clean_marker="${gateway_state_dir}/clean-shutdown.json"
+  _ts_ms=$(( $(date +%s) * 1000 ))
+  _reason="watchdog: bridge disconnected for ${disc_duration}s"
+  _tmp="${_clean_marker}.tmp-$$"
+  if command -v jq >/dev/null 2>&1; then
+    jq -n --argjson ts "$_ts_ms" --arg reason "$_reason" \
+      '{ts: $ts, signal: "SIGTERM", reason: $reason}' > "$_tmp" 2>/dev/null \
+      && mv -f "$_tmp" "$_clean_marker" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
+  else
+    # Escape backslashes and double-quotes in the reason for safe JSON embedding.
+    _esc_reason=$(printf '%s' "$_reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    printf '{"ts":%s,"signal":"SIGTERM","reason":"%s"}' "$_ts_ms" "$_esc_reason" > "$_tmp" 2>/dev/null \
+      && mv -f "$_tmp" "$_clean_marker" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
+  fi
   systemctl --user restart "$agent_svc" || {
     echo "$(date -Iseconds) watchdog: ${agent_svc} restart failed"
   }

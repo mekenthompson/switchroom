@@ -478,6 +478,92 @@ describe("scaffoldAgent", () => {
     expect(greeting).toContain('printf \'%s\' "$NOW" > "$GREETED_MARKER_FILE"');
   });
 
+  it("session greeting renders a Restarted row from the clean-shutdown marker and omits it otherwise", () => {
+    // Source-level pins for the new Restarted row (PR
+    // feat/restart-reason-greeting). Renders the reason when
+    // clean-shutdown.json is present with a `reason`, and omits the row
+    // entirely when the file is absent — cold starts stay quiet.
+    const config = makeAgentConfig();
+    const result = scaffoldAgent("restart-row-agent", config, tmpDir, telegramConfig);
+    const greeting = readFileSync(
+      join(result.agentDir, "telegram", "session-greeting.sh"),
+      "utf-8",
+    );
+
+    // Placeholder is emitted in the TEXT template.
+    expect(greeting).toContain("__SWITCHROOM_RESTARTED_ROW__");
+    // Reads the clean-shutdown marker from $TELEGRAM_STATE_DIR — same path
+    // the gateway writes on shutdown and callers pre-stamp with a reason.
+    expect(greeting).toContain('_clean_marker="$TELEGRAM_STATE_DIR/clean-shutdown.json"');
+    // jq-based extraction of the reason (primary path).
+    expect(greeting).toContain(`jq -r '.reason // empty'`);
+    // Row text uses the "Restarted" label.
+    expect(greeting).toContain("<b>Restarted</b>");
+    // Consumes (deletes) the marker so the NEXT greeting doesn't repeat
+    // the stale reason.
+    expect(greeting).toMatch(/rm -f "\$_clean_marker"/);
+    // When the reason is empty (cold start, admin systemctl), the
+    // placeholder line is stripped entirely rather than rendered as a
+    // blank "Restarted" row.
+    expect(greeting).toContain("__SWITCHROOM_RESTARTED_ROW__");
+    expect(greeting).toMatch(/awk '!\/__SWITCHROOM_RESTARTED_ROW__\/ \{ print \}'/);
+  });
+
+  it("scaffold wiring: documented callers write the clean-shutdown marker with a reason before restarting", () => {
+    // Source-grep regression for the five documented call sites so a
+    // future refactor can't silently drop the reason-stamping step.
+    const lifecycleSrc = readFileSync(
+      resolve(__dirname, "..", "src", "agents", "lifecycle.ts"),
+      "utf-8",
+    );
+    const cliAgentSrc = readFileSync(
+      resolve(__dirname, "..", "src", "cli", "agent.ts"),
+      "utf-8",
+    );
+    const cliUpdateSrc = readFileSync(
+      resolve(__dirname, "..", "src", "cli", "update.ts"),
+      "utf-8",
+    );
+    const watchdogSrc = readFileSync(
+      resolve(__dirname, "..", "bin", "bridge-watchdog.sh"),
+      "utf-8",
+    );
+    const gatewaySrc = readFileSync(
+      resolve(__dirname, "..", "telegram-plugin", "gateway", "gateway.ts"),
+      "utf-8",
+    );
+
+    // Helper lives in lifecycle.ts and resolves the same file the gateway
+    // writes (shared contract — if the path drifts, greetings go dark).
+    expect(lifecycleSrc).toContain("export function writeRestartReasonMarker");
+    expect(lifecycleSrc).toContain("clean-shutdown.json");
+
+    // CLI restart + reconcile-with-restart stamp a reason.
+    expect(cliAgentSrc).toContain("writeRestartReasonMarker");
+    expect(cliAgentSrc).toMatch(/buildCliRestartReason/);
+    expect(cliAgentSrc).toMatch(/reconcile:\s/);
+
+    // switchroom update stamps a reason for every bulk-restart target.
+    expect(cliUpdateSrc).toContain("writeRestartReasonMarker");
+    expect(cliUpdateSrc).toMatch(/update: pulled/);
+    expect(cliUpdateSrc).toMatch(/update: reconciled config/);
+
+    // Watchdog writes the marker before the systemctl restart.
+    expect(watchdogSrc).toContain("clean-shutdown.json");
+    expect(watchdogSrc).toMatch(/watchdog: bridge disconnected for/);
+    // The write MUST precede the systemctl restart so the new boot sees it.
+    const writeIdx = watchdogSrc.indexOf("clean-shutdown.json");
+    const restartIdx = watchdogSrc.indexOf('systemctl --user restart "$agent_svc"', writeIdx);
+    expect(writeIdx).toBeGreaterThan(-1);
+    expect(restartIdx).toBeGreaterThan(writeIdx);
+
+    // Gateway user-slash paths stamp a user-attributed reason.
+    expect(gatewaySrc).toContain("function stampUserRestartReason");
+    expect(gatewaySrc).toContain("user: /restart from chat");
+    expect(gatewaySrc).toContain("user: /reconcile from chat");
+    expect(gatewaySrc).toMatch(/user: \/\$\{kind\} from chat/);
+  });
+
   it("generates telegram .env with bot token", () => {
     const config = makeAgentConfig();
     const result = scaffoldAgent("bot-agent", config, tmpDir, telegramConfig);

@@ -139,7 +139,10 @@ import {
 import {
   writeCleanShutdownMarker,
   readCleanShutdownMarker,
-  clearCleanShutdownMarker,
+  // clearCleanShutdownMarker is intentionally NOT imported here —
+  // cleanup ownership moved to the agent-side session-greeting.sh after
+  // it renders the "Restarted <reason>" row. See the boot path comment
+  // around the reason-rendering block for the lifecycle rationale.
   shouldSuppressRecoveryBanner,
   DEFAULT_MAX_AGE_MS as CLEAN_SHUTDOWN_MAX_AGE_MS,
 } from './clean-shutdown-marker.js'
@@ -2518,6 +2521,31 @@ function clearRestartMarker(): void {
 }
 
 /**
+ * Stamp a user-facing restart reason into the clean-shutdown marker
+ * (same file the SIGTERM handler writes to and the next session greeting
+ * consumes). Called by /restart, /reconcile, /new, /reset BEFORE the
+ * detached `switchroom agent restart …` CLI fires — so the agent-side
+ * greeting card shows who asked ("user: /restart from chat") instead of
+ * the downstream CLI's "cli: restart" default.
+ *
+ * Best-effort: if the write fails, the restart still proceeds. The
+ * downstream CLI will fall back to its own "cli: restart" marker (the
+ * CLI uses preserveExisting to avoid clobbering a fresh user marker).
+ */
+function stampUserRestartReason(reason: string): void {
+  try {
+    writeCleanShutdownMarker(GATEWAY_CLEAN_SHUTDOWN_MARKER_PATH, {
+      ts: Date.now(),
+      signal: 'SIGTERM',
+      reason,
+    })
+    process.stderr.write(`telegram gateway: restart-reason.stamped reason=${JSON.stringify(reason)} path=${GATEWAY_CLEAN_SHUTDOWN_MARKER_PATH}\n`)
+  } catch (err) {
+    process.stderr.write(`telegram gateway: restart-reason.stamp_failed err=${(err as Error).message}\n`)
+  }
+}
+
+/**
  * Fire-and-forget a detached `switchroom` CLI invocation.
  *
  * `onFailure`, if provided, is called with the child's exit code and the
@@ -2965,6 +2993,10 @@ bot.command('restart', async ctx => {
       }
     } catch {}
     writeRestartMarker({ chat_id: chatId, thread_id: threadId ?? null, ack_message_id: ackId, ts: Date.now() })
+    // Stamp user attribution into the clean-shutdown marker so the next
+    // greeting card shows "Restarted  user: /restart from chat" instead
+    // of whatever reason the downstream CLI would default to.
+    stampUserRestartReason('user: /restart from chat')
     await sweepBeforeSelfRestart()
     spawnSwitchroomDetached(
       ['agent', 'restart', name, '--force'],
@@ -3074,6 +3106,9 @@ async function handleNewOrResetCommand(ctx: Context, kind: 'new' | 'reset'): Pro
     }
   }
 
+  // Stamp user attribution so the next greeting shows "Restarted  user:
+  // /new" / "user: /reset" rather than the downstream CLI default.
+  stampUserRestartReason(`user: /${kind} from chat`)
   await sweepBeforeSelfRestart()
   spawnSwitchroomDetached(
     ['agent', 'restart', name, '--force'],
@@ -3724,6 +3759,7 @@ bot.command('reconcile', async ctx => {
       if (HISTORY_ENABLED) { try { recordOutbound({ chat_id: chatId, thread_id: threadId ?? null, message_ids: [sent.message_id], texts: [ackText], attachment_kinds: [] }) } catch {} }
     } catch {}
     writeRestartMarker({ chat_id: chatId, thread_id: threadId ?? null, ack_message_id: null, ts: Date.now() })
+    stampUserRestartReason('user: /reconcile from chat')
     await sweepBeforeSelfRestart()
     spawnSwitchroomDetached(
       ['agent', 'reconcile', arg, '--restart'],
@@ -4312,16 +4348,33 @@ void (async () => {
           const cleanFresh = shouldSuppressRecoveryBanner(cleanMarker, nowMs, CLEAN_SHUTDOWN_MAX_AGE_MS)
           if (cleanMarker) {
             const ageSec = Math.max(0, Math.round((nowMs - cleanMarker.ts) / 1000))
+            const reasonTag = cleanMarker.reason ? ` reason=${JSON.stringify(cleanMarker.reason)}` : ''
             if (cleanFresh) {
-              process.stderr.write(`telegram gateway: boot.clean_shutdown_detected age=${ageSec}s signal=${cleanMarker.signal} — suppressing 'recovered from unexpected restart' banner\n`)
+              process.stderr.write(`telegram gateway: boot.clean_shutdown_detected age=${ageSec}s signal=${cleanMarker.signal}${reasonTag} — suppressing 'recovered from unexpected restart' banner\n`)
             } else {
               // Marker present but stale: shutdown was initiated cleanly
               // but never finished within the age window. Almost
-              // certainly a crash mid-drain; clear the stale marker and
-              // fall through so the operator gets the banner anyway.
-              process.stderr.write(`telegram gateway: boot.clean_shutdown_marker_stale age=${ageSec}s signal=${cleanMarker.signal} — clearing + posting banner anyway\n`)
+              // certainly a crash mid-drain; fall through so the operator
+              // gets the banner anyway. We DON'T clear here either — see
+              // the note below — but stale markers are harmless to leave
+              // in place because shouldSuppressRecoveryBanner returns
+              // false on the next boot too.
+              process.stderr.write(`telegram gateway: boot.clean_shutdown_marker_stale age=${ageSec}s signal=${cleanMarker.signal}${reasonTag} — posting banner anyway (leaving marker for agent-side consumer)\n`)
             }
-            clearCleanShutdownMarker(GATEWAY_CLEAN_SHUTDOWN_MARKER_PATH)
+            // IMPORTANT: do NOT clearCleanShutdownMarker() here.
+            //
+            // Lifecycle change (PR for restart-reason-greeting):
+            //   The agent-side consumer (session-greeting.sh) reads
+            //   `clean-shutdown.json` to render a "Restarted  <reason>"
+            //   row in the next greeting card. The gateway and the agent
+            //   boot in parallel under systemd, so if we cleared here the
+            //   greeting would race and miss the reason.
+            //
+            //   The gateway only needs to READ the marker to decide
+            //   banner suppression; the file's continued presence after
+            //   that decision is harmless to the gateway. We hand
+            //   ownership of cleanup to session-greeting.sh which
+            //   deletes the marker right after rendering the row.
           }
           const currentSession: SessionMarker = { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS }
           const storedSession = readSessionMarker(GATEWAY_SESSION_MARKER_PATH)

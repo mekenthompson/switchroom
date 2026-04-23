@@ -18,7 +18,10 @@ import {
   getAllAgentStatuses,
   attachAgent,
   getAgentLogs,
+  writeRestartReasonMarker,
+  buildCliRestartReason,
 } from "../agents/lifecycle.js";
+import { COMMIT_SHA as BUILD_COMMIT } from "../build-info.js";
 import {
   generateUnit,
   generateGatewayUnit,
@@ -832,6 +835,17 @@ export function registerAgentCommand(program: Command): void {
             }
 
             try {
+              // Stamp the restart reason so the next greeting card can
+              // surface it. `cli: deploying <sha> <subject>` when the
+              // running build's commit differs from HEAD, `cli: restart`
+              // otherwise. Written BEFORE the systemctl restart so the
+              // file is on disk by the time the next agent boots.
+              const reason = buildCliRestartReason({ buildCommit: BUILD_COMMIT });
+              // preserveExisting: keep the gateway-written "user: /restart
+              // from chat" (or similar) marker if it's fresh, so the next
+              // greeting shows the real user-facing attribution rather
+              // than being overwritten by the downstream CLI.
+              writeRestartReasonMarker(n, reason, { preserveExisting: true });
               if (opts.gracefulRestart) {
                 const result = await gracefulRestartAgent(n);
                 if (result.restartedImmediately) {
@@ -984,6 +998,16 @@ export function registerAgentCommand(program: Command): void {
 
             if ((opts.restart || opts.gracefulRestart) && result.changes.length > 0) {
               try {
+                // Summarise the files that changed (at most 3) so the
+                // greeting's Restarted row is meaningful rather than
+                // "reconcile: 7 files".
+                const files = result.changes;
+                const head = files.slice(0, 3).join(", ");
+                const tail = files.length > 3 ? `, +${files.length - 3} more` : "";
+                const reason = `reconcile: ${head}${tail}`;
+                // Same cooperative race guard — gateway /reconcile may
+                // have pre-seeded a user-attributed marker.
+                writeRestartReasonMarker(n, reason, { preserveExisting: true });
                 if (opts.gracefulRestart) {
                   const restartResult = await gracefulRestartAgent(n);
                   if (restartResult.restartedImmediately) {

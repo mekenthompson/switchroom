@@ -38,6 +38,13 @@ import type { McpServerConfig } from "../memory/hindsight.js";
 import { createBank, updateBankMissions, ensureUserProfileMentalModel } from "../memory/hindsight.js";
 import { loadTopicState } from "../telegram/state.js";
 import { resolveDualPath } from "../config/paths.js";
+import {
+  VERSION,
+  COMMIT_SHA,
+  COMMIT_DATE,
+  LATEST_PR,
+  COMMITS_AHEAD_OF_TAG,
+} from "../build-info.js";
 import { resolvePath } from "../config/loader.js";
 import { isVaultReference, parseVaultReference } from "../vault/resolver.js";
 import { openVault, VaultError } from "../vault/vault.js";
@@ -371,6 +378,7 @@ function buildSessionGreetingScript(
     `<b>Quota</b>  __SWITCHROOM_QUOTA__`,
     `<b>Session</b>  __SWITCHROOM_SESSION__`,
     `<b>Memory</b>  __SWITCHROOM_MEMORY__`,
+    `<b>Version</b>  ${escapeHtml(formatVersionRow())}`,
     `<b>Profile</b>  ${escapeHtml(profile)}`,
     `<b>Tools</b>  ${escapeHtml(tools)}`,
     deny ? `<b>Deny</b>  ${escapeHtml(deny)}` : null,
@@ -948,6 +956,46 @@ ${curlCalls.join("\n\n")}
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * Format a relative time like "2m ago" / "3h ago" / "5d ago" from an
+ * ISO 8601 timestamp. Returns null if the input is null or unparseable.
+ */
+function formatRelativeAgo(iso: string | null): string | null {
+  if (!iso) return null;
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return null;
+  const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (diffSec < 60) return `${diffSec}s ago`;
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`;
+  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`;
+  return `${Math.floor(diffSec / 86400)}d ago`;
+}
+
+/**
+ * Format the Version row shown in the greeting card. Two shapes:
+ *   - on a tag (commits_ahead = 0 or null):   "v0.2.0 · #44 · 2h ago"
+ *     (omit "#44 ·" when no PR was parsed)
+ *   - ahead of a tag (commits_ahead > 0):     "v0.2.0+3 · db6de9e · 2m ago"
+ *     (always show short SHA when ahead, omit PR)
+ * The age segment is omitted if no commit date is available (npm consumer).
+ */
+function formatVersionRow(): string {
+  const ago = formatRelativeAgo(COMMIT_DATE);
+  const onTag = COMMITS_AHEAD_OF_TAG === 0 || COMMITS_AHEAD_OF_TAG === null;
+
+  if (onTag) {
+    const parts: string[] = [`v${VERSION}`];
+    if (LATEST_PR != null) parts.push(`#${LATEST_PR}`);
+    if (ago) parts.push(ago);
+    return parts.join(" · ");
+  }
+
+  const parts: string[] = [`v${VERSION}+${COMMITS_AHEAD_OF_TAG}`];
+  if (COMMIT_SHA) parts.push(COMMIT_SHA);
+  if (ago) parts.push(ago);
+  return parts.join(" · ");
 }
 
 /**

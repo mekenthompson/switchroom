@@ -25,7 +25,7 @@ function unitName(name: string): string {
   return `switchroom-${name}`;
 }
 
-function unitFilePath(name: string): string {
+export function unitFilePath(name: string): string {
   return resolve(SYSTEMD_USER_DIR, `${unitName(name)}.service`);
 }
 
@@ -69,6 +69,11 @@ StandardError=journal
 Restart=on-failure
 RestartSec=5
 WorkingDirectory=${agentDir}
+# Optional vault-decrypted env. The "-" prefix makes systemd silently
+# skip the file when absent (e.g. pre-"switchroom vault init" or
+# agents that don't use the vault). %h resolves to the invoking user's
+# home under "systemd --user", so this works without hardcoding paths.
+EnvironmentFile=-%h/.switchroom/.env.vault
 ${tzEnv}
 [Install]
 WantedBy=default.target
@@ -226,6 +231,10 @@ RestartSec=3
 # 409 against each other. See 2026-04-23 incident in startup-mutex.ts.
 TimeoutStopSec=45
 WorkingDirectory=${stateDir}
+# Optional vault-decrypted env — same rationale as the agent unit.
+# "-" prefix = no error if the file is missing; %h resolves to the
+# user's home under "systemd --user".
+EnvironmentFile=-%h/.switchroom/.env.vault
 Environment=PATH=${unitPath}
 Environment=SWITCHROOM_CLI_PATH=${switchroomCli}
 Environment=TELEGRAM_STATE_DIR=${stateDir}

@@ -2601,6 +2601,10 @@ export function reconcileAgent(
       forumChatId: telegramConfig.forum_chat_id,
       dangerousMode: agentConfig.dangerous_mode === true,
       useSwitchroomPlugin: usesSwitchroomTelegramPlugin(agentConfig),
+      // Mirror scaffoldAgent's start.sh context — without this the
+      // {{#unless useHotReloadStable}} block always renders, so flipping
+      // hotReloadStable on never removes the _WS_STABLE bake from start.sh.
+      useHotReloadStable: agentConfig.channels?.telegram?.hotReloadStable === true,
       hindsightEnabled: hindsightAutoRecallEnabled,
       hindsightBankIdQ: shellSingleQuote(hindsightBankId),
       hindsightApiBaseUrlQ: shellSingleQuote(hindsightApiBaseUrl),

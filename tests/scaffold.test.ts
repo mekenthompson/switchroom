@@ -1298,7 +1298,19 @@ describe("reconcileAgent", () => {
       backend: "hindsight",
       shared_collection: "shared",
     });
-    reconcileAgent("test-agent", agentConfig, tmpDir, telegramConfig, updatedConfig);
+    // preserveClaudeMd: the hand-edited CLAUDE.md without a sidecar
+    // would otherwise abort the reconcile via process.exit. The test's
+    // intent — verify user edits to CLAUDE.md and telegram files are
+    // not silently overwritten — is satisfied by the preserve flag.
+    reconcileAgent(
+      "test-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      updatedConfig,
+      undefined,
+      { preserveClaudeMd: true },
+    );
 
     for (const f of userEditedFiles) {
       if (existsSync(f)) {
@@ -1698,11 +1710,32 @@ describe("scaffoldAgent with global defaults cascade", () => {
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
     );
 
-    // Native Claude Code nested shape
+    // Native Claude Code nested shape. User's UserPromptSubmit hook +
+    // switchroom-owned workspace-dynamic and timezone hooks (always
+    // injected; the dynamic injects per-turn workspace files, the
+    // timezone hook emits a one-line local-time additionalContext).
     expect(settings.hooks.UserPromptSubmit).toEqual([
       {
         hooks: [
           { type: "command", command: "/opt/audit.sh", timeout: 5 },
+        ],
+      },
+      {
+        hooks: [
+          {
+            type: "command",
+            command: expect.stringContaining("workspace-dynamic-hook.sh"),
+            timeout: 5,
+          },
+        ],
+      },
+      {
+        hooks: [
+          {
+            type: "command",
+            command: expect.stringContaining("timezone-hook.sh"),
+            timeout: 3,
+          },
         ],
       },
     ]);
@@ -2814,8 +2847,14 @@ describe("session freshness in start.sh", () => {
     );
     expect(settings.hooks.Stop).toBeUndefined();
     const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
-    expect(startSh).not.toContain(".handoff.md");
+    // The session-mode detection block always references .handoff.md
+    // (it's the signal that a handoff briefing was written by a prior
+    // session's Stop hook); when handoff is disabled the file never
+    // exists so the elif is dead code but inert. The real signal that
+    // handoff is disabled is the absence of the handoff-briefing block
+    // and its exported env var.
     expect(startSh).not.toContain("SWITCHROOM_HANDOFF_SHOW_LINE");
+    expect(startSh).not.toContain("HANDOFF_FILE=");
   });
 
   it("threads show_handoff_line=false through to start.sh env", () => {

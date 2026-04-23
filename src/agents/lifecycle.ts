@@ -114,7 +114,7 @@ export function restartAgent(name: string): void {
  * restart immediately. If a turn is in flight, wait for completion then restart.
  */
 export function gracefulRestartAgent(name: string): Promise<{ restartedImmediately: boolean; waitingForTurn: boolean }> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolvePromise, reject) => {
     // Gateway socket is in the agent's telegram directory
     // (set via TELEGRAM_STATE_DIR in the gateway service unit)
     const agentsDir = process.env.SWITCHROOM_AGENTS_DIR ?? resolveStatePath("agents");
@@ -152,7 +152,7 @@ export function gracefulRestartAgent(name: string): Promise<{ restartedImmediate
             client.destroy();
 
             if (response.success) {
-              resolve({
+              resolvePromise({
                 restartedImmediately: response.restartedImmediately ?? false,
                 waitingForTurn: response.waitingForTurn ?? false,
               });

@@ -11,7 +11,6 @@
 
 import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'grammy'
 import { run, type RunnerHandle } from '@grammyjs/runner'
-import { runWithRetry, withTimeout } from './run-with-retry.js'
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes } from 'crypto'
 import { execFileSync, execSync, spawn } from 'child_process'
@@ -26,6 +25,7 @@ import { join, extname, sep, basename } from 'path'
 import { installPluginLogger } from '../plugin-logger.js'
 import { StatusReactionController } from '../status-reactions.js'
 import { isTelegramReplyTool, isTelegramSurfaceTool } from '../tool-names.js'
+import { createTypingWrapper } from '../typing-wrap.js'
 import { type DraftStreamHandle } from '../draft-stream.js'
 import { handlePtyPartialPure, type PtyHandlerState } from '../pty-partial-handler.js'
 import { handleStreamReply } from '../stream-reply-handler.js'
@@ -127,6 +127,13 @@ import type {
   HeartbeatMessage,
   InboundMessage,
 } from './ipc-protocol.js'
+import { writePidFile, clearPidFile } from './pid-file.js'
+import {
+  writeSessionMarker,
+  readSessionMarker,
+  shouldFireRestartBanner,
+  type SessionMarker,
+} from './session-marker.js'
 
 // ─── Stderr logging ───────────────────────────────────────────────────────
 installPluginLogger()
@@ -535,6 +542,12 @@ function stopTypingLoop(chat_id: string): void {
   if (retry) { clearTimeout(retry); typingRetryTimers.delete(chat_id) }
 }
 
+const typingWrapper = createTypingWrapper({
+  startTypingLoop,
+  stopTypingLoop,
+  isSurfaceTool: isTelegramSurfaceTool,
+})
+
 // ─── Robust API call wrapper ──────────────────────────────────────────────
 // Extracted to telegram-plugin/retry-api-call.ts so it's unit-testable in
 // isolation; the gateway just composes the pure policy with its own logger.
@@ -660,6 +673,22 @@ let unpinProgressCardForChat: ((chatId: string, threadId: number | undefined) =>
 const SOCKET_PATH = process.env.SWITCHROOM_GATEWAY_SOCKET ?? join(STATE_DIR, 'gateway.sock')
 // Ensure the directory for the socket exists
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+
+// PID file + session marker. See pid-file.ts and session-marker.ts for
+// the 2026-04-22 incident that motivates these. The PID file lets the
+// in-agent plugin distinguish "gateway gone" from "socket blinked on a
+// live gateway"; the session marker lets the crash-recovery banner
+// distinguish a real process restart from a grammY poll-restart.
+const GATEWAY_PID_PATH = process.env.SWITCHROOM_GATEWAY_PID_FILE ?? join(STATE_DIR, 'gateway.pid.json')
+const GATEWAY_SESSION_MARKER_PATH = process.env.SWITCHROOM_GATEWAY_SESSION_MARKER ?? join(STATE_DIR, 'gateway-session.json')
+const GATEWAY_STARTED_AT_MS = Date.now()
+
+try {
+  writePidFile(GATEWAY_PID_PATH, { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS })
+  process.stderr.write(`telegram gateway: wrote PID file ${GATEWAY_PID_PATH} pid=${process.pid} startedAt=${GATEWAY_STARTED_AT_MS}\n`)
+} catch (err) {
+  process.stderr.write(`telegram gateway: writePidFile failed: ${err}\n`)
+}
 
 const ipcServer: IpcServer = createIpcServer({
   socketPath: SOCKET_PATH,
@@ -1433,6 +1462,9 @@ function closeProgressLane(chatId: string, threadId: number | undefined): void {
 function handleSessionEvent(ev: SessionEvent): void {
   switch (ev.kind) {
     case 'enqueue': {
+      // Drain any orphaned typing-wrap entries left over from a crashed
+      // prior turn before resetting focus.
+      typingWrapper.drainAll()
       if (ev.chatId) {
         currentSessionChatId = ev.chatId
         currentSessionThreadId = ev.threadId != null ? Number(ev.threadId) : undefined
@@ -1468,6 +1500,9 @@ function handleSessionEvent(ev: SessionEvent): void {
       if (!ctrl) return
       if (isTelegramSurfaceTool(name)) return
       ctrl.setTool(name)
+      if (ev.toolUseId) {
+        typingWrapper.onToolUse(ev.toolUseId, currentSessionChatId, name)
+      }
       return
     }
     case 'text': {
@@ -1502,8 +1537,24 @@ function handleSessionEvent(ev: SessionEvent): void {
       }
       return
     }
-    case 'tool_result': return
+    case 'tool_result': {
+      if (ev.toolUseId) typingWrapper.onToolResult(ev.toolUseId)
+      return
+    }
+    case 'sub_agent_tool_use': {
+      if (currentSessionChatId == null) return
+      if (!ev.toolUseId) return
+      typingWrapper.onToolUse(ev.toolUseId, currentSessionChatId, ev.toolName)
+      return
+    }
+    case 'sub_agent_tool_result': {
+      if (ev.toolUseId) typingWrapper.onToolResult(ev.toolUseId)
+      return
+    }
     case 'turn_end': {
+      // Drain any still-pending tool dispatch typing entries — covers
+      // transcript truncation or a Claude Code crash mid-tool.
+      typingWrapper.drainAll()
       if (orphanedReplyTimeoutId != null) {
         clearTimeout(orphanedReplyTimeoutId)
         orphanedReplyTimeoutId = null
@@ -1603,19 +1654,7 @@ function handleSessionEvent(ev: SessionEvent): void {
       lastPtyPreviewByChat.delete(statusKey(chatId, threadId))
       pendingPtyPartial = null
       closeActivityLane(chatId, threadId)
-      // Notification-spam fix (2026-04-23): when the progress-card driver is
-      // still managing a deferred-completion card (parent turn_end arrived
-      // but sub-agents are still running), tearing down the draft stream
-      // here forces every subsequent sub-agent emit to create a fresh
-      // `sendMessage` — which Telegram delivers as a new push notification.
-      // The driver is authoritative for its own stream lifecycle: it
-      // calls `emit(done=true)` exactly once when the card is truly final,
-      // and `handleStreamReply` finalizes + deletes the stream entry at
-      // that point. Skip the backstop while the driver still owns the card.
-      const driverThreadId = threadId != null ? String(threadId) : undefined
-      if (progressDriver == null || !progressDriver.hasActiveCard(chatId, driverThreadId)) {
-        closeProgressLane(chatId, threadId)
-      }
+      closeProgressLane(chatId, threadId)
       currentSessionChatId = null
       currentSessionThreadId = undefined
       currentTurnReplyCalled = false
@@ -3682,22 +3721,21 @@ async function shutdown(): Promise<void> {
   ipcServer.broadcast({ type: 'status', status: 'gateway_shutting_down' })
   await ipcServer.close()
 
+  // Clear PID file so the next bridge spawn sees "no PID file" = gateway
+  // truly gone, rather than racing a stale file against an already-dead
+  // process. Session marker is left on disk intentionally — it's read
+  // by the NEXT gateway process's banner-gate.
+  clearPidFile(GATEWAY_PID_PATH)
+
   // Safety net: force exit after 3 seconds if graceful stop hangs
   const forceExitTimer = setTimeout(() => process.exit(0), 3000)
   forceExitTimer.unref()
 
-  // Bound the stop() at 2s — tighter than the 3s forceExitTimer above so
-  // SIGTERM → clean exit doesn't stall waiting for grammy cleanup. Null the
-  // handle after stop() so a double-SIGTERM or a post-shutdown retry-loop
-  // resume can't double-stop it (grammy's stop() is idempotent but the
-  // defensive null keeps the invariant "at most one live handle" intact).
   try {
     if (runnerHandle != null) {
-      const h = runnerHandle
-      runnerHandle = null
-      await withTimeout(h.stop(), 2000)
+      await runnerHandle.stop()
     } else {
-      await withTimeout(Promise.resolve(bot.stop()), 2000)
+      await bot.stop()
     }
   } catch (err) {
     process.stderr.write(`telegram gateway: error during bot stop: ${err}\n`)
@@ -3860,167 +3898,145 @@ let runnerHandle: RunnerHandle | null = null
 // grammY 409 retry loop).
 let didOneTimeSetup = false
 
-// ─── 409 retry teardown ───
-// Production flow delegates to the unit-tested runWithRetry helper. The
-// "drain before retry" invariant (stop old → run new, at most one live
-// handle at any time) is pinned by tests in gateway-409-retry-leak.test.ts.
-// Keeping this inline loop in lockstep with the helper was too easy to
-// break — hence the shared code path.
-async function doOneTimeSetup(): Promise<void> {
-  // Clear any orphan long-poll from a previous gateway process
-  // before we start our own. See clearStaleTelegramPollingState
-  // docstring for the production incident that motivates this.
-  await clearStaleTelegramPollingState(bot.api)
+void (async () => {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      // Clear any orphan long-poll from a previous gateway process
+      // before we start our own. See clearStaleTelegramPollingState
+      // docstring for the production incident that motivates this.
+      // Safe to re-run on retries: it's idempotent.
+      await clearStaleTelegramPollingState(bot.api)
 
-  const me = await bot.api.getMe()
-  botUsername = me.username
-  process.stderr.write(`telegram gateway: polling as @${me.username}\n`)
-  if (TOPIC_ID != null) process.stderr.write(`telegram gateway: topic filter active — thread_id=${TOPIC_ID}\n`)
+      const me = await bot.api.getMe()
+      botUsername = me.username
+      process.stderr.write(`telegram gateway: polling as @${me.username}\n`)
+      if (TOPIC_ID != null) process.stderr.write(`telegram gateway: topic filter active — thread_id=${TOPIC_ID}\n`)
 
-  void registerSwitchroomBotCommands().catch(() => {})
+      if (!didOneTimeSetup) {
+        didOneTimeSetup = true
+        void registerSwitchroomBotCommands().catch(() => {})
 
-  // Boot-time pin sweep
-  try {
-    const bootAccess = loadAccess()
-    const chatSet = new Set<string>(bootAccess.allowFrom)
-    for (const gid of Object.keys(bootAccess.groups)) chatSet.add(gid)
-    const chatIds = [...chatSet]
-    if (chatIds.length > 0) {
-      void sweepBotAuthoredPins(
-        chatIds, me.id,
-        async (chatId) => {
-          const chat = await lockedBot.api.getChat(chatId)
-          const pinned = (chat as { pinned_message?: { message_id: number; from?: { id: number } } }).pinned_message
-          if (!pinned) return null
-          return { messageId: pinned.message_id, fromId: pinned.from?.id ?? null }
-        },
-        (chatId, messageId) => lockedBot.api.unpinChatMessage(chatId, messageId),
-        { log: (msg) => process.stderr.write(`telegram gateway: bot-authored pin sweep — ${msg}\n`) },
-      ).catch(() => {})
-    }
-  } catch {}
-
-  // Restart follow-up
-  try {
-    const marker = readRestartMarker()
-    if (marker) {
-      const ageMs = Date.now() - marker.ts
-      const ageSec = Math.max(1, Math.round(ageMs / 1000))
-      process.stderr.write(`telegram gateway: boot: restart-marker present, chat_id=${marker.chat_id} age=${ageSec}s within5min=${ageMs < 5 * 60_000}\n`)
-      clearRestartMarker()
-      if (ageMs < 5 * 60_000) {
-        const text = `🎛️ Switchroom restarted — ready. (took ~${ageSec}s)`
-        process.stderr.write(`telegram gateway: boot: posting 'restarted — ready' banner chat_id=${marker.chat_id} thread_id=${marker.thread_id ?? '-'} ackReply=${marker.ack_message_id ?? '-'}\n`)
+        // Boot-time pin sweep
         try {
-          const sent = await lockedBot.api.sendMessage(marker.chat_id, text, {
-            parse_mode: 'HTML', link_preview_options: { is_disabled: true },
-            ...(marker.thread_id != null ? { message_thread_id: marker.thread_id } : {}),
-            ...(marker.ack_message_id != null ? { reply_parameters: { message_id: marker.ack_message_id } } : {}),
-          })
-          if (HISTORY_ENABLED) { try { recordOutbound({ chat_id: marker.chat_id, thread_id: marker.thread_id, message_ids: [sent.message_id], texts: [text], attachment_kinds: [] }) } catch {} }
-        } catch (err) {
-          process.stderr.write(`telegram gateway: boot: 'restarted — ready' banner send failed: ${err}\n`)
-        }
-      }
-    } else {
-      process.stderr.write(`telegram gateway: boot: no restart-marker found (clean start or crash recovery path)\n`)
-    }
-  } catch {}
-
-  // Crash recovery
-  try {
-    const marker = readRestartMarker()
-    if (!marker) {
-      const bootAccess = loadAccess()
-      const ownerChatId = bootAccess.allowFrom[0]
-      if (ownerChatId && HISTORY_ENABLED) {
-        try {
-          const recent = queryHistory({ chat_id: ownerChatId, limit: 1 })
-          if (recent.length > 0) {
-            const lastTs = recent[0].ts * 1000
-            const downtime = Date.now() - lastTs
-            const downSec = Math.max(1, Math.round(downtime / 1000))
-            if (downtime < 30 * 60_000) {
-              const text = `⚡ Recovered from unexpected restart. (down ~${downSec}s)`
-              process.stderr.write(`telegram gateway: boot: posting 'recovered from unexpected restart' banner chat_id=${ownerChatId} down=${downSec}s (no marker present, last msg ${downSec}s ago)\n`)
-              const sent = await lockedBot.api.sendMessage(ownerChatId, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } })
-              if (HISTORY_ENABLED) { try { recordOutbound({ chat_id: ownerChatId, thread_id: null, message_ids: [sent.message_id], texts: [text], attachment_kinds: [] }) } catch {} }
-            } else {
-              process.stderr.write(`telegram gateway: boot: suppressed 'recovered' banner — last msg ${downSec}s ago exceeds 30min window\n`)
-            }
+          const bootAccess = loadAccess()
+          const chatSet = new Set<string>(bootAccess.allowFrom)
+          for (const gid of Object.keys(bootAccess.groups)) chatSet.add(gid)
+          const chatIds = [...chatSet]
+          if (chatIds.length > 0) {
+            void sweepBotAuthoredPins(
+              chatIds, me.id,
+              async (chatId) => {
+                const chat = await lockedBot.api.getChat(chatId)
+                const pinned = (chat as { pinned_message?: { message_id: number; from?: { id: number } } }).pinned_message
+                if (!pinned) return null
+                return { messageId: pinned.message_id, fromId: pinned.from?.id ?? null }
+              },
+              (chatId, messageId) => lockedBot.api.unpinChatMessage(chatId, messageId),
+              { log: (msg) => process.stderr.write(`telegram gateway: bot-authored pin sweep — ${msg}\n`) },
+            ).catch(() => {})
           }
         } catch {}
+
+        // Restart follow-up
+        try {
+          const marker = readRestartMarker()
+          if (marker) {
+            const ageMs = Date.now() - marker.ts
+            const ageSec = Math.max(1, Math.round(ageMs / 1000))
+            process.stderr.write(`telegram gateway: boot: restart-marker present, chat_id=${marker.chat_id} age=${ageSec}s within5min=${ageMs < 5 * 60_000}\n`)
+            clearRestartMarker()
+            if (ageMs < 5 * 60_000) {
+              const text = `🎛️ Switchroom restarted — ready. (took ~${ageSec}s)`
+              process.stderr.write(`telegram gateway: boot: posting 'restarted — ready' banner chat_id=${marker.chat_id} thread_id=${marker.thread_id ?? '-'} ackReply=${marker.ack_message_id ?? '-'}\n`)
+              try {
+                const sent = await lockedBot.api.sendMessage(marker.chat_id, text, {
+                  parse_mode: 'HTML', link_preview_options: { is_disabled: true },
+                  ...(marker.thread_id != null ? { message_thread_id: marker.thread_id } : {}),
+                  ...(marker.ack_message_id != null ? { reply_parameters: { message_id: marker.ack_message_id } } : {}),
+                })
+                if (HISTORY_ENABLED) { try { recordOutbound({ chat_id: marker.chat_id, thread_id: marker.thread_id, message_ids: [sent.message_id], texts: [text], attachment_kinds: [] }) } catch {} }
+              } catch (err) {
+                process.stderr.write(`telegram gateway: boot: 'restarted — ready' banner send failed: ${err}\n`)
+              }
+            }
+          } else {
+            process.stderr.write(`telegram gateway: boot: no restart-marker found (clean start or crash recovery path)\n`)
+          }
+        } catch {}
+
+        // Crash recovery. Gated on the session marker so a grammY
+        // poll-restart (which re-enters the outer retry loop) does NOT
+        // fire the banner — only an actual new process does. See
+        // session-marker.ts for the 2026-04-22 incident this closes.
+        try {
+          const marker = readRestartMarker()
+          const currentSession: SessionMarker = { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS }
+          const storedSession = readSessionMarker(GATEWAY_SESSION_MARKER_PATH)
+          const bannerOK = shouldFireRestartBanner({ stored: storedSession, current: currentSession })
+          if (!marker && !bannerOK) {
+            process.stderr.write(`telegram gateway: boot: suppressed 'recovered' banner — session marker matches current process (pid=${process.pid} startedAt=${GATEWAY_STARTED_AT_MS})\n`)
+          }
+          if (!marker && bannerOK) {
+            const bootAccess = loadAccess()
+            const ownerChatId = bootAccess.allowFrom[0]
+            if (ownerChatId && HISTORY_ENABLED) {
+              try {
+                const recent = queryHistory({ chat_id: ownerChatId, limit: 1 })
+                if (recent.length > 0) {
+                  const lastTs = recent[0].ts * 1000
+                  const downtime = Date.now() - lastTs
+                  const downSec = Math.max(1, Math.round(downtime / 1000))
+                  if (downtime < 30 * 60_000) {
+                    const text = `⚡ Recovered from unexpected restart. (down ~${downSec}s)`
+                    process.stderr.write(`telegram gateway: boot: posting 'recovered from unexpected restart' banner chat_id=${ownerChatId} down=${downSec}s (no marker present, last msg ${downSec}s ago)\n`)
+                    const sent = await lockedBot.api.sendMessage(ownerChatId, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } })
+                    if (HISTORY_ENABLED) { try { recordOutbound({ chat_id: ownerChatId, thread_id: null, message_ids: [sent.message_id], texts: [text], attachment_kinds: [] }) } catch {} }
+                  } else {
+                    process.stderr.write(`telegram gateway: boot: suppressed 'recovered' banner — last msg ${downSec}s ago exceeds 30min window\n`)
+                  }
+                }
+              } catch {}
+            }
+          }
+          // Always update the marker to the current process on this
+          // boot pass so subsequent banner-gates see "stored === current".
+          try {
+            writeSessionMarker(GATEWAY_SESSION_MARKER_PATH, currentSession)
+          } catch (err) {
+            process.stderr.write(`telegram gateway: writeSessionMarker failed: ${err}\n`)
+          }
+        } catch {}
+
+        // Auto-fallback on quota exhaustion. Periodically polls
+        // the active slot's rate-limit headers; when utilization >= 99.5%
+        // or a 429 is observed, marks the slot exhausted, swaps to the
+        // next healthy slot via src/auth, restarts the agent, and posts
+        // a notification to the owner chat. See telegram-plugin/auto-fallback.ts
+        // for the pure decision logic + notification builder.
+        //
+        // Default poll cadence: every 60 minutes. Set
+        // SWITCHROOM_AUTO_FALLBACK_POLL_MS=0 to disable the background
+        // poller (users can still trigger a check via /authfallback).
+        const AUTO_FALLBACK_POLL_MS = Number(process.env.SWITCHROOM_AUTO_FALLBACK_POLL_MS ?? 60 * 60_000)
+        if (AUTO_FALLBACK_POLL_MS > 0) {
+          setInterval(() => { void runAutoFallbackCheck({ trigger: 'scheduled' }) }, AUTO_FALLBACK_POLL_MS).unref()
+        }
       }
-    }
-  } catch {}
 
-  // Auto-fallback on quota exhaustion. Periodically polls
-  // the active slot's rate-limit headers; when utilization >= 99.5%
-  // or a 429 is observed, marks the slot exhausted, swaps to the
-  // next healthy slot via src/auth, restarts the agent, and posts
-  // a notification to the owner chat. See telegram-plugin/auto-fallback.ts
-  // for the pure decision logic + notification builder.
-  //
-  // Default poll cadence: every 60 minutes. Set
-  // SWITCHROOM_AUTO_FALLBACK_POLL_MS=0 to disable the background
-  // poller (users can still trigger a check via /authfallback).
-  const AUTO_FALLBACK_POLL_MS = Number(process.env.SWITCHROOM_AUTO_FALLBACK_POLL_MS ?? 60 * 60_000)
-  if (AUTO_FALLBACK_POLL_MS > 0) {
-    setInterval(() => { void runAutoFallbackCheck({ trigger: 'scheduled' }) }, AUTO_FALLBACK_POLL_MS).unref()
+      process.stderr.write(`telegram gateway: starting bot polling pid=${process.pid} agent=${process.env.SWITCHROOM_AGENT_NAME ?? '-'} stateDir=${STATE_DIR} historyEnabled=${HISTORY_ENABLED} streamMode=${process.env.SWITCHROOM_TG_STREAM_MODE ?? 'checklist'}\n`)
+      runnerHandle = run(bot)
+      await runnerHandle.task()
+      return
+    } catch (err) {
+      if (err instanceof GrammyError && err.error_code === 409) {
+        const delay = Math.min(1000 * attempt, 15000)
+        process.stderr.write(`telegram gateway: 409 Conflict, retrying in ${delay / 1000}s\n`)
+        await new Promise(r => setTimeout(r, delay))
+        continue
+      }
+      if (err instanceof Error && err.message === 'Aborted delay') return
+      process.stderr.write(`telegram gateway: polling failed: ${err}\n`)
+      return
+    }
   }
-}
-
-void runWithRetry<RunnerHandle>({
-  // Heavy setup runs once on attempt 1 only. Gated on !didOneTimeSetup so
-  // 409 retries don't re-issue API calls — the retry branch is purely
-  // "stop old → run new". This is what the `didOneTimeSetup` banner guard
-  // from e897ab1 protects (no duplicate "⚡ Recovered…" banners on retry).
-  beforeRun: async () => {
-    if (didOneTimeSetup) return
-    await doOneTimeSetup()
-    didOneTimeSetup = true
-  },
-  onAttempt: () => {
-    process.stderr.write(`telegram gateway: starting bot polling pid=${process.pid} agent=${process.env.SWITCHROOM_AGENT_NAME ?? '-'} stateDir=${STATE_DIR} historyEnabled=${HISTORY_ENABLED} streamMode=${process.env.SWITCHROOM_TG_STREAM_MODE ?? 'checklist'}\n`)
-  },
-  run: () => {
-    runnerHandle = run(bot)
-    return runnerHandle
-  },
-  shouldRetry: (err) => err instanceof GrammyError && err.error_code === 409,
-  sleep: async (attempt) => {
-    const delay = Math.min(1000 * attempt, 15000)
-    await new Promise((r) => setTimeout(r, delay))
-  },
-  stopTimeoutMs: 3000,
-  onRetry: (err, attempt) => {
-    const delay = Math.min(1000 * attempt, 15000)
-    // Existing log line — kept verbatim so existing log-greps / dashboards
-    // keep matching. If you change this, check journalctl filters first.
-    if (err instanceof GrammyError && err.error_code === 409) {
-      process.stderr.write(`telegram gateway: 409 Conflict, retrying in ${delay / 1000}s\n`)
-    }
-    // NEW retry-specific line. Distinct from "starting bot polling" so
-    // operators can tell at a glance whether a log is a fresh boot or an
-    // in-process retry after teardown. Prior to this, both paths wrote
-    // the exact same "starting bot polling" line, which is part of why
-    // the 2026-04-22 stacked-poller leak was hard to spot.
-    const code = err instanceof GrammyError ? err.error_code : 'unknown'
-    const reason = err instanceof Error ? err.message.slice(0, 120) : String(err).slice(0, 120)
-    process.stderr.write(`telegram gateway: retry attempt=${attempt + 1} reason=${code} detail=${JSON.stringify(reason)} teardown_ms=3000 next_in_ms=${delay}\n`)
-  },
-  onStopFailure: (stopErr) => {
-    process.stderr.write(`telegram gateway: runner stop() during 409 teardown failed: ${stopErr}\n`)
-  },
-  onFatal: (err) => {
-    // Null the local reference — runWithRetry's internal drain has
-    // already stopped the handle.
-    runnerHandle = null
-    if (err instanceof Error && err.message === 'Aborted delay') return
-    process.stderr.write(`telegram gateway: polling failed: ${err}\n`)
-  },
-}).then(() => {
-  // Loop exited cleanly (graceful resolution). Internal drain has already
-  // stopped any outstanding handle; null the local reference.
-  runnerHandle = null
-})
+})()

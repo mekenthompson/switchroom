@@ -1,0 +1,27 @@
+# Minimal vendored gitleaks-style rule file.
+#
+# Full upstream gitleaks.toml (https://github.com/gitleaks/gitleaks) is the
+# long-term plan for v2. For v1 we ship a thin placeholder so the loader can
+# be exercised and we have a declared file path to extend.
+#
+# Each rule is a [rules.<id>] section with `regex` and optional `tags`.
+# The loader in gitleaks-loader.ts parses this file at boot and compiles
+# each regex into a PatternDef. TOML parsing is intentionally naive to
+# avoid a new dep — see gitleaks-loader.ts for the minimal parser.
+
+title = "switchroom vendored gitleaks (subset)"
+
+[[rules]]
+id = "slack-webhook"
+description = "Slack incoming webhook URL"
+regex = '''https://hooks\.slack\.com/services/[A-Za-z0-9_/]+'''
+
+[[rules]]
+id = "stripe-live-key"
+description = "Stripe live secret key"
+regex = '''\b(sk_live_[A-Za-z0-9]{24,})\b'''
+
+[[rules]]
+id = "sendgrid-api-key"
+description = "SendGrid API key"
+regex = '''\b(SG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43})\b'''

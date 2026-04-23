@@ -12,6 +12,7 @@ import {
   removeSecret,
   VaultError,
 } from "../vault/vault.js";
+import { registerVaultSweep } from "./vault-sweep.js";
 
 function getVaultPath(configPath?: string): string {
   try {
@@ -272,4 +273,8 @@ export function registerVaultCommand(program: Command): void {
         throw err;
       }
     });
+
+  // `vault sweep` — retroactively scrub stored vault values from Telegram
+  // SQLite history + Claude Code session transcripts. See vault-sweep.ts.
+  registerVaultSweep(vault, program);
 }

@@ -139,7 +139,7 @@ describe("projectBootstrapFiles", () => {
       ],
       heading: "Project Context",
       budget: { bootstrapMaxChars: 400, bootstrapTotalMaxChars: 10000 },
-      warningMode: "warn",
+      warningMode: "once",
     });
     expect(result.analysis.hasTruncation).toBe(true);
     expect(result.warning.warningShown).toBe(true);
@@ -155,7 +155,7 @@ describe("projectBootstrapFiles", () => {
       ],
       heading: "Project Context",
       budget: { bootstrapMaxChars: 500, bootstrapTotalMaxChars: 900 },
-      warningMode: "warn",
+      warningMode: "once",
     });
     expect(result.analysis.hasTruncation).toBe(true);
     // The injected files total must not exceed bootstrapTotalMaxChars.
@@ -189,7 +189,7 @@ describe("projectBootstrapFiles — truncation marker respects cap", () => {
       ],
       heading: "Project Context",
       budget: { bootstrapMaxChars: 1000, bootstrapTotalMaxChars: 10000 },
-      warningMode: "warn",
+      warningMode: "once",
     });
     for (const f of result.injectedFiles) {
       expect(f.content.length).toBeLessThanOrEqual(1000);

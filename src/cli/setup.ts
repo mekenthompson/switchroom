@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { loadConfig, resolveAgentsDir, resolvePath, ConfigError } from "../config/loader.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { scaffoldAgent } from "../agents/scaffold.js";
-import { installAllUnits } from "../agents/systemd.js";
+import { installAllUnits, installForemanUnit, generateForemanUnit } from "../agents/systemd.js";
 import { syncTopics } from "../telegram/topic-manager.js";
 import { loadTopicState } from "../telegram/state.js";
 import { createVault, setStringSecret } from "../vault/vault.js";
@@ -56,7 +56,14 @@ export function registerSetupCommand(program: Command): void {
     )
     .option("--non-interactive", "Run without prompts (use env vars and flags)")
     .option("--user-id <id>", "Telegram user ID (non-interactive mode)")
+    .option("--foreman", "Set up the foreman admin bot only (skip agent setup)")
     .action(async (opts) => {
+      // ── --foreman shortcut ────────────────────────────────────────
+      if (opts.foreman) {
+        await runForemanSetup(opts);
+        return;
+      }
+
       const parentOpts = program.opts();
       const nonInteractive =
         opts.nonInteractive === true || !process.stdin.isTTY;
@@ -1048,4 +1055,136 @@ async function stepVerification(
   }
 
   console.log(chalk.green(`  ${STEP_DONE} Verification steps ready`));
+}
+
+// ─── Foreman setup (--foreman) ────────────────────────────────────────────
+
+/**
+ * Standalone foreman setup flow. Prompts for a bot token and user Telegram
+ * ID, writes ~/.switchroom/foreman/.env + access.json, installs + enables
+ * the switchroom-foreman.service unit.
+ *
+ * Invoked via: switchroom setup --foreman
+ */
+async function runForemanSetup(opts: { nonInteractive?: boolean; userId?: string }): Promise<void> {
+  const { mkdirSync, writeFileSync, chmodSync, existsSync } = await import("node:fs");
+  const { resolve: resolvePath, join } = await import("node:path");
+  const { homedir } = await import("node:os");
+  const { execFileSync } = await import("node:child_process");
+
+  const nonInteractive = opts.nonInteractive === true || !process.stdin.isTTY;
+
+  console.log(
+    chalk.bold("\n  switchroom setup --foreman\n") +
+      chalk.gray("  Sets up the foreman admin bot and installs its systemd unit.\n"),
+  );
+
+  const foremanDir = join(homedir(), ".switchroom", "foreman");
+  mkdirSync(foremanDir, { recursive: true });
+
+  // ── Bot token ──────────────────────────────────────────────────────────
+  let botToken: string | undefined = process.env.TELEGRAM_FOREMAN_BOT_TOKEN;
+
+  if (!botToken) {
+    if (nonInteractive) {
+      console.error(
+        chalk.red("  No bot token. Set TELEGRAM_FOREMAN_BOT_TOKEN env var."),
+      );
+      process.exit(1);
+    }
+    botToken = await ask(
+      "  Paste foreman bot token from @BotFather",
+    );
+    if (!botToken) {
+      console.error(chalk.red("  Bot token is required."));
+      process.exit(1);
+    }
+  }
+
+  // Validate token
+  const spin = spinner("Validating foreman bot token...");
+  let botUsername: string;
+  try {
+    const info = await validateBotToken(botToken);
+    botUsername = info.username;
+    spin.stop(chalk.green(`${STEP_DONE} Bot validated: @${botUsername}`));
+  } catch (err) {
+    spin.stop(chalk.red(`  Token invalid: ${(err as Error).message}`));
+    process.exit(1);
+  }
+
+  // ── User Telegram ID ────────────────────────────────────────────────────
+  let userId = opts.userId ?? process.env.TELEGRAM_USER_ID ?? process.env.USER_ID;
+
+  if (!userId) {
+    if (nonInteractive) {
+      console.error(
+        chalk.red("  No user ID. Set TELEGRAM_USER_ID env var or pass --user-id."),
+      );
+      process.exit(1);
+    }
+    console.log(chalk.cyan(`\n  DM /start to @${botUsername}: ${chalk.underline(`t.me/${botUsername}`)}`));
+    const pollSpin = spinner("Waiting for /start DM (up to 2 minutes)...");
+    try {
+      const result = await pollForDmStart(botToken, 120_000);
+      pollSpin.stop(
+        chalk.green(`${STEP_DONE} Paired with user ID: ${result.userId}`),
+      );
+      userId = String(result.userId);
+    } catch {
+      pollSpin.stop(chalk.yellow("Timed out — enter user ID manually."));
+      userId = await ask("  Your Telegram user ID (numeric)");
+      if (!userId) {
+        console.error(chalk.red("  User ID is required."));
+        process.exit(1);
+      }
+    }
+  }
+
+  // ── Write config files ─────────────────────────────────────────────────
+  const envFile = join(foremanDir, ".env");
+  writeFileSync(envFile, `TELEGRAM_BOT_TOKEN=${botToken}\n`, { mode: 0o600 });
+  chmodSync(envFile, 0o600);
+  console.log(chalk.green(`  ${STEP_DONE} Wrote ${envFile}`));
+
+  const accessFile = join(foremanDir, "access.json");
+  writeFileSync(
+    accessFile,
+    JSON.stringify({ allowFrom: [userId] }, null, 2) + "\n",
+    { mode: 0o644 },
+  );
+  console.log(chalk.green(`  ${STEP_DONE} Wrote ${accessFile}`));
+
+  // ── Install systemd unit ───────────────────────────────────────────────
+  console.log(chalk.gray("\n  Installing switchroom-foreman.service..."));
+  try {
+    installForemanUnit();
+    console.log(chalk.green(`  ${STEP_DONE} switchroom-foreman.service installed and enabled`));
+  } catch (err) {
+    console.log(
+      chalk.yellow(`  Warning: systemd install failed: ${(err as Error).message}`),
+    );
+    console.log(chalk.gray("  Start manually: systemctl --user start switchroom-foreman"));
+  }
+
+  // ── Offer to start now ─────────────────────────────────────────────────
+  const startNow = nonInteractive
+    ? false
+    : await askYesNo("\n  Start foreman now?", true);
+
+  if (startNow) {
+    try {
+      execFileSync("systemctl", ["--user", "start", "switchroom-foreman"], { stdio: "inherit" });
+      console.log(chalk.green(`  ${STEP_DONE} Foreman started — DM @${botUsername} to verify`));
+    } catch {
+      console.log(
+        chalk.yellow("  Could not start automatically. Run: systemctl --user start switchroom-foreman"),
+      );
+    }
+  }
+
+  console.log(
+    chalk.bold.green("\n  Foreman setup complete!") +
+      chalk.gray(` DM @${botUsername} and try /help.\n`),
+  );
 }

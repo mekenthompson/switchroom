@@ -23,6 +23,7 @@ import {
   generateUnit,
   generateGatewayUnit,
   installUnit,
+  uninstallUnit,
   installScheduleTimers,
   enableScheduleTimers,
   daemonReload,
@@ -31,6 +32,7 @@ import {
 import {
   writeAgentEntryToConfig,
   updateAgentExtendsInConfig,
+  removeAgentFromConfig,
   synthesizeTopicName,
 } from "../cli/agent.js";
 import { validateBotToken } from "../setup/telegram-api.js";
@@ -96,7 +98,14 @@ export interface CompletionResult {
  *   6. Write telegram/.env with the bot token.
  *   7. startAuthSession() — returns loginUrl + sessionName.
  *
- * On failure at step 7 with rollbackOnFail=true, the scaffold dir is removed.
+ * Side-effects are tracked in a rollback stack. When rollbackOnFail=true and
+ * any step throws, all previously-applied side-effects are unwound in reverse
+ * order:
+ *   - agentDir removed (rmSync)
+ *   - systemd units uninstalled (uninstallUnit)
+ *   - switchroom.yaml entry removed (removeAgentFromConfig)
+ * This prevents a failed bootstrap from leaving the user in a "stuck" state
+ * where a second run hits the "already configured" guard.
  */
 export async function createAgent(
   opts: CreateAgentOpts,
@@ -143,12 +152,38 @@ export async function createAgent(
       );
     })();
 
+  // Rollback stack — each entry is a best-effort undo for one side-effect.
+  // Unwound in reverse order on failure when rollbackOnFail=true.
+  const rollbackStack: Array<() => void> = [];
+
+  /**
+   * Run `fn`. If it throws and rollbackOnFail=true, unwind the rollback stack
+   * in reverse order, then re-throw the original error.
+   */
+  async function withRollback<T>(fn: () => T | Promise<T>): Promise<T> {
+    try {
+      return await fn();
+    } catch (err) {
+      if (rollbackOnFail) {
+        for (let i = rollbackStack.length - 1; i >= 0; i--) {
+          try { rollbackStack[i](); } catch { /* best effort */ }
+        }
+      }
+      throw err;
+    }
+  }
+
   let config = loadConfig(configPath);
   const existingEntry = config.agents[name];
+
+  // Track whether we wrote the yaml entry (so rollback can remove it).
+  let wroteYamlEntry = false;
 
   if (!existingEntry) {
     // Fresh agent: write entry to yaml.
     writeAgentEntryToConfig(configPath, name, profile);
+    wroteYamlEntry = true;
+    rollbackStack.push(() => removeAgentFromConfig(configPath, name));
     config = loadConfig(configPath);
   } else {
     // Agent already in yaml — reconcile extends.
@@ -175,45 +210,48 @@ export async function createAgent(
   const agentDir = resolve(agentsDir, name);
 
   // ── Step 4: Scaffold ──────────────────────────────────────────────────────
-  scaffoldAgent(name, agentConfig, agentsDir, config.telegram, config, undefined, configPath);
+  await withRollback(() => {
+    scaffoldAgent(name, agentConfig, agentsDir, config.telegram, config, undefined, configPath);
+    // Push agentDir removal onto stack after scaffold succeeds.
+    rollbackStack.push(() => rmSync(agentDir, { recursive: true, force: true }));
+  });
 
   // ── Step 5: Install systemd units ─────────────────────────────────────────
   const useAutoaccept = agentConfig.channels?.telegram?.plugin === "switchroom";
   const gwName = resolveGatewayUnitName(config, name);
-  const unitContent = generateUnit(name, agentDir, useAutoaccept, gwName);
-  installUnit(name, unitContent);
 
-  if (useAutoaccept && gwName) {
-    const stateDir = resolve(agentDir, "telegram");
-    const gatewayContent = generateGatewayUnit(stateDir, name);
-    installUnit(gwName, gatewayContent);
-  }
+  await withRollback(() => {
+    const unitContent = generateUnit(name, agentDir, useAutoaccept, gwName);
+    installUnit(name, unitContent);
+    rollbackStack.push(() => uninstallUnit(name));
+
+    if (useAutoaccept && gwName) {
+      const stateDir = resolve(agentDir, "telegram");
+      const gatewayContent = generateGatewayUnit(stateDir, name);
+      installUnit(gwName, gatewayContent);
+      rollbackStack.push(() => uninstallUnit(gwName));
+    }
+  });
 
   // Install schedule timers if any.
   const schedule = agentConfig.schedule ?? [];
   if (schedule.length > 0) {
-    installScheduleTimers(name, agentDir, schedule);
-    daemonReload();
-    enableScheduleTimers(name, schedule.length);
+    await withRollback(() => {
+      installScheduleTimers(name, agentDir, schedule);
+      daemonReload();
+      enableScheduleTimers(name, schedule.length);
+    });
   }
 
   // ── Step 6: Write bot token to telegram/.env ──────────────────────────────
-  writeAgentEnv(agentDir, telegramBotToken);
+  await withRollback(() => {
+    writeAgentEnv(agentDir, telegramBotToken);
+  });
 
   // ── Step 7: Start OAuth session ───────────────────────────────────────────
-  let authResult: ReturnType<typeof startAuthSession>;
-  try {
-    authResult = startAuthSession(name, agentDir, { force: false });
-  } catch (err) {
-    if (rollbackOnFail) {
-      try {
-        rmSync(agentDir, { recursive: true, force: true });
-      } catch {
-        /* best effort */
-      }
-    }
-    throw err;
-  }
+  const authResult = await withRollback(() =>
+    startAuthSession(name, agentDir, { force: false }),
+  );
 
   return {
     loginUrl: authResult.loginUrl,

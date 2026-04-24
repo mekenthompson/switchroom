@@ -762,8 +762,8 @@ export const SwitchroomConfigSchema = z.object({
     ),
   agents: z
     .record(
-      z.string().regex(/^[a-z0-9][a-z0-9_-]*$/, {
-        message: "Agent name must start with a letter/digit and contain only lowercase letters, digits, hyphens, and underscores",
+      z.string().regex(/^[a-z0-9][a-z0-9_-]{0,62}$/, {
+        message: "Agent name must start with a letter/digit, contain only lowercase letters/digits/hyphens/underscores, and be at most 63 characters",
       }),
       AgentSchema,
     )

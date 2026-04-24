@@ -3944,6 +3944,11 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // TODO(Phase 4b): `op:<action>:<agent>` callbacks from operator-events.ts
+  // renderOperatorEvent(). Agent name is URL-encoded at emit (issue #24) —
+  // handler MUST decodeURIComponent(agent) before using the value.
+  // See telegram-plugin/operator-events.ts for the emit contract.
+
   // Permission request buttons.
   const m = /^perm:(allow|deny|more):([a-km-z]{5})$/.exec(data)
   if (!m) { await ctx.answerCallbackQuery().catch(() => {}); return }

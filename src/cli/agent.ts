@@ -324,6 +324,23 @@ export function updateAgentExtendsInConfig(
 }
 
 /**
+ * Remove an agent entry from switchroom.yaml. No-ops silently if the
+ * agent is not present (e.g. it was never written or already removed).
+ * Used by rollback in the creation orchestrator to undo a partial write.
+ *
+ * Exported for tests.
+ */
+export function removeAgentFromConfig(configPath: string, name: string): void {
+  if (!existsSync(configPath)) return;
+  const raw = readFileSync(configPath, "utf-8");
+  const doc = YAML.parseDocument(raw);
+  const agents = doc.get("agents") as YAML.YAMLMap | null;
+  if (!agents || !agents.has(name)) return;
+  agents.delete(name);
+  writeFileSync(configPath, doc.toString(), "utf-8");
+}
+
+/**
  * Reconcile the agent's scaffolded state against switchroom.yaml, then
  * restart it. This is the single codepath every `switchroom agent
  * restart` invocation goes through — the CLI entry point thin-wraps
@@ -1483,14 +1500,29 @@ export function registerAgentCommand(program: Command): void {
       "Prints the OAuth URL to stdout and reads the code from stdin."
     )
     .requiredOption("--profile <profile>", "Profile to extend (e.g. health-coach)")
-    .requiredOption("--bot-token <token>", "BotFather token for the agent's Telegram bot")
+    .option(
+      "--bot-token <token>",
+      "BotFather token for the agent's Telegram bot " +
+      "(alternative: set SWITCHROOM_BOT_TOKEN env var to avoid leaking token into shell history)"
+    )
     .option("--rollback-on-fail", "Remove scaffold dir if auth fails (default: keep for retry)")
     .action(
       withConfigError(async (
         name: string,
-        opts: { profile: string; botToken: string; rollbackOnFail?: boolean },
+        opts: { profile: string; botToken?: string; rollbackOnFail?: boolean },
       ) => {
         const configPath = getConfigPath(program);
+
+        // Resolve bot token: flag takes precedence, then env var.
+        const botToken = opts.botToken ?? process.env.SWITCHROOM_BOT_TOKEN;
+        if (!botToken) {
+          console.error(
+            chalk.red(
+              "Error: --bot-token is required (or set SWITCHROOM_BOT_TOKEN env var)."
+            )
+          );
+          process.exit(1);
+        }
 
         console.log(chalk.bold(`\nBootstrapping agent: ${name}\n`));
         console.log(chalk.gray(`  Profile:   ${opts.profile}`));
@@ -1503,7 +1535,7 @@ export function registerAgentCommand(program: Command): void {
           creationResult = await createAgent({
             name,
             profile: opts.profile,
-            telegramBotToken: opts.botToken,
+            telegramBotToken: botToken,
             configPath,
             rollbackOnFail: opts.rollbackOnFail ?? false,
           });

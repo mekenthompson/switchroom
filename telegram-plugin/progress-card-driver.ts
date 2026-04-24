@@ -867,7 +867,14 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       // that already ended — without this, a stray tool_result after turn_end
       // would resurrect the card. currentTurnKey is cleared on turn_end.
       const k = currentTurnKey
-      if (k == null) return
+      if (k == null) {
+        if (event.kind.startsWith('sub_agent_')) {
+          process.stderr.write(
+            `telegram gateway: progress-card: late-sub-agent-event-dropped kind=${event.kind} agentId=${'agentId' in event ? (event as { agentId: string }).agentId : 'n/a'} chatId=${chatId}\n`,
+          )
+        }
+        return
+      }
       let chatState = chats.get(k)
       if (chatState == null) return
 

@@ -1774,6 +1774,145 @@ describe('forceCompleteTurn — external completion signal', () => {
     advance(1000)
     expect(emits.length).toBe(afterFirst)
   })
+
+  it('deferred completion: multi-sub-agent race — parent turn_end while A mid-tool, B has partial results', () => {
+    // Regression test for issue #6 item 1.
+    //
+    // Scenario:
+    //   - Two parallel sub-agents (A, B) spawned via Agent tool_use.
+    //   - Sub-agent A fires sub_agent_tool_use but NOT sub_agent_tool_result
+    //     (mid-tool, in-flight).
+    //   - Sub-agent B fires sub_agent_tool_use + sub_agent_tool_result
+    //     (at least one completed tool cycle).
+    //   - Parent turn_end arrives — both sub-agents still alive.
+    //   - A then completes its tool (sub_agent_tool_result), more flush
+    //     cycles happen.
+    //   - Throughout all of this, every emit must carry done=false.
+    //   - Only after BOTH A and B fire sub_agent_turn_end does done=true appear.
+    //
+    // Today's code (PR #4) already passes this. The test locks the invariant
+    // against future regressions.
+    const { driver, emits, advance } = harness(500, 400, {
+      initialDelayMs: 0,
+    })
+
+    // Step 1: turn starts
+    driver.ingest(enqueue('c'), null)
+
+    // Step 2: spawn TWO parallel sub-agents
+    driver.ingest(
+      { kind: 'tool_use', toolName: 'Agent', toolUseId: 'pA', input: { description: 'worker-A', prompt: 'PA' } },
+      'c',
+    )
+    driver.ingest(
+      { kind: 'tool_use', toolName: 'Agent', toolUseId: 'pB', input: { description: 'worker-B', prompt: 'PB' } },
+      'c',
+    )
+
+    // Step 3: both sub-agents start
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'A', firstPromptText: 'PA' }, 'c')
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'B', firstPromptText: 'PB' }, 'c')
+
+    // Step 4: A fires a tool_use but NOT its tool_result (mid-tool, in-flight)
+    driver.ingest({ kind: 'sub_agent_tool_use', agentId: 'A', toolUseId: 'a-t1', toolName: 'Read' }, 'c')
+
+    // Step 5: B fires tool_use + tool_result (B has ≥1 completed tool cycle)
+    // B completing a cycle before parent turn_end ensures the deferred-completion logic sees
+    // heterogeneous sub-agent states (one mid-tool, one with completed cycles).
+    driver.ingest({ kind: 'sub_agent_tool_use', agentId: 'B', toolUseId: 'b-t1', toolName: 'Bash' }, 'c')
+    driver.ingest({ kind: 'sub_agent_tool_result', agentId: 'B', toolUseId: 'b-t1' }, 'c')
+
+    // Step 6: parent turn_end — sub-agents still in flight
+    driver.ingest({ kind: 'turn_end', durationMs: 1000 }, 'c')
+    advance(0)
+
+    // Snapshot emit count at this point to assert done=false in steps 6-8.
+    const baselineCount = emits.length
+    expect(baselineCount).toBeGreaterThan(0) // card has been emitting
+
+    // All emits so far must be done=false.
+    expect(emits.filter((e) => e.done === true)).toHaveLength(0)
+
+    // Step 7a: A's in-flight tool completes (sub_agent_tool_result for a-t1)
+    driver.ingest({ kind: 'sub_agent_tool_result', agentId: 'A', toolUseId: 'a-t1' }, 'c')
+    advance(600) // past coalesceMs so any pending flush fires
+
+    // Still done=false — both sub-agents still alive
+    expect(emits.filter((e) => e.done === true)).toHaveLength(0)
+
+    // Step 7b: more flush triggers (heartbeat, additional tool calls)
+    driver.ingest({ kind: 'sub_agent_tool_use', agentId: 'A', toolUseId: 'a-t2', toolName: 'Bash' }, 'c')
+    advance(600)
+    driver.ingest({ kind: 'sub_agent_tool_result', agentId: 'A', toolUseId: 'a-t2' }, 'c')
+    advance(600)
+    driver.ingest({ kind: 'sub_agent_tool_use', agentId: 'B', toolUseId: 'b-t2', toolName: 'Write' }, 'c')
+    advance(600)
+    driver.ingest({ kind: 'sub_agent_tool_result', agentId: 'B', toolUseId: 'b-t2' }, 'c')
+    advance(600)
+
+    // Assert: throughout steps 6-7, every emit has done=false (Step 9)
+    expect(emits.filter((e) => e.done === true)).toHaveLength(0)
+    expect(emits.length).toBeGreaterThan(baselineCount) // flushes did happen
+
+    // Step 8a: first sub-agent finishes — A done, B still running
+    // One sub-agent finishing must NOT close the card — other sub-agent still running.
+    driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'A' }, 'c')
+    advance(0)
+
+    // Still no done=true — B is still in flight
+    expect(emits.filter((e) => e.done === true)).toHaveLength(0)
+
+    // Step 8b: second sub-agent finishes — both done → card closes
+    driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'B' }, 'c')
+    advance(0)
+
+    // Now exactly one terminal emit with done=true, and it must be the last one.
+    const doneEmits = emits.filter((e) => e.done === true)
+    expect(doneEmits).toHaveLength(1)
+    expect(emits[emits.length - 1].done).toBe(true)
+  })
+
+  it('late sub-agent event after card close: logs to stderr and returns cleanly', () => {
+    // Regression test for issue #6 item 2.
+    //
+    // After completeTurnFully nulls currentTurnKey, any sub_agent_* event
+    // that arrives (from a stale session-tail tail) should:
+    //   1. Emit a process.stderr.write diagnostic log (matches file's observability pattern).
+    //   2. Return cleanly without corrupting any state.
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
+
+    try {
+      const { driver, emits, advance } = harness(0, 0, { initialDelayMs: 0 })
+
+      // Complete a full turn so the card closes (currentTurnKey → null).
+      driver.ingest(enqueue('c'), null)
+      driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c')
+      advance(0)
+
+      // Card is now closed. Confirm via hasActiveCard.
+      expect(driver.hasActiveCard('c')).toBe(false)
+
+      const emitCountBeforeLate = emits.length
+
+      // Fire a late sub_agent_tool_result — arrives after card close.
+      driver.ingest({ kind: 'sub_agent_tool_result', agentId: 'Z', toolUseId: 'z-t1' }, 'c')
+      advance(0)
+
+      // Assert 1: process.stderr.write was called with the diagnostic log.
+      expect(stderrSpy).toHaveBeenCalled()
+      const lateEventLog = stderrSpy.mock.calls
+        .map((c) => c[0] as string)
+        .find((s) => typeof s === 'string' && s.includes('late-sub-agent-event-dropped'))
+      expect(lateEventLog).toBeDefined()
+      expect(lateEventLog).toContain('sub_agent_tool_result')
+
+      // Assert 2: no state corruption — no new emits, card still closed.
+      expect(emits).toHaveLength(emitCountBeforeLate)
+      expect(driver.hasActiveCard('c')).toBe(false)
+    } finally {
+      stderrSpy.mockRestore()
+    }
+  })
 })
 
 // ─── API failure escalation (permanent-4xx terminal state) ───────────────────

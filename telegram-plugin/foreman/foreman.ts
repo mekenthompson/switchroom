@@ -21,20 +21,20 @@ import { Bot } from 'grammy'
 import { readFileSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { execSync } from 'child_process'
-
 import { installPluginLogger } from '../plugin-logger.js'
 import {
   escapeHtmlForTg,
-  preBlock,
-  stripAnsi,
-  formatSwitchroomOutput,
   isAllowedSender,
   makeSwitchroomExec,
   makeSwitchroomExecJson,
   makeSwitchroomReply,
   runPollingLoop,
 } from '../shared/bot-runtime.js'
+import {
+  assertSafeAgentName,
+  buildFleetSummary,
+  handleLogsCommand,
+} from './foreman-handlers.js'
 import {
   buildDashboard,
   isQuotaHot,
@@ -105,6 +105,10 @@ const switchroomReply = makeSwitchroomReply(() => undefined)
 
 // ─── Auth guard middleware ────────────────────────────────────────────────
 bot.use(async (ctx, next) => {
+  // Silently ignore any message that is not a private DM.
+  // If the foreman bot is ever added to a group, this prevents fleet info
+  // from leaking to all group members even when the sender is allowlisted.
+  if (ctx.chat?.type !== 'private') return
   if (!ctx.from) return
   const allowFrom = loadAllowFrom()
   if (!isAllowedSender(ctx, allowFrom)) {
@@ -115,57 +119,6 @@ bot.use(async (ctx, next) => {
 })
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
-
-function assertSafeAgentName(name: string): void {
-  if (!/^[a-zA-Z0-9_-]{1,64}$/.test(name)) {
-    throw new Error(`invalid agent name: ${name}`)
-  }
-}
-
-function statusIcon(status: string): string {
-  if (status === 'active' || status === 'running') return '🟢'
-  if (status === 'inactive' || status === 'stopped' || status === 'dead') return '🔴'
-  if (status === 'failed') return '⚠️'
-  return '⚪'
-}
-
-/** Chunk text into Telegram-safe parts (max 4096 chars per message). */
-function chunkText(text: string, maxLen = 4096): string[] {
-  if (text.length <= maxLen) return [text]
-  const chunks: string[] = []
-  let pos = 0
-  while (pos < text.length) {
-    chunks.push(text.slice(pos, pos + maxLen))
-    pos += maxLen
-  }
-  return chunks
-}
-
-/** Fetch fleet summary as formatted HTML. */
-type AgentListEntry = {
-  name: string; status: string; uptime: string;
-  template?: string | null; topic_name?: string | null;
-}
-
-function buildFleetSummary(): string {
-  try {
-    const data = switchroomExecJson<{ agents: AgentListEntry[] }>(['agent', 'list'])
-    if (!data || data.agents.length === 0) return '<i>No agents defined</i>'
-    const lines = ['<b>Fleet status</b>']
-    for (const a of data.agents) {
-      lines.push(
-        `${statusIcon(a.status)} <b>${escapeHtmlForTg(a.name)}</b> · ${escapeHtmlForTg(a.status)} · ${escapeHtmlForTg(a.uptime)}`,
-      )
-      if (a.template || a.topic_name) {
-        const meta = [a.template, a.topic_name].filter(Boolean).map(s => escapeHtmlForTg(s!)).join(' → ')
-        lines.push(`  <i>${meta}</i>`)
-      }
-    }
-    return lines.join('\n')
-  } catch (err) {
-    return `<b>agent list failed:</b>\n${preBlock(formatSwitchroomOutput((err as Error).message))}`
-  }
-}
 
 /** Fetch auth dashboard state for a named agent. */
 function fetchForemanDashboardState(agent: string): DashboardState | null {
@@ -247,71 +200,15 @@ bot.command('help', async ctx => {
 
 // ─── /status + /list ──────────────────────────────────────────────────────
 bot.command(['status', 'list'], async ctx => {
-  const summary = buildFleetSummary()
+  const summary = buildFleetSummary(switchroomExecJson)
   await switchroomReply(ctx, summary, { html: true })
 })
 
 // ─── /logs ───────────────────────────────────────────────────────────────
-const LOG_PAGE_BYTES = 3 * 1024 // 3 KB — paginate above this
-
 bot.command('logs', async ctx => {
-  const raw = (ctx.match ?? '').trim()
-  const args = raw.split(/\s+/).filter(Boolean)
-
-  if (args.length === 0) {
-    await switchroomReply(ctx, 'Usage: /logs &lt;agent&gt; [--tail N]', { html: true })
-    return
-  }
-
-  const agentName = args[0]
-  try { assertSafeAgentName(agentName) } catch {
-    await switchroomReply(ctx, 'Invalid agent name.', { html: true })
-    return
-  }
-
-  // Parse --tail N
-  let tailN = 50
-  const tailIdx = args.indexOf('--tail')
-  if (tailIdx !== -1 && args[tailIdx + 1]) {
-    const parsed = parseInt(args[tailIdx + 1], 10)
-    if (!isNaN(parsed) && parsed > 0) tailN = Math.min(parsed, 500)
-  }
-
-  let output: string
-  try {
-    output = stripAnsi(execSync(
-      `journalctl --user -u "switchroom-${agentName}" -n ${tailN} --no-pager --output=short-monotonic 2>&1`,
-      {
-        encoding: 'utf-8',
-        timeout: 10000,
-        env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
-      },
-    ))
-  } catch (err) {
-    const msg = (err as { stdout?: string; stderr?: string; message?: string })
-    const detail = msg.stdout || msg.stderr || msg.message || 'unknown error'
-    await switchroomReply(ctx,
-      `<b>logs failed for ${escapeHtmlForTg(agentName)}:</b>\n${preBlock(formatSwitchroomOutput(stripAnsi(detail)))}`,
-      { html: true },
-    )
-    return
-  }
-
-  const trimmed = output.trim()
-  if (!trimmed) {
-    await switchroomReply(ctx, `No logs found for <code>${escapeHtmlForTg(agentName)}</code>.`, { html: true })
-    return
-  }
-
-  // Paginate if output > LOG_PAGE_BYTES
-  if (Buffer.byteLength(trimmed, 'utf8') > LOG_PAGE_BYTES) {
-    const chunks = chunkText(trimmed, 3800)
-    for (let i = 0; i < chunks.length; i++) {
-      const label = chunks.length > 1 ? ` (${i + 1}/${chunks.length})` : ''
-      await switchroomReply(ctx, preBlock(chunks[i]) + (label ? `\n<i>${label}</i>` : ''), { html: true })
-    }
-  } else {
-    await switchroomReply(ctx, preBlock(trimmed), { html: true })
+  const result = handleLogsCommand((ctx.match ?? '') as string)
+  for (const reply of result.replies) {
+    await switchroomReply(ctx, reply.text, { html: reply.html })
   }
 })
 

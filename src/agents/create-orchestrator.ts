@@ -107,6 +107,15 @@ export interface CompletionResult {
  * This prevents a failed bootstrap from leaving the user in a "stuck" state
  * where a second run hits the "already configured" guard.
  */
+/**
+ * Regex that agent names must match — mirrors the yaml schema constraint.
+ * Max length 51 chars. Telegram callback_data is capped at 64 BYTES; the
+ * longest operator-event prefix is `op:swap-slot:` (13 bytes), leaving 51
+ * for the agent name. Agents with longer names would have broken buttons
+ * in Phase 4a/4b. See operator-events.ts callback_data contract.
+ */
+const AGENT_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,50}$/;
+
 export async function createAgent(
   opts: CreateAgentOpts,
 ): Promise<CreationResult> {
@@ -117,6 +126,14 @@ export async function createAgent(
     configPath: configPathOpt,
     rollbackOnFail = false,
   } = opts;
+
+  // ── Step 0: Validate name slug (before any disk writes) ───────────────────
+  if (!AGENT_NAME_RE.test(name)) {
+    throw new Error(
+      `Invalid agent name: "${name}". ` +
+        `Names must match ^[a-z0-9][a-z0-9_-]{0,50}$ (lowercase alphanumeric, hyphens, underscores; max 51 chars for Telegram callback_data compatibility).`,
+    );
+  }
 
   // ── Step 1: Validate profile ──────────────────────────────────────────────
   const available = listAvailableProfiles();
@@ -176,13 +193,9 @@ export async function createAgent(
   let config = loadConfig(configPath);
   const existingEntry = config.agents[name];
 
-  // Track whether we wrote the yaml entry (so rollback can remove it).
-  let wroteYamlEntry = false;
-
   if (!existingEntry) {
     // Fresh agent: write entry to yaml.
     writeAgentEntryToConfig(configPath, name, profile);
-    wroteYamlEntry = true;
     rollbackStack.push(() => removeAgentFromConfig(configPath, name));
     config = loadConfig(configPath);
   } else {
@@ -238,6 +251,11 @@ export async function createAgent(
   if (schedule.length > 0) {
     await withRollback(() => {
       installScheduleTimers(name, agentDir, schedule);
+      // Push timer rollback BEFORE enabling so partial installs are also cleaned up.
+      rollbackStack.push(() => {
+        // Uninstall timers by passing an empty schedule (removes all timer units).
+        try { installScheduleTimers(name, agentDir, []); } catch { /* best effort */ }
+      });
       daemonReload();
       enableScheduleTimers(name, schedule.length);
     });
@@ -280,6 +298,14 @@ export async function completeCreation(
     pollTimeoutMs?: number;
   } = {},
 ): Promise<CompletionResult> {
+  // Validate name slug before any work.
+  if (!AGENT_NAME_RE.test(name)) {
+    throw new Error(
+      `Invalid agent name: "${name}". ` +
+        `Names must match ^[a-z0-9][a-z0-9_-]{0,50}$ (lowercase alphanumeric, hyphens, underscores; max 51 chars for Telegram callback_data compatibility).`,
+    );
+  }
+
   const configPath =
     opts.configPath ??
     (() => {

@@ -3590,6 +3590,110 @@ function resolveAgentDirForName(agent: string): string | null {
  * callback_data, runs the matching action, acknowledges the tap with a
  * toast, and refreshes the dashboard in-place via editMessageText.
  */
+/**
+ * Handle op:<action>:<encoded-agent> callbacks from operator-events.ts
+ * renderOperatorEvent(). Phase 4b — closes the "buttons do nothing" gap.
+ *
+ * Actions:
+ *   dismiss   — clear keyboard + toast
+ *   restart   — systemctl --user restart switchroom-<agent>
+ *   reauth    — delegate to runSwitchroomAuthCommand (same flow as /auth reauth)
+ *   logs      — post last 30 lines of journalctl for the agent
+ *   swap-slot, add-slot — Phase 4c will wire these; for now toast with the
+ *                         equivalent CLI command for the user to run manually.
+ */
+async function handleOperatorEventCallback(ctx: Context, data: string): Promise<void> {
+  const senderId = String(ctx.from?.id ?? '')
+  const access = loadAccess()
+  if (!access.allowFrom.includes(senderId)) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+
+  // Parse op:<action>:<encoded-agent>
+  const parts = data.slice(3).split(':', 2)  // drop "op:", then split action:agent
+  if (parts.length !== 2) {
+    await ctx.answerCallbackQuery({ text: 'Malformed operator-event callback.' }).catch(() => {})
+    return
+  }
+  const [action, encodedAgent] = parts
+  let agent: string
+  try {
+    agent = decodeURIComponent(encodedAgent)
+  } catch {
+    await ctx.answerCallbackQuery({ text: 'Bad agent name encoding.' }).catch(() => {})
+    return
+  }
+  if (!/^[a-z0-9][a-z0-9_-]{0,50}$/.test(agent)) {
+    await ctx.answerCallbackQuery({ text: 'Invalid agent name.' }).catch(() => {})
+    return
+  }
+
+  switch (action) {
+    case 'dismiss': {
+      await ctx.answerCallbackQuery({ text: 'Dismissed' }).catch(() => {})
+      await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {})
+      return
+    }
+    case 'restart': {
+      await ctx.answerCallbackQuery({ text: `Restarting ${agent}…` }).catch(() => {})
+      try {
+        execFileSync('systemctl', ['--user', 'restart', `switchroom-${agent}`], {
+          encoding: 'utf-8',
+          timeout: 15000,
+          stdio: ['ignore', 'pipe', 'pipe'],
+        })
+        await ctx.reply(`<b>${agent}</b> restart requested.`, { parse_mode: 'HTML' })
+        await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {})
+      } catch (err) {
+        await ctx.reply(`<b>Restart failed for ${agent}:</b>\n<pre>${(err as Error).message}</pre>`, {
+          parse_mode: 'HTML',
+        })
+      }
+      return
+    }
+    case 'reauth': {
+      await ctx.answerCallbackQuery({ text: `Starting reauth for ${agent}…` }).catch(() => {})
+      await runSwitchroomAuthCommand(ctx, ['auth', 'reauth', agent], `auth reauth ${agent}`)
+      pendingReauthFlows.set(String(ctx.chat!.id), { agent, startedAt: Date.now() })
+      return
+    }
+    case 'logs': {
+      await ctx.answerCallbackQuery({ text: 'Fetching logs…' }).catch(() => {})
+      try {
+        const out = execFileSync(
+          'journalctl',
+          ['--user', '-u', `switchroom-${agent}`, '-n', '30', '--no-pager', '--output=short-monotonic'],
+          { encoding: 'utf-8', timeout: 10000, stdio: ['ignore', 'pipe', 'pipe'] },
+        ) as string
+        const trimmed = out.trim().slice(-3500)
+        await ctx.reply(
+          trimmed
+            ? `<pre>${trimmed.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</pre>`
+            : `<i>No logs for ${agent}.</i>`,
+          { parse_mode: 'HTML' },
+        )
+      } catch (err) {
+        await ctx.reply(`<b>logs failed:</b> ${(err as Error).message}`)
+      }
+      return
+    }
+    case 'swap-slot':
+    case 'add-slot': {
+      await ctx.answerCallbackQuery({ text: 'Phase 4c will wire this' }).catch(() => {})
+      const cmd = action === 'swap-slot' ? `auth use ${agent} <slot-name>` : `auth add ${agent}`
+      await ctx.reply(`Phase 4c will wire ${action} buttons. Until then, run in terminal: <code>switchroom ${cmd}</code>`, {
+        parse_mode: 'HTML',
+      })
+      return
+    }
+    default: {
+      await ctx.answerCallbackQuery({ text: `Unknown action: ${action}` }).catch(() => {})
+      return
+    }
+  }
+}
+
 async function handleAuthDashboardCallback(ctx: Context): Promise<void> {
   const data = ctx.callbackQuery?.data ?? ''
   const senderId = String(ctx.from?.id ?? '')
@@ -3944,10 +4048,13 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // TODO(Phase 4b): `op:<action>:<agent>` callbacks from operator-events.ts
-  // renderOperatorEvent(). Agent name is URL-encoded at emit (issue #24) —
-  // handler MUST decodeURIComponent(agent) before using the value.
-  // See telegram-plugin/operator-events.ts for the emit contract.
+  // op:<action>:<encoded-agent> callbacks from operator-events.ts
+  // renderOperatorEvent(). Agent name is URL-encoded at emit (issue #24).
+  // Actions: dismiss, restart, reauth, swap-slot, add-slot, logs.
+  if (data.startsWith('op:')) {
+    await handleOperatorEventCallback(ctx, data)
+    return
+  }
 
   // Permission request buttons.
   const m = /^perm:(allow|deny|more):([a-km-z]{5})$/.exec(data)

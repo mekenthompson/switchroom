@@ -1092,6 +1092,10 @@ async function runForemanSetup(opts: { nonInteractive?: boolean; userId?: string
       );
       process.exit(1);
     }
+    console.log(chalk.yellow(
+      "  Token will be visible as you paste. " +
+      "For production, use TELEGRAM_FOREMAN_BOT_TOKEN env var.",
+    ));
     botToken = await ask(
       "  Paste foreman bot token from @BotFather",
     );

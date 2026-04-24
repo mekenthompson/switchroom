@@ -21,7 +21,7 @@ import { Bot } from 'grammy'
 import { readFileSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join } from 'path'
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 
 import { installPluginLogger } from '../plugin-logger.js'
 import {
@@ -105,6 +105,10 @@ const switchroomReply = makeSwitchroomReply(() => undefined)
 
 // ─── Auth guard middleware ────────────────────────────────────────────────
 bot.use(async (ctx, next) => {
+  // Silently ignore any message that is not a private DM.
+  // If the foreman bot is ever added to a group, this prevents fleet info
+  // from leaking to all group members even when the sender is allowlisted.
+  if (ctx.chat?.type !== 'private') return
   if (!ctx.from) return
   const allowFrom = loadAllowFrom()
   if (!isAllowedSender(ctx, allowFrom)) {
@@ -279,12 +283,14 @@ bot.command('logs', async ctx => {
 
   let output: string
   try {
-    output = stripAnsi(execSync(
-      `journalctl --user -u "switchroom-${agentName}" -n ${tailN} --no-pager --output=short-monotonic 2>&1`,
+    output = stripAnsi(execFileSync(
+      'journalctl',
+      ['--user', '-u', `switchroom-${agentName}`, '-n', String(tailN), '--no-pager', '--output=short-monotonic'],
       {
         encoding: 'utf-8',
         timeout: 10000,
         env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
       },
     ))
   } catch (err) {

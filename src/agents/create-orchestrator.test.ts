@@ -4,11 +4,11 @@
  * All external side-effects are mocked:
  *   - validateBotToken (HTTP call)
  *   - scaffoldAgent (large file-system operation)
- *   - installUnit / generateUnit / generateGatewayUnit / resolveGatewayUnitName
+ *   - installUnit / uninstallUnit / generateUnit / generateGatewayUnit / resolveGatewayUnitName
  *   - installScheduleTimers / enableScheduleTimers / daemonReload
  *   - startAuthSession / submitAuthCode
  *   - startAgent
- *   - writeAgentEntryToConfig / updateAgentExtendsInConfig
+ *   - writeAgentEntryToConfig / updateAgentExtendsInConfig / removeAgentFromConfig
  *   - loadConfig / resolveAgentsDir (config)
  *   - listAvailableProfiles
  *   - writeAgentEnv
@@ -37,6 +37,7 @@ vi.mock("./systemd.js", () => ({
   generateUnit: vi.fn().mockReturnValue("[Unit]\nDescription=stub"),
   generateGatewayUnit: vi.fn().mockReturnValue("[Unit]\nDescription=stub-gw"),
   installUnit: vi.fn(),
+  uninstallUnit: vi.fn(),
   installScheduleTimers: vi.fn(),
   enableScheduleTimers: vi.fn(),
   daemonReload: vi.fn(),
@@ -55,6 +56,7 @@ vi.mock("./lifecycle.js", () => ({
 vi.mock("../cli/agent.js", () => ({
   writeAgentEntryToConfig: vi.fn(),
   updateAgentExtendsInConfig: vi.fn(),
+  removeAgentFromConfig: vi.fn(),
   synthesizeTopicName: vi.fn((n: string) => n),
 }));
 
@@ -79,6 +81,7 @@ import { scaffoldAgent } from "./scaffold.js";
 import {
   generateUnit,
   installUnit,
+  uninstallUnit,
   resolveGatewayUnitName,
 } from "./systemd.js";
 import { startAuthSession, submitAuthCode } from "../auth/manager.js";
@@ -86,6 +89,7 @@ import { startAgent } from "./lifecycle.js";
 import {
   writeAgentEntryToConfig,
   updateAgentExtendsInConfig,
+  removeAgentFromConfig,
 } from "../cli/agent.js";
 import { loadConfig, resolveAgentsDir } from "../config/loader.js";
 import { listAvailableProfiles } from "./profiles.js";
@@ -139,7 +143,7 @@ describe("createAgent", () => {
 
   afterEach(() => {
     rmSync(agentsDir, { recursive: true, force: true });
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("rejects an unknown profile before any disk writes", async () => {
@@ -309,6 +313,133 @@ describe("createAgent", () => {
     const { existsSync } = await import("node:fs");
     expect(existsSync(agentDir)).toBe(true);
   });
+
+  it("rolls back agentDir, systemd unit, and yaml entry on installUnit failure (rollbackOnFail=true)", async () => {
+    const agentDir = join(agentsDir, "gymbro");
+    mkdirSync(agentDir, { recursive: true });
+
+    // Override: agent NOT yet in yaml, so orchestrator writes the entry (and
+    // rollback must remove it).
+    vi.mocked(loadConfig).mockReturnValue({
+      agents: {},
+      telegram: { bot_token: "stub", forum_chat_id: "-100111111111" },
+    } as any);
+    vi.mocked(loadConfig).mockReturnValueOnce({
+      agents: {},
+      telegram: { bot_token: "stub", forum_chat_id: "-100111111111" },
+    } as any);
+    vi.mocked(loadConfig).mockReturnValueOnce({
+      agents: {
+        gymbro: {
+          extends: "health-coach",
+          topic_name: "Gymbro",
+          channels: { telegram: { plugin: "switchroom" } },
+          schedule: [],
+        },
+      },
+      telegram: { bot_token: "stub", forum_chat_id: "-100111111111" },
+    } as any);
+
+    vi.mocked(installUnit).mockImplementation(() => {
+      throw new Error("permission denied writing unit file");
+    });
+
+    await expect(
+      createAgent({
+        name: "gymbro",
+        profile: "health-coach",
+        telegramBotToken: "123:abc",
+        configPath: join(agentsDir, "switchroom.yaml"),
+        rollbackOnFail: true,
+      }),
+    ).rejects.toThrow("permission denied writing unit file");
+
+    // YAML entry should be rolled back
+    expect(removeAgentFromConfig).toHaveBeenCalledWith(
+      expect.stringContaining("switchroom.yaml"),
+      "gymbro",
+    );
+    // agentDir should have been removed
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(agentDir)).toBe(false);
+  });
+
+  it("rolls back agentDir, systemd unit, and yaml entry on writeAgentEnv failure (rollbackOnFail=true)", async () => {
+    const agentDir = join(agentsDir, "gymbro");
+    mkdirSync(agentDir, { recursive: true });
+
+    // Override: agent NOT yet in yaml, so rollback has an entry to remove.
+    vi.mocked(loadConfig).mockReturnValueOnce({
+      agents: {},
+      telegram: { bot_token: "stub", forum_chat_id: "-100111111111" },
+    } as any);
+    vi.mocked(loadConfig).mockReturnValueOnce({
+      agents: {
+        gymbro: {
+          extends: "health-coach",
+          topic_name: "Gymbro",
+          channels: { telegram: { plugin: "switchroom" } },
+          schedule: [],
+        },
+      },
+      telegram: { bot_token: "stub", forum_chat_id: "-100111111111" },
+    } as any);
+
+    vi.mocked(writeAgentEnv).mockImplementation(() => {
+      throw new Error("ENOENT: telegram dir missing");
+    });
+
+    await expect(
+      createAgent({
+        name: "gymbro",
+        profile: "health-coach",
+        telegramBotToken: "123:abc",
+        configPath: join(agentsDir, "switchroom.yaml"),
+        rollbackOnFail: true,
+      }),
+    ).rejects.toThrow("ENOENT: telegram dir missing");
+
+    // systemd unit should be uninstalled
+    expect(uninstallUnit).toHaveBeenCalledWith("gymbro");
+    // YAML entry should be rolled back
+    expect(removeAgentFromConfig).toHaveBeenCalledWith(
+      expect.stringContaining("switchroom.yaml"),
+      "gymbro",
+    );
+    // agentDir should have been removed
+    const { existsSync } = await import("node:fs");
+    expect(existsSync(agentDir)).toBe(false);
+  });
+
+  it("rolls back agentDir and yaml entry on writeAgentEntryToConfig failure (rollbackOnFail=true)", async () => {
+    // Simulate: agent not yet in yaml, writeAgentEntryToConfig throws part way
+    // through (e.g. file system full after first read).
+    // We model this by having loadConfig return empty agents (so the branch
+    // tries to write) but writeAgentEntryToConfig throws synchronously.
+    vi.mocked(loadConfig).mockReturnValueOnce({
+      agents: {},
+      telegram: { bot_token: "stub", forum_chat_id: "-100111111111" },
+    } as any);
+    vi.mocked(writeAgentEntryToConfig).mockImplementation(() => {
+      throw new Error("ENOSPC: no space left on device");
+    });
+
+    await expect(
+      createAgent({
+        name: "gymbro",
+        profile: "health-coach",
+        telegramBotToken: "123:abc",
+        configPath: join(agentsDir, "switchroom.yaml"),
+        rollbackOnFail: true,
+      }),
+    ).rejects.toThrow("ENOSPC: no space left on device");
+
+    // writeAgentEntryToConfig threw before the rollback push — no partial
+    // agentDir or systemd state should exist. Crucially, scaffoldAgent and
+    // installUnit must NOT have been called at all.
+    expect(scaffoldAgent).not.toHaveBeenCalled();
+    expect(installUnit).not.toHaveBeenCalled();
+  });
 });
 
 // ─── completeCreation ─────────────────────────────────────────────────────────
@@ -325,7 +456,7 @@ describe("completeCreation", () => {
 
   afterEach(() => {
     rmSync(agentsDir, { recursive: true, force: true });
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("returns success outcome and starts agent on happy path", async () => {
@@ -431,6 +562,46 @@ describe("completeCreation", () => {
       { pollTimeoutMs: 5000 },
     );
   });
+
+  it("surfaces expired-code outcome with paneTailText correctly", async () => {
+    vi.mocked(submitAuthCode).mockReturnValue({
+      completed: false,
+      tokenSaved: false,
+      outcome: {
+        kind: "expired-code",
+        paneTailText: "Error: The provided code has expired. Please try again.",
+      },
+      instructions: ["Code expired. Request a new one."],
+    });
+
+    const result = await completeCreation("gymbro", "stale-code", {
+      configPath: join(agentsDir, "switchroom.yaml"),
+    });
+
+    expect(result.outcome.kind).toBe("expired-code");
+    expect(result.outcome.paneTailText).toContain("expired");
+    expect(result.started).toBe(false);
+    expect(startAgent).not.toHaveBeenCalled();
+    expect(result.instructions).toEqual(["Code expired. Request a new one."]);
+  });
+
+  it("surfaces timeout outcome when submitAuthCode returns undefined outcome (fallback path)", async () => {
+    // The ?. ?? { kind: "timeout" } fallback fires when outcome is absent.
+    vi.mocked(submitAuthCode).mockReturnValue({
+      completed: false,
+      tokenSaved: false,
+      outcome: undefined as any, // simulate missing outcome — triggers fallback
+      instructions: ["Auth timed out."],
+    });
+
+    const result = await completeCreation("gymbro", "any-code", {
+      configPath: join(agentsDir, "switchroom.yaml"),
+    });
+
+    expect(result.outcome.kind).toBe("timeout");
+    expect(result.started).toBe(false);
+    expect(startAgent).not.toHaveBeenCalled();
+  });
 });
 
 // ─── End-to-end happy path (createAgent + completeCreation) ──────────────────
@@ -464,7 +635,7 @@ describe("createAgent + completeCreation end-to-end", () => {
 
   afterEach(() => {
     rmSync(agentsDir, { recursive: true, force: true });
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it("createAgent then completeCreation returns success and started=true", async () => {

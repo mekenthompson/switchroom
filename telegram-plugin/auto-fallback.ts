@@ -14,6 +14,7 @@
  */
 
 import type { QuotaResult, QuotaUtilization } from './quota-check.js';
+import { renderOperatorEvent } from './operator-events.js';
 
 /** Threshold over which we treat the active slot as functionally out
  *  of quota. 99.5% leaves a tiny head-room for clock skew between the
@@ -214,6 +215,11 @@ export function emptyLockout(): LockoutRecord {
   return { lastTransitionedFrom: null, lastTransitionAt: 0 };
 }
 
+/**
+ * Build the notification HTML for a successful slot switch.
+ * Delegates to renderOperatorEvent for quota-exhausted; appends
+ * slot-transition detail as structured context.
+ */
 function buildSwitchedMessage(
   prev: string,
   next: string,
@@ -221,36 +227,45 @@ function buildSwitchedMessage(
   resetAtMs: number | null,
 ): string {
   const reset = resetAtMs ? formatResetAt(resetAtMs) : 'unknown';
-  return [
-    `⚠️ <b>Quota exhausted</b> on slot <code>${escape(prev)}</code> for <b>${escape(agent)}</b>.`,
-    `Switched to slot <code>${escape(next)}</code>. Restarting agent.`,
-    `Reset at: <code>${escape(reset)}</code>.`,
-  ].join('\n');
+  const detail = [
+    `Switched from slot ${prev} to ${next}. Restarting agent.`,
+    `Reset at: ${reset}.`,
+  ].join(' ');
+  return renderOperatorEvent({
+    kind: 'quota-exhausted',
+    agent,
+    detail,
+    suggestedActions: [],
+    firstSeenAt: new Date(),
+  }).text;
 }
 
+/**
+ * Build the notification HTML when all slots are exhausted.
+ * Delegates to renderOperatorEvent for quota-exhausted; appends
+ * all-exhausted detail.
+ */
 function buildAllExhaustedMessage(
   active: string,
   agent: string,
   resetAtMs: number | null,
 ): string {
   const reset = resetAtMs ? formatResetAt(resetAtMs) : 'unknown';
-  return [
-    `🚨 <b>All account slots quota-exhausted</b> for <b>${escape(agent)}</b>.`,
-    `Active slot: <code>${escape(active)}</code>.`,
-    `Earliest reset at: <code>${escape(reset)}</code>.`,
-    `Run <code>/auth add ${escape(agent)}</code> to attach another subscription.`,
-  ].join('\n');
+  const detail = [
+    `All account slots exhausted. Active slot: ${active}.`,
+    `Earliest reset at: ${reset}.`,
+    `Run /auth add ${agent} to attach another subscription.`,
+  ].join(' ');
+  return renderOperatorEvent({
+    kind: 'quota-exhausted',
+    agent,
+    detail,
+    suggestedActions: [],
+    firstSeenAt: new Date(),
+  }).text;
 }
 
 function formatResetAt(ms: number): string {
   // ISO with seconds trimmed — Telegram doesn't need millisecond precision.
   return new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
-}
-
-function escape(text: string): string {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
 }

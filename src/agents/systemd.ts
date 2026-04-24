@@ -245,6 +245,69 @@ WantedBy=default.target
 `;
 }
 
+// ─── Foreman unit ──────────────────────────────────────────────────────────
+
+/**
+ * Generate the systemd user unit for the foreman admin bot.
+ *
+ * The foreman reads its bot token from ~/.switchroom/foreman/.env and its
+ * access list from ~/.switchroom/foreman/access.json. It runs continuously
+ * (Restart=always) — it's the entry point for Telegram-only fleet management.
+ */
+export function generateForemanUnit(): string {
+  const pluginDir = resolve(import.meta.dirname, "../../telegram-plugin");
+  const foremanEntry = resolve(pluginDir, "foreman/foreman.ts");
+  const homeDir = process.env.HOME ?? "/root";
+  const foremanDir = resolve(homeDir, ".switchroom", "foreman");
+  const logFile = resolve(foremanDir, "foreman.log");
+  const bunBin = resolve(homeDir, ".bun/bin/bun");
+  const bunBinDir = dirname(bunBin);
+  const nodeBinDir = dirname(process.execPath);
+  const switchroomCli = resolveSwitchroomCliPath(bunBinDir);
+  const unitPath = `${bunBinDir}:${nodeBinDir}:/usr/local/bin:/usr/bin:/bin`;
+
+  return `[Unit]
+Description=switchroom foreman (fleet admin bot)
+After=network-online.target
+Wants=network-online.target
+StartLimitBurst=10
+StartLimitIntervalSec=60
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/script -qfc "${bunBin} ${foremanEntry}" ${logFile}
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=3
+TimeoutStopSec=30
+WorkingDirectory=${foremanDir}
+EnvironmentFile=-%h/.switchroom/.env.vault
+Environment=PATH=${unitPath}
+Environment=SWITCHROOM_CLI_PATH=${switchroomCli}
+Environment=SWITCHROOM_FOREMAN_DIR=${foremanDir}
+
+[Install]
+WantedBy=default.target
+`;
+}
+
+/**
+ * Write + enable the foreman unit file.
+ * Creates ~/.switchroom/foreman/ if it doesn't exist.
+ */
+export function installForemanUnit(): void {
+  const homeDir = process.env.HOME ?? "/root";
+  const foremanDir = resolve(homeDir, ".switchroom", "foreman");
+  mkdirSync(foremanDir, { recursive: true });
+  const content = generateForemanUnit();
+  const unitFileName = "switchroom-foreman";
+  installUnit(unitFileName, content);
+  daemonReload();
+  enableUnits([unitFileName]);
+  ensureLinger();
+}
+
 export function installAllUnits(config: SwitchroomConfig): void {
   const agentsDir = resolveAgentsDir(config);
   const installedAgents: string[] = [];

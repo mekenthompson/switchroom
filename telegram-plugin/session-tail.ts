@@ -35,6 +35,7 @@ import {
 import { homedir } from 'os'
 import { basename, join } from 'path'
 import { isMultiAgentEnabled } from './progress-card.js'
+import { classifyClaudeError, type OperatorEventKind } from './operator-events.js'
 
 /** Match Claude Code's cli.js VX() function. */
 export function sanitizeCwdToProjectName(cwd: string): string {
@@ -343,7 +344,73 @@ export function projectSubagentLine(
   return []
 }
 
+// ─── Error detection for operator events ──────────────────────────────────
+
+/**
+ * Inspect a raw JSONL line for Anthropic API error shapes and return the
+ * classified kind + the raw error object if one is found.
+ *
+ * Claude Code can write several error-bearing line shapes:
+ *   - { type: "api_error", error: { type: "...", message: "..." } }
+ *   - { type: "error", error: { type: "...", message: "..." } }
+ *   - Any line where obj.error is a non-null object with a recognized type
+ *
+ * Returns null when no actionable error is detected (routine lines).
+ * Never throws — delegates to classifyClaudeError's own safety guarantee.
+ */
+export function detectErrorInTranscriptLine(
+  line: string,
+): { kind: OperatorEventKind; raw: unknown; detail: string } | null {
+  if (!line || line.length > 2 * 1024 * 1024) return null
+  let obj: Record<string, unknown>
+  try {
+    obj = JSON.parse(line)
+  } catch {
+    return null
+  }
+  if (typeof obj !== 'object' || obj == null) return null
+
+  const type = obj.type as string | undefined
+
+  // Explicit error line types from Claude Code JSONL
+  const isErrorLine = type === 'api_error' || type === 'error'
+
+  // Also detect lines where obj.error is a non-null object (embedded error)
+  const embeddedError =
+    typeof obj.error === 'object' && obj.error != null ? obj.error : null
+
+  if (!isErrorLine && !embeddedError) return null
+
+  const raw = embeddedError ?? obj
+
+  // For api_error/error wrapper lines, the nested error object carries the
+  // real error type (e.g. rate_limit_error). Classify the nested error when
+  // present; fall back to the full object for status-code-based fallback.
+  const kind = classifyClaudeError(embeddedError ?? obj)
+
+  // Detail: prefer message from nested error or top-level
+  const detail =
+    extractDetailMessage(embeddedError as Record<string, unknown> | null) ??
+    extractDetailMessage(obj) ??
+    String(type ?? '')
+
+  return { kind, raw, detail }
+}
+
+function extractDetailMessage(obj: Record<string, unknown> | null): string | null {
+  if (!obj) return null
+  const msg = obj.message
+  return typeof msg === 'string' && msg.length > 0 ? msg : null
+}
+
 // ─── The tail watcher ─────────────────────────────────────────────────────
+
+/** Emitted to onOperatorEvent when the tail detects a Claude API error. */
+export interface TailOperatorEvent {
+  kind: OperatorEventKind
+  detail: string
+  raw: unknown
+}
 
 export interface SessionTailConfig {
   /** Working directory of the Claude Code process. Defaults to process.cwd(). */
@@ -356,6 +423,12 @@ export interface SessionTailConfig {
   log?: (msg: string) => void
   /** Called for each parsed event. */
   onEvent: (event: SessionEvent) => void
+  /**
+   * Called when an Anthropic API error is detected in the JSONL transcript.
+   * Phase 4a: session-tail emits; the gateway subscription is wired in Phase 4b.
+   * TODO(Phase 4b): wire this to the gateway's emitOperatorEvent pipeline.
+   */
+  onOperatorEvent?: (event: TailOperatorEvent) => void
 }
 
 export interface SessionTailHandle {
@@ -382,6 +455,7 @@ export function startSessionTail(config: SessionTailConfig): SessionTailHandle {
   const rescanMs = config.rescanIntervalMs ?? 500
   const log = config.log
   const onEvent = config.onEvent
+  const onOperatorEvent = config.onOperatorEvent
 
   log?.(`session-tail: projectsDir=${projectsDir}`)
 
@@ -436,6 +510,18 @@ export function startSessionTail(config: SessionTailConfig): SessionTailHandle {
             onEvent(ev)
           } catch (err) {
             log?.(`session-tail: onEvent threw: ${(err as Error).message}`)
+          }
+        }
+        // Operator-event detection: check for API error shapes in the line.
+        // This runs even when projectTranscriptLine returns [] (unknown types).
+        if (onOperatorEvent) {
+          try {
+            const errEvent = detectErrorInTranscriptLine(line)
+            if (errEvent) {
+              onOperatorEvent(errEvent)
+            }
+          } catch (err) {
+            log?.(`session-tail: onOperatorEvent threw: ${(err as Error).message}`)
           }
         }
       }

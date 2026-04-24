@@ -218,8 +218,9 @@ describe("performAutoFallback", () => {
       expect(plan.previousSlot).toBe("default");
       expect(plan.newSlot).toBe("personal");
       expect(plan.notificationHtml).toContain("Quota exhausted");
-      expect(plan.notificationHtml).toContain("<code>default</code>");
-      expect(plan.notificationHtml).toContain("<code>personal</code>");
+      // Slot names appear in the detail text (migrated to renderOperatorEvent)
+      expect(plan.notificationHtml).toContain("default");
+      expect(plan.notificationHtml).toContain("personal");
     }
     expect(marks).toHaveLength(1);
     expect(marks[0].slot).toBe("default");

@@ -976,7 +976,7 @@ describe('progress-card reducer — multi-agent correlation', () => {
           kind: 'tool_use',
           toolName: 'Agent',
           toolUseId: 'toolu_p1',
-          input: { description: 'd', prompt: 'P' },
+          input: { description: 'Deploy the service', prompt: 'P' },
         },
         { kind: 'sub_agent_started', agentId: 'X', firstPromptText: 'P' },
       ])
@@ -985,7 +985,8 @@ describe('progress-card reducer — multi-agent correlation', () => {
       expect(html).not.toContain('[Sub-agents')
       // Agent with human-authored description renders without the "Agent:" prefix.
       // Check the description text appears (not the raw tool name as a prefix).
-      expect(html).toContain('d')
+      expect(html).toContain('Deploy the service')
+      expect(html).not.toContain('Agent: Deploy')
     } finally {
       if (prev != null) process.env.PROGRESS_CARD_MULTI_AGENT = prev
       else delete process.env.PROGRESS_CARD_MULTI_AGENT

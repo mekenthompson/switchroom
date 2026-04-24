@@ -3677,7 +3677,10 @@ async function handleOperatorEventCallback(ctx: Context, data: string): Promise<
           { parse_mode: 'HTML' },
         )
       } catch (err) {
-        await ctx.reply(`<b>logs failed:</b> ${(err as Error).message}`)
+        await ctx.reply(
+          `<b>logs failed:</b> ${escapeHtmlForTg((err as Error).message)}`,
+          { parse_mode: 'HTML' },
+        )
       }
       return
     }

@@ -120,7 +120,8 @@ import {
   type LockoutRecord,
 } from '../auto-fallback.js'
 import { markSlotQuotaExhausted } from '../../src/auth/accounts.js'
-import { fallbackToNextSlot, currentActiveSlot } from '../../src/auth/manager.js'
+import { fallbackToNextSlot, currentActiveSlot, type AuthCodeOutcome } from '../../src/auth/manager.js'
+import { shouldSweepChatAtBoot } from './boot-sweep-filter.js'
 
 import { createIpcServer, type IpcClient, type IpcServer } from './ipc-server.js'
 import type {
@@ -2021,14 +2022,19 @@ async function handleInbound(
     const elapsed = Date.now() - pendingReauth.startedAt
     if (elapsed < REAUTH_INTERCEPT_TTL_MS) {
       pendingReauthFlows.delete(chat_id)
-      try {
-        const output = stripAnsi(switchroomExecCombined(['auth', 'code', pendingReauth.agent, text.trim()], 30000))
-        const formatted = formatAuthOutputForTelegram(output)
-        await switchroomReply(ctx, formatted.text, { html: true })
-      } catch (err: unknown) {
-        const error = err as { stderr?: string; message?: string }
-        const detail = stripAnsi(error.stderr?.trim() || error.message || 'unknown error')
-        await switchroomReply(ctx, `<b>auth code failed:</b>\n${preBlock(formatSwitchroomOutput(detail))}`, { html: true })
+      const { result, errorText } = execAuthCode(pendingReauth.agent, text.trim())
+      if (errorText) {
+        await switchroomReply(ctx, `<b>auth code failed:</b>\n${preBlock(formatSwitchroomOutput(errorText))}`, { html: true })
+      } else if (result) {
+        const outcomeMsg = renderAuthCodeOutcome(result.outcome)
+        if (outcomeMsg) {
+          await switchroomReply(ctx, outcomeMsg, { html: true })
+        } else {
+          // success or no structured outcome — fall back to formatted text
+          const output = result.instructions.join('\n')
+          const formatted = formatAuthOutputForTelegram(output)
+          await switchroomReply(ctx, formatted.text, { html: true })
+        }
       }
       if (msgId != null) {
         void bot.api.setMessageReaction(chat_id, msgId, [
@@ -2854,6 +2860,67 @@ function statusIcon(status: string): string {
   return '⚪'
 }
 
+/**
+ * Render an `AuthCodeOutcome` as a user-facing Telegram HTML string.
+ * Returns null when the outcome is not present or is `success` (caller
+ * can handle success via the existing text path).
+ */
+function renderAuthCodeOutcome(outcome: AuthCodeOutcome | null | undefined): string | null {
+  if (!outcome || outcome.kind === 'success') return null
+  const tail = outcome.paneTailText
+    ? `\n<i>${escapeHtmlForTg(outcome.paneTailText)}</i>`
+    : ''
+  switch (outcome.kind) {
+    case 'invalid-code':
+    case 'expired-code':
+      return `Code rejected by Claude — tap <b>Restart flow</b> for a fresh URL.${tail}`
+    case 'pane-not-ready':
+      return `Auth pane not ready — tap <b>Retry</b>.`
+    case 'timeout':
+      return `Still waiting after 2 min — tap <b>Retry</b> or check <code>switchroom auth status</code>.${tail}`
+  }
+}
+
+interface AuthCodeJsonResult {
+  completed: boolean
+  tokenSaved: boolean
+  tokenPath: string | null
+  outcome: AuthCodeOutcome | null
+  instructions: string[]
+}
+
+/**
+ * Run `switchroom auth code <agent> <code> --json` with a 150 s timeout
+ * (allows for the full 120 s poll budget + startup overhead).
+ *
+ * Returns the parsed `AuthCodeJsonResult`, or null on exec failure.
+ * On exec failure, `errorText` holds a formatted error string for the caller.
+ */
+function execAuthCode(
+  agent: string,
+  code: string,
+): { result: AuthCodeJsonResult; errorText: null } | { result: null; errorText: string } {
+  try {
+    const output = switchroomExec(['auth', 'code', agent, code, '--json'], 150_000)
+    const parsed = JSON.parse(stripAnsi(output)) as AuthCodeJsonResult
+    return { result: parsed, errorText: null }
+  } catch (err: unknown) {
+    const error = err as { stderr?: string; stdout?: string; message?: string }
+    // `auth code` exits 0 even on timeout/failure (it prints instructions).
+    // However if the process itself fails (ENOENT, killed, etc.) we land here.
+    // Try to salvage a JSON body from stdout if present.
+    const rawOut = error.stdout ?? ''
+    if (rawOut.trim().startsWith('{')) {
+      try {
+        const parsed = JSON.parse(stripAnsi(rawOut)) as AuthCodeJsonResult
+        return { result: parsed, errorText: null }
+      } catch { /* fall through */ }
+    }
+    const detail = stripAnsi(error.stderr?.trim() || error.message || 'unknown error')
+    return { result: null, errorText: detail }
+  }
+}
+
 async function runSwitchroomCommandFormatted(ctx: Context, args: string[], label: string, formatter: () => string | null): Promise<void> {
   try {
     const formatted = formatter()
@@ -3314,7 +3381,20 @@ bot.command('auth', async ctx => {
     return
   }
   if (intent.kind === 'code') {
-    await runSwitchroomCommand(ctx, intent.cliArgs, intent.label)
+    // Use structured JSON path so we can render typed outcome messages.
+    const { result, errorText } = execAuthCode(intent.agent, intent.code)
+    if (errorText) {
+      await switchroomReply(ctx, `<b>${escapeHtmlForTg(intent.label)} failed:</b>\n${preBlock(formatSwitchroomOutput(errorText))}`, { html: true })
+    } else if (result) {
+      const outcomeMsg = renderAuthCodeOutcome(result.outcome)
+      if (outcomeMsg) {
+        await switchroomReply(ctx, outcomeMsg, { html: true })
+      } else {
+        const output = result.instructions.join('\n')
+        const formatted = formatAuthOutputForTelegram(output)
+        await switchroomReply(ctx, formatted.text, { html: true })
+      }
+    }
     pendingReauthFlows.delete(String(ctx.chat!.id))
     return
   }
@@ -3644,7 +3724,19 @@ bot.command('reauth', async ctx => {
     return
   }
   if (raw.startsWith('http') || looksLikeAuthCode(raw)) {
-    await runSwitchroomCommand(ctx, ['auth', 'code', name, raw], `auth code ${name}`)
+    const { result, errorText } = execAuthCode(name, raw)
+    if (errorText) {
+      await switchroomReply(ctx, `<b>auth code ${escapeHtmlForTg(name)} failed:</b>\n${preBlock(formatSwitchroomOutput(errorText))}`, { html: true })
+    } else if (result) {
+      const outcomeMsg = renderAuthCodeOutcome(result.outcome)
+      if (outcomeMsg) {
+        await switchroomReply(ctx, outcomeMsg, { html: true })
+      } else {
+        const output = result.instructions.join('\n')
+        const formatted = formatAuthOutputForTelegram(output)
+        await switchroomReply(ctx, formatted.text, { html: true })
+      }
+    }
     pendingReauthFlows.delete(chatId)
     return
   }
@@ -4342,15 +4434,41 @@ void (async () => {
           const bootAccess = loadAccess()
           const chatSet = new Set<string>(bootAccess.allowFrom)
           for (const gid of Object.keys(bootAccess.groups)) chatSet.add(gid)
-          const chatIds = [...chatSet]
-          if (chatIds.length > 0) {
+          // Filter out user DM IDs (positive integers) — the Bot API returns
+          // `400 chat not found` for users who have never messaged the bot.
+          // Only sweep group/supergroup IDs (negative integers) at boot.
+          const sweepableIds: string[] = []
+          const skippedIds: string[] = []
+          for (const id of chatSet) {
+            if (shouldSweepChatAtBoot(id)) {
+              sweepableIds.push(id)
+            } else {
+              skippedIds.push(id)
+            }
+          }
+          for (const id of skippedIds) {
+            process.stderr.write(`telegram gateway: startup: skipped chat ${id} (not yet reachable)\n`)
+          }
+          if (sweepableIds.length > 0) {
             void sweepBotAuthoredPins(
-              chatIds, me.id,
+              sweepableIds, me.id,
               async (chatId) => {
-                const chat = await lockedBot.api.getChat(chatId)
-                const pinned = (chat as { pinned_message?: { message_id: number; from?: { id: number } } }).pinned_message
-                if (!pinned) return null
-                return { messageId: pinned.message_id, fromId: pinned.from?.id ?? null }
+                try {
+                  const chat = await lockedBot.api.getChat(chatId)
+                  const pinned = (chat as { pinned_message?: { message_id: number; from?: { id: number } } }).pinned_message
+                  if (!pinned) return null
+                  return { messageId: pinned.message_id, fromId: pinned.from?.id ?? null }
+                } catch (err) {
+                  if (
+                    err instanceof GrammyError &&
+                    err.error_code === 400 &&
+                    /chat not found/i.test(err.description)
+                  ) {
+                    process.stderr.write(`telegram gateway: startup: skipped chat ${chatId} (not yet reachable)\n`)
+                    return null
+                  }
+                  throw err
+                }
               },
               (chatId, messageId) => lockedBot.api.unpinChatMessage(chatId, messageId),
               { log: (msg) => process.stderr.write(`telegram gateway: bot-authored pin sweep — ${msg}\n`) },

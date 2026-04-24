@@ -61,6 +61,17 @@ steps:
 
   - label: ":vitest: Core tests"
     key: tests-core
+    # bktec splits test files across parallel jobs via BUILDKITE_PARALLEL_JOB /
+    # BUILDKITE_PARALLEL_JOB_COUNT. Those env vars are only populated when the
+    # step declares parallelism — without it, `bktec run` aborts with
+    # "BUILDKITE_PARALLEL_JOB_COUNT was 0". Two parallel jobs is a conservative
+    # start; bump when suite timing warrants it.
+    parallelism: 2
+    # Stub token so importing server.ts (via cross-package coverage of
+    # telegram-plugin/tests/*.test.ts) doesn't boot the legacy monolith path
+    # and demand a live TELEGRAM_BOT_TOKEN. Tests never actually poll Telegram.
+    env:
+      TELEGRAM_BOT_TOKEN: "123456:stub-for-tests"
     if_changed:
       - "src/**"
       - "tests/**"
@@ -128,6 +139,11 @@ steps:
 
   - label: ":telegram: Plugin tests (402)"
     key: tests-plugin
+    # Stub token so `silent-reply-guard.test.ts` and any other test that
+    # imports from `../server.js` doesn't trigger the monolith boot path and
+    # exit with "TELEGRAM_BOT_TOKEN required".
+    env:
+      TELEGRAM_BOT_TOKEN: "123456:stub-for-tests"
     if_changed:
       - "telegram-plugin/**"
       - ".buildkite/pipeline.yml"

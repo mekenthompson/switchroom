@@ -3646,7 +3646,10 @@ async function handleOperatorEventCallback(ctx: Context, data: string): Promise<
         await ctx.reply(`<b>${agent}</b> restart requested.`, { parse_mode: 'HTML' })
         await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {})
       } catch (err) {
-        await ctx.reply(`<b>Restart failed for ${agent}:</b>\n<pre>${(err as Error).message}</pre>`, {
+        // err.message includes concatenated stderr which can contain HTML
+        // metacharacters; escape before interpolating into a <pre> block.
+        const safeMsg = escapeHtmlForTg((err as Error).message)
+        await ctx.reply(`<b>Restart failed for ${agent}:</b>\n<pre>${safeMsg}</pre>`, {
           parse_mode: 'HTML',
         })
       }

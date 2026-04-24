@@ -2062,4 +2062,40 @@ describe('progress-card driver — API failure escalation', () => {
     expect(() => driver.reportApiFailure('nonexistent:99', perm4xx)).not.toThrow()
     expect(() => driver.reportApiSuccess('nonexistent:99')).not.toThrow()
   })
+
+  it('429 rate-limit errors do not advance the permanent counter', () => {
+    // Telegram 429 Too Many Requests is transient (retry_after). Classifier
+    // must return kind:'transient' for 429 so that a rate-limit burst cannot
+    // trip the consecutive-4xx threshold and permanently silence the card.
+    const { driver, emits, advance, currentTurnKey } = failureHarness()
+
+    driver.startTurn({ chatId: 'c', userText: 'task' })
+    advance(0)
+    const turnKey = currentTurnKey('c')
+
+    driver.ingest({ kind: 'tool_use', toolName: 'Read', toolUseId: 't1' }, 'c')
+    advance(0)
+    const emitCountBeforeRateLimits = emits.length
+
+    // Fire 10 consecutive 429 (transient) — more than 3× the default threshold.
+    const rateLimit = { code: 429, description: 'Too Many Requests: retry after 5', kind: 'transient' as const }
+    for (let i = 0; i < 10; i++) {
+      driver.reportApiFailure(turnKey, rateLimit)
+    }
+
+    // Card must still be live. Subsequent events emit normally.
+    driver.ingest({ kind: 'tool_result', toolUseId: 't1', toolName: 'Read' }, 'c')
+    advance(100)
+    expect(emits.length).toBeGreaterThan(emitCountBeforeRateLimits)
+
+    // Extra guard: counter is genuinely zero. Two permanent_4xx after the
+    // 429 burst must NOT tip into terminal (would take 3 to trigger).
+    const emitsAfterTransient = emits.length
+    const perm4xx = { code: 403, description: 'Forbidden', kind: 'permanent_4xx' as const }
+    driver.reportApiFailure(turnKey, perm4xx)
+    driver.reportApiFailure(turnKey, perm4xx)
+    driver.ingest({ kind: 'tool_use', toolName: 'Bash', toolUseId: 't2' }, 'c')
+    advance(100)
+    expect(emits.length).toBeGreaterThan(emitsAfterTransient)
+  })
 })

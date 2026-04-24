@@ -2418,6 +2418,12 @@ if (streamMode === 'checklist') {
       if (code === 400 && /\bmessage is not modified\b/i.test(desc)) {
         return { code, description: desc, kind: 'benign' }
       }
+      // 429 Too Many Requests is explicitly retryable (Telegram returns a
+      // retry_after hint). Must short-circuit BEFORE the generic 4xx branch
+      // so a rate-limit burst doesn't permanently silence the card.
+      if (code === 429) {
+        return { code, description: desc, kind: 'transient' }
+      }
       // 4xx permanent failures: message gone, bot blocked, etc.
       if (code >= 400 && code < 500) {
         return { code, description: desc, kind: 'permanent_4xx' }

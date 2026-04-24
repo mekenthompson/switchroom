@@ -250,6 +250,10 @@ export function createIpcClient(options: IpcClientOptions): Promise<IpcClientHan
       sendRaw(msg);
     },
 
+    sendOperatorEvent(msg: OperatorEventForward): void {
+      sendRaw(msg);
+    },
+
     isConnected(): boolean {
       return connected;
     },

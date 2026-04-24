@@ -88,10 +88,24 @@ export interface ScheduleRestartMessage {
   agentName: string;
 }
 
+/**
+ * Forwarded from bridge → gateway when session-tail detects a Claude API
+ * error in the JSONL transcript (Phase 4b).
+ */
+export interface OperatorEventForward {
+  type: "operator_event";
+  /** OperatorEventKind — kept as string to avoid cross-package type dep. */
+  kind: string;
+  agent: string;
+  detail: string;
+  chatId: string;
+}
+
 export type ClientToGateway =
   | RegisterMessage
   | ToolCallMessage
   | SessionEventForward
   | PermissionRequestForward
   | HeartbeatMessage
-  | ScheduleRestartMessage;
+  | ScheduleRestartMessage
+  | OperatorEventForward;

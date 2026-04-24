@@ -3,6 +3,7 @@ import type {
   ClientToGateway,
   GatewayToClient,
   HeartbeatMessage,
+  OperatorEventForward,
   PermissionRequestForward,
   RegisterMessage,
   ScheduleRestartMessage,
@@ -20,6 +21,7 @@ export interface IpcServerOptions {
   onPermissionRequest: (client: IpcClient, msg: PermissionRequestForward) => void;
   onHeartbeat: (client: IpcClient, msg: HeartbeatMessage) => void;
   onScheduleRestart: (client: IpcClient, msg: ScheduleRestartMessage) => void;
+  onOperatorEvent?: (client: IpcClient, msg: OperatorEventForward) => void;
   log?: (msg: string) => void;
 }
 
@@ -82,6 +84,11 @@ export function validateClientMessage(msg: unknown): msg is ClientToGateway {
       return typeof m.agentName === "string" && m.agentName.length > 0;
     case "schedule_restart":
       return typeof m.agentName === "string" && m.agentName.length > 0;
+    case "operator_event":
+      return typeof m.kind === "string" && m.kind.length > 0
+        && typeof m.agent === "string" && m.agent.length > 0
+        && typeof m.detail === "string"
+        && typeof m.chatId === "string";
     default:
       return false;
   }
@@ -97,6 +104,7 @@ export function createIpcServer(options: IpcServerOptions): IpcServer {
     onPermissionRequest,
     onHeartbeat,
     onScheduleRestart,
+    onOperatorEvent,
     log = () => {},
   } = options;
 
@@ -169,6 +177,9 @@ export function createIpcServer(options: IpcServerOptions): IpcServer {
         break;
       case "schedule_restart":
         onScheduleRestart(client, msg);
+        break;
+      case "operator_event":
+        if (onOperatorEvent) onOperatorEvent(client, msg as OperatorEventForward);
         break;
       default:
         log(`unknown IPC message type from client ${client.id}: ${(msg as any).type}`);

@@ -790,7 +790,17 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       // that already ended — without this, a stray tool_result after turn_end
       // would resurrect the card. currentTurnKey is cleared on turn_end.
       const k = currentTurnKey
-      if (k == null) return
+      if (k == null) {
+        if (event.kind.startsWith('sub_agent_')) {
+          console.debug({
+            event: 'progress-card.late-sub-agent-event-dropped',
+            kind: event.kind,
+            agentId: 'agentId' in event ? (event as { agentId: string }).agentId : null,
+            chatId,
+          }, 'sub_agent event arrived after card close')
+        }
+        return
+      }
       let chatState = chats.get(k)
       if (chatState == null) return
 

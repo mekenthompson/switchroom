@@ -18,6 +18,7 @@
 import type { SessionEvent } from './session-tail.js'
 import {
   hasInFlightSubAgents,
+  hasAnyRunningSubAgent,
   initialState,
   reduce,
   render,
@@ -501,8 +502,9 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     // turn_end no longer force-closes running sub-agents (background
     // agents may legitimately outlive parent turn_end). But closeZombie
     // IS the abandonment path — we ARE giving up on them here. Close
-    // them explicitly so the final render shows all work accounted for.
-    if (hasInFlightSubAgents(cs.state)) {
+    // ALL running sub-agents explicitly (including orphans) so the final
+    // render shows all work accounted for.
+    if (hasAnyRunningSubAgent(cs.state)) {
       const closed = new Map(cs.state.subAgents)
       const nowMs = now()
       for (const [k, sa] of closed) {
@@ -538,11 +540,12 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         // Skip only when TRULY done. During the deferred-completion
         // window (parent turn_end fired but background sub-agents are
         // still running), reducer stage is 'done' but the card is
-        // still alive and `hasInFlightSubAgents` is true. We want the
-        // heartbeat to keep ticking so elapsed time + sub-agent
-        // durations visibly advance — a frozen "✅ Done" card was the
-        // "card went dead" bug.
-        if (cs.state.stage === 'done' && !hasInFlightSubAgents(cs.state)) continue
+        // still alive. Use `hasAnyRunningSubAgent` (not `hasInFlightSubAgents`)
+        // so orphan background sub-agents also keep the heartbeat alive and
+        // their elapsed-time rows tick visibly — a frozen "✅ Done" card was
+        // the "card went dead" bug. `hasInFlightSubAgents` (correlated-only)
+        // is the DEFER gate; `hasAnyRunningSubAgent` is the DISPLAY gate.
+        if (cs.state.stage === 'done' && !hasAnyRunningSubAgent(cs.state)) continue
         // Skip heartbeat for terminal cards — the Telegram message is gone
         // (deleted / bot blocked). No edits should be attempted.
         if (cs.apiFailures.terminal) continue
@@ -901,22 +904,35 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         flush(chatState, /*forceDone*/ event.kind === 'turn_end')
         if (event.kind === 'turn_end') {
           if (hasInFlightSubAgents(chatState.state)) {
-            // Parent turn ended but sub-agents are still running (common
-            // for background Agent calls). Keep the card alive so the
-            // sub-agent work stays visible; defer completion until the
-            // last running sub-agent reports done via its own
-            // sub_agent_turn_end (or the parent Agent tool_result for
-            // the foreground case). The heartbeat keeps ticking so the
-            // card visibly tracks the in-flight sub-agents.
+            // Parent turn ended but correlated sub-agents are still running.
+            // Keep the card alive so the sub-agent work stays visible; defer
+            // completion until the last running correlated sub-agent reports
+            // done via its own sub_agent_turn_end (or the parent Agent
+            // tool_result). Orphan sub-agents (parentToolUseId == null) do NOT
+            // gate this defer — they are fire-and-forget for the parent turn's
+            // pin lifecycle (#31 fix). The heartbeat keeps ticking for all
+            // running sub-agents regardless.
             chatState.pendingCompletion = true
-            const running: string[] = []
+            const correlated: string[] = []
+            const orphans: string[] = []
             for (const [k, sa] of chatState.state.subAgents) {
-              if (sa.state === 'running') running.push(k)
+              if (sa.state === 'running') {
+                if (sa.parentToolUseId != null) correlated.push(k)
+                else orphans.push(k)
+              }
             }
-            process.stderr.write(`telegram gateway: progress-card: turn_end deferred turnKey=${chatState.turnKey} reason=in-flight-sub-agents n=${running.length} agentIds=[${running.join(',')}]\n`)
+            process.stderr.write(`telegram gateway: progress-card: turn_end deferred turnKey=${chatState.turnKey} reason=in-flight-sub-agents correlated=${correlated.length} orphans=${orphans.length} gatingAgentIds=[${correlated.join(',')}]${orphans.length > 0 ? ` non-gating-orphans=[${orphans.join(',')}]` : ''}\n`)
             return
           }
-          // No in-flight sub-agents: complete the turn the normal way.
+          // No correlated in-flight sub-agents: complete the turn.
+          // Log any orphan sub-agents that are still running but not gating.
+          const orphanRunning: string[] = []
+          for (const [k, sa] of chatState.state.subAgents) {
+            if (sa.state === 'running') orphanRunning.push(k)
+          }
+          if (orphanRunning.length > 0) {
+            process.stderr.write(`telegram gateway: progress-card: turn_end completing immediately turnKey=${chatState.turnKey} — orphan-sub-agents-ignored=[${orphanRunning.join(',')}] (fire-and-forget, not gating pin lifecycle)\n`)
+          }
           completeTurnFully(chatState)
         }
         return

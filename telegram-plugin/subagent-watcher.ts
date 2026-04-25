@@ -287,6 +287,18 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
   const dirWatchers = new Map<string, FSWatcher>()
   // Known subagent files: filePath → true
   const knownFiles = new Set<string>()
+  /**
+   * Files that existed before the watcher started (boot-time snapshot).
+   * Agents discovered from these files are tracked for state transitions
+   * but do NOT fire a "Worker dispatched" notification — they are historical.
+   */
+  const historicalFiles = new Set<string>()
+  /**
+   * True while the initial boot scan is running. During this window every
+   * newly discovered file is added to historicalFiles so we can suppress
+   * dispatch notifications for them.
+   */
+  let bootScanInProgress = true
 
   let stopped = false
   let lastCardUpdate = 0
@@ -317,7 +329,8 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
   function registerAgent(filePath: string, agentId: string): void {
     if (registry.has(agentId)) return
     const n = nowFn()
-    log?.(`subagent-watcher: registering agent ${agentId}`)
+    const isHistorical = historicalFiles.has(filePath)
+    log?.(`subagent-watcher: registering agent ${agentId}${isHistorical ? ' (historical — no dispatch notification)' : ''}`)
 
     const entry: WorkerEntry = {
       agentId,
@@ -351,7 +364,18 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
     // (file written-then-watched), fire the state-transition + completion
     // notification now. Otherwise the FSWatcher callback handles it on
     // subsequent writes.
-    maybySendStateTransition(agentId)
+    //
+    // Historical files that are already done at startup do NOT get a
+    // completion notification either — they finished before this session.
+    // Only transitions that happen AFTER startup (e.g. a pre-existing
+    // in-flight agent that finishes while we're watching) fire.
+    if (isHistorical && entry.state === 'done') {
+      // Already finished before we started — mark as notified so we
+      // don't fire a spurious completion notification later.
+      entry.completionNotified = true
+    } else {
+      maybySendStateTransition(agentId)
+    }
 
     // Set up FSWatcher
     try {
@@ -371,12 +395,14 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
       log?.(`subagent-watcher: fs.watch failed for ${agentId}: ${(err as Error).message}`)
     }
 
-    // Dispatch notification
-    try {
-      const desc = escapeHtml(truncate(entry.description, 80))
-      config.sendNotification(`\u{1F6E0} Worker dispatched: ${desc}`)
-    } catch (err) {
-      log?.(`subagent-watcher: sendNotification error: ${(err as Error).message}`)
+    // Dispatch notification — suppressed for historical (pre-existing) files.
+    if (!isHistorical) {
+      try {
+        const desc = escapeHtml(truncate(entry.description, 80))
+        config.sendNotification(`\u{1F6E0} Worker dispatched: ${desc}`)
+      } catch (err) {
+        log?.(`subagent-watcher: sendNotification error: ${(err as Error).message}`)
+      }
     }
 
     maybeSendCardUpdate(true)
@@ -492,6 +518,11 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
       const filePath = join(subagentsPath, e)
       if (knownFiles.has(filePath)) continue
       knownFiles.add(filePath)
+      // During the initial boot scan, mark every discovered file as
+      // historical so registerAgent suppresses the dispatch notification.
+      if (bootScanInProgress) {
+        historicalFiles.add(filePath)
+      }
       const agentId = e.slice('agent-'.length, -'.jsonl'.length)
       registerAgent(filePath, agentId)
     }
@@ -526,8 +557,10 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
     }
   }
 
-  // Initial scan
+  // Initial boot scan: discover pre-existing files and mark them historical
+  // so their registration does not emit spurious dispatch notifications.
   rescanSubagentDirs()
+  bootScanInProgress = false
 
   const pollHandle = setI(poll, rescanMs)
 

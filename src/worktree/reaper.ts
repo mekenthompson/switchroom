@@ -14,7 +14,7 @@
  *      (callers can forward this to Telegram).
  */
 
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { listRecords, deleteRecord } from "./registry.js";
 import type { WorktreeRecord } from "./types.js";
@@ -28,16 +28,37 @@ export interface ReapResult {
 }
 
 /**
- * Check whether any process holds the worktree path open (Linux).
- * Uses `fuser` (procps); returns false if fuser is unavailable.
+ * Check whether any process holds the worktree path open.
+ *
+ * Tries `fuser` (Linux/procps) first, then `lsof` (macOS/BSD). Returns
+ * false if neither probe finds a holder OR if neither tool is installed.
+ *
+ * Note: a false negative (returns false but a process actually has files
+ * open) means the reaper can fall through to heartbeat-only stale logic.
+ * That's acceptable — the spec allows reaping on stale heartbeat alone
+ * for hosts where process-liveness can't be probed.
  */
 function isPathInUse(path: string): boolean {
+  // fuser: Linux. Exits 0 when the path is in use; non-zero (or ENOENT
+  // if not installed) otherwise.
   try {
     execFileSync("fuser", [path], { stdio: "pipe" });
-    return true; // fuser exits 0 when it finds a process
+    return true;
   } catch {
-    return false; // fuser exits 1 when no process holds it, or not available
+    /* fuser missing or path not in use — fall through to lsof */
   }
+  // lsof: macOS / BSD. Exits 0 with PID output when in use.
+  try {
+    const out = execFileSync("lsof", ["-t", path], {
+      stdio: ["ignore", "pipe", "ignore"],
+    })
+      .toString()
+      .trim();
+    if (out.length > 0) return true;
+  } catch {
+    /* lsof missing or path not in use */
+  }
+  return false;
 }
 
 /**

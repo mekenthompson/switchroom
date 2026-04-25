@@ -13,12 +13,49 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdirSync, existsSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, existsSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
-import { writeRecord, countByRepo, deleteRecord } from "./registry.js";
+import { writeRecord, countByRepo, deleteRecord, registryDir } from "./registry.js";
 import type { ClaimInput, ClaimResult, CodeRepoEntry } from "./types.js";
+
+/**
+ * Acquire a per-repo lockfile to serialize claim() across processes.
+ *
+ * The TOCTOU window between countByRepo() and writeRecord() lets two
+ * concurrent claims both pass the cap check. A lockfile with O_EXCL
+ * forces them to serialize. Returns a release function the caller MUST
+ * call (use try/finally).
+ */
+function acquireRepoLock(repoPath: string): () => void {
+  const lockDir = registryDir();
+  mkdirSync(lockDir, { recursive: true });
+  // Different repos shouldn't block each other — lockfile per repo path.
+  const lockName = repoPath.replace(/[^A-Za-z0-9]/g, "_");
+  const lockPath = join(lockDir, `.lock-${lockName}`);
+  const deadline = Date.now() + 5_000;
+  let fd: number | null = null;
+  while (fd === null) {
+    try {
+      fd = openSync(lockPath, "wx");
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      if (Date.now() > deadline) {
+        throw new Error(
+          `Failed to acquire claim lock for "${repoPath}" within 5s. ` +
+          `Another claim may be hung; check ${lockPath} and remove if stale.`,
+        );
+      }
+      const start = Date.now();
+      while (Date.now() - start < 50) { /* spin briefly */ }
+    }
+  }
+  return () => {
+    try { closeSync(fd as number); } catch { /* ignore */ }
+    try { unlinkSync(lockPath); } catch { /* race-tolerant */ }
+  };
+}
 
 /** Default max simultaneous worktrees per repo. */
 export const DEFAULT_CONCURRENCY = 5;
@@ -106,40 +143,54 @@ export async function claimWorktree(
     if (entry?.concurrency !== undefined) concurrencyCap = entry.concurrency;
   }
 
-  // Check concurrency cap
-  const current = countByRepo(repoPath);
-  if (current >= concurrencyCap) {
-    throw new Error(
-      `Concurrency cap of ${concurrencyCap} reached for repo "${input.repo}". ` +
-      `Release existing worktrees before claiming more.`,
-    );
+  // Acquire per-repo lock so concurrent claims serialize through the
+  // count-check + writeRecord critical section. Without the lock, two
+  // callers can both read count<cap and both write, violating the cap.
+  const releaseLock = acquireRepoLock(repoPath);
+
+  let id: string;
+  let branch: string;
+  let worktreePath: string;
+  try {
+    // Check concurrency cap (now race-free under the lock)
+    const current = countByRepo(repoPath);
+    if (current >= concurrencyCap) {
+      throw new Error(
+        `Concurrency cap of ${concurrencyCap} reached for repo "${input.repo}". ` +
+        `Release existing worktrees before claiming more.`,
+      );
+    }
+
+    // Generate ID and branch
+    id = shortId();
+    const taskSuffix = input.taskName ? sanitizeTaskName(input.taskName) : "task";
+    branch = `task/${taskSuffix}-${id}`;
+
+    // Compute worktree path
+    const baseDir = worktreesBaseDir();
+    mkdirSync(baseDir, { recursive: true });
+    worktreePath = join(baseDir, `${id}-${taskSuffix}`);
+
+    const now = new Date().toISOString();
+    const record = {
+      id,
+      repo: repoPath,
+      repoName: input.repo,
+      branch,
+      path: worktreePath,
+      createdAt: now,
+      heartbeatAt: now,
+      ownerAgent: input.ownerAgent,
+    };
+
+    // ATOMIC: write registry record BEFORE git operation.
+    // If git fails, we delete the record to prevent orphaning.
+    writeRecord(record);
+  } finally {
+    // Release lock before the (potentially slow) git operation. The cap
+    // check + record write are done; subsequent counts include this record.
+    releaseLock();
   }
-
-  // Generate ID and branch
-  const id = shortId();
-  const taskSuffix = input.taskName ? sanitizeTaskName(input.taskName) : "task";
-  const branch = `task/${taskSuffix}-${id}`;
-
-  // Compute worktree path
-  const baseDir = worktreesBaseDir();
-  mkdirSync(baseDir, { recursive: true });
-  const worktreePath = join(baseDir, `${id}-${taskSuffix}`);
-
-  const now = new Date().toISOString();
-  const record = {
-    id,
-    repo: repoPath,
-    repoName: input.repo,
-    branch,
-    path: worktreePath,
-    createdAt: now,
-    heartbeatAt: now,
-    ownerAgent: input.ownerAgent,
-  };
-
-  // ATOMIC: write registry record BEFORE git operation.
-  // If git fails, we delete the record to prevent orphaning.
-  writeRecord(record);
 
   try {
     // git worktree add -b <branch> <path>

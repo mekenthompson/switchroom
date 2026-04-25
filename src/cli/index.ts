@@ -1,6 +1,7 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { execFileSync } from "node:child_process";
 import { registerInitCommand } from "./init.js";
 import { registerAgentCommand } from "./agent.js";
 import { registerSystemdCommand } from "./systemd.js";
@@ -12,6 +13,8 @@ import { registerWebCommand } from "./web.js";
 import { registerSetupCommand } from "./setup.js";
 import { registerDoctorCommand } from "./doctor.js";
 import { registerUpdateCommand } from "./update.js";
+import { registerRestartCommand } from "./restart.js";
+import { registerVersionCommand } from "./version.js";
 import { registerHandoffCommand } from "./handoff.js";
 import { registerDepsCommand } from "./deps.js";
 import { registerWorkspaceCommand } from "./workspace.js";
@@ -43,6 +46,8 @@ export const program = new Command()
 registerSetupCommand(program);
 registerDoctorCommand(program);
 registerUpdateCommand(program);
+registerRestartCommand(program);
+registerVersionCommand(program);
 registerInitCommand(program);
 registerAgentCommand(program);
 registerSystemdCommand(program);
@@ -55,3 +60,26 @@ registerHandoffCommand(program);
 registerDepsCommand(program);
 registerWorkspaceCommand(program);
 registerDebugCommand(program);
+
+// Deprecated aliases — kept for one release, will be removed after.
+// Invoking these prints a clear deprecation warning and delegates to `update`.
+for (const oldVerb of ["upgrade", "rebuild", "reconcile"] as const) {
+  program
+    .command(oldVerb, { hidden: true })
+    .description(`[DEPRECATED] Use 'switchroom update' instead`)
+    .allowUnknownOption(true)
+    .action(() => {
+      console.warn(
+        `\n  ⚠  '${oldVerb}' is deprecated — use 'switchroom update' instead.\n`
+      );
+      // Delegate by re-invoking with the canonical verb
+      try {
+        const self = process.argv[1];
+        execFileSync(process.execPath, [self, "update", ...process.argv.slice(3)], {
+          stdio: "inherit",
+        });
+      } catch (err: any) {
+        process.exit(err.status ?? 1);
+      }
+    });
+}

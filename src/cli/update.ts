@@ -2,13 +2,14 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { execSync } from "node:child_process";
 import { existsSync, realpathSync, readFileSync } from "node:fs";
-import { dirname, resolve, join } from "node:path";
+import { dirname, join } from "node:path";
 import { withConfigError, getConfig } from "./helpers.js";
 import { reconcileAgent } from "../agents/scaffold.js";
 import { restartAgent, writeRestartReasonMarker } from "../agents/lifecycle.js";
 import { installAllUnits } from "../agents/systemd.js";
 import { resolveAgentsDir } from "../config/loader.js";
 import { getConfigPath } from "./helpers.js";
+import { printHealthSummary } from "./version.js";
 
 /**
  * Locate the directory where switchroom is installed (the git checkout root).
@@ -108,6 +109,31 @@ export function registerUpdateCommand(program: Command): void {
             )
           );
           process.exit(1);
+        }
+
+        // Guard: dirty working tree blocks a pull. A dirty tree means
+        // `git pull --ff-only` would either fail or silently clobber
+        // uncommitted work. Print explicit instructions and exit.
+        // --check is read-only so we skip this guard for it.
+        if (!opts.check) {
+          const porcelain = runCaptured("git status --porcelain", installDir)?.trim() ?? "";
+          if (porcelain) {
+            console.error(
+              chalk.red(
+                `\n  Switchroom install directory has uncommitted changes:\n\n` +
+                  porcelain
+                    .split("\n")
+                    .map(l => `    ${l}`)
+                    .join("\n") +
+                  `\n\n  Resolve before updating:\n` +
+                  `    cd ${installDir}\n` +
+                  `    git stash         # stash your changes\n` +
+                  `    switchroom update # then retry\n` +
+                  `    git stash pop     # restore if needed\n`
+              )
+            );
+            process.exit(1);
+          }
         }
 
         console.log(chalk.bold(`\nUpdating Switchroom at ${installDir}\n`));
@@ -286,8 +312,13 @@ export function registerUpdateCommand(program: Command): void {
         // 8. Summary
         const after = runCaptured("git rev-parse --short HEAD", installDir)?.trim() ?? "unknown";
         console.log(chalk.bold(`\n  Done. ${before} → ${after}\n`));
+
+        // Print one-line health summary so the user can see what's running
+        // without running a second command.
+        const finalConfig = getConfig(program);
+        printHealthSummary(finalConfig);
+        console.log();
       })
     );
 
-  void resolve; // referenced for symmetry; resolve was previously imported
 }

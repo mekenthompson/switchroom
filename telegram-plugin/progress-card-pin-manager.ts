@@ -194,9 +194,15 @@ export function createPinManager(deps: PinManagerDeps): PinManager {
       serviceMessages.delete(key)
       deleteServiceMessage(chatId, svcId)
     }
+    const unpinStart = now()
     const p = deps.unpin(chatId, pinnedId)
+      .then(() => {
+        const ms = now() - unpinStart
+        log(`telegram gateway: progress-card: unpin OK turnKey=${turnKey} msgId=${pinnedId} durationMs=${ms}\n`)
+      })
       .catch((err: Error) => {
-        log(`telegram gateway: progress-card unpin failed: ${err?.message ?? err}\n`)
+        const ms = now() - unpinStart
+        log(`telegram gateway: progress-card: unpin FAILED turnKey=${turnKey} msgId=${pinnedId} durationMs=${ms} error="${err?.message ?? err}"\n`)
       })
       .finally(() => {
         // Keep the sidecar consistent whether the API call succeeded
@@ -228,12 +234,19 @@ export function createPinManager(deps: PinManagerDeps): PinManager {
         pinnedAt: now(),
       })
     }
-    const p = deps.pin(chatId, messageId, { disable_notification: true }).catch(
-      (err: Error) => {
-        log(`telegram gateway: progress-card pin failed: ${err?.message ?? err}\n`)
-        if (deps.removePin) deps.removePin(chatId, messageId)
-      },
-    )
+    const pinStart = now()
+    const p = deps.pin(chatId, messageId, { disable_notification: true })
+      .then(() => {
+        const ms = now() - pinStart
+        log(`telegram gateway: progress-card: pin OK turnKey=${turnKey} msgId=${messageId} durationMs=${ms}\n`)
+      })
+      .catch(
+        (err: Error) => {
+          const ms = now() - pinStart
+          log(`telegram gateway: progress-card: pin FAILED turnKey=${turnKey} msgId=${messageId} durationMs=${ms} error="${err?.message ?? err}"\n`)
+          if (deps.removePin) deps.removePin(chatId, messageId)
+        },
+      )
     track(p)
   }
 

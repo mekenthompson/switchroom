@@ -195,13 +195,35 @@ export interface ProgressCardState {
 }
 
 /**
- * True when any sub-agent in the state is still running. Parent turn_end
- * no longer closes running sub-agents (they may outlive the parent turn
- * for background Agent calls), so the driver uses this gate to decide
- * whether to close the card now or defer until the last sub-agent lands
- * its own `sub_agent_turn_end`.
+ * True when any **correlated** (non-orphan) sub-agent is still running.
+ *
+ * Orphan sub-agents (parentToolUseId == null) were spawned via
+ * `run_in_background: true` or a JSONL-delivery race where `sub_agent_started`
+ * arrived before the parent `tool_use`. Their `sub_agent_turn_end` event may
+ * never arrive from the parent's perspective — when the parent turn ends and a
+ * new turn starts, `currentTurnKey` flips to the new turn and late events for
+ * the old turn are dropped. Waiting on orphan sub-agents therefore defers the
+ * parent card indefinitely (the ghost-pin / stale-pin bug, #31 / #43).
+ *
+ * Fix: only correlated sub-agents (parentToolUseId != null) gate the defer.
+ * Orphan sub-agents are treated as fire-and-forget for the parent turn's
+ * lifecycle. Their in-progress state is still rendered in the card while
+ * events arrive — we just don't block card completion on them.
  */
 export function hasInFlightSubAgents(state: ProgressCardState): boolean {
+  for (const sa of state.subAgents.values()) {
+    if (sa.state === 'running' && sa.parentToolUseId != null) return true
+  }
+  return false
+}
+
+/**
+ * True when any sub-agent (including orphans) is still running. Used only
+ * for rendering (showing sub-agent activity lines) — not for the defer gate.
+ * Keeps the card "Working…" and showing sub-agent rows while orphan background
+ * agents are active, without blocking card completion.
+ */
+export function hasAnyRunningSubAgent(state: ProgressCardState): boolean {
   for (const sa of state.subAgents.values()) {
     if (sa.state === 'running') return true
   }
@@ -508,7 +530,17 @@ export function reduce(
       }
       const subAgents = new Map(state.subAgents)
       subAgents.set(event.agentId, sub)
-      process.stderr.write(`telegram gateway: progress-card: sub_agent_started agentId=${event.agentId} correlated=${parentToolUseId != null ? 'yes' : 'orphan'}${parentToolUseId != null ? ` parentToolUseId=${parentToolUseId}` : ''}\n`)
+      // Log correlation result. For orphans: include the promptText prefix
+      // and the count of pending spawns so callers can diagnose WHY the
+      // match failed (empty pendingAgentSpawns = no parent tool_use arrived
+      // yet; promptText mismatch = race between spawn and text delivery).
+      if (parentToolUseId != null) {
+        process.stderr.write(`telegram gateway: progress-card: sub_agent_started agentId=${event.agentId} correlated=yes parentToolUseId=${parentToolUseId}\n`)
+      } else {
+        const promptSnip = (event.firstPromptText ?? '').slice(0, 80).replace(/\n/g, ' ')
+        const pendingCount = state.pendingAgentSpawns.size
+        process.stderr.write(`telegram gateway: progress-card: sub_agent_started agentId=${event.agentId} correlated=orphan pendingSpawns=${pendingCount} promptSnip="${promptSnip}" — NOTE: orphan sub-agents no longer gate parent turn_end defer (#31 fix)\n`)
+      }
       return { ...state, subAgents, pendingAgentSpawns, items }
     }
 
@@ -812,13 +844,12 @@ export function render(state: ProgressCardState, now: number, taskNum?: TaskNum,
   const lines: string[] = []
 
   const elapsed = formatDuration(now - state.turnStartedAt)
-  // "Truly done" = parent turn_end fired AND no sub-agents still in
-  // flight. While the driver's `pendingCompletion` state is active
-  // (background Agent calls outliving parent turn_end), the reducer
-  // has already flipped `state.stage` to 'done' but the work isn't
-  // actually finished. Show "Working…" + ticking elapsed in that
-  // window so users aren't looking at a frozen ✅ card.
-  const trulyDone = state.stage === 'done' && !hasInFlightSubAgents(state)
+  // "Truly done" = parent turn_end fired AND no sub-agents of any kind
+  // are still visibly running. `hasAnyRunningSubAgent` includes orphan
+  // (background) sub-agents so the card stays in "Working…" while they
+  // are active — even though orphan sub-agents no longer gate the defer
+  // for pin-lifecycle purposes (#31/#43 fix).
+  const trulyDone = state.stage === 'done' && !hasAnyRunningSubAgent(state)
   const headerIcon = trulyDone ? '✅' : '⚙️'
   const headerLabel = trulyDone ? 'Done' : 'Working…'
   const taskSuffix = taskNum && taskNum.total > 1 ? ` (${taskNum.index}/${taskNum.total})` : ''
@@ -1127,6 +1158,10 @@ function renderSubAgent(
  *
  * Partial runs (any item still running) are never collapsed — the running
  * item is always shown individually so the user can see live progress.
+ *
+ * Human-authored items are never collapsed into a bare "Tool ×N" rollup (#41).
+ * When any item in the run has `humanAuthored=true`, each is rendered
+ * individually so the agent's natural-language descriptions remain visible.
  */
 interface RolledItem extends ChecklistItem {
   readonly kind?: 'single' | 'rollup'
@@ -1149,8 +1184,13 @@ export function compactItems(items: ReadonlyArray<ChecklistItem>): RolledItem[] 
     const last = run[run.length - 1]
     const allDone = run.every((r) => r.state === 'done')
     const sameLabel = run.every((r) => r.label === first.label)
+    // Never collapse a run that contains any human-authored item (#41 fix).
+    // Descriptions written by the agent ("Check commit state", "Run tests")
+    // are valuable context — collapsing them into "Bash ×N" discards that
+    // signal. Each human-authored item must appear as its own line.
+    const anyHumanAuthored = run.some((r) => r.humanAuthored)
 
-    if (allDone && sameLabel && run.length >= ROLLUP_THRESHOLD) {
+    if (allDone && !anyHumanAuthored && sameLabel && run.length >= ROLLUP_THRESHOLD) {
       // B3 + B1: identical tool + identical label → rollup keeping the label
       out.push({
         id: first.id,
@@ -1164,8 +1204,8 @@ export function compactItems(items: ReadonlyArray<ChecklistItem>): RolledItem[] 
         kind: 'rollup',
         count: run.length,
       })
-    } else if (allDone && !sameLabel && run.length >= MIXED_ROLLUP_THRESHOLD) {
-      // C1: same tool, mixed labels → rollup without label (heuristic summary)
+    } else if (allDone && !anyHumanAuthored && !sameLabel && run.length >= MIXED_ROLLUP_THRESHOLD) {
+      // C1: same tool, mixed labels, no human-authored → rollup without label
       out.push({
         id: first.id,
         toolUseId: null,

@@ -1678,6 +1678,22 @@ function handleSessionEvent(ev: SessionEvent): void {
         process.stderr.write(
           `telegram gateway: turn-flush skipped — reason=${flushDecision.reason}\n`,
         )
+        // Ghost-reply detection (#45): the model ended a Telegram-inbound turn
+        // without calling reply/stream_reply AND without emitting any assistant
+        // text that the turn-flush could forward. The user will see only the
+        // progress card disappear — no visible output. Log a prominent warning
+        // so this silent-drop pattern is immediately visible in the logs.
+        if (
+          flushDecision.reason === 'empty-text' &&
+          !currentTurnReplyCalled &&
+          currentSessionChatId != null
+        ) {
+          process.stderr.write(
+            `telegram gateway: WARN ghost-reply detected — turn ended with zero outbound messages` +
+            ` chat=${chatId} turnStartedAt=${currentTurnStartedAt} replyCalled=false capturedText=empty` +
+            ` — the progress card steps were the only thing the user saw (#45)\n`,
+          )
+        }
       }
       if (flushDecision.kind === 'flush') {
         const capturedText = flushDecision.text

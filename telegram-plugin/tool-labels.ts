@@ -179,8 +179,15 @@ export function toolLabel(
 
     case 'Bash':
     case 'BashOutput': {
+      // Priority order (highest to lowest):
+      // 1. input.description — agent-authored, human-readable phrase
+      // 2. preamble — model's preceding text narration ("Checking the logs")
+      //    (same single-line + length gate as file tools)
+      // 3. raw command, truncated to MAX_BASH_CHARS
       const description = str('description')
       if (description) return truncate(firstLine(description), MAX_DESCRIPTION_CHARS)
+      const pre = preambleLabel()
+      if (pre) return pre
       const cmd = str('command') ?? str('bash_id') ?? ''
       return truncate(firstLine(cmd), MAX_BASH_CHARS)
     }

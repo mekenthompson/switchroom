@@ -13,7 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import * as fs from 'fs'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'fs'
+import { mkdtempSync, mkdirSync, writeFileSync, appendFileSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { renderWorkerCard, startSubagentWatcher, type WorkerEntry } from '../subagent-watcher.js'
@@ -225,6 +225,9 @@ function makeHarness(opts: {
   // Build a mock fs object — injected via watcher config (ESM namespace
   // exports are not configurable so vi.spyOn(fs, ...) doesn't work).
   const fakeWatchers: Array<{ close: () => void }> = []
+  // Track which path was last opened so readSync can serve the right content.
+  // The mock fd is always 42; we only ever have one open file at a time.
+  let lastOpenedPath: string | null = null
   const mockFs = {
     existsSync: ((p: fs.PathLike) => {
       const ps = String(p)
@@ -254,15 +257,28 @@ function makeHarness(opts: {
       const content = fileContents.get(ps)
       return { size: content?.length ?? 0 } as fs.Stats
     }) as typeof fs.statSync,
-    openSync: (() => 42) as unknown as typeof fs.openSync,
-    closeSync: (() => {}) as typeof fs.closeSync,
+    openSync: ((p: fs.PathLike) => {
+      lastOpenedPath = String(p)
+      return 42
+    }) as unknown as typeof fs.openSync,
+    closeSync: (() => {
+      lastOpenedPath = null
+    }) as typeof fs.closeSync,
     readSync: ((
       _fd: number,
-      _buf: NodeJS.ArrayBufferView,
-      _offset: number,
-      _length: number,
-      _position: number | null,
-    ): number => 0) as unknown as typeof fs.readSync,
+      buf: NodeJS.ArrayBufferView,
+      offset: number,
+      length: number,
+      position: number | null,
+    ): number => {
+      // Serve content from fileContents for the currently open file.
+      const content = lastOpenedPath != null ? fileContents.get(lastOpenedPath) : undefined
+      if (!content) return 0
+      const pos = position ?? 0
+      const src = content.slice(pos, pos + length)
+      ;(src as Buffer).copy(buf as Buffer, offset)
+      return src.length
+    }) as unknown as typeof fs.readSync,
     watch: (() => {
       const w = { close: vi.fn() }
       fakeWatchers.push(w)
@@ -339,13 +355,15 @@ describe('startSubagentWatcher', () => {
     h.watcher.stop()
   })
 
-  it('detects a new subagent JSONL and emits dispatch notification', () => {
+  it('detects a new subagent JSONL created after startup and emits dispatch notification', () => {
+    // Watcher starts with an empty subagents dir, then a new file appears.
     const agentDir = '/home/user/.switchroom/agents/myagent'
     const projectsRoot = `${agentDir}/.claude/projects`
     const projectDir = `${projectsRoot}/myproject`
     const sessionDir = `${projectDir}/session-abc123`
     const subagentsDir = `${sessionDir}/subagents`
     const jsonlPath = `${subagentsDir}/agent-deadbeef.jsonl`
+    const content = buildJSONL(subAgentUserMsg('Fix the tests please'))
 
     const h = makeHarness({
       agentDir,
@@ -353,12 +371,32 @@ describe('startSubagentWatcher', () => {
       dirs: {
         [projectsRoot]: ['myproject'],
         [projectDir]: ['session-abc123'],
-        [subagentsDir]: ['agent-deadbeef.jsonl'],
+        // subagentsDir is empty at startup
+        [subagentsDir]: [],
       },
-      files: {
-        [jsonlPath]: buildJSONL(subAgentUserMsg('Fix the tests please')),
-      },
+      files: {},
     })
+
+    // No notifications during boot
+    expect(h.notifications).toHaveLength(0)
+
+    // Simulate the new file appearing after startup
+    h.mockFs.readdirSync = ((p: unknown) => {
+      const ps = String(p)
+      if (ps === subagentsDir) return ['agent-deadbeef.jsonl']
+      if (ps === projectsRoot) return ['myproject']
+      if (ps === projectDir) return ['session-abc123']
+      return []
+    }) as unknown as typeof fs.readdirSync
+    h.mockFs.existsSync = ((p: unknown) => {
+      const ps = String(p)
+      return [projectsRoot, projectDir, sessionDir, subagentsDir, jsonlPath].includes(ps)
+    }) as typeof fs.existsSync
+    const contentBuf = Buffer.from(content, 'utf-8')
+    h.mockFs.statSync = ((p: unknown) => {
+      if (String(p) === jsonlPath) return { size: contentBuf.length } as import('fs').Stats
+      return { size: 0 } as import('fs').Stats
+    }) as typeof fs.statSync
 
     h.poll()
 
@@ -466,7 +504,9 @@ describe('startSubagentWatcher', () => {
       expect(entry?.toolCount).toBe(3)
     })
 
-    it('emits completion notification when turn_end arrives', () => {
+    it('does NOT emit completion notification for a file already done at startup', () => {
+      // File pre-exists with turn_end already written — agent was done before
+      // the watcher started. No completion notification should fire.
       const content = buildJSONL(
         subAgentUserMsg('Do the task'),
         subAgentTurnDuration(),
@@ -477,8 +517,42 @@ describe('startSubagentWatcher', () => {
       const entry = h.watcher.getRegistry().get('deadbeef')
       expect(entry).toBeDefined()
       expect(entry?.state).toBe('done')
+      // Already done at boot → historical → no completion notification
       const completionNotifs = h.notifications.filter((n) => n.includes('Worker done'))
-      expect(completionNotifs.length).toBeGreaterThanOrEqual(1)
+      expect(completionNotifs).toHaveLength(0)
+    })
+
+    it('emits completion notification when a NEW subagent finishes', () => {
+      // File does NOT exist at startup. Watcher starts, then file appears
+      // with an in-flight status. Then turn_end is appended — we should
+      // get a completion notification.
+      const agentDir = join(tmpRoot, 'agent')
+      const subagentsDir = join(agentDir, '.claude', 'projects', 'p1', 'session-abc', 'subagents')
+      mkdirSync(subagentsDir, { recursive: true })
+      const jsonlPath = join(subagentsDir, 'agent-newagent.jsonl')
+
+      // Write just the initial user message (in-flight state)
+      const initialContent = buildJSONL(subAgentUserMsg('Do the task'))
+
+      const h = startWatcherSync({ agentDir })
+
+      // Write file AFTER watcher starts (post-startup, so not historical)
+      writeFileSync(jsonlPath, initialContent)
+      h.poll()
+
+      const entry = h.watcher.getRegistry().get('newagent')
+      expect(entry).toBeDefined()
+      expect(entry?.state).toBe('running')
+
+      // Dispatch notification fired (post-startup file)
+      expect(h.notifications.filter((n) => n.includes('Worker dispatched'))).toHaveLength(1)
+
+      // Now append turn_end to simulate agent finishing
+      appendFileSync(jsonlPath, buildJSONL(subAgentTurnDuration()))
+      h.poll()
+
+      const completionNotifs = h.notifications.filter((n) => n.includes('Worker done'))
+      expect(completionNotifs).toHaveLength(1)
     })
   })
 
@@ -552,6 +626,8 @@ describe('startSubagentWatcher', () => {
   })
 
   it('does not duplicate workers registered from same file', () => {
+    // File exists at startup → historical. Repeated polls should not
+    // re-register the agent or emit extra notifications.
     const agentDir = '/home/user/.switchroom/agents/myagent'
     const projectsRoot = `${agentDir}/.claude/projects`
     const projectDir = `${projectsRoot}/myproject`
@@ -577,10 +653,12 @@ describe('startSubagentWatcher', () => {
     h.poll()
 
     const registry = h.watcher.getRegistry()
+    // The agent is tracked exactly once (historical, no dispatch spam)
     expect(registry.size).toBe(1)
 
+    // Historical file — no dispatch notification should have been emitted
     const dispatchNotifs = h.notifications.filter((n) => n.includes('Worker dispatched'))
-    expect(dispatchNotifs.length).toBe(1)
+    expect(dispatchNotifs.length).toBe(0)
 
     h.watcher.stop()
   })
@@ -593,5 +671,177 @@ describe('startSubagentWatcher', () => {
     const notifsBefore = h.notifications.length
     h.advance(100_000)
     expect(h.notifications.length).toBe(notifsBefore)
+  })
+
+  // ─── Startup-snapshot regression tests (the core bug fix) ─────────────────
+
+  describe('startup snapshot: pre-existing JSONL files do not fire dispatch', () => {
+    /**
+     * These tests directly verify the fix for the bug where pre-existing JSONL
+     * files at watcher boot caused spurious "Worker dispatched" notifications —
+     * one per historical session — on every agent restart.
+     */
+
+    it('pre-existing JSONL files at startup are NOT dispatched', () => {
+      // Two JSONL files exist before the watcher starts.
+      const agentDir = '/home/user/.switchroom/agents/myagent'
+      const projectsRoot = `${agentDir}/.claude/projects`
+      const projectDir = `${projectsRoot}/myproject`
+      const sessionDir = `${projectDir}/session-abc123`
+      const subagentsDir = `${sessionDir}/subagents`
+      const jsonlA = `${subagentsDir}/agent-hist-aaaa.jsonl`
+      const jsonlB = `${subagentsDir}/agent-hist-bbbb.jsonl`
+
+      const content = buildJSONL(subAgentUserMsg('Old task'))
+
+      // Both files exist at harness construction time (i.e. before watcher starts)
+      const h = makeHarness({
+        agentDir,
+        existingDirs: [projectsRoot, projectDir, sessionDir, subagentsDir],
+        dirs: {
+          [projectsRoot]: ['myproject'],
+          [projectDir]: ['session-abc123'],
+          [subagentsDir]: ['agent-hist-aaaa.jsonl', 'agent-hist-bbbb.jsonl'],
+        },
+        files: {
+          [jsonlA]: content,
+          [jsonlB]: content,
+        },
+      })
+
+      // Both agents are in the registry (we track them for state transitions)
+      const registry = h.watcher.getRegistry()
+      expect(registry.size).toBe(2)
+
+      // But no dispatch notification was emitted for either
+      const dispatchNotifs = h.notifications.filter((n) => n.includes('Worker dispatched'))
+      expect(dispatchNotifs).toHaveLength(0)
+
+      h.watcher.stop()
+    })
+
+    it('JSONL file created after startup DOES fire dispatch', () => {
+      const agentDir = '/home/user/.switchroom/agents/myagent'
+      const projectsRoot = `${agentDir}/.claude/projects`
+      const projectDir = `${projectsRoot}/myproject`
+      const sessionDir = `${projectDir}/session-abc123`
+      const subagentsDir = `${sessionDir}/subagents`
+      const newJsonl = `${subagentsDir}/agent-new-cccc.jsonl`
+
+      const content = buildJSONL(subAgentUserMsg('Fresh task'))
+
+      // Watcher starts with an EMPTY subagents dir
+      const h = makeHarness({
+        agentDir,
+        existingDirs: [projectsRoot, projectDir, sessionDir, subagentsDir],
+        dirs: {
+          [projectsRoot]: ['myproject'],
+          [projectDir]: ['session-abc123'],
+          // subagentsDir is empty at startup — no pre-existing files
+          [subagentsDir]: [],
+        },
+        files: {},
+      })
+
+      // Nothing dispatched yet
+      expect(h.notifications.filter((n) => n.includes('Worker dispatched'))).toHaveLength(0)
+
+      // Simulate a new file appearing AFTER startup by mutating mockFs
+      h.mockFs.readdirSync = ((p: unknown) => {
+        if (String(p) === subagentsDir) return ['agent-new-cccc.jsonl']
+        if (String(p) === projectsRoot) return ['myproject']
+        if (String(p) === projectDir) return ['session-abc123']
+        return []
+      }) as unknown as typeof import('fs').readdirSync
+      h.mockFs.existsSync = ((p: unknown) => {
+        const ps = String(p)
+        return [projectsRoot, projectDir, sessionDir, subagentsDir, newJsonl].includes(ps)
+      }) as typeof import('fs').existsSync
+      h.mockFs.statSync = ((p: unknown) => {
+        const ps = String(p)
+        if (ps === newJsonl) return { size: Buffer.from(content, 'utf-8').length } as import('fs').Stats
+        return { size: 0 } as import('fs').Stats
+      }) as typeof import('fs').statSync
+
+      // Trigger a poll — the new file is now visible
+      h.poll()
+
+      const dispatchNotifs = h.notifications.filter((n) => n.includes('Worker dispatched'))
+      expect(dispatchNotifs).toHaveLength(1)
+      expect(dispatchNotifs[0]).toContain('Worker dispatched')
+
+      h.watcher.stop()
+    })
+
+    it('pre-existing in-flight agent that finishes after restart fires completion but NOT dispatch', () => {
+      // An in-flight subagent existed before restart. At boot it's registered
+      // as historical (no dispatch). Then it writes turn_end and we get a
+      // completion notification — the state transition fired correctly.
+      const agentDir = '/home/user/.switchroom/agents/myagent'
+      const projectsRoot = `${agentDir}/.claude/projects`
+      const projectDir = `${projectsRoot}/myproject`
+      const sessionDir = `${projectDir}/session-abc123`
+      const subagentsDir = `${sessionDir}/subagents`
+      const jsonlPath = `${subagentsDir}/agent-inflight-dddd.jsonl`
+
+      // At boot: only the initial user message — still running
+      const initialContent = buildJSONL(subAgentUserMsg('Important in-flight task'))
+      const initialBuf = Buffer.from(initialContent, 'utf-8')
+
+      // Track mutable file content for the real-time fs mock
+      let currentContent = initialBuf
+
+      const h = makeHarness({
+        agentDir,
+        existingDirs: [projectsRoot, projectDir, sessionDir, subagentsDir],
+        dirs: {
+          [projectsRoot]: ['myproject'],
+          [projectDir]: ['session-abc123'],
+          [subagentsDir]: ['agent-inflight-dddd.jsonl'],
+        },
+        files: { [jsonlPath]: initialContent },
+      })
+
+      // After boot: historical — no dispatch notification
+      const dispatchNotifs = h.notifications.filter((n) => n.includes('Worker dispatched'))
+      expect(dispatchNotifs).toHaveLength(0)
+
+      // The agent IS in the registry
+      const entry = h.watcher.getRegistry().get('inflight-dddd')
+      expect(entry).toBeDefined()
+      expect(entry?.state).toBe('running')
+
+      // Now the sub-agent finishes — new JSONL content with turn_end appended
+      const finishedContent = initialContent + buildJSONL(subAgentTurnDuration())
+      // Update the mock so statSync/readSync see the larger file
+      currentContent = Buffer.from(finishedContent, 'utf-8')
+      h.mockFs.statSync = ((p: unknown) => {
+        if (String(p) === jsonlPath) return { size: currentContent.length } as import('fs').Stats
+        return { size: 0 } as import('fs').Stats
+      }) as typeof import('fs').statSync
+      h.mockFs.readSync = ((
+        _fd: number,
+        buf: NodeJS.ArrayBufferView,
+        offset: number,
+        length: number,
+        position: number | null,
+      ): number => {
+        const pos = position ?? 0
+        const src = currentContent.slice(pos, pos + length)
+        Buffer.from(src).copy(buf as Buffer, offset)
+        return src.length
+      }) as unknown as typeof import('fs').readSync
+
+      // Trigger a poll — watcher should detect the turn_end and emit completion
+      h.poll()
+
+      const completionNotifs = h.notifications.filter((n) => n.includes('Worker done'))
+      expect(completionNotifs).toHaveLength(1)
+
+      // Still no spurious dispatch notification
+      expect(h.notifications.filter((n) => n.includes('Worker dispatched'))).toHaveLength(0)
+
+      h.watcher.stop()
+    })
   })
 })

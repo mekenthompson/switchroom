@@ -2,13 +2,14 @@ import type { Command } from "commander";
 import chalk from "chalk";
 import { execSync } from "node:child_process";
 import { existsSync, realpathSync, readFileSync } from "node:fs";
-import { dirname, resolve, join } from "node:path";
+import { dirname, join } from "node:path";
 import { withConfigError, getConfig } from "./helpers.js";
 import { reconcileAgent } from "../agents/scaffold.js";
 import { restartAgent, writeRestartReasonMarker } from "../agents/lifecycle.js";
 import { installAllUnits } from "../agents/systemd.js";
 import { resolveAgentsDir } from "../config/loader.js";
 import { getConfigPath } from "./helpers.js";
+import { printHealthSummary } from "./version.js";
 
 /**
  * Locate the directory where switchroom is installed (the git checkout root).
@@ -61,10 +62,12 @@ function locateSwitchroomInstallDir(): string | null {
 
 /**
  * Run a shell command, streaming output. Returns true on success.
+ * Pass an explicit timeoutMs — git/network/install commands MUST cap, or
+ * a stalled SSH key prompt or unreachable origin hangs `update` forever.
  */
-function runStreamed(cmd: string, cwd: string): boolean {
+function runStreamed(cmd: string, cwd: string, timeoutMs: number): boolean {
   try {
-    execSync(cmd, { cwd, stdio: "inherit" });
+    execSync(cmd, { cwd, stdio: "inherit", timeout: timeoutMs });
     return true;
   } catch {
     return false;
@@ -73,13 +76,16 @@ function runStreamed(cmd: string, cwd: string): boolean {
 
 /**
  * Run a shell command and capture stdout. Returns the output or null on error.
+ * timeoutMs defaults to 10s — fine for local git metadata reads (rev-parse,
+ * status, log). Override for anything that touches the network.
  */
-function runCaptured(cmd: string, cwd: string): string | null {
+function runCaptured(cmd: string, cwd: string, timeoutMs = 10_000): string | null {
   try {
     return execSync(cmd, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       encoding: "utf-8",
+      timeout: timeoutMs,
     }).toString();
   } catch {
     return null;
@@ -110,6 +116,31 @@ export function registerUpdateCommand(program: Command): void {
           process.exit(1);
         }
 
+        // Guard: dirty working tree blocks a pull. A dirty tree means
+        // `git pull --ff-only` would either fail or silently clobber
+        // uncommitted work. Print explicit instructions and exit.
+        // --check is read-only so we skip this guard for it.
+        if (!opts.check) {
+          const porcelain = runCaptured("git status --porcelain", installDir)?.trim() ?? "";
+          if (porcelain) {
+            console.error(
+              chalk.red(
+                `\n  Switchroom install directory has uncommitted changes:\n\n` +
+                  porcelain
+                    .split("\n")
+                    .map(l => `    ${l}`)
+                    .join("\n") +
+                  `\n\n  Resolve before updating:\n` +
+                  `    cd ${installDir}\n` +
+                  `    git stash         # stash your changes\n` +
+                  `    switchroom update # then retry\n` +
+                  `    git stash pop     # restore if needed\n`
+              )
+            );
+            process.exit(1);
+          }
+        }
+
         console.log(chalk.bold(`\nUpdating Switchroom at ${installDir}\n`));
 
         // 1. Capture current commit
@@ -118,7 +149,7 @@ export function registerUpdateCommand(program: Command): void {
 
         // 2. Fetch from origin
         console.log(chalk.gray("\n  Fetching from origin..."));
-        if (!runStreamed("git fetch --quiet origin", installDir)) {
+        if (!runStreamed("git fetch --quiet origin", installDir, 30_000)) {
           console.error(chalk.red("  git fetch failed"));
           process.exit(1);
         }
@@ -150,7 +181,7 @@ export function registerUpdateCommand(program: Command): void {
         // 4. Pull
         if (log) {
           console.log(chalk.gray("\n  Pulling..."));
-          if (!runStreamed(`git pull --ff-only --quiet origin ${branch}`, installDir)) {
+          if (!runStreamed(`git pull --ff-only --quiet origin ${branch}`, installDir, 60_000)) {
             console.error(
               chalk.red(
                 "  git pull failed (not a fast-forward?). " +
@@ -167,7 +198,7 @@ export function registerUpdateCommand(program: Command): void {
           )?.trim() ?? "";
           if (changed.includes("package.json") || changed.includes("bun.lock")) {
             console.log(chalk.gray("\n  Reinstalling dependencies (package.json changed)..."));
-            if (!runStreamed("bun install --quiet", installDir)) {
+            if (!runStreamed("bun install --quiet", installDir, 120_000)) {
               console.error(chalk.yellow("  bun install reported a non-zero exit"));
             }
           }
@@ -176,7 +207,7 @@ export function registerUpdateCommand(program: Command): void {
           const pluginPkg = join(installDir, "telegram-plugin", "package.json");
           if (existsSync(pluginPkg) && changed.includes("telegram-plugin/package.json")) {
             console.log(chalk.gray("  Reinstalling telegram-plugin dependencies..."));
-            runStreamed("bun install --quiet", join(installDir, "telegram-plugin"));
+            runStreamed("bun install --quiet", join(installDir, "telegram-plugin"), 120_000);
           }
         }
 
@@ -286,8 +317,13 @@ export function registerUpdateCommand(program: Command): void {
         // 8. Summary
         const after = runCaptured("git rev-parse --short HEAD", installDir)?.trim() ?? "unknown";
         console.log(chalk.bold(`\n  Done. ${before} → ${after}\n`));
+
+        // Print one-line health summary so the user can see what's running
+        // without running a second command.
+        const finalConfig = getConfig(program);
+        printHealthSummary(finalConfig);
+        console.log();
       })
     );
 
-  void resolve; // referenced for symmetry; resolve was previously imported
 }

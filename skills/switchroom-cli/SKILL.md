@@ -1,12 +1,17 @@
 ---
 name: switchroom-cli
-description: "Run switchroom CLI operations on existing agents: logs, restart, reconcile, config inspection, scheduled tasks, and Telegram plugin reference. Use when the user wants to: show logs (\"logs\", \"what happened\", \"check the journal\", \"why did it crash\"); restart agents (\"restart\", \"reboot\", \"bounce\", \"kick\", \"it's stuck\"); apply config changes (\"apply\", \"sync my config\", \"reconcile\", \"I just edited switchroom.yaml\"); inspect an agent's effective config (\"what model is X using\", \"how is <agent> configured\", \"show the cascade\"); list scheduled tasks (\"cron\", \"timers\", \"what runs automatically\", \"scheduled tasks\"); or ask about Telegram-plugin features (\"what MCP tools does the bot have\", \"how does reply work\"). Do NOT use for adding/removing agents (switchroom-manage), bootstrapping switchroom from scratch (switchroom-install), or \"something is broken\" diagnostics (switchroom-health).
+description: "Run switchroom CLI operations on existing agents: logs, update, restart, version, config inspection, scheduled tasks, and Telegram plugin reference. Use when the user wants to: show logs (\"logs\", \"what happened\", \"check the journal\", \"why did it crash\"); update agents (\"update\", \"pull latest\", \"get new code\", \"upgrade\"); restart agents (\"restart\", \"reboot\", \"bounce\", \"kick\", \"it's stuck\"); check what's running (\"version\", \"what sha\", \"are agents up\", \"health summary\"); apply config changes (\"apply\", \"sync my config\", \"I just edited switchroom.yaml\"); inspect an agent's effective config (\"what model is X using\", \"how is <agent> configured\", \"show the cascade\"); list scheduled tasks (\"cron\", \"timers\", \"what runs automatically\", \"scheduled tasks\"); or ask about Telegram-plugin features (\"what MCP tools does the bot have\", \"how does reply work\"). Do NOT use for adding/removing agents (switchroom-manage), bootstrapping switchroom from scratch (switchroom-install), or \"something is broken\" diagnostics (switchroom-health).
 allowed-tools: Bash(switchroom *) Bash(systemctl --user *) Bash(journalctl *)
 ---
 
 # Switchroom CLI operations
 
 This skill is the reference for running `switchroom` CLI commands against existing agents. Each section below is triggered by a distinct user intent — jump to the relevant one rather than walking top-to-bottom.
+
+**Three commands to know:**
+- `switchroom update` — picks up new code (pull, rebuild, reconcile, restart)
+- `switchroom restart [agent]` — bounces a stuck or wedged agent
+- `switchroom version` — shows what's running (versions + health summary)
 
 **Prerequisite:** the `switchroom` CLI must be on `PATH`. If it isn't, direct the user to the `switchroom-install` skill.
 
@@ -40,55 +45,75 @@ Include the last ~20 lines verbatim, then summarise what you see (crash, stall, 
 
 ---
 
+## Update — "update", "pull latest", "get new code", "upgrade"
+
+Pull the latest switchroom source, rebuild the CLI binary, reconcile all agents, and restart everything.
+
+```bash
+switchroom update
+```
+
+This is the single command for "running the latest code". It:
+1. `git pull` the switchroom repo
+2. Reinstalls deps if package.json changed
+3. Regenerates systemd units
+4. Reconciles all agent config from switchroom.yaml
+5. Restarts all agents that need it
+6. Prints a one-line health summary when done
+
+**Idempotent**: running twice = first does work, second is a fast no-op.
+
+---
+
 ## Restart — "restart", "reboot", "bounce", "it's stuck"
 
 Restart one agent or all. Also covers "refresh", "kick", "kill and restart", "stop and start".
 
 ### Step 1 — Identify the agent
 
-If the user didn't name one, ask which. Accept `all` as a valid target.
+If the user didn't name one, ask which. Accept `all` or no argument as "all agents".
 
 ### Step 2 — Run the restart
 
 ```bash
-switchroom agent restart <name>
-# or for the whole fleet:
-switchroom agent restart all --force
+# Restart a specific agent (drains in-flight turn by default):
+switchroom restart <name>
+
+# Restart all agents:
+switchroom restart
+
+# Skip drain — SIGTERM immediately:
+switchroom restart <name> --force
 ```
+
+The `switchroom restart` top-level command reconciles + restarts and prints the health summary. It uses drain semantics by default (waits up to 60s for an in-flight turn to complete before cycling).
+
+For the lower-level per-agent restart without reconcile, `switchroom agent restart <name>` is also available.
 
 ### Step 3 — Confirm
 
 Report the outcome. If the agent is being restarted via Telegram (`/restart` handler), the user will see a `🔄 Restarting <name>…` ack followed by a `🎛️ Switchroom restarted — ready` message. Don't double-post.
 
-**If you want a fresh session** (flush handoff + restart), prefer `switchroom agent reconcile <name> --restart` or the Telegram `/new` / `/reset` commands — plain restart preserves the handoff briefing.
-
 ---
 
-## Reconcile — "apply my changes", "sync config", "I just edited switchroom.yaml"
+## Version / health summary — "version", "what sha", "are agents up", "health check"
 
-Re-apply `switchroom.yaml` to one or all running agents. Use only when the user has edited config and wants it live.
-
-### Step 1 — Scope
+Show switchroom version, claude-code version, and the running status of all agents.
 
 ```bash
-# Single agent:
-switchroom agent reconcile <name>
-
-# All agents:
-switchroom agent reconcile all
+switchroom version
 ```
 
-### Step 2 — Optional restart
-
-`reconcile` rewrites `.mcp.json`, `settings.json`, `start.sh`, and the generated hooks — but most changes only take effect on restart. Append `--restart` when the user wants the new config live immediately:
-
-```bash
-switchroom agent reconcile <name> --restart
+Output format:
+```
+✓ claude-code 2.1.119
+✓ switchroom 0.3.0 / 7278044 (clean)
+✓ klanker → up 5m, on 7278044
+✓ gymbro → up 4h, on 7278044
+✓ foreman → up 2d, on 7278044
 ```
 
-### Step 3 — Confirm
-
-Tell the user what changed (the CLI prints the affected files). If nothing changed, say so — "nothing to reconcile" is a valid answer.
+No side effects. Safe to run at any time.
 
 ---
 
@@ -153,7 +178,7 @@ Additional features:
 - **SQLite history** — enables quote-reply defaults
 - **PI-safe envelope** — inbound text wrapped in `<channel source="telegram">` for prompt-injection safety
 - **Inline approvals** — tool permissions surface as ✅/❌ buttons or via `/approve` `/deny` `/pending`
-- **Slash commands** — `/new`, `/reset`, `/approve`, `/deny`, `/pending`, `/restart`, `/reconcile`, `/update`, `/logs`, `/doctor`, `/switchroomhelp` (see `TELEGRAM_MENU_COMMANDS` in `telegram-plugin/welcome-text.ts`)
+- **Slash commands** — `/new`, `/reset`, `/approve`, `/deny`, `/pending`, `/restart`, `/update`, `/version`, `/logs`, `/doctor`, `/switchroomhelp` (see `TELEGRAM_MENU_COMMANDS` in `telegram-plugin/welcome-text.ts`)
 - **Access control** — `dmPolicy: pairing | allowlist | disabled` per agent
 
 ---

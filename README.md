@@ -186,11 +186,13 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
 ```bash
 switchroom setup                              # Interactive wizard
 switchroom doctor                             # Health check
-switchroom update                             # Pull + reconcile + restart
+switchroom update                             # Pull latest + rebuild + reconcile + restart
+switchroom restart [agent] [--force]          # Bounce agent(s); drains in-flight turn by default
+switchroom version                            # Show versions + running agent health summary
 
 switchroom agent list                         # Status of all agents
 switchroom agent create <name> [--profile <p>] # Scaffold + install timers; --profile writes yaml entry
-switchroom agent reconcile <name|all>         # Re-apply switchroom.yaml
+switchroom agent reconcile <name|all>         # Re-apply switchroom.yaml (without pulling/building)
 switchroom agent start|stop|restart <name>    # Lifecycle (with preflight)
 switchroom agent attach <name>                # Interactive tmux session
 switchroom agent logs <name> [-f]             # View logs

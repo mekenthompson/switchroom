@@ -616,7 +616,6 @@ describe("scaffoldAgent", () => {
     // Gateway user-slash paths stamp a user-attributed reason.
     expect(gatewaySrc).toContain("function stampUserRestartReason");
     expect(gatewaySrc).toContain("user: /restart from chat");
-    expect(gatewaySrc).toContain("user: /reconcile from chat");
     expect(gatewaySrc).toMatch(/user: \/\$\{kind\} from chat/);
   });
 

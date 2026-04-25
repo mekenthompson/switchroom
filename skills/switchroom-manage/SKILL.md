@@ -18,8 +18,8 @@ When the user invokes `/switchroom` or asks to add, create, remove, reinstall, r
 | `/switchroom remove <name>` | `switchroom agent remove <name>` |
 | `/switchroom start <name>` | `switchroom agent start <name>` |
 | `/switchroom stop <name>` | `switchroom agent stop <name>` |
-| `/switchroom restart <name>` | `switchroom agent restart <name>` |
-| `/switchroom reinstall <name>` or "reinstall my agents" | `switchroom agent reconcile <name>` then `switchroom agent restart <name>` |
+| `/switchroom restart <name>` | `switchroom restart <name>` |
+| `/switchroom reinstall <name>` or "reinstall my agents" | `switchroom update` |
 | `/switchroom status` | `switchroom auth status` |
 | `/switchroom memory <query>` | `switchroom memory search "<query>"` |
 | `/switchroom memory <query> --agent <name>` | `switchroom memory search "<query>" --agent <name>` |
@@ -32,7 +32,7 @@ When the user says "add a new agent", "add an agent to my switchroom setup", or 
 
 ### Reinstall / reprovision agents
 
-"Reinstall my agents" is a fleet-level reprovisioning operation, **not** a fresh switchroom install. It means: re-apply `switchroom.yaml` and restart the agents. For a single named agent run `switchroom agent reconcile <name>` then `switchroom agent restart <name>`; for all agents use `switchroom agent reconcile all` then restart each. Ask which agents the user wants to reprovision if the scope is ambiguous.
+"Reinstall my agents" is a fleet-level reprovisioning operation, **not** a fresh switchroom install. It means: pull the latest code, re-apply `switchroom.yaml`, and restart the agents. Run `switchroom update` for the full fleet. Ask the user to confirm before running if the scope is ambiguous.
 
 ## Behavior
 
@@ -46,9 +46,13 @@ Switchroom commands:
   /switchroom agents         List all configured agents
   /switchroom start <name>   Start an agent
   /switchroom stop <name>    Stop an agent
-  /switchroom restart <name> Restart an agent
+  /switchroom restart <name> Restart an agent (drain by default)
   /switchroom status         Show auth status
   /switchroom memory <query> Search agent memory
   /switchroom vault list     List vault secrets
   /switchroom topics         List Telegram topics
+
+Fleet operations (run directly, not via /switchroom <sub>):
+  switchroom update          Pull latest + reconcile + restart everything
+  switchroom version         Show versions + running agent health summary
 ```

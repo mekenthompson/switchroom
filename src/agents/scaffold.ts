@@ -1129,7 +1129,7 @@ function parseDurationToSeconds(d: string | undefined): number | undefined {
  * The script is self-contained — sources nvm, reads bot token from
  * .env at runtime, and uses POSIX quoting for the prompt.
  */
-function buildCronScript(
+export function buildCronScript(
   agentDir: string,
   prompt: string,
   model: string,
@@ -1146,6 +1146,19 @@ export NVM_DIR="$HOME/.nvm"
 export PATH="$HOME/.bun/bin:$PATH"
 
 cd ${shellSingleQuote(agentDir)}
+
+# Auth: always OAuth, never API key.
+# Defensively unset ANTHROPIC_API_KEY so any ambient env or systemd
+# Environment= mapping cannot silently shift cron auth from OAuth
+# subscription quota to API billing.
+unset ANTHROPIC_API_KEY
+export CLAUDE_CONFIG_DIR=${shellSingleQuote(agentDir + "/.claude")}
+
+# Inject OAuth token from the agent's own .oauth-token file.
+unset CLAUDE_CODE_OAUTH_TOKEN
+if [ -f "$CLAUDE_CONFIG_DIR/.oauth-token" ]; then
+  export CLAUDE_CODE_OAUTH_TOKEN="$(cat "$CLAUDE_CONFIG_DIR/.oauth-token" | tr -d '[:space:]')"
+fi
 
 # Run Claude one-shot (no persistent session, cheap model)
 OUTPUT=$(claude -p ${shellSingleQuote(prompt)} \\

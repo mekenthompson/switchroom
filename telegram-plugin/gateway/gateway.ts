@@ -90,6 +90,7 @@ import {
   decideTurnFlush,
   isTurnFlushSafetyEnabled,
 } from '../turn-flush-safety.js'
+import { recoverProseFromProgressCard } from '../turn-flush-prose-recovery.js'
 import {
   resolveAgentDirFromEnv,
   consumeHandoffTopic,
@@ -1679,6 +1680,28 @@ function handleSessionEvent(ev: SessionEvent): void {
       const threadId = currentSessionThreadId
       const ctrl = activeStatusReactions.get(statusKey(chatId, threadId))
 
+      // ── #51: prose-as-step recovery ──────────────────────────────────
+      // The capturedText accumulator gates push on currentSessionChatId,
+      // while progressDriver.ingest uses the IPC envelope's chatHint. When
+      // those views disagree, prose can land in the progress card's
+      // narrative steps while capturedText stays empty — `decideTurnFlush`
+      // then returns `empty-text` and the user sees nothing. Recover from
+      // the card state so the flush path can send what the user already
+      // sees in the step list.
+      if (currentTurnCapturedText.length === 0 && progressDriver != null) {
+        const peek = progressDriver.peek(
+          chatId,
+          threadId != null ? String(threadId) : undefined,
+        )
+        const recovered = recoverProseFromProgressCard(peek)
+        if (recovered.length > 0) {
+          process.stderr.write(
+            `telegram gateway: turn-flush prose-recovery — recovered ${recovered.length} chars from progress-card narratives chat=${chatId} turnKey=${currentTurnStartedAt}\n`,
+          )
+          currentTurnCapturedText.push(recovered)
+        }
+      }
+
       const flushDecision = decideTurnFlush({
         chatId: currentSessionChatId,
         replyCalled: currentTurnReplyCalled,
@@ -1706,6 +1729,59 @@ function handleSessionEvent(ev: SessionEvent): void {
           )
         }
       }
+
+      // ── Sentinel suppression (NO_REPLY / HEARTBEAT_OK) ──────────────────
+      // When the model's only output is a silent-turn sentinel we must:
+      //  1. NOT finalise the progress card (that would push a "Done" edit).
+      //  2. NOT send any reply message to the user.
+      //  3. Unpin the progress card so no orphaned ⚙️ Working… lingers.
+      //  4. Log at debug level and fall through to normal state cleanup.
+      if (flushDecision.kind === 'skip' && flushDecision.reason === 'silent-marker') {
+        // Don't try to distinguish NO_REPLY vs HEARTBEAT_OK in the log line:
+        // `isSilentFlushMarker` accepts trailing punctuation (e.g. "NO_REPLY.")
+        // and case variants, so a strict equality check would print the wrong
+        // reason. The flushDecision.reason is the source of truth.
+        process.stderr.write(
+          `telegram gateway: silent-turn-suppression: chat=${chatId} turnKey=${currentTurnStartedAt} reason=silent-marker\n`,
+        )
+        // Drop progress-card streams without finalising — the normal
+        // closeProgressLane call below would call stream.finalize() which
+        // sends a final "Done" edit to Telegram. Skip that for silent turns.
+        const suppressPrefix = `${chatId}:${threadId ?? '_'}:progress`
+        for (const [key] of activeDraftStreams) {
+          if (key.startsWith(suppressPrefix)) {
+            activeDraftStreams.delete(key)
+            activeDraftParseModes.delete(key)
+          }
+        }
+        // Unpin without editing the message so no orphaned card lingers.
+        unpinProgressCardForChat?.(chatId, threadId)
+        // Fall through to normal state cleanup (ctrl.setDone, purge, etc.)
+        // but skip the regular closeProgressLane so we don't re-finalize.
+        if (ctrl) ctrl.setDone()
+        purgeReactionTracking(statusKey(chatId, threadId))
+        // Match the normal turn_end path's telemetry so silent-marker turns
+        // still appear in turn-duration graphs.
+        {
+          const sKey = streamKey(chatId, threadId)
+          logStreamingEvent({
+            kind: 'turn_end',
+            chatId,
+            durationMs: currentTurnStartedAt > 0 ? Date.now() - currentTurnStartedAt : 0,
+            suppressClearedCount: suppressPtyPreview.has(sKey) ? 1 : 0,
+          })
+        }
+        lastPtyPreviewByChat.delete(statusKey(chatId, threadId))
+        pendingPtyPartial = null
+        closeActivityLane(chatId, threadId)
+        // NOTE: closeProgressLane intentionally skipped — streams already dropped above.
+        currentSessionChatId = null
+        currentSessionThreadId = undefined
+        currentTurnReplyCalled = false
+        currentTurnCapturedText = []
+        return
+      }
+
       if (flushDecision.kind === 'flush') {
         const capturedText = flushDecision.text
         const backstopChatId = chatId

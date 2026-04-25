@@ -87,7 +87,7 @@ For common failures, give the exact fix:
 | `switchroom: command not found` | `npm install -g switchroom-ai` |
 | Auth expired | `switchroom auth login` |
 | Unit failed | `systemctl --user reset-failed switchroom-<name>`, then restart |
-| Missing .mcp.json | `switchroom agent reconcile <name>` |
+| Missing .mcp.json | `switchroom update` (full reconcile + restart) or `switchroom agent reconcile <name>` (targeted) |
 | Bot token unresolved | Check vault: `switchroom vault list` |
 | Memory unreachable | Check Hindsight MCP server is running |
 

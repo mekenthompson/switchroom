@@ -346,11 +346,35 @@ export function interruptAgent(name: string): { pid: number } {
 }
 
 /**
+ * Parse the SWITCHROOM_AGENT_START_SHA value out of `systemctl show
+ * --property=Environment` output. Exported so tests can exercise the parser
+ * directly without shelling out to systemctl.
+ *
+ * Returns null when no Environment= line carries the key.
+ */
+export function parseAgentStartShaFromSystemctl(output: string): string | null {
+  // The output looks like:
+  //   Environment=VAR1=val1 VAR2=val2 SWITCHROOM_AGENT_START_SHA=abc1234 TZ=UTC
+  // Each word may itself contain = so we need to split carefully.
+  for (const line of output.split("\n")) {
+    if (!line.startsWith("Environment=")) continue;
+    const envBlock = line.slice("Environment=".length);
+    // Split on whitespace boundaries between KEY= tokens. \S+ is safe here
+    // because the value is always a hex git SHA (no whitespace, no quotes) —
+    // generateUnit emits it literally without quoting. If the value format
+    // ever changes to embed spaces, this regex must change to handle
+    // systemd's quoted-value syntax.
+    const match = envBlock.match(/(?:^|\s)SWITCHROOM_AGENT_START_SHA=(\S+)/);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+/**
  * Read the SWITCHROOM_AGENT_START_SHA from the running unit's environment.
  *
  * systemd stores the unit's baked-in Environment= lines and can return them
- * via `systemctl --user show --property=Environment`. We parse the output for
- * `SWITCHROOM_AGENT_START_SHA=<sha>`.
+ * via `systemctl --user show --property=Environment`.
  *
  * Returns null if the unit isn't running, the env var isn't set (pre-#66
  * units), or parsing fails.
@@ -359,18 +383,7 @@ export function getAgentStartSha(name: string): string | null {
   const service = serviceName(name);
   try {
     const output = systemctl(["show", service, "--property=Environment"]);
-    // The output looks like:
-    //   Environment=VAR1=val1 VAR2=val2 SWITCHROOM_AGENT_START_SHA=abc1234 TZ=UTC
-    // Each word may itself contain = so we need to split carefully.
-    for (const line of output.split("\n")) {
-      if (!line.startsWith("Environment=")) continue;
-      const envBlock = line.slice("Environment=".length);
-      // Split on whitespace boundaries between KEY= tokens. We look for
-      // the specific key anywhere in the block.
-      const match = envBlock.match(/(?:^|\s)SWITCHROOM_AGENT_START_SHA=(\S+)/);
-      if (match) return match[1];
-    }
-    return null;
+    return parseAgentStartShaFromSystemctl(output);
   } catch {
     return null;
   }

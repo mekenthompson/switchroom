@@ -8,7 +8,7 @@
 
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { generateUnit } from "./systemd.js";
-import { getAgentStartSha } from "./lifecycle.js";
+import { getAgentStartSha, parseAgentStartShaFromSystemctl } from "./lifecycle.js";
 
 // ─── generateUnit SHA injection ──────────────────────────────────────────────
 
@@ -59,49 +59,38 @@ describe("generateUnit: SWITCHROOM_AGENT_START_SHA injection", () => {
   });
 });
 
-// ─── getAgentStartSha: parsing ───────────────────────────────────────────────
+// ─── parseAgentStartShaFromSystemctl: parsing ────────────────────────────────
 
-// We can't call the real systemctl in unit tests, so we test the parsing logic
-// via a re-implementation that mirrors getAgentStartSha's internal regex.
-
-function parseAgentStartSha(systemctlOutput: string): string | null {
-  for (const line of systemctlOutput.split("\n")) {
-    if (!line.startsWith("Environment=")) continue;
-    const envBlock = line.slice("Environment=".length);
-    const match = envBlock.match(/(?:^|\s)SWITCHROOM_AGENT_START_SHA=(\S+)/);
-    if (match) return match[1];
-  }
-  return null;
-}
-
-describe("getAgentStartSha: parsing logic", () => {
+// Test the real exported parser so a regression in lifecycle.ts is caught
+// here rather than silently passing because of a stale local copy.
+describe("parseAgentStartShaFromSystemctl", () => {
   it("extracts SHA from a single-var Environment line", () => {
     const output = "Environment=SWITCHROOM_AGENT_START_SHA=abc1234";
-    expect(parseAgentStartSha(output)).toBe("abc1234");
+    expect(parseAgentStartShaFromSystemctl(output)).toBe("abc1234");
   });
 
   it("extracts SHA when multiple env vars are on the same line", () => {
     const output = "Environment=TZ=UTC SWITCHROOM_AGENT_START_SHA=abc1234 SWITCHROOM_TIMEZONE=UTC";
-    expect(parseAgentStartSha(output)).toBe("abc1234");
+    expect(parseAgentStartShaFromSystemctl(output)).toBe("abc1234");
   });
 
   it("extracts SHA when it appears first on the line", () => {
     const output = "Environment=SWITCHROOM_AGENT_START_SHA=ff00112 TZ=UTC";
-    expect(parseAgentStartSha(output)).toBe("ff00112");
+    expect(parseAgentStartShaFromSystemctl(output)).toBe("ff00112");
   });
 
   it("returns null when SWITCHROOM_AGENT_START_SHA is absent", () => {
     const output = "Environment=TZ=UTC SWITCHROOM_TIMEZONE=UTC";
-    expect(parseAgentStartSha(output)).toBeNull();
+    expect(parseAgentStartShaFromSystemctl(output)).toBeNull();
   });
 
   it("returns null when output is empty", () => {
-    expect(parseAgentStartSha("")).toBeNull();
+    expect(parseAgentStartShaFromSystemctl("")).toBeNull();
   });
 
   it("returns null when no Environment= line is present", () => {
     const output = "ActiveEnterTimestamp=Mon 2026-04-25 10:00:00 UTC\nMainPID=1234";
-    expect(parseAgentStartSha(output)).toBeNull();
+    expect(parseAgentStartShaFromSystemctl(output)).toBeNull();
   });
 
   it("handles multi-line output with other properties before Environment=", () => {
@@ -111,13 +100,13 @@ describe("getAgentStartSha: parsing logic", () => {
       "Environment=TZ=Australia/Brisbane SWITCHROOM_AGENT_START_SHA=deadbeef SWITCHROOM_TIMEZONE=Australia/Brisbane",
       "MemoryCurrent=12345678",
     ].join("\n");
-    expect(parseAgentStartSha(output)).toBe("deadbeef");
+    expect(parseAgentStartShaFromSystemctl(output)).toBe("deadbeef");
   });
 
   it("does not partially match a different env var name containing SHA", () => {
     const output = "Environment=NOT_SWITCHROOM_AGENT_START_SHA=should-not-match";
     // Our regex requires whitespace OR start-of-string before the key
-    expect(parseAgentStartSha(output)).toBeNull();
+    expect(parseAgentStartShaFromSystemctl(output)).toBeNull();
   });
 });
 

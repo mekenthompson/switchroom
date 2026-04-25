@@ -103,6 +103,7 @@ interface UpdateResumeState {
   branch: string;
   sourceChanged: boolean;
   before: string;
+  noRestart: boolean;
 }
 
 /**
@@ -305,13 +306,17 @@ export function registerUpdateCommand(program: Command): void {
           try { unlinkSync(opts.resume); } catch { /* best effort */ }
 
           console.log(chalk.bold(`\n  [post-build] Resuming update for ${state.installDir}\n`));
+          // The resumed process inherits user intent (e.g. --no-restart) from
+          // the persisted state. argv on the resume command is hardcoded by
+          // selfReexec and does not include the user's original flags, so
+          // never read opts.restart here.
           runPostBuildPhase({
             program,
             installDir: state.installDir,
             agentNames: state.agentNames,
             before: state.before,
             sourceChanged: state.sourceChanged,
-            noRestart: opts.restart === false,
+            noRestart: state.noRestart ?? false,
           });
           return;
         }
@@ -450,6 +455,7 @@ export function registerUpdateCommand(program: Command): void {
               branch,
               sourceChanged,
               before,
+              noRestart: opts.restart === false,
             };
             const resumeFile = join(
               tmpdir(),

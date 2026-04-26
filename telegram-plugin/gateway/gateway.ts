@@ -168,6 +168,8 @@ import {
   startBootCard,
   type BootCardHandle,
 } from './boot-card.js'
+import { determineRestartReason } from './boot-reason.js'
+import type { RestartReason } from './boot-card.js'
 
 // ─── Stderr logging ───────────────────────────────────────────────────────
 installPluginLogger()
@@ -877,19 +879,28 @@ const ipcServer: IpcServer = createIpcServer({
     process.stderr.write(`telegram gateway: bridge registered — agent=${client.agentName}\n`)
     client.send({ type: 'status', status: 'agent_connected' })
 
-    // If the agent reconnected after a /restart, clear the marker and
-    // notify the user so Telegram doesn't stay stuck on "restarting…".
-    const marker = readRestartMarker()
-    if (marker) {
-      const ageMs = Date.now() - marker.ts
-      const ageSec = Math.max(1, Math.round(ageMs / 1000))
-      process.stderr.write(`telegram gateway: bridge-reconnect: restart-marker present, chat_id=${marker.chat_id} age=${ageSec}s within5min=${ageMs < 5 * 60_000} agent=${client.agentName}\n`)
-      clearRestartMarker()
-      if (ageMs < 5 * 60_000) {
-        const chatId = marker.chat_id
-        const threadId = marker.thread_id ?? undefined
-        const ackMsgId = marker.ack_message_id ?? undefined
-        process.stderr.write(`telegram gateway: bridge-reconnect: posting boot card chat_id=${chatId} thread_id=${threadId ?? '-'} ackReply=${ackMsgId ?? '-'} boot_card=${BOOT_CARD_ENABLED}\n`)
+    // If the agent reconnected after a /restart (or any restart), post a boot
+    // card. The restart-marker carries the ack chat; if absent we fall back to
+    // resolveBootChatId so crash-recovery reconnects also get a card.
+    {
+      const nowMs = Date.now()
+      const marker = readRestartMarker()
+      const cleanMarker = readCleanShutdownMarker(GATEWAY_CLEAN_SHUTDOWN_MARKER_PATH)
+      const storedSession = readSessionMarker(GATEWAY_SESSION_MARKER_PATH)
+      const markerAgeMs = marker ? nowMs - marker.ts : undefined
+
+      if (marker) {
+        const ageSec = Math.max(1, Math.round((markerAgeMs ?? 0) / 1000))
+        process.stderr.write(`telegram gateway: bridge-reconnect: restart-marker present, chat_id=${marker.chat_id} age=${ageSec}s agent=${client.agentName}\n`)
+        clearRestartMarker()
+      }
+
+      const reason = determineRestartReason({ marker, cleanMarker, sessionMarker: storedSession, now: nowMs })
+      const target = resolveBootChatId(marker, markerAgeMs)
+
+      if (target) {
+        const { chatId, threadId, ackMsgId } = target
+        process.stderr.write(`telegram gateway: bridge-reconnect: posting boot card reason=${reason} chat_id=${chatId} thread_id=${threadId ?? '-'} ackReply=${ackMsgId ?? '-'} boot_card=${BOOT_CARD_ENABLED}\n`)
         if (BOOT_CARD_ENABLED) {
           const agentDir = resolveAgentDirFromEnv()
           const agentName = process.env.SWITCHROOM_AGENT_NAME ?? client.agentName ?? '-'
@@ -903,14 +914,19 @@ const ipcServer: IpcServer = createIpcServer({
             agentName,
             agentDir: agentDir ?? (process.env.TELEGRAM_STATE_DIR ? require('path').dirname(process.env.TELEGRAM_STATE_DIR) : '/tmp'),
             gatewayInfo: { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS },
+            restartReason: reason,
+            restartAgeMs: markerAgeMs,
           }, ackMsgId).then(handle => {
             activeBootCard = handle
           }).catch((err: Error) => {
             process.stderr.write(`telegram gateway: bridge-reconnect: boot card error: ${err.message}\n`)
           })
         } else {
+          const ageSec = markerAgeMs != null ? Math.max(1, Math.round(markerAgeMs / 1000)) : 0
           postLegacyBanner(chatId, threadId, ackMsgId, ageSec, 'bridge-reconnect')
         }
+      } else {
+        process.stderr.write(`telegram gateway: bridge-reconnect: no known chat for boot card (reason=${reason}) — skipping\n`)
       }
     }
   },
@@ -2755,6 +2771,47 @@ function clearRestartMarker(): void {
     rmSync(p, { force: true })
     process.stderr.write(`telegram gateway: restart-marker: cleared path=${p}\n`)
   } catch {}
+}
+
+/**
+ * Resolve which Telegram chat should receive the boot card.
+ *
+ * Fallback chain:
+ *   1. restart-pending.json chat_id (if present and fresh)
+ *   2. SUBAGENT_OWNER_CHAT_ID env var
+ *   3. Most recent inbound from history SQLite
+ *   4. null → skip (no known chat)
+ *
+ * TODO: add test coverage for the history-SQLite fallback path
+ */
+function resolveBootChatId(
+  marker: { chat_id: string; thread_id: number | null; ack_message_id: number | null; ts: number } | null,
+  ageMs?: number,
+): { chatId: string; threadId: number | undefined; ackMsgId: number | undefined } | null {
+  // 1. Restart marker
+  if (marker != null && (ageMs == null || ageMs < 5 * 60_000)) {
+    return {
+      chatId: marker.chat_id,
+      threadId: marker.thread_id ?? undefined,
+      ackMsgId: marker.ack_message_id ?? undefined,
+    }
+  }
+  // 2. Env var
+  const envChat = process.env.SUBAGENT_OWNER_CHAT_ID
+  if (envChat) return { chatId: envChat, threadId: undefined, ackMsgId: undefined }
+  // 3. Most-recent inbound from history
+  if (HISTORY_ENABLED) {
+    try {
+      const access = loadAccess()
+      const ownerChatId = access.allowFrom[0]
+      if (ownerChatId) {
+        const recent = queryHistory({ chat_id: ownerChatId, limit: 1 })
+        if (recent.length > 0) return { chatId: ownerChatId, threadId: undefined, ackMsgId: undefined }
+      }
+    } catch {}
+  }
+  // 4. No known chat
+  return null
 }
 
 /**
@@ -4919,19 +4976,51 @@ void (async () => {
           }
         } catch {}
 
-        // Restart follow-up
+        // Boot card — always post on every gateway start with the restart reason.
+        // Gated on session marker so a grammY poll-restart (same process, no
+        // actual restart) does NOT re-post.  See session-marker.ts for the
+        // 2026-04-22 incident that introduced this gate.
         try {
+          const nowMs = Date.now()
           const marker = readRestartMarker()
+          const cleanMarker = readCleanShutdownMarker(GATEWAY_CLEAN_SHUTDOWN_MARKER_PATH)
+          const currentSession: SessionMarker = { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS }
+          const storedSession = readSessionMarker(GATEWAY_SESSION_MARKER_PATH)
+          const isRealRestart = shouldFireRestartBanner({ stored: storedSession, current: currentSession })
+
+          if (cleanMarker) {
+            const ageSec = Math.max(0, Math.round((nowMs - cleanMarker.ts) / 1000))
+            const reasonTag = cleanMarker.reason ? ` reason=${JSON.stringify(cleanMarker.reason)}` : ''
+            const cleanFresh = shouldSuppressRecoveryBanner(cleanMarker, nowMs, CLEAN_SHUTDOWN_MAX_AGE_MS)
+            if (cleanFresh) {
+              process.stderr.write(`telegram gateway: boot.clean_shutdown_detected age=${ageSec}s signal=${cleanMarker.signal}${reasonTag}\n`)
+            } else {
+              process.stderr.write(`telegram gateway: boot.clean_shutdown_marker_stale age=${ageSec}s signal=${cleanMarker.signal}${reasonTag}\n`)
+            }
+            // IMPORTANT: do NOT clearCleanShutdownMarker() here.
+            // session-greeting.sh reads clean-shutdown.json to render the
+            // "Restarted <reason>" row. Gateway and agent boot in parallel
+            // under systemd, so clearing here would race and drop the reason.
+            // Ownership of cleanup belongs to session-greeting.sh.
+          }
+
           if (marker) {
-            const ageMs = Date.now() - marker.ts
+            const ageMs = nowMs - marker.ts
             const ageSec = Math.max(1, Math.round(ageMs / 1000))
             process.stderr.write(`telegram gateway: boot: restart-marker present, chat_id=${marker.chat_id} age=${ageSec}s within5min=${ageMs < 5 * 60_000}\n`)
             clearRestartMarker()
-            if (ageMs < 5 * 60_000) {
-              const chatId = marker.chat_id
-              const threadId = marker.thread_id ?? undefined
-              const ackMsgId = marker.ack_message_id ?? undefined
-              process.stderr.write(`telegram gateway: boot: posting boot card chat_id=${chatId} thread_id=${threadId ?? '-'} ackReply=${ackMsgId ?? '-'} boot_card=${BOOT_CARD_ENABLED}\n`)
+          }
+
+          if (!isRealRestart) {
+            process.stderr.write(`telegram gateway: boot: suppressed boot card — session marker matches current process (pid=${process.pid} startedAt=${GATEWAY_STARTED_AT_MS})\n`)
+          } else {
+            const markerAgeMs = marker ? nowMs - marker.ts : undefined
+            const reason = determineRestartReason({ marker, cleanMarker, sessionMarker: storedSession, now: nowMs })
+            const target = resolveBootChatId(marker, markerAgeMs)
+
+            if (target) {
+              const { chatId, threadId, ackMsgId } = target
+              process.stderr.write(`telegram gateway: boot: posting boot card reason=${reason} chat_id=${chatId} thread_id=${threadId ?? '-'} ackReply=${ackMsgId ?? '-'} boot_card=${BOOT_CARD_ENABLED}\n`)
               if (BOOT_CARD_ENABLED) {
                 const agentDir = resolveAgentDirFromEnv()
                 const agentName = process.env.SWITCHROOM_AGENT_NAME ?? '-'
@@ -4946,95 +5035,23 @@ void (async () => {
                     agentName,
                     agentDir: agentDir ?? join(homedir(), '.switchroom', 'agents', agentName),
                     gatewayInfo: { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS },
+                    restartReason: reason,
+                    restartAgeMs: markerAgeMs,
                   }, ackMsgId)
                   activeBootCard = handle
                 } catch (err) {
                   process.stderr.write(`telegram gateway: boot: boot card error: ${err}\n`)
                 }
               } else {
+                const ageSec = markerAgeMs != null ? Math.max(1, Math.round(markerAgeMs / 1000)) : 0
                 postLegacyBanner(chatId, threadId, ackMsgId, ageSec, 'boot')
               }
-            }
-          } else {
-            process.stderr.write(`telegram gateway: boot: no restart-marker found (clean start or crash recovery path)\n`)
-          }
-        } catch {}
-
-        // Crash recovery. Gated on the session marker so a grammY
-        // poll-restart (which re-enters the outer retry loop) does NOT
-        // fire the banner — only an actual new process does. See
-        // session-marker.ts for the 2026-04-22 incident this closes.
-        //
-        // ALSO gated on the clean-shutdown marker: SIGTERM/SIGINT writes
-        // a sentinel before draining, so deliberate restarts (systemctl,
-        // `switchroom agent restart`, Coolify, etc.) suppress the
-        // banner. See clean-shutdown-marker.ts for the 2026-04-23 UX gap
-        // this closes.
-        try {
-          const marker = readRestartMarker()
-          const cleanMarker = readCleanShutdownMarker(GATEWAY_CLEAN_SHUTDOWN_MARKER_PATH)
-          const nowMs = Date.now()
-          const cleanFresh = shouldSuppressRecoveryBanner(cleanMarker, nowMs, CLEAN_SHUTDOWN_MAX_AGE_MS)
-          if (cleanMarker) {
-            const ageSec = Math.max(0, Math.round((nowMs - cleanMarker.ts) / 1000))
-            const reasonTag = cleanMarker.reason ? ` reason=${JSON.stringify(cleanMarker.reason)}` : ''
-            if (cleanFresh) {
-              process.stderr.write(`telegram gateway: boot.clean_shutdown_detected age=${ageSec}s signal=${cleanMarker.signal}${reasonTag} — suppressing 'recovered from unexpected restart' banner\n`)
             } else {
-              // Marker present but stale: shutdown was initiated cleanly
-              // but never finished within the age window. Almost
-              // certainly a crash mid-drain; fall through so the operator
-              // gets the banner anyway. We DON'T clear here either — see
-              // the note below — but stale markers are harmless to leave
-              // in place because shouldSuppressRecoveryBanner returns
-              // false on the next boot too.
-              process.stderr.write(`telegram gateway: boot.clean_shutdown_marker_stale age=${ageSec}s signal=${cleanMarker.signal}${reasonTag} — posting banner anyway (leaving marker for agent-side consumer)\n`)
-            }
-            // IMPORTANT: do NOT clearCleanShutdownMarker() here.
-            //
-            // Lifecycle change (PR for restart-reason-greeting):
-            //   The agent-side consumer (session-greeting.sh) reads
-            //   `clean-shutdown.json` to render a "Restarted  <reason>"
-            //   row in the next greeting card. The gateway and the agent
-            //   boot in parallel under systemd, so if we cleared here the
-            //   greeting would race and miss the reason.
-            //
-            //   The gateway only needs to READ the marker to decide
-            //   banner suppression; the file's continued presence after
-            //   that decision is harmless to the gateway. We hand
-            //   ownership of cleanup to session-greeting.sh which
-            //   deletes the marker right after rendering the row.
-          }
-          const currentSession: SessionMarker = { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS }
-          const storedSession = readSessionMarker(GATEWAY_SESSION_MARKER_PATH)
-          const bannerOK = shouldFireRestartBanner({ stored: storedSession, current: currentSession })
-          if (!marker && !bannerOK) {
-            process.stderr.write(`telegram gateway: boot: suppressed 'recovered' banner — session marker matches current process (pid=${process.pid} startedAt=${GATEWAY_STARTED_AT_MS})\n`)
-          }
-          if (!marker && bannerOK && !cleanFresh) {
-            const bootAccess = loadAccess()
-            const ownerChatId = bootAccess.allowFrom[0]
-            if (ownerChatId && HISTORY_ENABLED) {
-              try {
-                const recent = queryHistory({ chat_id: ownerChatId, limit: 1 })
-                if (recent.length > 0) {
-                  const lastTs = recent[0].ts * 1000
-                  const downtime = Date.now() - lastTs
-                  const downSec = Math.max(1, Math.round(downtime / 1000))
-                  if (downtime < 30 * 60_000) {
-                    const text = `⚡ Recovered from unexpected restart. (down ~${downSec}s)`
-                    process.stderr.write(`telegram gateway: boot: posting 'recovered from unexpected restart' banner chat_id=${ownerChatId} down=${downSec}s (no marker present, last msg ${downSec}s ago)\n`)
-                    const sent = await lockedBot.api.sendMessage(ownerChatId, text, { parse_mode: 'HTML', link_preview_options: { is_disabled: true } })
-                    if (HISTORY_ENABLED) { try { recordOutbound({ chat_id: ownerChatId, thread_id: null, message_ids: [sent.message_id], texts: [text], attachment_kinds: [] }) } catch {} }
-                  } else {
-                    process.stderr.write(`telegram gateway: boot: suppressed 'recovered' banner — last msg ${downSec}s ago exceeds 30min window\n`)
-                  }
-                }
-              } catch {}
+              process.stderr.write(`telegram gateway: boot: no known chat for boot card (reason=${reason}) — skipping\n`)
             }
           }
-          // Always update the marker to the current process on this
-          // boot pass so subsequent banner-gates see "stored === current".
+
+          // Always update the session marker so subsequent boots see "stored === current".
           try {
             writeSessionMarker(GATEWAY_SESSION_MARKER_PATH, currentSession)
           } catch (err) {

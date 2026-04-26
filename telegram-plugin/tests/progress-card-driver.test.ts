@@ -1412,6 +1412,31 @@ describe('forceCompleteTurn — external completion signal', () => {
     expect(emitted).toHaveLength(1)
   })
 
+  it('orphan that never reports turn_end: new turn force-closes via closeZombie', () => {
+    // Safety net: an orphan whose own sub_agent_turn_end never lands
+    // (process killed, JSONL never closed) would defer the parent pin
+    // forever. closeZombie (triggered by a new turn enqueue) abandons
+    // the orphan and completes the old card. Without this, extending
+    // the defer gate to orphans would risk indefinite-pin.
+    const emitted: Array<unknown> = []
+    const { driver, advance } = harness(0, 0, {
+      initialDelayMs: 0,
+      onTurnComplete: (args) => emitted.push(args),
+    })
+
+    driver.ingest(enqueue('c', 'first'), null)
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'BG', firstPromptText: 'orphan-stuck' }, 'c')
+    driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c')
+    advance(0)
+    expect(emitted).toHaveLength(0) // deferred on the orphan
+
+    // Orphan never reports turn_end. New user message arrives →
+    // closeZombie abandons it and completes the old card.
+    driver.startTurn({ chatId: 'c', userText: 'second message' })
+    advance(0)
+    expect(emitted).toHaveLength(1)
+  })
+
   it('forceCompleteTurn with running sub-agent defers (stream_reply done semantic)', () => {
     // stream_reply(done=true) = user's answer landed, NOT all work done.
     // Must not abandon still-running sub-agents.

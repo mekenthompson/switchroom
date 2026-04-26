@@ -169,14 +169,24 @@ export function setupPlugins(agentDir: string, useSwitchroomPlugin = false): voi
   for (const file of configFiles) {
     const globalFile = join(globalPluginsDir, file);
     const agentFile = join(agentPluginsDir, file);
-    if (existsSync(globalFile) && !existsSync(agentFile)) {
-      try {
-        if (useSwitchroomPlugin && file === "installed_plugins.json") {
-          const scrubbed = stripOfficialTelegramPlugin(readFileSync(globalFile, "utf8"));
+    if (file === "installed_plugins.json" && useSwitchroomPlugin) {
+      // Always re-scrub on every reconcile — a Claude Code update can re-add the
+      // official Telegram entry, causing a bot-token conflict with the fork.
+      // Use the global file if present, otherwise fall back to the agent's own copy.
+      const sourceFile = existsSync(globalFile)
+        ? globalFile
+        : existsSync(agentFile)
+          ? agentFile
+          : null;
+      if (sourceFile) {
+        try {
+          const scrubbed = stripOfficialTelegramPlugin(readFileSync(sourceFile, "utf8"));
           writeFileSync(agentFile, scrubbed);
-        } else {
-          copyFileSync(globalFile, agentFile);
-        }
+        } catch { /* ignore write failures */ }
+      }
+    } else if (existsSync(globalFile) && !existsSync(agentFile)) {
+      try {
+        copyFileSync(globalFile, agentFile);
       } catch { /* ignore copy failures */ }
     }
   }
@@ -1758,13 +1768,27 @@ export function installHindsightPlugin(
   }
 
   // Copy the vendored plugin into the agent's .claude/plugins dir.
-  // Force overwrite on every reconcile so plugin updates from
-  // `switchroom update` propagate.
+  // Skip when the installed plugin.json version matches the vendor version
+  // to avoid unnecessary I/O on every `switchroom update`.
   const destPath = join(agentDir, ".claude", "plugins", "hindsight-memory");
-  if (existsSync(destPath)) {
-    rmSync(destPath, { recursive: true, force: true });
+  const vendorManifestPath = join(sourcePath, ".claude-plugin", "plugin.json");
+  const installedManifestPath = join(destPath, ".claude-plugin", "plugin.json");
+  let vendorVersion: string | null = null;
+  let installedVersion: string | null = null;
+  try {
+    vendorVersion = (JSON.parse(readFileSync(vendorManifestPath, "utf8")) as { version?: string }).version ?? null;
+  } catch { /* unreadable or missing — proceed with copy */ }
+  if (vendorVersion !== null && existsSync(installedManifestPath)) {
+    try {
+      installedVersion = (JSON.parse(readFileSync(installedManifestPath, "utf8")) as { version?: string }).version ?? null;
+    } catch { /* unreadable */ }
   }
-  copyDirRecursive(sourcePath, destPath);
+  if (vendorVersion === null || vendorVersion !== installedVersion || !existsSync(destPath)) {
+    if (existsSync(destPath)) {
+      rmSync(destPath, { recursive: true, force: true });
+    }
+    copyDirRecursive(sourcePath, destPath);
+  }
 
   // Resolve the agent's bank/collection name and the Hindsight REST URL.
   // The plugin's hooks expect HINDSIGHT_API_URL (the REST base), not the

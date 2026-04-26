@@ -27,6 +27,8 @@ import { join } from 'path'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
+export type RestartReason = 'planned' | 'graceful' | 'crash' | 'fresh'
+
 export type ProbeKey = 'account' | 'agent' | 'gateway' | 'quota' | 'hindsight' | 'crons'
 
 export type ProbeMap = Partial<Record<ProbeKey, ProbeResult | null>>
@@ -59,6 +61,30 @@ export interface BootCardHandle {
 
 // ─── Rendering ───────────────────────────────────────────────────────────────
 
+const REASON_EMOJI: Record<RestartReason, string> = {
+  planned:  '🔄',
+  graceful: '✅',
+  crash:    '⚠️',
+  fresh:    '🆕',
+}
+
+const REASON_LABEL: Record<RestartReason, string> = {
+  planned:  'planned restart',
+  graceful: 'graceful restart',
+  crash:    'crash recovery',
+  fresh:    'fresh start',
+}
+
+function renderRestartRow(reason: RestartReason, ageMs?: number): string {
+  const emoji = REASON_EMOJI[reason]
+  const label = REASON_LABEL[reason]
+  if (ageMs != null && ageMs > 0) {
+    const ageSec = (ageMs / 1000).toFixed(1)
+    return `${emoji} <b>Restart</b>  ${escapeHtml(label)} · ${ageSec}s ago`
+  }
+  return `${emoji} <b>Restart</b>  ${escapeHtml(label)}`
+}
+
 const DOT: Record<string, string> = {
   ok: '🟢',
   degraded: '🟡',
@@ -87,17 +113,27 @@ function renderRow(key: ProbeKey, result: ProbeResult | null | undefined): strin
   return `${dot} <b>${PROBE_LABELS[key]}</b>  ${escapeHtml(result.detail)}`
 }
 
-export function renderBootCard(probes: ProbeMap): string {
+export function renderBootCard(
+  probes: ProbeMap,
+  restartReason?: RestartReason,
+  restartAgeMs?: number,
+): string {
   const rows: string[] = [
     '🎛️ <b>Switchroom boot</b>',
     '',
+  ]
+  if (restartReason != null) {
+    rows.push(renderRestartRow(restartReason, restartAgeMs))
+    rows.push('')
+  }
+  rows.push(
     renderRow('account',   probes.account),
     renderRow('agent',     probes.agent),
     renderRow('gateway',   probes.gateway),
     renderRow('quota',     probes.quota),
     renderRow('hindsight', probes.hindsight),
     renderRow('crons',     probes.crons),
-  ]
+  )
   return rows.join('\n')
 }
 
@@ -110,6 +146,10 @@ export interface RunProbesOpts {
   agentDir: string
   gatewayInfo: GatewayRuntimeInfo
   bankName?: string
+  /** Why the gateway is starting — shown as a top row in the card. */
+  restartReason?: RestartReason
+  /** Age of the restart in milliseconds (for "X.Xs ago" display). */
+  restartAgeMs?: number
   /** Override fetch for tests. */
   fetchImpl?: typeof fetch
 }
@@ -119,8 +159,9 @@ export async function postInitialBootCard(
   threadId: number | undefined,
   bot: BotApiForBootCard,
   ackMessageId?: number,
+  opts?: Pick<RunProbesOpts, 'restartReason' | 'restartAgeMs'>,
 ): Promise<number> {
-  const text = renderBootCard({})
+  const text = renderBootCard({}, opts?.restartReason, opts?.restartAgeMs)
   const sent = await bot.sendMessage(chatId, text, {
     parse_mode: 'HTML',
     link_preview_options: { is_disabled: true },
@@ -144,11 +185,16 @@ export async function runProbesAndUpdateCard(
 
   async function editCard(): Promise<void> {
     try {
-      await bot.editMessageText(chatId, messageId, renderBootCard(probes), {
-        parse_mode: 'HTML',
-        link_preview_options: { is_disabled: true },
-        ...(threadId != null ? { message_thread_id: threadId } : {}),
-      })
+      await bot.editMessageText(
+        chatId,
+        messageId,
+        renderBootCard(probes, opts.restartReason, opts.restartAgeMs),
+        {
+          parse_mode: 'HTML',
+          link_preview_options: { is_disabled: true },
+          ...(threadId != null ? { message_thread_id: threadId } : {}),
+        },
+      )
     } catch {
       // Edit failures are non-fatal; another edit will follow
     }
@@ -216,7 +262,7 @@ export async function startBootCard(
 
   let messageId: number
   try {
-    messageId = await postInitialBootCard(chatId, threadId, bot, ackMessageId)
+    messageId = await postInitialBootCard(chatId, threadId, bot, ackMessageId, opts)
     logger(`telegram gateway: boot-card: posted msgId=${messageId} chatId=${chatId}\n`)
   } catch (err: unknown) {
     logger(`telegram gateway: boot-card: failed to post initial card: ${(err as Error)?.message ?? String(err)}\n`)

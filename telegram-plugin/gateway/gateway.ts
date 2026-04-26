@@ -170,6 +170,7 @@ import {
 } from './boot-card.js'
 import { determineRestartReason } from './boot-reason.js'
 import type { RestartReason } from './boot-card.js'
+import { isMessageNotModified, isBenignGrammyError } from './grammy-errors.js'
 
 // ─── Stderr logging ───────────────────────────────────────────────────────
 installPluginLogger()
@@ -787,6 +788,9 @@ const TURN_FLUSH_SAFETY_ENABLED = isTurnFlushSafetyEnabled()
 let progressDriver: ProgressDriver | null = null
 let unpinProgressCardForChat: ((chatId: string, threadId: number | undefined) => void) | null = null
 let subagentWatcher: SubagentWatcherHandle | null = null
+/** Message ID of the currently-pinned worker card, tracked at module scope so
+ *  the `message:pinned_message` handler can suppress its pin system message. */
+let workerCardMsgId: number | null = null
 
 // ─── IPC server ───────────────────────────────────────────────────────────
 const SOCKET_PATH = process.env.SWITCHROOM_GATEWAY_SOCKET ?? join(STATE_DIR, 'gateway.sock')
@@ -4707,6 +4711,15 @@ if (streamMode === 'checklist') {
       pinnedMessageId: pinned.message_id,
       serviceMessageId,
     })
+    // Suppress the "Clerk pinned …" system message for the worker card pin,
+    // mirroring the main progress card suppression above. The pinMgr only
+    // tracks progress-card pins; the worker card message ID is tracked
+    // separately via the module-level workerCardMsgId variable.
+    if (workerCardMsgId != null && pinned.message_id === workerCardMsgId) {
+      void ctx.api.deleteMessage(chatId, serviceMessageId).catch((err: Error) => {
+        process.stderr.write(`telegram gateway: worker card pin service-msg delete failed: ${err?.message ?? err}\n`)
+      })
+    }
   })
 
   // Watchdog: re-pin if Telegram's current pin drifts away from ours
@@ -4740,7 +4753,7 @@ if (streamMode === 'checklist') {
     if (err instanceof GrammyError) {
       const code = err.error_code
       const desc = err.description ?? ''
-      if (code === 400 && /\bmessage is not modified\b/i.test(desc)) {
+      if (isMessageNotModified(err)) {
         return { code, description: desc, kind: 'benign' }
       }
       // 429 Too Many Requests is explicitly retryable — Telegram includes a
@@ -4833,6 +4846,23 @@ initHandoffContinuity()
 // The `shuttingDown` guard inside shutdown() prevents double-invocation if
 // SIGTERM races with one of these handlers.
 process.on('unhandledRejection', err => {
+  // Layer C — global safety net: absorb known-benign Grammy 400 errors so
+  // a stale promise chain (e.g., from the chat-lock's `tracked` branch) can't
+  // crash the gateway on a harmless race condition. Any other unhandled
+  // rejection still routes through shutdown() as before.
+  //
+  // Benign cases absorbed here:
+  //   - "message is not modified" — duplicate edit; primary fix is Layer A/B
+  //     in boot-card.ts but this is the belt-and-suspenders backstop for any
+  //     future similar patterns anywhere in the codebase.
+  //   - "message to edit/delete not found" — benign race with deletion.
+  //
+  // Non-benign unhandled rejections (network errors, unexpected 5xx, etc.)
+  // still trigger shutdown() so real bugs aren't silently swallowed.
+  if (isBenignGrammyError(err)) {
+    process.stderr.write(`telegram gateway: unhandled rejection absorbed (benign Grammy 400): ${err}\n`)
+    return
+  }
   process.stderr.write(`telegram gateway: unhandled rejection: ${err}\n`)
   void shutdown('unhandledRejection')
 })
@@ -5084,7 +5114,9 @@ void (async () => {
           if (watcherAgentDir != null) {
             // Pinned worker card: one message per watcher session,
             // edited in-place. Managed entirely by the watcher.
-            let workerCardMsgId: number | null = null
+            // workerCardMsgId is declared at module scope so the
+            // message:pinned_message handler can suppress the pin system message.
+            workerCardMsgId = null
 
             subagentWatcher = startSubagentWatcher({
               agentDir: watcherAgentDir,

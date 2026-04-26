@@ -40,6 +40,33 @@ function makeEntry(overrides: Partial<WorkerEntry> = {}): WorkerEntry {
 // ─── renderWorkerCard ────────────────────────────────────────────────────────
 
 describe('renderWorkerCard', () => {
+  it('header matches the main-card layout: icon · bold-label · ⏱ elapsed', () => {
+    // The worker card header should mirror the main progress-card header style:
+    //   🔧 <b>Background workers (N)</b> · ⏱ MM:SS
+    const registry = new Map<string, WorkerEntry>([
+      ['a', makeEntry({ dispatchedAt: 1000 })],
+    ])
+    const html = renderWorkerCard(registry, 31_000) // 30s since dispatch
+    expect(html).not.toBeNull()
+    const firstLine = html!.split('\n')[0]
+    expect(firstLine).toContain('🔧')
+    expect(firstLine).toContain('<b>Background workers (1)</b>')
+    expect(firstLine).toContain('⏱')
+    expect(firstLine).toContain('00:30') // shared formatDuration for 30_000ms
+  })
+
+  it('elapsed in header is the time since the oldest dispatched worker', () => {
+    // Two workers dispatched at different times — header elapsed uses the oldest.
+    const registry = new Map<string, WorkerEntry>([
+      ['a', makeEntry({ agentId: 'a', dispatchedAt: 1000 })],         // 59s ago
+      ['b', makeEntry({ agentId: 'b', dispatchedAt: 30_000 })],       // 30s ago
+    ])
+    const html = renderWorkerCard(registry, 60_000)
+    const firstLine = html!.split('\n')[0]
+    // Oldest dispatched = 1000, now = 60_000 → 59_000ms → 00:59
+    expect(firstLine).toContain('00:59')
+  })
+
   it('returns null when registry is empty', () => {
     const registry = new Map<string, WorkerEntry>()
     expect(renderWorkerCard(registry, 2000)).toBeNull()
@@ -55,14 +82,16 @@ describe('renderWorkerCard', () => {
 
   it('renders a single running worker', () => {
     const registry = new Map<string, WorkerEntry>([
-      ['a', makeEntry({ description: 'Fix the tests', toolCount: 3, lastActivityAt: 1000 })],
+      ['a', makeEntry({ description: 'Fix the tests', toolCount: 3, lastActivityAt: 1000, dispatchedAt: 1000 })],
     ])
     const html = renderWorkerCard(registry, 61_000)
     expect(html).not.toBeNull()
     expect(html).toContain('Background workers (1)')
     expect(html).toContain('Fix the tests')
     expect(html).toContain('3 tools')
-    expect(html).toContain('running')
+    // Header shows elapsed since oldest dispatch; row shows last-activity age
+    expect(html).toContain('⏱')
+    expect(html).toContain('last activity')
   })
 
   it('renders multiple running workers', () => {
@@ -106,27 +135,28 @@ describe('renderWorkerCard', () => {
     expect(html).toContain('…')
   })
 
-  it('formats last-activity age', () => {
+  it('formats last-activity age using MM:SS format', () => {
     const registry = new Map<string, WorkerEntry>([
-      ['a', makeEntry({ lastActivityAt: 1000 })],
+      ['a', makeEntry({ lastActivityAt: 1000, dispatchedAt: 1000 })],
     ])
-    // 30s ago
+    // 30s ago → shared formatDuration returns "00:30"
     const html = renderWorkerCard(registry, 31_000)
-    expect(html).toContain('30s ago')
+    expect(html).toContain('00:30 ago')
   })
 
-  it('escapes HTML in sub-second age (<1s)', () => {
-    // formatDuration returns the literal string "<1s" when ms < 1000.
-    // If left unescaped, Telegram parses the leading "<" as the start
-    // of an HTML tag and rejects the message with
-    // "can't parse entities: Unsupported start tag '1s'". Ensure the
-    // rendered card escapes the angle bracket so the card actually sends.
+  it('formats sub-second last-activity age as Nms', () => {
+    // The shared formatDuration returns "${ms}ms" for sub-second values,
+    // which is HTML-safe (no angle brackets). Verify the card uses this
+    // format and does not contain a raw "<" from the duration string.
     const registry = new Map<string, WorkerEntry>([
-      ['a', makeEntry({ description: 'sub-agent', lastActivityAt: 999 })],
+      ['a', makeEntry({ description: 'sub-agent', lastActivityAt: 999, dispatchedAt: 999 })],
     ])
-    const html = renderWorkerCard(registry, 1000) // 1ms idle → "<1s"
-    expect(html).not.toContain('<1s')
-    expect(html).toContain('&lt;1s')
+    const html = renderWorkerCard(registry, 1000) // 1ms idle → "1ms"
+    expect(html).toContain('1ms ago')
+    // Confirm no unescaped "<" leaks in from the duration
+    // (the only safe "<" should be inside explicit HTML tags we write)
+    const bodyOnly = html?.replace(/<[^>]+>/g, '') ?? ''
+    expect(bodyOnly).not.toContain('<')
   })
 
   it('excludes historical entries from the active-workers card', () => {

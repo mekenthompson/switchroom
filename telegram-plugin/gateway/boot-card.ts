@@ -23,6 +23,7 @@ import {
   probeHindsight,
   probeCronTimers,
 } from './boot-probes.js'
+import { isMessageNotModified } from './grammy-errors.js'
 import { join } from 'path'
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -183,20 +184,41 @@ export async function runProbesAndUpdateCard(
   const claudeDir = join(opts.agentDir, '.claude')
   const probes: ProbeMap = {}
 
+  // Layer A — pre-check: track the last successfully-sent HTML so we can
+  // skip calls where the rendered content hasn't changed. This is the
+  // primary fix for #99: when all probes settle to content identical to
+  // what was already posted, we never call editMessageText at all, so
+  // Telegram never has a chance to return 400 "message is not modified".
+  let lastSentHtml: string | null = null
+
   async function editCard(): Promise<void> {
+    const html = renderBootCard(probes, opts.restartReason, opts.restartAgeMs)
+    // Layer A: skip the API call entirely when content hasn't changed.
+    if (html === lastSentHtml) return
     try {
       await bot.editMessageText(
         chatId,
         messageId,
-        renderBootCard(probes, opts.restartReason, opts.restartAgeMs),
+        html,
         {
           parse_mode: 'HTML',
           link_preview_options: { is_disabled: true },
           ...(threadId != null ? { message_thread_id: threadId } : {}),
         },
       )
-    } catch {
-      // Edit failures are non-fatal; another edit will follow
+      // Only update the tracking variable when the call succeeds.
+      lastSentHtml = html
+    } catch (err) {
+      // Layer B: defensively swallow "message is not modified" in case the
+      // pre-check has a gap (e.g., the initial send text and first edit
+      // content match due to timing). Log at debug level and continue;
+      // another edit will follow as probes settle.
+      if (isMessageNotModified(err)) {
+        process.stderr.write(`telegram gateway: boot-card: edit skipped (not modified) msgId=${messageId}\n`)
+        lastSentHtml = html  // Treat it as sent — content reached Telegram
+        return
+      }
+      // Other edit failures are non-fatal; another edit will follow.
     }
   }
 

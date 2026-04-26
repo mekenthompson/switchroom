@@ -161,10 +161,6 @@ import { defaultVaultWrite, defaultVaultList } from '../secret-detect/vault-writ
 import { detectSecrets } from '../secret-detect/index.js'
 import { ADMIN_COMMAND_NAMES, parseCommandName } from '../admin-commands/index.js'
 import {
-  startSubagentWatcher,
-  type SubagentWatcherHandle,
-} from '../subagent-watcher.js'
-import {
   startBootCard,
   type BootCardHandle,
 } from './boot-card.js'
@@ -787,7 +783,6 @@ const streamMode = process.env.SWITCHROOM_TG_STREAM_MODE ?? 'checklist'
 const TURN_FLUSH_SAFETY_ENABLED = isTurnFlushSafetyEnabled()
 let progressDriver: ProgressDriver | null = null
 let unpinProgressCardForChat: ((chatId: string, threadId: number | undefined) => void) | null = null
-let subagentWatcher: SubagentWatcherHandle | null = null
 
 // ─── IPC server ───────────────────────────────────────────────────────────
 const SOCKET_PATH = process.env.SWITCHROOM_GATEWAY_SOCKET ?? join(STATE_DIR, 'gateway.sock')
@@ -4579,8 +4574,6 @@ async function shutdown(signal: string): Promise<void> {
   // Clean up all timers and pending state.
   // Snapshot timer handles before clearing so a late-firing timer can't
   // invalidate the iterator by deleting its own entry during cleanup.
-  subagentWatcher?.stop()
-  subagentWatcher = null
 
   for (const iv of [...typingIntervals.values()]) clearInterval(iv)
   typingIntervals.clear()
@@ -5095,75 +5088,13 @@ void (async () => {
           setInterval(() => { void runAutoFallbackCheck({ trigger: 'scheduled' }) }, AUTO_FALLBACK_POLL_MS).unref()
         }
 
-        // Background sub-agent visibility watcher. Watches the subagents/
-        // directory under each session dir for new agent-<id>.jsonl files
-        // and surfaces live activity to Telegram via a pinned card +
-        // inline notifications. Only started when a valid agentDir is known
-        // (gate on streamMode=checklist for progress-card parity).
-        if (streamMode === 'checklist') {
-          const watcherAgentDir = resolveAgentDirFromEnv()
-          if (watcherAgentDir != null) {
-            // Pinned worker card: one message per watcher session,
-            // edited in-place. Managed entirely by the watcher.
-            let workerCardMsgId: number | null = null
-
-            subagentWatcher = startSubagentWatcher({
-              agentDir: watcherAgentDir,
-              sendNotification: (text: string) => {
-                const ownerChatId = loadAccess().allowFrom[0]
-                if (!ownerChatId) return
-                void lockedBot.api.sendMessage(ownerChatId, text, {
-                  parse_mode: 'HTML',
-                  link_preview_options: { is_disabled: true },
-                  ...(TOPIC_ID != null ? { message_thread_id: TOPIC_ID } : {}),
-                }).catch((err: Error) => {
-                  process.stderr.write(`telegram gateway: subagent-watcher notification failed: ${err.message}\n`)
-                })
-              },
-              updatePinnedCard: (html: string | null) => {
-                const ownerChatId = loadAccess().allowFrom[0]
-                if (!ownerChatId) return
-                if (html === null) {
-                  // No active workers — unpin and delete the card
-                  if (workerCardMsgId != null) {
-                    const msgId = workerCardMsgId
-                    workerCardMsgId = null
-                    void lockedBot.api.unpinChatMessage(ownerChatId, msgId).catch(() => {})
-                    void lockedBot.api.deleteMessage(ownerChatId, msgId).catch(() => {})
-                  }
-                  return
-                }
-                if (workerCardMsgId == null) {
-                  // Create a new pinned card
-                  void lockedBot.api.sendMessage(ownerChatId, html, {
-                    parse_mode: 'HTML',
-                    link_preview_options: { is_disabled: true },
-                    ...(TOPIC_ID != null ? { message_thread_id: TOPIC_ID } : {}),
-                  }).then((sent) => {
-                    workerCardMsgId = sent.message_id
-                    void lockedBot.api.pinChatMessage(ownerChatId, sent.message_id, {
-                      disable_notification: true,
-                    }).catch(() => {})
-                  }).catch((err: Error) => {
-                    process.stderr.write(`telegram gateway: subagent-watcher card send failed: ${err.message}\n`)
-                  })
-                } else {
-                  // Edit the existing card
-                  void lockedBot.api.editMessageText(ownerChatId, workerCardMsgId, html, {
-                    parse_mode: 'HTML',
-                    link_preview_options: { is_disabled: true },
-                  }).catch((err: Error) => {
-                    const msg = err instanceof GrammyError && err.error_code === 400 &&
-                      /message is not modified/i.test(err.description ?? '') ? '' : err.message
-                    if (msg) process.stderr.write(`telegram gateway: subagent-watcher card edit failed: ${msg}\n`)
-                  })
-                }
-              },
-              log: (msg) => process.stderr.write(`telegram gateway: ${msg}\n`),
-            })
-            process.stderr.write('telegram gateway: subagent-watcher active\n')
-          }
-        }
+        // Background sub-agent visibility is handled by the unified
+        // progress-card pin lifecycle: the parent's pinned card stays
+        // alive while ANY sub-agent (correlated or background-orphan) is
+        // running, with `closeZombie` (new turn or maxIdleMs) as the
+        // safety net. The standalone subagent-watcher (separate pinned
+        // card + inline "Worker dispatched/idle/done" messages) was
+        // removed in favour of that single surface.
       }
 
       process.stderr.write(`telegram gateway: starting bot polling pid=${process.pid} agent=${process.env.SWITCHROOM_AGENT_NAME ?? '-'} stateDir=${STATE_DIR} historyEnabled=${HISTORY_ENABLED} streamMode=${process.env.SWITCHROOM_TG_STREAM_MODE ?? 'checklist'}\n`)

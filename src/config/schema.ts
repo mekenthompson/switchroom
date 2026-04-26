@@ -28,6 +28,14 @@ export const ScheduleEntrySchema = z.object({
       "Model for this task. Defaults to claude-sonnet-4-6 (cheap, fast). " +
       "Use claude-opus-4-6 for tasks needing complex reasoning.",
     ),
+  secrets: z
+    .array(z.string().regex(/^[a-zA-Z0-9_-]+$/, "Secret key names must contain only alphanumeric characters, underscores, and hyphens"))
+    .default([])
+    .describe(
+      "Vault key names this cron task is allowed to access via the vault-broker daemon. " +
+      "Declared keys are injected as env vars at runtime (PR 2). " +
+      "Empty by default — no vault access unless explicitly listed.",
+    ),
 });
 
 export const AgentSoulSchema = z
@@ -718,6 +726,23 @@ export const VaultConfigSchema = z.object({
     .string()
     .default("~/.switchroom/vault.enc")
     .describe("Path to encrypted vault file"),
+  broker: z
+    .object({
+      socket: z
+        .string()
+        .default("~/.switchroom/vault-broker.sock")
+        .describe("Unix domain socket path for the vault-broker daemon"),
+      enabled: z
+        .boolean()
+        .default(true)
+        .describe("Whether to start the vault-broker daemon on agent launch"),
+    })
+    .default({})
+    .describe(
+      "Vault-broker daemon configuration. The broker holds the decrypted vault " +
+      "in memory and serves secrets to cron scripts via a Unix socket, so the " +
+      "vault passphrase is entered once at startup rather than per-cron invocation.",
+    ),
 });
 
 /**
@@ -823,5 +848,6 @@ export type ScheduleEntry = z.infer<typeof ScheduleEntrySchema>;
 export type TelegramConfig = z.infer<typeof TelegramConfigSchema>;
 export type MemoryBackendConfig = z.infer<typeof MemoryBackendConfigSchema>;
 export type VaultConfig = z.infer<typeof VaultConfigSchema>;
+export type VaultBrokerConfig = z.infer<typeof VaultConfigSchema>["broker"];
 export type QuotaConfig = z.infer<typeof QuotaConfigSchema>;
 export type CodeRepoEntry = z.infer<typeof CodeRepoEntrySchema>;

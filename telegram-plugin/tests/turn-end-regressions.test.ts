@@ -154,6 +154,12 @@ describe('bug 1 — Done transition reaches the original progress card', () => {
     })
     onEvent({ kind: 'tool_use', toolName: 'Read', toolUseId: 't1', input: { file_path: '/x' } })
     onEvent({ kind: 'tool_result', toolUseId: 't1', toolName: 'Read' })
+    // Issue #132: simulate the agent calling the reply tool so the final
+    // render lands on "✅ Done" rather than "🙊 Ended without reply". This
+    // test is about the bug-1 ordering between handler and driver, not
+    // the silent-end UX, so we explicitly opt into the happy path.
+    onEvent({ kind: 'tool_use', toolName: 'mcp__switchroom-telegram__reply', toolUseId: 't2' })
+    onEvent({ kind: 'tool_result', toolUseId: 't2', toolName: 'mcp__switchroom-telegram__reply' })
     onEvent({ kind: 'turn_end', durationMs: 500 })
 
     // With driver-first, only ONE stream is ever created — the original

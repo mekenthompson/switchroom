@@ -297,12 +297,13 @@ function statusKey(chatId: string, threadId?: number): string {
 function endStatusReaction(
   chatId: string,
   threadId: number | undefined,
-  outcome: 'done' | 'error',
+  outcome: 'done' | 'silent' | 'error',
 ): void {
   const key = statusKey(chatId, threadId)
   const ctrl = activeStatusReactions.get(key)
   if (!ctrl) return
   if (outcome === 'done') ctrl.setDone()
+  else if (outcome === 'silent') ctrl.setSilent()
   else ctrl.setError()
   activeStatusReactions.delete(key)
   activeTurnStartedAt.delete(key)
@@ -3203,7 +3204,24 @@ function handleSessionEvent(ev: SessionEvent): void {
       // Normal path: terminate the controller cleanly. The reply tool's
       // own setDone() may already have fired — that's fine, the
       // controller's terminal state is idempotent.
-      if (ctrl) ctrl.setDone()
+      //
+      // Issue #132: distinguish "ended with a reply" (👍 done) from "ended
+      // without producing user-visible text" (🙊 silent). We reach this
+      // branch when EITHER: (a) the reply/stream_reply tool was called
+      // (currentTurnReplyCalled === true) and likely fired its own setDone
+      // already, OR (b) no reply tool AND no captured text — the agent
+      // ran tools and went silent. Case (b) is the silent end. The
+      // backstop above handles "no reply tool but captured text".
+      if (ctrl) {
+        if (currentTurnReplyCalled) {
+          ctrl.setDone()
+        } else {
+          process.stderr.write(
+            `telegram channel: silent turn end — agent ran tools but never called reply/stream_reply (chatId=${chatId})\n`,
+          )
+          ctrl.setSilent()
+        }
+      }
       activeStatusReactions.delete(statusKey(chatId, threadId))
       activeTurnStartedAt.delete(statusKey(chatId, threadId))
       {

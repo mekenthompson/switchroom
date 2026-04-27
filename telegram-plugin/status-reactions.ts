@@ -49,6 +49,7 @@ export type ReactionState =
   | 'tool'
   | 'compacting'
   | 'done'
+  | 'silent'
   | 'error'
   | 'stallSoft'
   | 'stallHard'
@@ -66,6 +67,10 @@ export const REACTION_VARIANTS: Record<ReactionState, string[]> = {
   web:       ['⚡', '🔥', '👍'],
   compacting:['✍', '🤔', '👀'],
   done:      ['👍', '🎉', '💯'],
+  // 🙊 — turn ended without producing a user-visible reply. Distinct from
+  // 'done' (which means "reply landed") so the user doesn't read 👍 as
+  // "agent acknowledged" when actually nothing was sent. See issue #132.
+  silent:    ['🙊', '🤔', '😐'],
   error:     ['😱', '😨', '🤯'],
   stallSoft: ['🥱', '😴', '🤔'],
   stallHard: ['😨', '🤯', '😱'],
@@ -165,6 +170,20 @@ export class StatusReactionController {
   /** 👍 — final reply delivered. Terminal, bypasses debounce. */
   setDone(): void {
     this.finishWithState('done')
+  }
+
+  /**
+   * 🙊 — turn ended without producing a user-visible reply.
+   *
+   * Distinct from `setDone()` so the user doesn't read 👍 as "agent
+   * acknowledged but stayed silent on purpose" when in fact nothing was
+   * actually sent. Common case (#132): agent ran a long Bash chain to
+   * answer a question, never called `reply` / `stream_reply`, and the
+   * orphaned-reply backstop had no captured text to forward either.
+   * Terminal, bypasses debounce.
+   */
+  setSilent(): void {
+    this.finishWithState('silent')
   }
 
   /** 😱 — generation failed. Terminal, bypasses debounce. */

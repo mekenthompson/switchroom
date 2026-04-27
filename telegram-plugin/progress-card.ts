@@ -827,6 +827,19 @@ export interface TaskNum {
  */
 export interface RenderOptions {
   stuckMs?: number
+  /**
+   * Issue #132: when a turn ends without the agent ever calling
+   * `reply` / `stream_reply`, the card should NOT render as "✅ Done"
+   * (which the user reads as "agent acknowledged and replied") because
+   * no user-visible text was produced. The driver tracks per-chat
+   * "did a reply tool fire" and forwards the answer here so the
+   * renderer can distinguish the silent-end case.
+   *
+   * When true and the turn is terminal, the header swaps to
+   * "🙊 Ended without reply" with a hint line suggesting `/restart` or
+   * a rephrase. Has no effect while the turn is still running.
+   */
+  silentEnd?: boolean
 }
 
 /**
@@ -850,13 +863,33 @@ export function render(state: ProgressCardState, now: number, taskNum?: TaskNum,
   // are active — even though orphan sub-agents no longer gate the defer
   // for pin-lifecycle purposes (#31/#43 fix).
   const trulyDone = state.stage === 'done' && !hasAnyRunningSubAgent(state)
-  const headerIcon = trulyDone ? '✅' : '⚙️'
-  const headerLabel = trulyDone ? 'Done' : 'Working…'
+  const silentEnd = trulyDone && opts?.silentEnd === true
+  let headerIcon: string
+  let headerLabel: string
+  if (silentEnd) {
+    headerIcon = '🙊'
+    headerLabel = 'Ended without reply'
+  } else if (trulyDone) {
+    headerIcon = '✅'
+    headerLabel = 'Done'
+  } else {
+    headerIcon = '⚙️'
+    headerLabel = 'Working…'
+  }
   const taskSuffix = taskNum && taskNum.total > 1 ? ` (${taskNum.index}/${taskNum.total})` : ''
   lines.push(`${headerIcon} <b>${headerLabel}${taskSuffix}</b> · ⏱ ${elapsed}`)
 
   if (state.userRequest) {
     lines.push(`<blockquote>${escapeHtml(truncate(state.userRequest, 120))}</blockquote>`)
+  }
+
+  if (silentEnd) {
+    // Diagnostic hint shown only on silent-end turns. Distinct from the
+    // "stuck" warning (which fires while the turn is still active) — this
+    // tells the user what happened and what to try next.
+    lines.push(
+      `<i>⚠️ Agent ran tools but didn't send a reply. Try /restart or rephrase your message.</i>`,
+    )
   }
 
   // Stuck-warning: after 2 min of no session events the card is likely

@@ -25,6 +25,7 @@ import {
   type ProgressCardState,
   type TaskNum,
 } from './progress-card.js'
+import { isTelegramReplyTool } from './tool-names.js'
 
 /**
  * Classification of a Telegram API error for failure-escalation purposes.
@@ -241,6 +242,18 @@ interface PerChatState {
     lastError: { code: number; description: string; timestamp: number } | null
     terminal: boolean
   }
+  /**
+   * Issue #132: did the agent call `reply` or `stream_reply` (under any
+   * MCP server-key prefix) at least once during this turn?
+   *
+   * Set true on the first matching `tool_use` event observed by `ingest()`.
+   * When the turn ends with this still false, the card renders the
+   * "🙊 Ended without reply" silent-end variant instead of "✅ Done" so the
+   * user can tell the difference between "agent acknowledged with text"
+   * and "agent ran tools and went mute". Resets implicitly with each new
+   * `PerChatState` (one per turn).
+   */
+  replyToolCalled: boolean
 }
 
 export interface ProgressDriver {
@@ -561,7 +574,13 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         // §4.4: "heartbeat respects budget too".)
         if (isBudgetHot(cs.turnKey)) continue
         const stuckMs = Math.max(0, now() - cs.lastEventAt)
-        const html = render(cs.state, now(), undefined, { stuckMs })
+        // Issue #132: silentEnd only matters once the parent turn is in
+        // `stage='done'` AND no sub-agents are still running. While work
+        // is in flight, "no reply yet" is normal; the card stays in
+        // "Working…". The renderer applies the same gate, so passing the
+        // unconditional flag here is safe.
+        const silentEnd = !cs.replyToolCalled
+        const html = render(cs.state, now(), undefined, { stuckMs, silentEnd })
         const bucket = Math.floor(now() / heartbeatMs)
         const prevBucket = lastHeartbeatBucket.get(cs.turnKey)
         if (html === cs.lastEmittedHtml && bucket === prevBucket) continue
@@ -665,11 +684,12 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     }
     const taskNum = taskNumFor(chatState)
     const stuckMs = Math.max(0, now() - chatState.lastEventAt)
+    const silentEnd = !chatState.replyToolCalled
     const html = render(
       chatState.state,
       now(),
       taskNum.total > 1 ? taskNum : undefined,
-      { stuckMs },
+      { stuckMs, silentEnd },
     )
     // Issue #81 diagnostic: which checklist branch is the renderer taking?
     // The card prefers `narratives` (human preambles) over `items` (raw
@@ -872,6 +892,7 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
           pendingCompletion: false,
           completionFired: false,
           apiFailures: { consecutive4xx: 0, lastError: null, terminal: false },
+          replyToolCalled: false,
         }
         chats.set(slot.turnKey, chatState)
         if (event.isSync) {
@@ -908,6 +929,21 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       chatState.lastEventAt = now()
       const stageChanged = chatState.state.stage !== prev.stage
       const visibleChanged = visibleDiff(prev, chatState.state)
+
+      // Issue #132: track whether the agent has called `reply` or
+      // `stream_reply` at least once this turn so the renderer can
+      // distinguish "Done with reply" from "Done without reply" at
+      // turn_end. Tool-use intent is the right granularity here — if
+      // the call landed but failed mid-API, the model sees the error
+      // in tool_result and may retry, which still flips this true.
+      // Only false → true; never reset mid-turn.
+      if (
+        !chatState.replyToolCalled
+        && event.kind === 'tool_use'
+        && isTelegramReplyTool(event.toolName)
+      ) {
+        chatState.replyToolCalled = true
+      }
 
       // Issue #81 diagnostic: when a 'text' event lands, did the reducer
       // recognize it as a narrative step? If narratives.length didn't grow,

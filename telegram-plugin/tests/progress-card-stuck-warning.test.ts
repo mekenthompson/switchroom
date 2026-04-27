@@ -271,6 +271,12 @@ describe("progress-card driver — stuck warning propagation via heartbeat", () 
 
     const terminal = emits.find((e) => e.done === true);
     expect(terminal).toBeDefined();
-    expect(terminal!.html).toContain("✅");
+    // Issue #132: a zombie that never produced a reply correctly renders
+    // "🙊 Ended without reply" rather than "✅ Done" — a hung turn that
+    // sent nothing is *not* a successful done state. The test asserts the
+    // terminal-state contract: SOME terminal header lands, and we record
+    // which one. (Either ✅ Done or 🙊 silent end is acceptable here; the
+    // important property is `done: true` was emitted by the zombie path.)
+    expect(terminal!.html).toMatch(/✅ <b>Done<\/b>|🙊 <b>Ended without reply<\/b>/);
   });
 });

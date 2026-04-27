@@ -2,7 +2,7 @@ import { execFileSync, execSync } from "node:child_process";
 import { writeFileSync, mkdirSync, unlinkSync, existsSync, readdirSync } from "node:fs";
 import { resolve, join, dirname } from "node:path";
 import type { SwitchroomConfig, ScheduleEntry } from "../config/schema.js";
-import { resolveAgentsDir } from "../config/loader.js";
+import { resolveAgentsDir, resolvePath } from "../config/loader.js";
 import { usesSwitchroomTelegramPlugin, resolveAgentConfig } from "../config/merge.js";
 import { resolveTimezone } from "../config/timezone.js";
 import { COMMIT_SHA } from "../build-info.js";
@@ -358,7 +358,24 @@ export function installAllUnits(config: SwitchroomConfig): void {
   if (shouldInstallBrokerUnit(config)) {
     const homeDir = process.env.HOME ?? "/root";
     const bunBinDir = resolve(homeDir, ".bun", "bin");
-    const brokerContent = generateBrokerUnit({ homeDir, bunBinDir });
+    const brokerAutoUnlock = config.vault?.broker?.autoUnlock ?? false;
+    let autoUnlockOpt: { credentialPath: string } | undefined;
+    if (brokerAutoUnlock) {
+      const rawCredPath =
+        config.vault?.broker?.autoUnlockCredentialPath ??
+        "~/.config/credstore.encrypted/vault-passphrase";
+      const credPath = resolvePath(rawCredPath);
+      if (existsSync(credPath)) {
+        autoUnlockOpt = { credentialPath: credPath };
+      } else {
+        process.stderr.write(
+          `[switchroom] note: vault.broker.autoUnlock=true but credential file ` +
+          `is missing at ${credPath}; broker will start in interactive mode. ` +
+          `Run \`switchroom vault broker enable-auto-unlock\` to set up.\n`
+        );
+      }
+    }
+    const brokerContent = generateBrokerUnit({ homeDir, bunBinDir, autoUnlock: autoUnlockOpt });
     installUnit("vault-broker", brokerContent);
     // installedAgents holds the OS unit name (with the `switchroom-` prefix
     // that systemctl needs).

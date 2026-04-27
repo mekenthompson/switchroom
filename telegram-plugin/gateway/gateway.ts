@@ -73,6 +73,7 @@ import {
   type OperatorEventKind,
 } from '../operator-events.js'
 import { recordOperatorEvent } from '../operator-events-history.js'
+import { startRestartWatchdog } from './restart-watchdog.js'
 
 /**
  * Truncation cap for the `reply_to_text` channel-meta attribute (issue #119).
@@ -802,6 +803,70 @@ function coalesceKey(chatId: string, userId: string): string {
 }
 
 /**
+ * Gateway-side emission for an OperatorEvent — the single point where:
+ *   - per-agent per-kind cooldown is enforced
+ *   - the event is recorded into the in-memory history (feeds /status)
+ *   - the rendered card is broadcast to every chat in `access.allowFrom`
+ *
+ * Producers (the IPC `onOperatorEvent` handler, the boot-card crash
+ * detector, the restart-watchdog) all funnel through here so the dedupe,
+ * record, and post logic stays in one place.
+ *
+ * Each step is independently fault-tolerant — a failure to record
+ * doesn't block the post; a bad send to one chat doesn't block siblings.
+ */
+function emitGatewayOperatorEvent(event: OperatorEvent): void {
+  const { agent, kind } = event
+
+  if (!shouldEmitOperatorEvent(agent, kind)) {
+    process.stderr.write(
+      `telegram gateway: operator-event suppressed (cooldown) agent=${agent} kind=${kind}\n`,
+    )
+    return
+  }
+
+  try {
+    recordOperatorEvent(event)
+  } catch (err) {
+    process.stderr.write(
+      `telegram gateway: recordOperatorEvent failed agent=${agent} kind=${kind}: ${(err as Error).message}\n`,
+    )
+  }
+
+  let rendered: ReturnType<typeof renderOperatorEvent>
+  try {
+    rendered = renderOperatorEvent(event)
+  } catch (err) {
+    process.stderr.write(
+      `telegram gateway: renderOperatorEvent failed agent=${agent} kind=${kind}: ${(err as Error).message}\n`,
+    )
+    return
+  }
+
+  const access = loadAccess()
+  if (access.allowFrom.length === 0) {
+    process.stderr.write(
+      `telegram gateway: operator-event no-allowlist agent=${agent} kind=${kind} (recorded only)\n`,
+    )
+    return
+  }
+
+  process.stderr.write(
+    `telegram gateway: operator-event posting agent=${agent} kind=${kind} to ${access.allowFrom.length} chat(s)\n`,
+  )
+  for (const chat_id of access.allowFrom) {
+    void bot.api.sendMessage(chat_id, rendered.text, {
+      parse_mode: 'HTML',
+      reply_markup: rendered.keyboard,
+    }).catch(e => {
+      process.stderr.write(
+        `telegram gateway: operator-event send to ${chat_id} failed agent=${agent} kind=${kind}: ${e}\n`,
+      )
+    })
+  }
+}
+
+/**
  * Legacy "restarted — ready" banner, used when BOOT_CARD_ENABLED=false.
  * Kept as a safe fallback so reverting to the old behavior is one env var flip.
  */
@@ -1106,72 +1171,17 @@ const ipcServer: IpcServer = createIpcServer({
   },
 
   onOperatorEvent(_client: IpcClient, msg: OperatorEventForward) {
-    // Phase 4c: bridge has detected an Anthropic API error (or synthetic
-    // gateway-side event). Render the operator card + post to every chat
-    // on the access allowlist, deduped by per-agent per-kind cooldown.
-    //
-    // chatId on the wire is currently always empty — the bridge doesn't
-    // know which user-chat the error should attribute to (errors aren't
-    // tied to a specific inbound message). We broadcast to the same set
-    // of chats that receive permission requests so the right operator
-    // sees it.
-    const kind = msg.kind as OperatorEventKind
-    const agent = msg.agent
-
-    if (!shouldEmitOperatorEvent(agent, kind)) {
-      process.stderr.write(
-        `telegram gateway: operator-event suppressed (cooldown) agent=${agent} kind=${kind}\n`,
-      )
-      return
-    }
-
-    const event: OperatorEvent = {
-      kind,
-      agent,
+    // Bridge has detected an Anthropic API error (or synthetic gateway-side
+    // event). chatId on the wire is currently always empty — operator events
+    // are agent-level, not tied to a specific user message; the helper
+    // resolves the destination from `access.allowFrom`.
+    emitGatewayOperatorEvent({
+      kind: msg.kind as OperatorEventKind,
+      agent: msg.agent,
       detail: msg.detail,
       suggestedActions: [],
       firstSeenAt: new Date(),
-    }
-
-    try {
-      recordOperatorEvent(event)
-    } catch (err) {
-      process.stderr.write(
-        `telegram gateway: recordOperatorEvent failed agent=${agent} kind=${kind}: ${(err as Error).message}\n`,
-      )
-    }
-
-    let rendered: ReturnType<typeof renderOperatorEvent>
-    try {
-      rendered = renderOperatorEvent(event)
-    } catch (err) {
-      process.stderr.write(
-        `telegram gateway: renderOperatorEvent failed agent=${agent} kind=${kind}: ${(err as Error).message}\n`,
-      )
-      return
-    }
-
-    const access = loadAccess()
-    if (access.allowFrom.length === 0) {
-      process.stderr.write(
-        `telegram gateway: operator-event no-allowlist agent=${agent} kind=${kind} (recorded only)\n`,
-      )
-      return
-    }
-
-    process.stderr.write(
-      `telegram gateway: operator-event posting agent=${agent} kind=${kind} to ${access.allowFrom.length} chat(s)\n`,
-    )
-    for (const chat_id of access.allowFrom) {
-      void bot.api.sendMessage(chat_id, rendered.text, {
-        parse_mode: 'HTML',
-        reply_markup: rendered.keyboard,
-      }).catch(e => {
-        process.stderr.write(
-          `telegram gateway: operator-event send to ${chat_id} failed agent=${agent} kind=${kind}: ${e}\n`,
-        )
-      })
-    }
+    })
   },
 
   log: (msg) => process.stderr.write(`telegram gateway: ipc — ${msg}\n`),
@@ -5485,6 +5495,29 @@ void (async () => {
             const reason = determineRestartReason({ marker, cleanMarker, sessionMarker: storedSession, now: nowMs })
             const target = resolveBootChatId(marker, markerAgeMs)
 
+            // Issue #92: when reason='crash' AND no chat is resolvable,
+            // the gateway used to silently skip — the only signal a user
+            // got was their next message landing on a fresh process. Now
+            // we always surface unplanned crashes via the operator-events
+            // pipeline, which broadcasts to access.allowFrom (same path
+            // permission requests use). The pipeline's per-agent per-kind
+            // cooldown protects against crash loops spamming the chat.
+            if (reason === 'crash') {
+              const cleanMarkerStale = cleanMarker
+                ? !shouldSuppressRecoveryBanner(cleanMarker, nowMs, CLEAN_SHUTDOWN_MAX_AGE_MS)
+                : false
+              const detailParts: string[] = ['gateway crashed and was auto-restarted by systemd']
+              if (cleanMarker?.signal) detailParts.push(`prior signal=${cleanMarker.signal}`)
+              if (cleanMarkerStale) detailParts.push('clean-shutdown marker stale')
+              emitGatewayOperatorEvent({
+                kind: 'agent-crashed',
+                agent: process.env.SWITCHROOM_AGENT_NAME ?? '-',
+                detail: detailParts.join(' — '),
+                suggestedActions: [],
+                firstSeenAt: new Date(),
+              })
+            }
+
             if (target) {
               const { chatId, threadId, ackMsgId } = target
               process.stderr.write(`telegram gateway: boot: posting boot card reason=${reason} chat_id=${chatId} thread_id=${threadId ?? '-'} ackReply=${ackMsgId ?? '-'} boot_card=${BOOT_CARD_ENABLED}\n`)
@@ -5539,6 +5572,41 @@ void (async () => {
         const AUTO_FALLBACK_POLL_MS = Number(process.env.SWITCHROOM_AUTO_FALLBACK_POLL_MS ?? 60 * 60_000)
         if (AUTO_FALLBACK_POLL_MS > 0) {
           setInterval(() => { void runAutoFallbackCheck({ trigger: 'scheduled' }) }, AUTO_FALLBACK_POLL_MS).unref()
+        }
+
+        // Restart-watchdog: poll systemd's NRestarts for the agent unit.
+        // When the count ticks up without a corresponding restart-pending
+        // marker (= user-initiated /restart), emit an operator event.
+        // Closes #30 task 4 and the 2026-04-21 lessons-learned loop where
+        // IPC flaps falsely triggered the gateway's recovery banner.
+        // SWITCHROOM_RESTART_WATCHDOG_POLL_MS=0 disables it.
+        const RESTART_WATCHDOG_POLL_MS = Number(
+          process.env.SWITCHROOM_RESTART_WATCHDOG_POLL_MS ?? 30_000,
+        )
+        const watchdogAgentName = process.env.SWITCHROOM_AGENT_NAME
+        if (RESTART_WATCHDOG_POLL_MS > 0 && watchdogAgentName) {
+          startRestartWatchdog({
+            agentName: watchdogAgentName,
+            pollIntervalMs: RESTART_WATCHDOG_POLL_MS,
+            execShow: (unit) =>
+              execFileSync(
+                'systemctl',
+                ['--user', 'show', unit, '-p', 'NRestarts,ActiveEnterTimestampMonotonic'],
+                { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] },
+              ) as string,
+            isPlannedRestartFresh: () => readRestartMarker() != null,
+            emit: (detail) => {
+              emitGatewayOperatorEvent({
+                kind: 'agent-restarted-unexpectedly',
+                agent: watchdogAgentName,
+                detail,
+                suggestedActions: [],
+                firstSeenAt: new Date(),
+              })
+            },
+            log: (msg) =>
+              process.stderr.write(msg.endsWith('\n') ? `telegram gateway: ${msg}` : `telegram gateway: ${msg}\n`),
+          })
         }
 
         // Background sub-agent visibility watcher. Watches the subagents/

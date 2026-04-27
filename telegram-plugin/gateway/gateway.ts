@@ -681,6 +681,7 @@ function deferredKey(chat_id: string, message_id: number): string {
 // context rule covers future shape changes).
 const awaitingAuthCodeAt = new Map<string, number>()
 const AUTH_CODE_CONTEXT_TTL_MS = 5 * 60_000 // 5 min — OAuth code lifetime
+const DEFERRED_SECRET_TTL_MS = 24 * 60 * 60_000 // 24 h — ignored one-tap cards
 
 // ─── TTL reaper ───────────────────────────────────────────────────────────
 // Pending state maps above all grow whenever a flow starts and only shrink
@@ -708,6 +709,9 @@ const pendingStateReaper = setInterval(() => {
   }
   for (const [k, v] of awaitingAuthCodeAt) {
     if (now - v > AUTH_CODE_CONTEXT_TTL_MS) awaitingAuthCodeAt.delete(k)
+  }
+  for (const [k, v] of deferredSecrets) {
+    if (now - v.staged_at > DEFERRED_SECRET_TTL_MS) deferredSecrets.delete(k)
   }
   // Drain cap: if a scheduled restart has been waiting >60s for a turn
   // to complete, force it through anyway (spec: 60s cap → SIGKILL fallback).
@@ -2514,12 +2518,13 @@ async function handleInbound(
         // need the user's intent. Stash with a one-tap unlock+save card so
         // the post-context flow stays seamless.
         const dKey = deferredKey(chat_id, msgId ?? 0)
+        const cachedBranchDetection = detectSecrets(effectiveText).find((d) => d.confidence === 'high' && !d.suppressed)
         deferredSecrets.set(dKey, {
           chat_id,
           original_message_id: msgId ?? 0,
           text: effectiveText,
           staged_at: Date.now(),
-          suggested_slug: 'anthropic_oauth_code',
+          suggested_slug: cachedBranchDetection?.suggested_slug ?? (isAuthFlowContext ? 'anthropic_oauth_code' : 'secret'),
         })
         await switchroomReply(
           ctx,
@@ -3206,9 +3211,17 @@ function buildAuthUrlKeyboard(authorizeUrl: string): InlineKeyboard {
  * the prefix + key fits well within that on any realistic chat id.
  */
 function buildDeferredSecretKeyboard(deferKey: string): InlineKeyboard {
+  const unlockData = `vd:unlock:${deferKey}`
+  const cancelData = `vd:cancel:${deferKey}`
+  if (unlockData.length > 64 || cancelData.length > 64) {
+    process.stderr.write(
+      `telegram gateway: callback_data overflow — deferKey=${deferKey} unlockLen=${unlockData.length} cancelLen=${cancelData.length}\n`,
+    )
+    throw new Error(`callback_data overflow: deferKey too long (${deferKey.length} chars)`)
+  }
   return new InlineKeyboard()
-    .text('🔓 Unlock vault & save', `vd:unlock:${deferKey}`)
-    .text('🗑 Discard', `vd:cancel:${deferKey}`)
+    .text('🔓 Unlock vault & save', unlockData)
+    .text('🗑 Discard', cancelData)
 }
 
 async function runSwitchroomAuthCommand(ctx: Context, args: string[], label: string): Promise<void> {

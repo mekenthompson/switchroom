@@ -38,6 +38,19 @@ const TEST_SECRETS: Record<string, VaultEntry> = {
   },
 };
 
+/**
+ * Deep-clone TEST_SECRETS for each broker. `broker.lock()` mutates entry
+ * values in place (zeros them as a best-effort wipe before GC), so a shallow
+ * copy `{ ...TEST_SECRETS }` would leak that mutation across tests via the
+ * shared entry objects. Concretely: once the "lock wipes secrets" test runs,
+ * subsequent tests that read `foo` get `value: ""` instead of `bar-value`.
+ * The Linux-skipped get tests masked this for a long time; the new
+ * `_testIdentify` happy-path tests below run on Linux and surface the issue.
+ */
+function cloneSecrets(): Record<string, VaultEntry> {
+  return JSON.parse(JSON.stringify(TEST_SECRETS));
+}
+
 // Minimal SwitchroomConfig for broker tests. On Linux the broker uses
 // peercred + ACL to identify cron units; the test process isn't one, so
 // `get` requests are denied. ACL behavior is covered by acl.test.ts; here
@@ -104,7 +117,7 @@ describe("VaultBroker server", () => {
     socketPath = path.join(tmpDir, "test.sock");
 
     broker = new VaultBroker({
-      _testSecrets: { ...TEST_SECRETS },
+      _testSecrets: cloneSecrets(),
       _testConfig: makeMinimalConfig(),
     });
     await broker.start(socketPath, undefined, undefined);
@@ -345,7 +358,7 @@ describe("VaultBroker server: gated paths (allowed cron identity via _testIdenti
     socketPath = path.join(tmpDir, "test.sock");
 
     broker = new VaultBroker({
-      _testSecrets: { ...TEST_SECRETS },
+      _testSecrets: cloneSecrets(),
       _testConfig: makeAclConfig(),
       _testIdentify: () => FAKE_PEER,
     });
@@ -419,7 +432,7 @@ describe("VaultBroker server: gated paths (denied identity via _testIdentify)", 
     socketPath = path.join(tmpDir, "test.sock");
 
     broker = new VaultBroker({
-      _testSecrets: { ...TEST_SECRETS },
+      _testSecrets: cloneSecrets(),
       _testConfig: makeMinimalConfig(),
       // Simulate "unidentified caller" — same shape as production when
       // identify() can't resolve the peer (foreign UID, exited process, etc.)

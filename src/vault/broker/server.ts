@@ -30,7 +30,7 @@ import { dirname, resolve, join } from "node:path";
 import type { SwitchroomConfig } from "../../config/schema.js";
 import { openVault, type VaultEntry } from "../vault.js";
 import { resolvePath } from "../../config/loader.js";
-import { identify } from "./peercred.js";
+import { identify, type PeerInfo } from "./peercred.js";
 import { checkAcl } from "./acl.js";
 import {
   decodeRequest,
@@ -55,6 +55,20 @@ export interface BrokerTestOpts {
    * If provided, use this config instead of loading from configPath.
    */
   _testConfig?: SwitchroomConfig;
+  /**
+   * If provided, replaces the real `identify()` call on every connection.
+   * Returns the PeerInfo the broker should treat as the caller's identity,
+   * or null to simulate "unidentified" (broker denies).
+   *
+   * Without this hook, Linux unit tests can only ever exercise the deny
+   * path — the test process isn't a switchroom-…-cron-… cgroup, so the
+   * real identify() correctly returns null. Stubbing here lets us cover
+   * the happy path (allowed cron unit) without spinning up systemd-run.
+   *
+   * Production codepath is unchanged: when this is undefined the broker
+   * calls the real `identify()`. DO NOT set outside tests.
+   */
+  _testIdentify?: (socketPath: string, socket: net.Socket) => PeerInfo | null;
 }
 
 export class VaultBroker {
@@ -294,9 +308,11 @@ export class VaultBroker {
     // pin its ss-output lookup to the server-side fd's inode (node runtime).
     // Without the socket, identify() falls back to the legacy first-row-wins
     // ss lookup which has a documented concurrency hazard. See issue #129.
-    let peer: import("./peercred.js").PeerInfo | null = null;
+    let peer: PeerInfo | null = null;
     if (process.platform === "linux") {
-      peer = identify(this.socketPath, socket);
+      peer = this.testOpts._testIdentify
+        ? this.testOpts._testIdentify(this.socketPath, socket)
+        : identify(this.socketPath, socket);
     }
 
     let buffer = "";
@@ -446,7 +462,9 @@ export class VaultBroker {
     // pinned to this connection's fd (issue #129).
     // On other OSes: rely on socket file mode 0600.
     if (process.platform === "linux") {
-      const peer = identify(this.unlockSocketPath, socket);
+      const peer = this.testOpts._testIdentify
+        ? this.testOpts._testIdentify(this.unlockSocketPath, socket)
+        : identify(this.unlockSocketPath, socket);
       if (peer === null) {
         socket.write("ERR unable to verify caller identity\n");
         socket.destroy();

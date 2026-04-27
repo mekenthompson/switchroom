@@ -2220,20 +2220,30 @@ async function handleInbound(
   // frequency. We don't intercept the message — it still flows through to
   // the agent, since the agent may have a useful answer the card hasn't
   // surfaced yet.
+  //
+  // Log shape (grep anchor: "ux-failure: status-query"):
+  //   ux-failure: status-query agent=<n> chat_id=<n> thread=<n|none>
+  //                            card_stage=<stage> card_turn_age_s=<int>
+  //                            card_items=<n> card_subagents=<n>
+  //
+  // `card_turn_age_s` is always a non-negative integer; `-1` is the
+  // sentinel for "no active turn / driver idle" so structured-log parsers
+  // (Loki, Datadog, awk) can treat the field as numeric without
+  // string-comparison branches.
   if (STATUS_QUERY_RE.test(text)) {
     try {
       const threadKey = messageThreadId != null ? String(messageThreadId) : undefined
       const cardState = progressDriver?.peek(chat_id, threadKey)
-      const turnAge = cardState?.turnStartedAt
+      const turnAgeS = cardState?.turnStartedAt
         ? Math.max(0, Math.floor((Date.now() - cardState.turnStartedAt) / 1000))
-        : null
+        : -1
       const stage = cardState?.stage ?? 'idle'
       const itemCount = cardState?.items.length ?? 0
       const subAgentCount = cardState?.subAgents.size ?? 0
       const agentName = process.env.SWITCHROOM_AGENT_NAME ?? '-'
       process.stderr.write(
-        `telegram gateway: ux-failure status-query agent=${agentName} chat_id=${chat_id} thread=${threadKey ?? 'none'} ` +
-        `card_stage=${stage} card_turn_age_s=${turnAge ?? 'idle'} card_items=${itemCount} card_subagents=${subAgentCount}\n`,
+        `telegram gateway: ux-failure: status-query agent=${agentName} chat_id=${chat_id} thread=${threadKey ?? 'none'} ` +
+        `card_stage=${stage} card_turn_age_s=${turnAgeS} card_items=${itemCount} card_subagents=${subAgentCount}\n`,
       )
     } catch (err) {
       process.stderr.write(`telegram gateway: status-query telemetry failed: ${(err as Error).message}\n`)

@@ -15,7 +15,7 @@ import type { SwitchroomConfig } from "../config/schema.js";
 import { openVault, type VaultEntry } from "./vault.js";
 import { resolvePath } from "../config/loader.js";
 import {
-  getViaBroker,
+  getViaBrokerStructured,
   resolveBrokerSocketPath,
   type BrokerClientOpts,
 } from "./broker/client.js";
@@ -280,27 +280,63 @@ export async function resolveVaultReferencesViaBroker(
     return config;
   }
 
-  // Try broker first
+  // Try broker first. Use the structured result so we can distinguish:
+  //   - ok          → use the entry
+  //   - unreachable → fall back to passphrase decrypt (broker is dead /
+  //                   not started yet; passphrase is the right answer)
+  //   - denied      → fall back to passphrase decrypt (the config caller
+  //                   has the passphrase, so this is a CLI/scaffold path
+  //                   running without a cron unit identity; opening the
+  //                   vault directly is correct — same UX as the CLI's
+  //                   `vault get` flow)
+  //   - not_found   → return config unchanged (key truly missing — falling
+  //                   back to passphrase would just re-confirm the absence)
+  //
+  // Issue #129 review: previously this loop used the legacy null-shape
+  // getViaBroker, which collapsed unreachable / denied / not_found into
+  // a single null. denied + not_found both look like "fall back" cases,
+  // but the right behavior for a missing key is to NOT fall back, since
+  // a passphrase decrypt won't conjure it from nothing.
   const brokerSecrets: Record<string, VaultEntry> = {};
-  let brokerReachable = false;
+  let allResolved = true;
+  let sawDenied = false;
+  let sawUnreachable = false;
+  let sawNotFound = false;
 
   for (const key of refs) {
-    const entry = await getViaBroker(key, opts);
-    if (entry !== null) {
-      brokerSecrets[key] = entry;
-      brokerReachable = true;
-    } else if (!brokerReachable) {
-      // First key attempt failed — broker unreachable
-      break;
+    const result = await getViaBrokerStructured(key, opts);
+    if (result.kind === "ok") {
+      brokerSecrets[key] = result.entry;
+    } else {
+      allResolved = false;
+      if (result.kind === "unreachable") sawUnreachable = true;
+      if (result.kind === "denied") sawDenied = true;
+      if (result.kind === "not_found") sawNotFound = true;
+      // Don't break — collect all keys so we can compute fallback need
+      // accurately. A short-circuit on first unreachable would be wrong if
+      // the same broker later denies a different key (mixed schedule).
+      if (sawUnreachable && !sawDenied && !sawNotFound) {
+        // Pure unreachable: bail early, every other call will time out
+        // for the same reason.
+        break;
+      }
     }
   }
 
-  if (brokerReachable && Object.keys(brokerSecrets).length === refs.size) {
-    // All refs resolved via broker
+  if (allResolved) {
     return resolveValue(config, brokerSecrets) as SwitchroomConfig;
   }
 
-  // Broker unreachable or partial — fall back to direct decrypt
+  // Mixed outcomes. If we saw `not_found`, the key is genuinely absent
+  // and a passphrase decrypt won't help — log and return unchanged so
+  // the caller surfaces the missing reference.
+  if (sawNotFound && !sawUnreachable && !sawDenied) {
+    return config;
+  }
+
+  // Broker said denied OR unreachable: fall back to direct decrypt with
+  // the user's passphrase if we have one. Same fallback policy as before;
+  // the difference is we no longer treat not_found as a fallback trigger.
   if (passphrase) {
     return resolveVaultReferences(config, passphrase);
   }

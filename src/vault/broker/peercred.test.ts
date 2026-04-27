@@ -20,7 +20,21 @@ import * as fs from "node:fs";
 
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
-  return { ...actual, readFileSync: vi.fn(), readlinkSync: vi.fn() };
+  return {
+    ...actual,
+    readFileSync: vi.fn(),
+    readlinkSync: vi.fn(),
+    // fstatSync is destructured at import time in peercred.ts
+    // (`import { fstatSync } from "node:fs"`), so the mock must replace it
+    // here at the module boundary. A later `vi.spyOn(fs, "fstatSync")`
+    // would only patch the namespace object, not peercred's bound copy.
+    // Default behavior: throw EBADF for any fd. Tests that exercise the
+    // socket-fd → inode path call vi.mocked(fs.fstatSync).mockImplementation
+    // to return a synthetic inode for their specific fd.
+    fstatSync: vi.fn().mockImplementation(() => {
+      throw Object.assign(new Error("EBADF: bad file descriptor"), { code: "EBADF" });
+    }),
+  };
 });
 
 // We cannot easily mock process.platform, so we mock the identify function
@@ -100,7 +114,7 @@ describe("peercred.identify", () => {
     setupProcMocks(brokerUid, exe, clientPid, cgroupContent);
 
     const mockExec = mkMockExec(ssOutput);
-    const result = identify(SOCKET_PATH, mockExec as any);
+    const result = identify(SOCKET_PATH, undefined, mockExec as any);
 
     expect(result).not.toBeNull();
     expect(result?.pid).toBe(clientPid);
@@ -150,7 +164,7 @@ describe("peercred.identify", () => {
       ssOutput,
       "LoadState=not-found\nActiveState=inactive\n",
     );
-    const result = identify(SOCKET_PATH, mockExec as any);
+    const result = identify(SOCKET_PATH, undefined, mockExec as any);
 
     // Caller is still identified (uid/pid/exe), but systemdUnit is null
     // because we couldn't verify the cgroup claim.
@@ -177,7 +191,7 @@ describe("peercred.identify", () => {
     setupProcMocks(brokerUid, "/bin/bash", clientPid, cgroupContent);
 
     const mockExec = mkMockExec(ssOutput, null); // systemctl throws
-    const result = identify(SOCKET_PATH, mockExec as any);
+    const result = identify(SOCKET_PATH, undefined, mockExec as any);
 
     expect(result).not.toBeNull();
     expect(result?.systemdUnit).toBeNull();
@@ -204,7 +218,7 @@ describe("peercred.identify", () => {
       ssOutput,
       "LoadState=loaded\nActiveState=failed\n",
     );
-    const result = identify(SOCKET_PATH, mockExec as any);
+    const result = identify(SOCKET_PATH, undefined, mockExec as any);
 
     expect(result).not.toBeNull();
     expect(result?.systemdUnit).toBeNull();
@@ -230,7 +244,7 @@ describe("peercred.identify", () => {
     // No systemctl call expected because cgroup name doesn't match the
     // switchroom-cron pattern; readSystemdUnit returns null upstream.
     const mockExec = vi.fn().mockReturnValue(ssOutput);
-    const result = identify(SOCKET_PATH, mockExec as any);
+    const result = identify(SOCKET_PATH, undefined, mockExec as any);
 
     expect(result).not.toBeNull();
     expect(result?.systemdUnit).toBeNull();
@@ -242,7 +256,7 @@ describe("peercred.identify", () => {
     const ssOutput = `Netid State Recv-Q Send-Q\nu_str ESTAB 0 0 ${SOCKET_PATH} 12345\n`;
     const mockExec = vi.fn().mockReturnValue(ssOutput);
 
-    const result = identify(SOCKET_PATH, mockExec as any);
+    const result = identify(SOCKET_PATH, undefined, mockExec as any);
     expect(result).toBeNull();
   });
 
@@ -253,7 +267,7 @@ describe("peercred.identify", () => {
       throw new Error("ss: command not found");
     });
 
-    const result = identify(SOCKET_PATH, mockExec as any);
+    const result = identify(SOCKET_PATH, undefined, mockExec as any);
     expect(result).toBeNull();
   });
 
@@ -270,7 +284,7 @@ describe("peercred.identify", () => {
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     });
 
-    const result = identify(SOCKET_PATH, mockExec as any);
+    const result = identify(SOCKET_PATH, undefined, mockExec as any);
     expect(result).toBeNull();
   });
 
@@ -294,7 +308,7 @@ describe("peercred.identify", () => {
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     });
 
-    const result = identify(SOCKET_PATH, mockExec as any);
+    const result = identify(SOCKET_PATH, undefined, mockExec as any);
     expect(result).toBeNull();
   });
 
@@ -302,9 +316,72 @@ describe("peercred.identify", () => {
     if (process.platform === "linux") return; // only run on non-Linux
 
     const mockExec = vi.fn();
-    const result = identify(SOCKET_PATH, mockExec as any);
+    const result = identify(SOCKET_PATH, undefined, mockExec as any);
     expect(result).toBeNull();
     expect(mockExec).not.toHaveBeenCalled();
+  });
+
+  // Issue #129: concurrency safety. With multiple clients connected, the
+  // legacy "first row wins" picked an arbitrary PID. Passing the socket
+  // (whose fd inode pinpoints the right ss row) returns the correct one.
+  it("picks the row matching the accepted server fd's inode under multi-client load", () => {
+    if (process.platform !== "linux") return;
+
+    const brokerPid = 1234;
+    const brokerUid = process.getuid?.() ?? 1000;
+    const exe = "/bin/bash";
+    const cgroupContent =
+      `0::/user.slice/user-${brokerUid}.slice/user@${brokerUid}.service/app.slice/switchroom-myagent-cron-3.service\n`;
+
+    // Two simultaneous connections to the same listening socket. The
+    // legacy lookup would return whichever client appears first in the
+    // ss output. Our fd-pinned lookup must select the correct one.
+    const TARGET_SERVER_INODE = 200;
+    const TARGET_CLIENT_INODE = "201";
+    const TARGET_CLIENT_PID = 9999;
+    const OTHER_SERVER_INODE = "300";
+    const OTHER_CLIENT_INODE = "301";
+    const OTHER_CLIENT_PID = 8888;
+
+    const ssOutput =
+      `Netid State Recv-Q Send-Q Local Address:Port Peer Address:Port Process\n` +
+      // OTHER connection (listed first in ss output, and would win under legacy)
+      `u_str ESTAB 0 0 ${SOCKET_PATH} ${OTHER_SERVER_INODE} * ${OTHER_CLIENT_INODE} users:(("broker",pid=${brokerPid},fd=5))\n` +
+      `u_str ESTAB 0 0 * ${OTHER_CLIENT_INODE} * ${OTHER_SERVER_INODE} users:(("bash",pid=${OTHER_CLIENT_PID},fd=4))\n` +
+      // TARGET connection — what our fd actually points to
+      `u_str ESTAB 0 0 ${SOCKET_PATH} ${TARGET_SERVER_INODE} * ${TARGET_CLIENT_INODE} users:(("broker",pid=${brokerPid},fd=6))\n` +
+      `u_str ESTAB 0 0 * ${TARGET_CLIENT_INODE} * ${TARGET_SERVER_INODE} users:(("bash",pid=${TARGET_CLIENT_PID},fd=4))\n`;
+
+    setupProcMocks(brokerUid, exe, TARGET_CLIENT_PID, cgroupContent);
+
+    // Build a fake `Socket` exposing a synthetic _handle.fd. peercred reads
+    // its inode via fstatSync (mocked at the module boundary above) — we
+    // override the default EBADF stub with a per-fd mapping for this test.
+    const SYNTH_FD = 42;
+    vi.mocked(fs.fstatSync).mockImplementation(
+      // The Stats object is huge; we only need .ino, so cast.
+      ((fd: number) => {
+        if (fd === SYNTH_FD) {
+          return { ino: TARGET_SERVER_INODE } as unknown as fs.Stats;
+        }
+        throw Object.assign(new Error(`unexpected fd: ${fd}`), { code: "EBADF" });
+      }) as unknown as typeof fs.fstatSync,
+    );
+
+    const fakeSocket = { _handle: { fd: SYNTH_FD } } as unknown as import("node:net").Socket;
+    const mockExec = mkMockExec(ssOutput);
+    const result = identify(SOCKET_PATH, fakeSocket, mockExec as any);
+
+    expect(result).not.toBeNull();
+    // Critical: the target client PID, not the OTHER client PID.
+    expect(result?.pid).toBe(TARGET_CLIENT_PID);
+    expect(result?.uid).toBe(brokerUid);
+    expect(result?.systemdUnit).toBe("switchroom-myagent-cron-3.service");
+    // beforeEach() above runs vi.resetAllMocks() before the next test, which
+    // restores fstatSync to its module-level default (EBADF for any fd) —
+    // no manual mockRestore() needed. That was the prior pattern; the
+    // try/finally here is unnecessary because the module-mock provides the
+    // safety net automatically.
   });
 });
 

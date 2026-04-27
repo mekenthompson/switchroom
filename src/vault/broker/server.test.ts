@@ -38,15 +38,11 @@ const TEST_SECRETS: Record<string, VaultEntry> = {
   },
 };
 
-// Minimal SwitchroomConfig for broker tests — ACL checks are skipped in
-// test because identify() returns null (no real ss / /proc in tests),
-// and on Linux the broker falls back to peercred=null → denies get requests.
-// We use a non-Linux-compatible config or mock platform behavior.
-// Instead of fighting Linux peercred in unit tests, we test ACL separately
-// and disable Linux-only denial by providing a testConfig that allows
-// interactive access via allow_interactive=true AND running under a fake exe.
-// The simplest approach: on Linux, skip get tests that require peercred
-// (those are covered by integration tests). On non-Linux, get tests work.
+// Minimal SwitchroomConfig for broker tests. On Linux the broker uses
+// peercred + ACL to identify cron units; the test process isn't one, so
+// `get` requests are denied. ACL behavior is covered by acl.test.ts; here
+// we test the protocol/socket layer. On non-Linux there's no peercred, so
+// the broker serves any same-user caller and `get` round-trips work end-to-end.
 
 function makeMinimalConfig() {
   return {
@@ -57,7 +53,6 @@ function makeMinimalConfig() {
       broker: {
         socket: "~/.switchroom/vault-broker.sock",
         enabled: true,
-        allow_interactive: false,
       },
     },
     agents: {},
@@ -96,8 +91,15 @@ describe("VaultBroker server", () => {
   let broker: VaultBroker;
   let socketPath: string;
   let tmpDir: string;
+  let prevNonLinuxFlag: string | undefined;
 
   beforeEach(async () => {
+    // The broker is Linux-only by design (see issue #129). Tests start the
+    // broker on whatever the CI runner / dev box happens to be, so opt in
+    // to the non-Linux escape hatch here. On Linux this env var is a no-op.
+    prevNonLinuxFlag = process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
+    process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = "1";
+
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "broker-test-"));
     socketPath = path.join(tmpDir, "test.sock");
 
@@ -113,6 +115,11 @@ describe("VaultBroker server", () => {
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     } catch { /* ignore */ }
+    if (prevNonLinuxFlag === undefined) {
+      delete process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
+    } else {
+      process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = prevNonLinuxFlag;
+    }
   });
 
   // ── status ──────────────────────────────────────────────────────────────
@@ -127,9 +134,15 @@ describe("VaultBroker server", () => {
     }
   });
 
-  // ── list ───────────────────────────────────────────────────────────────
+  // ── list (non-Linux only — peercred skipped) ──────────────────────────
 
-  it("list: returns all key names", async () => {
+  it("list: returns all key names (non-Linux or ACL skip)", async () => {
+    if (process.platform === "linux") {
+      // On Linux, `list` requires peercred (PR #130 review fix). The test
+      // process isn't a recognized cron unit, so identify() returns null
+      // and the broker denies. Integration tests cover the cron path.
+      return;
+    }
     const resp = await rpc(socketPath, { v: 1, op: "list" });
     expect(resp.ok).toBe(true);
     if (resp.ok && "keys" in resp) {

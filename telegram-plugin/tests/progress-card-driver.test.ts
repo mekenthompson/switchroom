@@ -140,11 +140,48 @@ describe('progress-card driver', () => {
     const { driver, emits } = harness()
     driver.ingest(enqueue('c1'), null)
     driver.ingest({ kind: 'tool_use', toolName: 'Read' }, 'c1')
+    // Issue #132: a reply tool call is required for the renderer to land
+    // on "✅ Done"; without it the turn-end render is "🙊 Ended without reply".
+    // This test exercises the happy path. See the silent-end test below
+    // for the inverse.
+    driver.ingest({ kind: 'tool_use', toolName: 'mcp__switchroom-telegram__reply' }, 'c1')
     emits.length = 0
     driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c1')
     expect(emits).toHaveLength(1)
     expect(emits[0].done).toBe(true)
     expect(emits[0].html).toContain('✅ <b>Done</b>')
+  })
+
+  it('issue #132: turn ending without reply tool renders 🙊 silent-end', () => {
+    const { driver, emits } = harness()
+    driver.ingest(enqueue('c1'), null)
+    // Tool work happens but no reply / stream_reply is ever called.
+    driver.ingest({ kind: 'tool_use', toolName: 'Bash' }, 'c1')
+    driver.ingest({ kind: 'tool_result', toolUseId: 'a', toolName: 'Bash' }, 'c1')
+    driver.ingest({ kind: 'tool_use', toolName: 'Read' }, 'c1')
+    driver.ingest({ kind: 'tool_result', toolUseId: 'b', toolName: 'Read' }, 'c1')
+    emits.length = 0
+    driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c1')
+    expect(emits).toHaveLength(1)
+    expect(emits[0].done).toBe(true)
+    // The header swaps from ✅ Done to 🙊 Ended without reply, and the
+    // diagnostic hint line tells the user what happened.
+    expect(emits[0].html).toContain('🙊 <b>Ended without reply</b>')
+    expect(emits[0].html).not.toContain('✅ <b>Done</b>')
+    expect(emits[0].html).toContain("Agent ran tools but didn't send a reply")
+  })
+
+  it('issue #132: stream_reply also flips replyToolCalled (any plugin prefix)', () => {
+    const { driver, emits } = harness()
+    driver.ingest(enqueue('c1'), null)
+    driver.ingest({ kind: 'tool_use', toolName: 'Read' }, 'c1')
+    // Different MCP server-key prefix — old "clerk-telegram" still matches
+    // because tool-names.ts uses a regex on `mcp__*__telegram__`.
+    driver.ingest({ kind: 'tool_use', toolName: 'mcp__clerk-telegram__stream_reply' }, 'c1')
+    emits.length = 0
+    driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c1')
+    expect(emits[0].html).toContain('✅ <b>Done</b>')
+    expect(emits[0].html).not.toContain('🙊')
   })
 
   it('coalesces bursts of non-stage-changing events', () => {
@@ -336,6 +373,9 @@ describe('progress-card checklist rendering', () => {
     driver.ingest({ kind: 'tool_result', toolUseId: 't1', toolName: 'Read' }, 'c1')
     driver.ingest({ kind: 'tool_use', toolName: 'Bash', toolUseId: 't2', input: { command: 'echo hi' } }, 'c1')
     driver.ingest({ kind: 'tool_result', toolUseId: 't2', toolName: 'Bash' }, 'c1')
+    // Reply tool call is required to render "✅ Done" — see issue #132.
+    driver.ingest({ kind: 'tool_use', toolName: 'mcp__switchroom-telegram__reply', toolUseId: 't3' }, 'c1')
+    driver.ingest({ kind: 'tool_result', toolUseId: 't3', toolName: 'mcp__switchroom-telegram__reply' }, 'c1')
     driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c1')
     const final = emits.at(-1)!
     expect(final.done).toBe(true)

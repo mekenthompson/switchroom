@@ -365,6 +365,23 @@ export class VaultBroker {
         socket.write(encodeResponse(errorResponse("LOCKED", "Vault is locked")));
         return;
       }
+      // Issue #129 review: `list` previously skipped peercred entirely, so
+      // any same-UID caller could enumerate vault key names without proving
+      // identity. Inconsistent with `get`, which requires peer != null on
+      // Linux. Apply the same Linux peercred gate here so cron units can
+      // still list (for diagnostics) but a non-cron same-UID caller can't.
+      // On non-Linux the socket-file mode 0600 remains the only gate.
+      if (process.platform === "linux" && peer === null) {
+        socket.write(
+          encodeResponse(
+            errorResponse(
+              "DENIED",
+              "Unable to identify caller (peercred unavailable); denying on Linux",
+            ),
+          ),
+        );
+        return;
+      }
       socket.write(encodeResponse({ ok: true, keys: Object.keys(this.secrets) }));
       return;
     }

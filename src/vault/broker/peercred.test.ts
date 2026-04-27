@@ -20,7 +20,21 @@ import * as fs from "node:fs";
 
 vi.mock("node:fs", async () => {
   const actual = await vi.importActual<typeof import("node:fs")>("node:fs");
-  return { ...actual, readFileSync: vi.fn(), readlinkSync: vi.fn() };
+  return {
+    ...actual,
+    readFileSync: vi.fn(),
+    readlinkSync: vi.fn(),
+    // fstatSync is destructured at import time in peercred.ts
+    // (`import { fstatSync } from "node:fs"`), so the mock must replace it
+    // here at the module boundary. A later `vi.spyOn(fs, "fstatSync")`
+    // would only patch the namespace object, not peercred's bound copy.
+    // Default behavior: throw EBADF for any fd. Tests that exercise the
+    // socket-fd → inode path call vi.mocked(fs.fstatSync).mockImplementation
+    // to return a synthetic inode for their specific fd.
+    fstatSync: vi.fn().mockImplementation(() => {
+      throw Object.assign(new Error("EBADF: bad file descriptor"), { code: "EBADF" });
+    }),
+  };
 });
 
 // We cannot easily mock process.platform, so we mock the identify function
@@ -341,32 +355,33 @@ describe("peercred.identify", () => {
     setupProcMocks(brokerUid, exe, TARGET_CLIENT_PID, cgroupContent);
 
     // Build a fake `Socket` exposing a synthetic _handle.fd. peercred reads
-    // its inode via fstatSync, which we can't easily mock here without
-    // pulling in more vi.mock plumbing — so we mock fstat too.
+    // its inode via fstatSync (mocked at the module boundary above) — we
+    // override the default EBADF stub with a per-fd mapping for this test.
     const SYNTH_FD = 42;
-    const fstatSpy = vi.spyOn(fs, "fstatSync");
-    fstatSpy.mockImplementation((fd: number) => {
-      if (fd === SYNTH_FD) {
-        return { ino: TARGET_SERVER_INODE } as unknown as fs.Stats;
-      }
-      throw new Error(`unexpected fd: ${fd}`);
-    });
+    vi.mocked(fs.fstatSync).mockImplementation(
+      // The Stats object is huge; we only need .ino, so cast.
+      ((fd: number) => {
+        if (fd === SYNTH_FD) {
+          return { ino: TARGET_SERVER_INODE } as unknown as fs.Stats;
+        }
+        throw Object.assign(new Error(`unexpected fd: ${fd}`), { code: "EBADF" });
+      }) as unknown as typeof fs.fstatSync,
+    );
 
-    // try/finally so an assertion failure still restores the spy and
-    // doesn't leak fstat-mocked state into subsequent tests in the file.
-    try {
-      const fakeSocket = { _handle: { fd: SYNTH_FD } } as unknown as import("node:net").Socket;
-      const mockExec = mkMockExec(ssOutput);
-      const result = identify(SOCKET_PATH, fakeSocket, mockExec as any);
+    const fakeSocket = { _handle: { fd: SYNTH_FD } } as unknown as import("node:net").Socket;
+    const mockExec = mkMockExec(ssOutput);
+    const result = identify(SOCKET_PATH, fakeSocket, mockExec as any);
 
-      expect(result).not.toBeNull();
-      // Critical: the target client PID, not the OTHER client PID.
-      expect(result?.pid).toBe(TARGET_CLIENT_PID);
-      expect(result?.uid).toBe(brokerUid);
-      expect(result?.systemdUnit).toBe("switchroom-myagent-cron-3.service");
-    } finally {
-      fstatSpy.mockRestore();
-    }
+    expect(result).not.toBeNull();
+    // Critical: the target client PID, not the OTHER client PID.
+    expect(result?.pid).toBe(TARGET_CLIENT_PID);
+    expect(result?.uid).toBe(brokerUid);
+    expect(result?.systemdUnit).toBe("switchroom-myagent-cron-3.service");
+    // beforeEach() above runs vi.resetAllMocks() before the next test, which
+    // restores fstatSync to its module-level default (EBADF for any fd) —
+    // no manual mockRestore() needed. That was the prior pattern; the
+    // try/finally here is unnecessary because the module-mock provides the
+    // safety net automatically.
   });
 });
 

@@ -38,6 +38,19 @@ const TEST_SECRETS: Record<string, VaultEntry> = {
   },
 };
 
+/**
+ * Deep-clone TEST_SECRETS for each broker. `broker.lock()` mutates entry
+ * values in place (zeros them as a best-effort wipe before GC), so a shallow
+ * copy `{ ...TEST_SECRETS }` would leak that mutation across tests via the
+ * shared entry objects. Concretely: once the "lock wipes secrets" test runs,
+ * subsequent tests that read `foo` get `value: ""` instead of `bar-value`.
+ * The Linux-skipped get tests masked this for a long time; the new
+ * `_testIdentify` happy-path tests below run on Linux and surface the issue.
+ */
+function cloneSecrets(): Record<string, VaultEntry> {
+  return JSON.parse(JSON.stringify(TEST_SECRETS));
+}
+
 // Minimal SwitchroomConfig for broker tests. On Linux the broker uses
 // peercred + ACL to identify cron units; the test process isn't one, so
 // `get` requests are denied. ACL behavior is covered by acl.test.ts; here
@@ -104,7 +117,7 @@ describe("VaultBroker server", () => {
     socketPath = path.join(tmpDir, "test.sock");
 
     broker = new VaultBroker({
-      _testSecrets: { ...TEST_SECRETS },
+      _testSecrets: cloneSecrets(),
       _testConfig: makeMinimalConfig(),
     });
     await broker.start(socketPath, undefined, undefined);
@@ -279,4 +292,188 @@ describe("VaultBroker server", () => {
       });
     });
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Gated-paths coverage with a fake "I'm an allowed cron unit" identity.
+//
+// The broker's real `identify()` reads /proc and ss/SO_PEERCRED to resolve the
+// caller's systemd unit. Under `vitest`/`bun test` the test process is not a
+// switchroom cron unit, so on Linux the gated `list`/`get` ops correctly
+// return DENIED — that's why the suite above skips them on Linux.
+//
+// The `_testIdentify` test hook on VaultBroker (server.ts) lets us inject a
+// synthetic PeerInfo so the broker treats the test client as an allowed cron
+// unit. That gives us Linux-side happy-path coverage without spinning up
+// systemd-run (the realm of integration tests under tests/integration).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("VaultBroker server: gated paths (allowed cron identity via _testIdentify)", () => {
+  let broker: VaultBroker;
+  let socketPath: string;
+  let tmpDir: string;
+  let prevNonLinuxFlag: string | undefined;
+
+  // Synthetic identity: caller is `switchroom-myagent-cron-0.service`.
+  // The matching ACL config grants access to all keys in TEST_SECRETS for
+  // that exact (agent, schedule index) pair.
+  const FAKE_PEER = {
+    uid: process.getuid?.() ?? 1000,
+    pid: 99999,
+    exe: "/usr/bin/bash",
+    systemdUnit: "switchroom-myagent-cron-0.service" as string | null,
+  };
+
+  function makeAclConfig() {
+    // ACL-allowed keys = every test-secret key + "nonexistent" so the
+    // UNKNOWN_KEY test below actually reaches the key-lookup code path
+    // instead of being short-circuited by ACL deny. See the comment on
+    // that test for why this matters.
+    const allowedKeys = [...Object.keys(TEST_SECRETS), "nonexistent"];
+    return {
+      switchroom: { version: 1 },
+      telegram: { bot_token: "test", forum_chat_id: "123" },
+      vault: {
+        path: "~/.switchroom/vault.enc",
+        broker: {
+          socket: "~/.switchroom/vault-broker.sock",
+          enabled: true,
+        },
+      },
+      agents: {
+        myagent: {
+          schedule: [
+            { secrets: allowedKeys },
+          ],
+        },
+      },
+    } as any;
+  }
+
+  beforeEach(async () => {
+    prevNonLinuxFlag = process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
+    process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = "1";
+
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "broker-acl-test-"));
+    socketPath = path.join(tmpDir, "test.sock");
+
+    broker = new VaultBroker({
+      _testSecrets: cloneSecrets(),
+      _testConfig: makeAclConfig(),
+      _testIdentify: () => FAKE_PEER,
+    });
+    await broker.start(socketPath, undefined, undefined);
+  });
+
+  afterEach(() => {
+    broker.stop();
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch { /* ignore */ }
+    if (prevNonLinuxFlag === undefined) {
+      delete process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
+    } else {
+      process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = prevNonLinuxFlag;
+    }
+  });
+
+  it("list: returns all key names (allowed cron unit)", async () => {
+    const resp = await rpc(socketPath, { v: 1, op: "list" });
+    expect(resp.ok).toBe(true);
+    if (resp.ok && "keys" in resp) {
+      expect(resp.keys.sort()).toEqual(Object.keys(TEST_SECRETS).sort());
+    }
+  });
+
+  it("get: returns entry for ACL-allowed key", async () => {
+    const resp = await rpc(socketPath, { v: 1, op: "get", key: "foo" });
+    expect(resp.ok).toBe(true);
+    if (resp.ok && "entry" in resp) {
+      expect(resp.entry).toEqual({ kind: "string", value: "bar-value" });
+    }
+  });
+
+  it("get: returns UNKNOWN_KEY for non-existent key", async () => {
+    // makeAclConfig() puts "nonexistent" in the ACL allowlist on purpose
+    // — without that, this request would short-circuit to DENIED at the
+    // ACL gate (key not in schedule.secrets) and never reach the
+    // key-lookup branch we want to assert here.
+    const resp = await rpc(socketPath, { v: 1, op: "get", key: "nonexistent" });
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.code).toBe("UNKNOWN_KEY");
+    }
+  });
+
+  it("get: returns DENIED for ACL-disallowed key", async () => {
+    // "not-in-acl" is neither in TEST_SECRETS nor in the ACL allowlist,
+    // so the ACL gate denies before we ever look up the key. This is
+    // the security-relevant path: even when the caller is a real cron
+    // unit, they can only read keys their schedule entry was granted.
+    const resp = await rpc(socketPath, { v: 1, op: "get", key: "not-in-acl" });
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.code).toBe("DENIED");
+    }
+  });
+});
+
+describe("VaultBroker server: gated paths (denied identity via _testIdentify)", () => {
+  let broker: VaultBroker;
+  let socketPath: string;
+  let tmpDir: string;
+  let prevNonLinuxFlag: string | undefined;
+
+  beforeEach(async () => {
+    prevNonLinuxFlag = process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
+    process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = "1";
+
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "broker-deny-test-"));
+    socketPath = path.join(tmpDir, "test.sock");
+
+    broker = new VaultBroker({
+      _testSecrets: cloneSecrets(),
+      _testConfig: makeMinimalConfig(),
+      // Simulate "unidentified caller" — same shape as production when
+      // identify() can't resolve the peer (foreign UID, exited process, etc.)
+      _testIdentify: () => null,
+    });
+    await broker.start(socketPath, undefined, undefined);
+  });
+
+  afterEach(() => {
+    broker.stop();
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch { /* ignore */ }
+    if (prevNonLinuxFlag === undefined) {
+      delete process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
+    } else {
+      process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = prevNonLinuxFlag;
+    }
+  });
+
+  // The deny path is Linux-specific: on non-Linux the broker doesn't gate on
+  // peercred (socket-file mode is the only check), so list/get pass through.
+  it.skipIf(process.platform !== "linux")(
+    "list: DENIED when caller cannot be identified",
+    async () => {
+      const resp = await rpc(socketPath, { v: 1, op: "list" });
+      expect(resp.ok).toBe(false);
+      if (!resp.ok) {
+        expect(resp.code).toBe("DENIED");
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "get: DENIED when caller cannot be identified",
+    async () => {
+      const resp = await rpc(socketPath, { v: 1, op: "get", key: "foo" });
+      expect(resp.ok).toBe(false);
+      if (!resp.ok) {
+        expect(resp.code).toBe("DENIED");
+      }
+    },
+  );
 });

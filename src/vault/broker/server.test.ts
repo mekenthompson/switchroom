@@ -312,6 +312,11 @@ describe("VaultBroker server: gated paths (allowed cron identity via _testIdenti
   };
 
   function makeAclConfig() {
+    // ACL-allowed keys = every test-secret key + "nonexistent" so the
+    // UNKNOWN_KEY test below actually reaches the key-lookup code path
+    // instead of being short-circuited by ACL deny. See the comment on
+    // that test for why this matters.
+    const allowedKeys = [...Object.keys(TEST_SECRETS), "nonexistent"];
     return {
       switchroom: { version: 1 },
       telegram: { bot_token: "test", forum_chat_id: "123" },
@@ -325,7 +330,7 @@ describe("VaultBroker server: gated paths (allowed cron identity via _testIdenti
       agents: {
         myagent: {
           schedule: [
-            { secrets: Object.keys(TEST_SECRETS) },
+            { secrets: allowedKeys },
           ],
         },
       },
@@ -376,10 +381,26 @@ describe("VaultBroker server: gated paths (allowed cron identity via _testIdenti
   });
 
   it("get: returns UNKNOWN_KEY for non-existent key", async () => {
+    // makeAclConfig() puts "nonexistent" in the ACL allowlist on purpose
+    // — without that, this request would short-circuit to DENIED at the
+    // ACL gate (key not in schedule.secrets) and never reach the
+    // key-lookup branch we want to assert here.
     const resp = await rpc(socketPath, { v: 1, op: "get", key: "nonexistent" });
     expect(resp.ok).toBe(false);
     if (!resp.ok) {
       expect(resp.code).toBe("UNKNOWN_KEY");
+    }
+  });
+
+  it("get: returns DENIED for ACL-disallowed key", async () => {
+    // "not-in-acl" is neither in TEST_SECRETS nor in the ACL allowlist,
+    // so the ACL gate denies before we ever look up the key. This is
+    // the security-relevant path: even when the caller is a real cron
+    // unit, they can only read keys their schedule entry was granted.
+    const resp = await rpc(socketPath, { v: 1, op: "get", key: "not-in-acl" });
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.code).toBe("DENIED");
     }
   });
 });

@@ -156,6 +156,31 @@ describe('StatusReactionController', () => {
     expect(calls).toEqual(['👀', '😱'])
   })
 
+  it('issue #132: setSilent is terminal and uses 🙊 (distinct from 👍 done)', async () => {
+    const { emit, calls } = makeEmitter()
+    const ctrl = new StatusReactionController(emit)
+    ctrl.setQueued()
+    await flush()
+    ctrl.setTool('Bash')
+    vi.advanceTimersByTime(800)
+    await flush()
+
+    // Turn ends without producing a reply.
+    ctrl.setSilent()
+    await flush()
+    // 🙊 is in the Telegram bot reaction whitelist (speak-no-evil monkey).
+    // The choice signals "agent ran tools but said nothing" — distinct
+    // from 👍 which the user reads as "agent acknowledged with a reply".
+    // setTool('Bash') resolves to the 'coding' state → 👨‍💻 (first variant).
+    expect(calls).toEqual(['👀', '👨‍💻', '🙊'])
+
+    // Subsequent calls are no-ops (terminal).
+    ctrl.setThinking()
+    vi.advanceTimersByTime(5000)
+    await flush()
+    expect(calls).toEqual(['👀', '👨‍💻', '🙊'])
+  })
+
   it('promotes to stallSoft after 30s of no progress', async () => {
     const { emit, calls } = makeEmitter()
     const ctrl = new StatusReactionController(emit)

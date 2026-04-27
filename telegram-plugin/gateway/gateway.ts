@@ -137,6 +137,8 @@ import {
 } from '../auto-fallback.js'
 import { markSlotQuotaExhausted } from '../../src/auth/accounts.js'
 import { fallbackToNextSlot, currentActiveSlot, type AuthCodeOutcome } from '../../src/auth/manager.js'
+import { loadConfig as loadSwitchroomConfig } from '../../src/config/loader.js'
+import type { AgentAudit } from '../welcome-text.js'
 import { shouldSweepChatAtBoot } from './boot-sweep-filter.js'
 
 import { createIpcServer, type IpcClient, type IpcServer } from './ipc-server.js'
@@ -3629,6 +3631,72 @@ bot.use(async (ctx, next) => {
 
 // ─── Bot commands ─────────────────────────────────────────────────────────
 
+/**
+ * Build the optional audit details surfaced on `/status` (Profile, Tools,
+ * Skills, Limits, Channel, Memory, Version). Populated from switchroom.yaml
+ * at request time so the values reflect the live config.
+ *
+ * Pre-#142 this content was baked into a SessionStart curl script and
+ * pushed on every restart. Now it's pulled on demand via /status (#142
+ * PR 3) — server-side render of the same row shape.
+ *
+ * Best-effort: any failure (yaml unreadable, agent missing, etc.) returns
+ * undefined so /status falls back to its previous (auth + uptime + agent
+ * name) shape rather than blocking the reply.
+ */
+function buildAgentAudit(agentName: string): AgentAudit | undefined {
+  try {
+    const config = loadSwitchroomConfig()
+    const agentConfig = config.agents?.[agentName]
+    if (!agentConfig) return undefined
+
+    // Tools allowlist — same shape as the deleted greeting:
+    //   "all" / first 5 names + "+N more" / "none (default)".
+    const allow = agentConfig.tools?.allow
+    const tools = allow?.includes('all')
+      ? 'all'
+      : (allow?.slice(0, 5).join(', ') ?? 'none (default)')
+        + ((allow?.length ?? 0) > 5 ? ` +${(allow?.length ?? 0) - 5} more` : '')
+
+    const denyList = agentConfig.tools?.deny
+    const toolsDeny = denyList?.length ? denyList.join(', ') : null
+
+    // Skills cap at 6 names + "…+N more" so the row never wraps 4+
+    // mobile lines (matches the deleted greeting's behavior).
+    const skillsList = agentConfig.skills
+    let skills: string | null = null
+    if (skillsList?.length) {
+      const max = 6
+      skills = skillsList.length <= max
+        ? skillsList.join(', ')
+        : `${skillsList.slice(0, max).join(', ')}, …+${skillsList.length - max} more`
+    }
+
+    // Session limits — concatenated idle + max-turns, or "unlimited".
+    const session: string[] = []
+    if (agentConfig.session?.max_idle) session.push(`idle ${agentConfig.session.max_idle}`)
+    if (agentConfig.session?.max_turns) session.push(`${agentConfig.session.max_turns} turns`)
+    const limits = session.length ? session.join(', ') : 'unlimited (default)'
+
+    const channel = agentConfig.channels?.telegram?.plugin ?? 'switchroom (default)'
+    const memoryBank = agentConfig.memory?.collection ?? `${agentName} (default)`
+
+    return {
+      version: formatBootVersion(),
+      tools,
+      toolsDeny,
+      skills,
+      limits,
+      channel,
+      memoryBank,
+    }
+  } catch {
+    // Silent failure — gateway runs in agent dirs without switchroom.yaml
+    // path resolution always succeeding. /status falls back gracefully.
+    return undefined
+  }
+}
+
 // Build an AgentMetadata snapshot for the current agent by shelling out
 // to `switchroom agent list --json` and `switchroom auth status --json`.
 // Best-effort — any missing piece renders as a placeholder in the text
@@ -3669,6 +3737,7 @@ function buildAgentMetadata(agentName: string): AgentMetadata {
     uptime: a?.uptime ?? null,
     status: a?.status ?? null,
     auth: authSummary,
+    audit: buildAgentAudit(agentName),
   }
 }
 

@@ -161,7 +161,94 @@ describe("statusPairedText", () => {
     const out = statusPairedText({ user: "@ken", meta: withStatus });
     expect(out).toContain("Status: <code>running</code> · up 3h 12m");
   });
+
+  // Issue #142 PR 3 — audit details surfaced on /status when the gateway
+  // successfully loads switchroom.yaml. Pre-#142 this content lived in
+  // the SessionStart greeting card; now it's pulled on demand.
+  describe("audit block (#142 PR 3)", () => {
+    const audit = {
+      version: "v0.3.0+44 · 2h ago",
+      tools: "Read, Write, Bash, Edit, Grep +12 more",
+      toolsDeny: "WebFetch",
+      skills: "git, telegram, vault, +3 more",
+      limits: "idle 30m, 50 turns",
+      channel: "switchroom (default)",
+      memoryBank: "assistant",
+    };
+
+    it("does NOT render audit rows when meta.audit is undefined (yaml load failed)", () => {
+      const out = statusPairedText({ user: "@ken", meta });
+      expect(out).not.toContain("Version");
+      expect(out).not.toContain("Tools");
+      expect(out).not.toContain("Channel");
+    });
+
+    it("renders all audit rows when meta.audit is fully populated", () => {
+      const withAudit: AgentMetadata = { ...meta, extendsProfile: "klanker", audit };
+      const out = statusPairedText({ user: "@ken", meta: withAudit });
+      expect(out).toContain("<b>Version</b> v0.3.0+44 · 2h ago");
+      expect(out).toContain("<b>Profile</b> klanker");
+      expect(out).toContain("<b>Tools</b> Read, Write, Bash, Edit, Grep +12 more");
+      expect(out).toContain("<b>Deny</b> WebFetch");
+      expect(out).toContain("<b>Skills</b> git, telegram, vault, +3 more");
+      expect(out).toContain("<b>Limits</b> idle 30m, 50 turns");
+      expect(out).toContain("<b>Channel</b> switchroom (default)");
+      expect(out).toContain("<b>Memory</b> assistant");
+    });
+
+    it("omits Deny row when toolsDeny is null", () => {
+      const partial: AgentMetadata = { ...meta, audit: { ...audit, toolsDeny: null } };
+      const out = statusPairedText({ user: "@ken", meta: partial });
+      expect(out).not.toContain("Deny");
+      expect(out).toContain("<b>Tools</b>");
+    });
+
+    it("omits Skills row when skills is null (agent has no bundled skills)", () => {
+      const partial: AgentMetadata = { ...meta, audit: { ...audit, skills: null } };
+      const out = statusPairedText({ user: "@ken", meta: partial });
+      expect(out).not.toContain("Skills");
+    });
+
+    it("renders the audit block AFTER the live state (Agent/Auth/Status)", () => {
+      const withAudit: AgentMetadata = { ...meta, status: "running", uptime: "1h", audit };
+      const out = statusPairedText({ user: "@ken", meta: withAudit });
+      const statusIdx = out.indexOf("Status:");
+      const versionIdx = out.indexOf("Version");
+      expect(statusIdx).toBeGreaterThan(0);
+      expect(versionIdx).toBeGreaterThan(statusIdx);
+    });
+
+    it("escapes HTML in audit values", () => {
+      const hostile: AgentAuditLike = {
+        version: "<script>alert(1)</script>",
+        tools: "Read & <Write>",
+        toolsDeny: null,
+        skills: null,
+        limits: "idle 30m",
+        channel: "switchroom",
+        memoryBank: "bank<>name",
+      };
+      const out = statusPairedText({ user: "@ken", meta: { ...meta, audit: hostile } });
+      expect(out).not.toContain("<script>alert");
+      expect(out).toContain("&lt;script&gt;");
+      expect(out).toContain("Read &amp; &lt;Write&gt;");
+      expect(out).toContain("bank&lt;&gt;name");
+    });
+
+    it("handles empty extendsProfile (no Profile row when meta.extendsProfile is null)", () => {
+      const withAudit: AgentMetadata = { ...meta, extendsProfile: null, audit };
+      const out = statusPairedText({ user: "@ken", meta: withAudit });
+      expect(out).not.toContain("<b>Profile</b>");
+      // But other audit rows still render.
+      expect(out).toContain("<b>Version</b>");
+    });
+  });
 });
+
+// Local alias for the audit shape — duplicates the AgentMetadata.audit
+// type so the test file doesn't have to re-import it just for one
+// hostile-input fixture.
+type AgentAuditLike = NonNullable<AgentMetadata["audit"]>;
 
 describe("statusPendingText / statusUnpairedText", () => {
   it("pending includes the code verbatim", () => {

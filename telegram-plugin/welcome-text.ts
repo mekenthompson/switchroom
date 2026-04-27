@@ -18,6 +18,36 @@ export type AuthSummary = {
   auth_source: string | null;
 };
 
+/**
+ * Optional audit details surfaced on `/status` for a paired user. Populated
+ * from switchroom.yaml at request time so the values reflect the live
+ * config, not what was baked at scaffold time. Pre-#142 this content
+ * lived in the SessionStart greeting card written by `scaffold.ts`; that
+ * surface was deleted in #142 PR 1, and the content is reincarnated here
+ * as on-demand server-side rendering instead of pushed-on-every-restart
+ * client-side curl.
+ *
+ * All fields are optional — gateway only populates them when the yaml
+ * load succeeds. A failure to read the config produces the previous
+ * (auth + uptime + agent name) shape.
+ */
+export type AgentAudit = {
+  /** Pre-formatted version string from build-info, e.g. "v0.3.0+44 · 2h ago". */
+  version?: string;
+  /** Tools allowlist preview — `["all"]` or up to 5 names plus `"+N more"`. */
+  tools?: string;
+  /** Tools denylist as a comma-joined string, or null. */
+  toolsDeny?: string | null;
+  /** Skills bundle preview — up to 6 names + `"…+N more"`, or null. */
+  skills?: string | null;
+  /** Session limits — `"idle 30m, 50 turns"` or `"unlimited (default)"`. */
+  limits?: string;
+  /** Channel plugin name, e.g. `"switchroom (default)"`. */
+  channel?: string;
+  /** Hindsight bank id for memory recall, defaults to agent name. */
+  memoryBank?: string;
+};
+
 export type AgentMetadata = {
   agentName: string;
   model: string | null;
@@ -27,6 +57,8 @@ export type AgentMetadata = {
   uptime: string | null;
   status: string | null;
   auth: AuthSummary | null;
+  /** Live audit details — present only when switchroom.yaml loaded cleanly. */
+  audit?: AgentAudit;
 };
 
 // Tiny escaper — duplicates the one in gateway.ts / server.ts so this
@@ -112,6 +144,12 @@ export function helpText(agentName: string): string {
 /**
  * Rich `/status` output for a paired user. Includes agent, model,
  * auth state, and optional uptime / topic info.
+ *
+ * When `meta.audit` is populated (gateway successfully loaded
+ * switchroom.yaml at request time), the reply also surfaces the full
+ * config audit — Profile, Tools, Skills, Limits, Channel, Memory bank,
+ * Version. This is the on-demand reincarnation of the SessionStart
+ * greeting card deleted in #142 PR 1.
  */
 export function statusPairedText(params: {
   user: string;
@@ -125,6 +163,22 @@ export function statusPairedText(params: {
     `Auth: ${formatAuthLine(meta.auth)}`,
   ];
   if (meta.status) lines.push(`Status: <code>${escapeHtml(meta.status)}</code>${meta.uptime ? ` · up ${escapeHtml(meta.uptime)}` : ""}`);
+
+  const audit = meta.audit;
+  if (audit) {
+    // Blank separator before the audit block so the reply reads as two
+    // sections: live state up top, config audit below.
+    lines.push("");
+    if (audit.version) lines.push(`<b>Version</b> ${escapeHtml(audit.version)}`);
+    if (meta.extendsProfile) lines.push(`<b>Profile</b> ${escapeHtml(meta.extendsProfile)}`);
+    if (audit.tools) lines.push(`<b>Tools</b> ${escapeHtml(audit.tools)}`);
+    if (audit.toolsDeny) lines.push(`<b>Deny</b> ${escapeHtml(audit.toolsDeny)}`);
+    if (audit.skills) lines.push(`<b>Skills</b> ${escapeHtml(audit.skills)}`);
+    if (audit.limits) lines.push(`<b>Limits</b> ${escapeHtml(audit.limits)}`);
+    if (audit.channel) lines.push(`<b>Channel</b> ${escapeHtml(audit.channel)}`);
+    if (audit.memoryBank) lines.push(`<b>Memory</b> ${escapeHtml(audit.memoryBank)}`);
+  }
+
   return lines.join("\n");
 }
 

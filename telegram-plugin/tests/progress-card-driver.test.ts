@@ -625,6 +625,88 @@ describe('progress-card driver — zombie ceiling (maxIdleMs)', () => {
     expect(completeCalls).toHaveLength(1)
   })
 
+  it('ghost-pin safety net: orphan never reports turn_end → maxIdleMs auto-closes (#142 follow-up)', () => {
+    // The orphan-defer change in this PR makes `hasAnyRunningSubAgent` the
+    // defer gate. The intended safety-net argument is that an orphan whose
+    // `sub_agent_turn_end` never arrives (JSONL-delivery race, agent
+    // process crash mid-tool, etc.) won't ghost-pin forever because the
+    // heartbeat zombie ceiling (maxIdleMs) force-closes any card whose
+    // last real session event is older than the cutoff.
+    //
+    // This test pins that safety net explicitly. Without it, a future
+    // change to maxIdleMs default (e.g. raising it to 24h or disabling
+    // it) would silently re-introduce the ghost-pin failure mode that
+    // PR #49's correlated-only carve-out was originally designed to
+    // prevent (#31, #43).
+    let now = 1000
+    const timers: Array<{ fireAt: number; fn: () => void; ref: number; repeat?: number }> = []
+    let nextRef = 0
+    const completeCalls: Array<{ chatId: string }> = []
+    const emits: Array<{ done: boolean }> = []
+    const driver = createProgressDriver({
+      emit: (a) => emits.push({ done: a.done }),
+      onTurnComplete: (a) => completeCalls.push({ chatId: a.chatId }),
+      heartbeatMs: 1000,
+      maxIdleMs: 5_000,        // tight test cutoff
+      initialDelayMs: 0,
+      now: () => now,
+      setTimeout: (fn, ms) => {
+        const ref = nextRef++
+        timers.push({ fireAt: now + ms, fn, ref })
+        return { ref }
+      },
+      clearTimeout: (handle) => {
+        const target = (handle as { ref: number }).ref
+        const idx = timers.findIndex((t) => t.ref === target)
+        if (idx !== -1) timers.splice(idx, 1)
+      },
+      setInterval: (fn, ms) => {
+        const ref = nextRef++
+        timers.push({ fireAt: now + ms, fn, ref, repeat: ms })
+        return { ref }
+      },
+      clearInterval: (handle) => {
+        const target = (handle as { ref: number }).ref
+        const idx = timers.findIndex((t) => t.ref === target)
+        if (idx !== -1) timers.splice(idx, 1)
+      },
+    })
+    const advance = (ms: number): void => {
+      now += ms
+      for (;;) {
+        timers.sort((a, b) => a.fireAt - b.fireAt)
+        const next = timers[0]
+        if (!next || next.fireAt > now) break
+        if (next.repeat != null) {
+          next.fireAt += next.repeat
+          next.fn()
+        } else {
+          timers.shift()
+          next.fn()
+        }
+      }
+    }
+
+    // Setup: orphan sub-agent dispatched, parent turn_end fires while
+    // orphan is still running (the new defer behavior holds the card).
+    driver.ingest(enqueue('c1'), null)
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'orphan', firstPromptText: 'P' }, 'c1')
+    driver.ingest({ kind: 'turn_end', durationMs: 1000 }, 'c1')
+    advance(0)
+    expect(completeCalls).toHaveLength(0) // deferred — orphan still running
+
+    // No `sub_agent_turn_end` ever arrives. lastEventAt is stuck at the
+    // turn_end timestamp. After maxIdleMs (5s here, 5min in production)
+    // the heartbeat zombie ceiling must fire and close the card so the
+    // pin doesn't ghost forever.
+    advance(6_000) // past the 5s cutoff
+    expect(completeCalls).toHaveLength(1)
+    expect(completeCalls[0].chatId).toBe('c1')
+    // Final emit carries done=true so the gateway unpins.
+    const lastEmit = emits[emits.length - 1]
+    expect(lastEmit?.done).toBe(true)
+  })
+
   it('maxIdleMs=0 disables the zombie ceiling entirely', () => {
     const completeCalls: Array<{ chatId: string }> = []
     const { driver, advance } = harness(500, 400, {
@@ -1458,6 +1540,38 @@ describe('forceCompleteTurn — external completion signal', () => {
     expect(emitted).toHaveLength(1)
   })
 
+  it('pendingCompletion: orphan sub-agent (run_in_background) gates defer (closes #87)', () => {
+    // `Agent({run_in_background:true})` produces an orphan sub-agent because
+    // the parent's tool_result lands BEFORE sub_agent_started — there is no
+    // matching pendingAgentSpawn for prompt-text correlation, so
+    // parentToolUseId stays null. Pre-fix, the defer gate was correlated-
+    // only, orphans were excluded, and the card unpinned at parent turn_end
+    // while the background worker was still running. After the fix,
+    // `hasAnyRunningSubAgent` gates the defer and the card stays pinned
+    // until the orphan reports done.
+    const emitted: Array<unknown> = []
+    const { driver, advance } = harness(0, 0, {
+      initialDelayMs: 0,
+      onTurnComplete: (args) => emitted.push(args),
+    })
+
+    driver.ingest(enqueue('c'), null)
+    // No preceding tool_use Agent → sub_agent_started has no parent to
+    // correlate to → orphan (parentToolUseId == null).
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'X', firstPromptText: 'P' }, 'c')
+    driver.ingest({ kind: 'turn_end', durationMs: 1000 }, 'c')
+    advance(0)
+
+    // Parent turn_end landed but orphan X is still running → defer must
+    // hold. Pre-fix this would have completed immediately (orphans excluded).
+    expect(emitted).toHaveLength(0)
+
+    // Orphan reports its own turn_end → completion fires.
+    driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'X', durationMs: 5000 }, 'c')
+    advance(0)
+    expect(emitted).toHaveLength(1)
+  })
+
   it('two sub-agents running: completion waits for the last one', () => {
     const emitted: Array<unknown> = []
     const { driver, advance } = harness(0, 0, {
@@ -1515,6 +1629,31 @@ describe('forceCompleteTurn — external completion signal', () => {
     expect(emitted).toHaveLength(0)
 
     // Sub-agent eventually finishes.
+    driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'X', durationMs: 5000 }, 'c')
+    advance(0)
+    expect(emitted).toHaveLength(1)
+  })
+
+  it('forceCompleteTurn with running orphan sub-agent defers (closes #87)', () => {
+    // The orphan-defer test above (`pendingCompletion: orphan sub-agent`)
+    // exercises the turn_end path. This test pins the same gate on the
+    // forceCompleteTurn path — stream_reply(done=true) arriving before
+    // turn_end while an orphan from `Agent({run_in_background:true})` is
+    // still running must defer, not complete immediately.
+    const emitted: Array<unknown> = []
+    const { driver, advance } = harness(0, 0, {
+      initialDelayMs: 0,
+      onTurnComplete: (args) => emitted.push(args),
+    })
+
+    driver.ingest(enqueue('c'), null)
+    // No preceding tool_use Agent → orphan (parentToolUseId == null).
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'X', firstPromptText: 'P' }, 'c')
+
+    driver.forceCompleteTurn({ chatId: 'c' })
+    advance(0)
+    expect(emitted).toHaveLength(0)
+
     driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'X', durationMs: 5000 }, 'c')
     advance(0)
     expect(emitted).toHaveLength(1)

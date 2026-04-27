@@ -17,7 +17,6 @@
 
 import type { SessionEvent } from './session-tail.js'
 import {
-  hasInFlightSubAgents,
   hasAnyRunningSubAgent,
   initialState,
   reduce,
@@ -512,7 +511,13 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
    */
   function maybeCompleteDeferredTurn(cs: PerChatState): void {
     if (!cs.pendingCompletion) return
-    if (hasInFlightSubAgents(cs.state)) return
+    // Gate on ANY running sub-agent (correlated OR orphan). Orphans from
+    // `Agent({run_in_background:true})` only deregister via their own
+    // `sub_agent_turn_end` — the card must stay pinned until then so the
+    // user sees the background work. Closes #87. Historical ghost-pin
+    // risk (#31/#43) is bounded by `closeZombie` on new enqueue +
+    // `maxIdleMs` heartbeat ceiling.
+    if (hasAnyRunningSubAgent(cs.state)) return
     process.stderr.write(`telegram gateway: progress-card: deferred completion firing turnKey=${cs.turnKey} (last sub-agent finished)\n`)
     flush(cs, /*forceDone*/ true)
     completeTurnFully(cs)
@@ -574,13 +579,12 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       const zombies: PerChatState[] = []
       for (const [, cs] of chats) {
         // Skip only when TRULY done. During the deferred-completion
-        // window (parent turn_end fired but background sub-agents are
-        // still running), reducer stage is 'done' but the card is
-        // still alive. Use `hasAnyRunningSubAgent` (not `hasInFlightSubAgents`)
-        // so orphan background sub-agents also keep the heartbeat alive and
-        // their elapsed-time rows tick visibly — a frozen "✅ Done" card was
-        // the "card went dead" bug. `hasInFlightSubAgents` (correlated-only)
-        // is the DEFER gate; `hasAnyRunningSubAgent` is the DISPLAY gate.
+        // window (parent turn_end fired but sub-agents — correlated or
+        // orphan — are still running), reducer stage is 'done' but the
+        // card is still alive. Keeping the heartbeat ticking lets per-row
+        // elapsed times advance visibly; otherwise the card looks frozen
+        // ("card went dead" bug). Same gate as the defer paths so the
+        // heartbeat lifetime tracks the pin lifetime exactly.
         if (cs.state.stage === 'done' && !hasAnyRunningSubAgent(cs.state)) continue
         // Skip heartbeat for terminal cards — the Telegram message is gone
         // (deleted / bot blocked). No edits should be attempted.
@@ -759,16 +763,15 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     // notification. Ken observed ~13 identical "✅ Done" notifications
     // while two parallel review sub-agents were grinding.
     //
-    // Safe to gate on `hasInFlightSubAgents`: the completion paths
+    // Safe to gate on `hasAnyRunningSubAgent`: the completion paths
     // (`completeTurnFully` / `closeZombie` / `maybeCompleteDeferredTurn`)
-    // either (a) ran when !hasInFlightSubAgents or (b) explicitly marked
-    // every running sub-agent as done in the reducer state BEFORE the
-    // final flush. So at the instant the terminal emit fires, the
-    // condition evaluates to "no running sub-agents" and done=true
-    // flows through correctly.
+    // either (a) ran when no sub-agents are running or (b) explicitly
+    // marked every running sub-agent as done in the reducer state BEFORE
+    // the final flush. Including orphans here keeps `done=true` suppressed
+    // while a background dispatch is still active (closes #87).
     const terminal =
       (forceDone || chatState.state.stage === 'done')
-      && !hasInFlightSubAgents(chatState.state)
+      && !hasAnyRunningSubAgent(chatState.state)
     config.emit({
       chatId: chatState.chatId,
       threadId: chatState.threadId,
@@ -1015,15 +1018,16 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         }
         flush(chatState, /*forceDone*/ event.kind === 'turn_end')
         if (event.kind === 'turn_end') {
-          if (hasInFlightSubAgents(chatState.state)) {
-            // Parent turn ended but correlated sub-agents are still running.
+          if (hasAnyRunningSubAgent(chatState.state)) {
+            // Parent turn ended but at least one sub-agent is still running.
             // Keep the card alive so the sub-agent work stays visible; defer
-            // completion until the last running correlated sub-agent reports
-            // done via its own sub_agent_turn_end (or the parent Agent
-            // tool_result). Orphan sub-agents (parentToolUseId == null) do NOT
-            // gate this defer — they are fire-and-forget for the parent turn's
-            // pin lifecycle (#31 fix). The heartbeat keeps ticking for all
-            // running sub-agents regardless.
+            // completion until the last running sub-agent reports done via
+            // its own sub_agent_turn_end (or the parent Agent tool_result).
+            // Closes #87: orphans from `Agent({run_in_background:true})` now
+            // gate the defer too, so background dispatches stay visible past
+            // parent turn-end. Safety nets: `closeZombie` on new enqueue +
+            // the `maxIdleMs` heartbeat ceiling bound the bad case (orphan
+            // never reports done).
             chatState.pendingCompletion = true
             const correlated: string[] = []
             const orphans: string[] = []
@@ -1033,17 +1037,8 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
                 else orphans.push(k)
               }
             }
-            process.stderr.write(`telegram gateway: progress-card: turn_end deferred turnKey=${chatState.turnKey} reason=in-flight-sub-agents correlated=${correlated.length} orphans=${orphans.length} gatingAgentIds=[${correlated.join(',')}]${orphans.length > 0 ? ` non-gating-orphans=[${orphans.join(',')}]` : ''}\n`)
+            process.stderr.write(`telegram gateway: progress-card: turn_end deferred turnKey=${chatState.turnKey} reason=in-flight-sub-agents correlated=${correlated.length} orphans=${orphans.length} correlatedAgentIds=[${correlated.join(',')}] orphanAgentIds=[${orphans.join(',')}]\n`)
             return
-          }
-          // No correlated in-flight sub-agents: complete the turn.
-          // Log any orphan sub-agents that are still running but not gating.
-          const orphanRunning: string[] = []
-          for (const [k, sa] of chatState.state.subAgents) {
-            if (sa.state === 'running') orphanRunning.push(k)
-          }
-          if (orphanRunning.length > 0) {
-            process.stderr.write(`telegram gateway: progress-card: turn_end completing immediately turnKey=${chatState.turnKey} — orphan-sub-agents-ignored=[${orphanRunning.join(',')}] (fire-and-forget, not gating pin lifecycle)\n`)
           }
           completeTurnFully(chatState)
         }
@@ -1143,13 +1138,17 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       target.state = reduce(target.state, { kind: 'turn_end', durationMs }, now())
       target.lastEventAt = now()
       flush(target, /*forceDone*/ true)
-      if (hasInFlightSubAgents(target.state)) {
+      if (hasAnyRunningSubAgent(target.state)) {
         target.pendingCompletion = true
-        const running: string[] = []
+        const correlated: string[] = []
+        const orphans: string[] = []
         for (const [k, sa] of target.state.subAgents) {
-          if (sa.state === 'running') running.push(k)
+          if (sa.state === 'running') {
+            if (sa.parentToolUseId != null) correlated.push(k)
+            else orphans.push(k)
+          }
         }
-        process.stderr.write(`telegram gateway: progress-card: forceCompleteTurn deferred turnKey=${target.turnKey} reason=in-flight-sub-agents n=${running.length} agentIds=[${running.join(',')}]\n`)
+        process.stderr.write(`telegram gateway: progress-card: forceCompleteTurn deferred turnKey=${target.turnKey} reason=in-flight-sub-agents correlated=${correlated.length} orphans=${orphans.length} correlatedAgentIds=[${correlated.join(',')}] orphanAgentIds=[${orphans.join(',')}]\n`)
         return
       }
       completeTurnFully(target)

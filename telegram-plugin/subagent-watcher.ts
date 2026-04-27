@@ -5,7 +5,7 @@
  * agent-<id>.jsonl files. For each discovered sub-agent it:
  *   1. Registers it in an in-memory registry.
  *   2. Tails the JSONL to count tool calls and detect turn_end.
- *   3. Emits inline notifications for dispatch / stall / completion events.
+ *   3. Emits inline notifications for stall / completion state transitions.
  *
  * Sub-agent state is surfaced to the user via the progress card's
  * [Sub-agents · N running] block (progress-card.ts), not a separate pinned
@@ -75,8 +75,8 @@ export interface SubagentWatcherConfig {
    */
   agentDir: string
   /**
-   * Send a fresh (non-edit) Telegram message. For dispatch / completion / stall
-   * notifications.
+   * Send a fresh (non-edit) Telegram message. For stall / completion
+   * state-transition notifications.
    */
   sendNotification: (text: string) => void
   /**
@@ -242,14 +242,20 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
   const knownFiles = new Set<string>()
   /**
    * Files that existed before the watcher started (boot-time snapshot).
-   * Agents discovered from these files are tracked for state transitions
-   * but do NOT fire a "Worker dispatched" notification — they are historical.
+   * The `historical` flag on each entry suppresses two notification paths:
+   *   - Stall detection (see `checkStalls` — historical entries can't stall
+   *     because they predate the watcher session).
+   *   - Past-completion replay: if a historical file was already `done` at
+   *     boot, `completionNotified` is set immediately so the eventual
+   *     state-transition pass doesn't fire "Worker done" for work that
+   *     finished before we started watching.
+   * Historical files that are still in-flight at boot DO fire completion
+   * when they eventually report done — that transition is meaningful.
    */
   const historicalFiles = new Set<string>()
   /**
    * True while the initial boot scan is running. During this window every
-   * newly discovered file is added to historicalFiles so we can suppress
-   * dispatch notifications for them.
+   * newly discovered file is added to historicalFiles.
    */
   let bootScanInProgress = true
 
@@ -261,7 +267,7 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
     if (registry.has(agentId)) return
     const n = nowFn()
     const isHistorical = historicalFiles.has(filePath)
-    log?.(`subagent-watcher: registering agent ${agentId}${isHistorical ? ' (historical — no dispatch notification)' : ''}`)
+    log?.(`subagent-watcher: registering agent ${agentId}${isHistorical ? ' (historical — pre-existing at boot)' : ''}`)
 
     const entry: WorkerEntry = {
       agentId,
@@ -436,7 +442,9 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
       if (knownFiles.has(filePath)) continue
       knownFiles.add(filePath)
       // During the initial boot scan, mark every discovered file as
-      // historical so registerAgent suppresses the dispatch notification.
+      // historical so stall-detection and completion notifications are
+      // suppressed for pre-existing JSONLs (months of session history
+      // would otherwise flood the chat on every restart).
       if (bootScanInProgress) {
         historicalFiles.add(filePath)
       }
@@ -470,7 +478,7 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
   }
 
   // Initial boot scan: discover pre-existing files and mark them historical
-  // so their registration does not emit spurious dispatch notifications.
+  // so we don't replay stalls or past completions for past sessions.
   rescanSubagentDirs()
   bootScanInProgress = false
 

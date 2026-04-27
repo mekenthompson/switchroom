@@ -242,8 +242,8 @@ describe("progress-card driver — stuck warning propagation via heartbeat", () 
     // Parent turn ends while sub-agent still running.
     driver.ingest({ kind: "turn_end", durationMs: 500 }, "c1");
     const emitsAtTurnEnd = emits.length;
-    // Tick a few heartbeats forward. Since hasInFlightSubAgents is true
-    // (correlated sub-agent still running), the card stays alive and the
+    // Tick a few heartbeats forward. The sub-agent is still running, so
+    // hasAnyRunningSubAgent gates the defer and the card stays alive — the
     // heartbeat re-renders as the elapsed-time bucket advances.
     advance(20_000);
     const postHeartbeatEmits = emits.length;

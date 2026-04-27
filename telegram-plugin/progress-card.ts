@@ -200,33 +200,20 @@ export interface ProgressCardState {
 }
 
 /**
- * True when any **correlated** (non-orphan) sub-agent is still running.
+ * True when any sub-agent — correlated or orphan — is still running.
  *
- * Orphan sub-agents (parentToolUseId == null) were spawned via
- * `run_in_background: true` or a JSONL-delivery race where `sub_agent_started`
- * arrived before the parent `tool_use`. Their `sub_agent_turn_end` event may
- * never arrive from the parent's perspective — when the parent turn ends and a
- * new turn starts, `currentTurnKey` flips to the new turn and late events for
- * the old turn are dropped. Waiting on orphan sub-agents therefore defers the
- * parent card indefinitely (the ghost-pin / stale-pin bug, #31 / #43).
+ * Used as both the **display** gate (keep the card showing "Working…" with
+ * sub-agent rows) and the **defer** gate (hold `pendingCompletion` past
+ * parent turn_end so the card stays pinned until the last sub-agent reports
+ * done). Orphans (parentToolUseId == null, e.g. from
+ * `Agent({run_in_background: true})`) gate both, so background dispatches
+ * stay visible past parent turn-end (#87).
  *
- * Fix: only correlated sub-agents (parentToolUseId != null) gate the defer.
- * Orphan sub-agents are treated as fire-and-forget for the parent turn's
- * lifecycle. Their in-progress state is still rendered in the card while
- * events arrive — we just don't block card completion on them.
- */
-export function hasInFlightSubAgents(state: ProgressCardState): boolean {
-  for (const sa of state.subAgents.values()) {
-    if (sa.state === 'running' && sa.parentToolUseId != null) return true
-  }
-  return false
-}
-
-/**
- * True when any sub-agent (including orphans) is still running. Used only
- * for rendering (showing sub-agent activity lines) — not for the defer gate.
- * Keeps the card "Working…" and showing sub-agent rows while orphan background
- * agents are active, without blocking card completion.
+ * Historical context: an earlier design excluded orphans from the defer
+ * gate because their `sub_agent_turn_end` could go missing if the parent
+ * turn rolled over (ghost-pin risk, #31 / #43). That risk is now bounded
+ * by `closeZombie` on next enqueue + the `maxIdleMs` heartbeat ceiling, so
+ * orphans gate the defer like correlated sub-agents do.
  */
 export function hasAnyRunningSubAgent(state: ProgressCardState): boolean {
   for (const sa of state.subAgents.values()) {

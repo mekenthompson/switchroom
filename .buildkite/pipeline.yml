@@ -262,6 +262,13 @@ steps:
       - evals-trigger
       - evals-quality
     allow_dependency_failure: true
+    # Best-effort: this step only writes a Buildkite annotation and patches
+    # a public badge gist. Neither is load-bearing — every status that
+    # matters (build, type-check, tests, evals) already shows on the build
+    # page. A red Eval summary should never fail the build, so soft_fail
+    # any exit_status >= 1 (the publish-badges curl PATCH can 404 the gist
+    # on fork PRs that don't have access to the GIST_TOKEN cluster secret).
+    soft_fail: true
     command: |
       mkdir -p evals/results
       # Download to "." — buildkite-agent preserves the artifact's original
@@ -269,7 +276,9 @@ steps:
       # root, not `evals/results/`, otherwise files land at
       # `evals/results/evals/results/*.json` and the script can't find them.
       buildkite-agent artifact download "evals/results/*.json" . || true
-      bash .buildkite/annotate-evals.sh
-      # Publish dynamic shields.io badges (best-effort — never fails the build)
+      # Annotation + badge publish are independent best-effort steps —
+      # gate each one with `|| true` so a failure in one doesn't drop the
+      # next, and the step never aborts under buildkite's default `set -e`.
+      bash .buildkite/annotate-evals.sh || echo "annotate-evals.sh failed (continuing)"
       export GITHUB_GIST_TOKEN="$$(buildkite-agent secret get GITHUB_GIST_TOKEN 2>/dev/null || true)"
-      bash .buildkite/publish-badges.sh
+      bash .buildkite/publish-badges.sh || echo "publish-badges.sh failed (continuing)"

@@ -601,9 +601,16 @@ export interface BrokerUnitOpts {
 /**
  * Generate the systemd user unit for the vault-broker daemon.
  *
- * Type=notify: the broker calls sd_notify("READY=1\n") via NOTIFY_SOCKET
- * once both sockets are listening, so systemd knows the unit is actually up
- * before starting dependents.
+ * Type=simple: the in-process sd_notify implementation in
+ * `src/vault/broker/server.ts` uses `net.createConnection` (a STREAM
+ * socket), but systemd's $NOTIFY_SOCKET is a datagram socket — so the
+ * READY=1 message never reaches systemd. Under Type=notify the unit
+ * times out and enters a restart loop, killing any held vault unlock
+ * state. Until sd_notify is rewritten to use UNIX datagrams, Type=simple
+ * is the working configuration: systemd considers the unit started as
+ * soon as the ExecStart process is alive. The broker binds both sockets
+ * synchronously early in start(), so dependents racing the daemon is a
+ * non-issue in practice.
  *
  * No EnvironmentFile: the vault passphrase never touches disk — it is pushed
  * to the unlock socket interactively after the daemon starts.
@@ -620,12 +627,13 @@ Documentation=https://github.com/switchroom/switchroom
 After=network-online.target
 
 [Service]
-Type=notify
+Type=simple
 ExecStart=${switchroomCli} vault broker start --foreground
 Restart=on-failure
 RestartSec=2
-# NOTIFY_SOCKET is set automatically by systemd for Type=notify.
-# The broker writes READY=1 after both sockets are listening.
+# Type=simple — see generateBrokerUnit() for the sd_notify-stream-vs-datagram
+# rationale. The hand-rolled sd_notify in the broker is non-functional;
+# Type=notify caused a restart loop that destroyed unlock state.
 # No EnvironmentFile — the vault passphrase never touches disk.
 # Push the passphrase via: switchroom vault broker unlock
 Environment=PATH=${unitPath}

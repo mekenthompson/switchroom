@@ -1694,28 +1694,35 @@ describe('progress-card reducer — tool-error-filter classification (#202)', ()
     expect(runWithError('MESSAGE_ID_INVALID')).toBe('done')
   })
 
-  // Pattern group 4: TOOL_SETUP
-  it('TOOL_SETUP error renders as done', () => {
-    expect(runWithError('fatal: not a git repository')).toBe('done')
-    expect(runWithError('foo: command not found')).toBe('done')
-    expect(runWithError('Permission denied')).toBe('done')
+  // Pattern group 4: TOOL_SETUP — narrowed to just "not a git repository"
+  // after a review found `command not found` and `permission denied` were
+  // too broad and could swallow real failures.
+  it('TOOL_SETUP error (running git outside a repo) renders as done', () => {
+    expect(runWithError('fatal: not a git repository (or any of the parent directories)')).toBe('done')
   })
 
-  // Pattern group 5: TIMEOUT
+  // Pattern group 5: TIMEOUT — bare `aborted` was dropped after review;
+  // matches DB transaction aborts, git merge aborts, etc.
   it('TIMEOUT error renders as done', () => {
     expect(runWithError('operation timed out after 30s')).toBe('done')
     expect(runWithError('Request timeout')).toBe('done')
-    expect(runWithError('operation cancelled')).toBe('done')
-    expect(runWithError('aborted by user')).toBe('done')
+    expect(runWithError('operation cancelled by client')).toBe('done')
   })
 
-  // Real errors must still escalate
+  // Real errors must still escalate. Includes the messages that were
+  // previously over-suppressed by the old TOOL_SETUP and TIMEOUT regexes.
   it('real errors render as failed (regression guard)', () => {
     expect(runWithError('AuthenticationError: invalid API key')).toBe('failed')
     expect(runWithError('SyntaxError: unexpected token at line 12')).toBe('failed')
     expect(runWithError('Connection refused: server is unreachable')).toBe('failed')
     expect(runWithError('500 Internal Server Error')).toBe('failed')
     expect(runWithError('unhandled exception: segfault in libc')).toBe('failed')
+    // Previously over-suppressed by TOOL_SETUP_RE — now must escalate
+    expect(runWithError('kubectl: command not found')).toBe('failed')
+    expect(runWithError('Permission denied: /etc/passwd')).toBe('failed')
+    // Previously over-suppressed by TIMEOUT_RE (bare `aborted`)
+    expect(runWithError('transaction aborted: deadlock detected')).toBe('failed')
+    expect(runWithError('git merge aborted: conflicts in 3 files')).toBe('failed')
   })
 
   // Fail-closed: empty / missing errorText keeps the loud failure state.

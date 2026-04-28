@@ -452,9 +452,17 @@ export function reduce(
       }
       if (idx === -1) return state
       const items = state.items.slice()
+      // tool_result with is_error=true → 'failed' (❌), unless the error
+      // text matches a benign pattern (file-not-found, no-match, etc) in
+      // which case render 'done' (✅) — see tool-error-filter.ts.
+      //
+      // Fail-closed semantics: when isError=true but errorText is missing
+      // or empty (older JSONL shapes, malformed lines, tools that error
+      // without output), keep the 'failed' state. Suppression requires
+      // *evidence* the error is benign; absence of evidence stays loud.
       const nextState: ItemState =
-        event.isError === true && !isBenignToolError(event.errorText ?? '')
-          ? 'failed'
+        event.isError === true
+          ? (event.errorText && isBenignToolError(event.errorText) ? 'done' : 'failed')
           : 'done'
       items[idx] = { ...items[idx], state: nextState, finishedAt: now }
       // Multi-agent: a parent Agent/Task tool_result is the authoritative

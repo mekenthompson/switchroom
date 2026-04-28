@@ -1648,3 +1648,92 @@ describe('render — sub-second elapsed time is HTML-safe', () => {
     expect(html).toContain('999ms')
   })
 })
+
+// ─── Issue #202: tool-error-filter wiring ───────────────────────────────────
+//
+// Benign tool errors (file-not-found, no-match, recoverable Telegram, tool
+// setup, timeout) render as 'done' (✅) rather than 'failed' (❌). Real
+// errors still render as 'failed'. Empty/missing errorText fail-closed —
+// renders as 'failed' to avoid silently hiding errors with malformed
+// JSONL or older shapes.
+describe('progress-card reducer — tool-error-filter classification (#202)', () => {
+  function runWithError(errorText: string | undefined): 'done' | 'failed' | 'running' {
+    const events: SessionEvent[] = [
+      enqueue('test'),
+      { kind: 'tool_use', toolName: 'Bash', toolUseId: 'toolu_X' },
+      {
+        kind: 'tool_result',
+        toolUseId: 'toolu_X',
+        toolName: null,
+        isError: true,
+        ...(errorText !== undefined ? { errorText } : {}),
+      },
+    ]
+    const s = fold(events)
+    return s.items[0].state as 'done' | 'failed' | 'running'
+  }
+
+  // Pattern group 1: FILE_NOT_FOUND
+  it('FILE_NOT_FOUND error renders as done', () => {
+    expect(runWithError('Error: ENOENT: no such file or directory')).toBe('done')
+    expect(runWithError('file not found: /tmp/missing.txt')).toBe('done')
+    expect(runWithError('Path does not exist')).toBe('done')
+  })
+
+  // Pattern group 2: NO_MATCH
+  it('NO_MATCH error renders as done', () => {
+    expect(runWithError('grep: no matches found')).toBe('done')
+    expect(runWithError('returned no results')).toBe('done')
+    expect(runWithError('0 results returned from query')).toBe('done')
+  })
+
+  // Pattern group 3: TELEGRAM_RECOVERABLE
+  it('TELEGRAM_RECOVERABLE error renders as done', () => {
+    expect(runWithError('Bad Request: message is not modified')).toBe('done')
+    expect(runWithError('message to edit not found')).toBe('done')
+    expect(runWithError('MESSAGE_ID_INVALID')).toBe('done')
+  })
+
+  // Pattern group 4: TOOL_SETUP
+  it('TOOL_SETUP error renders as done', () => {
+    expect(runWithError('fatal: not a git repository')).toBe('done')
+    expect(runWithError('foo: command not found')).toBe('done')
+    expect(runWithError('Permission denied')).toBe('done')
+  })
+
+  // Pattern group 5: TIMEOUT
+  it('TIMEOUT error renders as done', () => {
+    expect(runWithError('operation timed out after 30s')).toBe('done')
+    expect(runWithError('Request timeout')).toBe('done')
+    expect(runWithError('operation cancelled')).toBe('done')
+    expect(runWithError('aborted by user')).toBe('done')
+  })
+
+  // Real errors must still escalate
+  it('real errors render as failed (regression guard)', () => {
+    expect(runWithError('AuthenticationError: invalid API key')).toBe('failed')
+    expect(runWithError('SyntaxError: unexpected token at line 12')).toBe('failed')
+    expect(runWithError('Connection refused: server is unreachable')).toBe('failed')
+    expect(runWithError('500 Internal Server Error')).toBe('failed')
+    expect(runWithError('unhandled exception: segfault in libc')).toBe('failed')
+  })
+
+  // Fail-closed: empty / missing errorText keeps the loud failure state.
+  // Suppression requires *evidence* the error is benign.
+  it('isError=true with no errorText fail-closes to failed', () => {
+    expect(runWithError(undefined)).toBe('failed')
+    expect(runWithError('')).toBe('failed')
+  })
+
+  // isError=false (or undefined) is unaffected by errorText.
+  it('isError=false renders as done regardless of any errorText', () => {
+    const events: SessionEvent[] = [
+      enqueue('test'),
+      { kind: 'tool_use', toolName: 'Bash', toolUseId: 'toolu_X' },
+      // isError omitted (falsy) — this is the success path
+      { kind: 'tool_result', toolUseId: 'toolu_X', toolName: null },
+    ]
+    const s = fold(events)
+    expect(s.items[0].state).toBe('done')
+  })
+})

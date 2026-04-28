@@ -1,3 +1,5 @@
+import { isSilentFlushMarker } from './turn-flush-safety.js'
+
 /**
  * Answer-lane incremental streaming for long Telegram replies.
  *
@@ -423,6 +425,20 @@ export function createAnswerStream(config: AnswerStreamConfig): AnswerStreamHand
         warn?.(
           `answer-stream: materialize — text exceeds ${TELEGRAM_MAX_CHARS} chars (got ${textToSend.length}); skipping. ` +
           `The reply path should have already delivered chunked output; this is a defensive guard.`,
+        )
+        return undefined
+      }
+
+      // Silent-marker guard: if the whole body is NO_REPLY / HEARTBEAT_OK
+      // (exact-match, with trailing-punctuation tolerance), suppress outbound
+      // and log — mirrors the suppression in server.ts and turn-flush-safety.ts.
+      if (isSilentFlushMarker(textToSend)) {
+        // Normalise the same way isSilentFlushMarker does so log searches for
+        // `marker=NO_REPLY` match both `NO_REPLY` and `NO_REPLY.` inputs.
+        let marker = textToSend.trim().toUpperCase()
+        if (marker.length > 0 && /\W$/.test(marker)) marker = marker.slice(0, -1)
+        log?.(
+          `telegram gateway: answer-stream: silent-marker-suppressed marker=${marker} chatId=${chatId}`,
         )
         return undefined
       }

@@ -431,6 +431,7 @@ export function createAnswerStream(config: AnswerStreamConfig): AnswerStreamHand
         if (typeof sentId === 'number' && Number.isFinite(sentId)) {
           streamMsgId = sentId
           log?.(`answer-stream: materialized (id=${sentId})`)
+          onMetric?.({ kind: 'answer_lane_materialized', chatId, messageId: streamMsgId })
           return sentId
         }
       } catch (err) {

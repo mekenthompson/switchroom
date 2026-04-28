@@ -2018,6 +2018,19 @@ function handleSessionEvent(ev: SessionEvent): void {
               }),
             log: (msg) => process.stderr.write(`telegram gateway: ${msg}\n`),
             warn: (msg) => process.stderr.write(`telegram gateway: ${msg}\n`),
+            // Issue #203: route answer-lane events through the streaming
+            // metrics sink. Each successful update/edit/draft and the final
+            // materialize emit one event. Also tick the silent-gap tracker
+            // so answer-lane activity doesn't count as silent.
+            onMetric: (ev) => {
+              logStreamingEvent(ev)
+              if (currentSessionChatId != null) {
+                signalTracker.noteSignal(
+                  statusKey(currentSessionChatId, currentSessionThreadId),
+                  Date.now(),
+                )
+              }
+            },
           })
         }
         activeAnswerStream.update(currentTurnCapturedText.join(''))

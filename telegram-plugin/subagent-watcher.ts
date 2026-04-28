@@ -365,11 +365,7 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
         entry.stallNotified = true
         const desc = escapeHtml(truncate(entry.description, 80))
         const idleSec = Math.floor(idleMs / 1000)
-        try {
-          config.sendNotification(`⚠ Worker idle: ${desc} (no activity for ${idleSec}s)`)
-        } catch (err) {
-          log?.(`subagent-watcher: stall notification error: ${(err as Error).message}`)
-        }
+        log?.(`subagent-watcher: stall detected for ${entry.agentId} (idle ${idleSec}s): ${desc}`)
       }
     }
   }

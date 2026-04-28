@@ -10,7 +10,9 @@
  *
  * Cache the result for 5 min in a single file shared across all agents.
  * On a hit, the cached ProbeResult is returned instead of making the
- * HTTP call. 429 results are NOT cached so the next boot tries fresh.
+ * HTTP call. 429 (rate-limited) results are cached for a shorter 30 s
+ * window so fleet-restart bursts are absorbed without holding stale state
+ * for 5 min. Fail results are never cached.
  *
  * Cache location: `~/.switchroom/quota-cache.json` (mode 0600). Format:
  *   { capturedAt: string, ttlMs: number, result: ProbeResult }
@@ -27,6 +29,14 @@ export interface QuotaCacheEntry {
 }
 
 export const DEFAULT_TTL_MS = 5 * 60 * 1000  // 5 min
+
+/**
+ * Short TTL used when caching a 429 result. 30 s is long enough to absorb
+ * a simultaneous fleet restart (all N agents firing their quota probe within
+ * the same second) while clearing fast enough that any real retry or the
+ * next scheduled boot gets a live result.
+ */
+export const RATE_LIMIT_TTL_MS = 30 * 1000  // 30 s
 export const DEFAULT_CACHE_PATH =
   process.env.SWITCHROOM_QUOTA_CACHE_PATH
     ?? join(process.env.HOME ?? '/tmp', '.switchroom', 'quota-cache.json')
@@ -67,8 +77,16 @@ export function readQuotaCache(opts: {
 }
 
 /**
- * Write a probe result to the cache. Ignored on rate-limited or
- * fail-status results — we want the next boot to try fresh.
+ * Write a probe result to the cache.
+ *
+ * Normal results (ok / degraded non-rate-limit) use the standard 5-min TTL.
+ * A 429 "quota check skipped: rate limited" result uses the short
+ * RATE_LIMIT_TTL_MS (30 s) so back-to-back fleet restarts read the cached
+ * 'ok' row instead of piling up on the endpoint, while still clearing fast
+ * enough for any real next-boot probe to see a live result.
+ *
+ * Fail results are still not cached — they indicate a real error and the
+ * next boot should always retry.
  *
  * Writes are best-effort: any IO error is swallowed (cache is an
  * optimization, not a correctness requirement).
@@ -81,12 +99,14 @@ export function writeQuotaCache(
     now?: number
   } = {},
 ): void {
-  // Don't cache failure / rate-limit so next boot retries clean.
+  // Don't cache hard failures — let the next boot retry clean.
   if (result.status === 'fail') return
-  if (result.detail === 'rate limited') return
 
   const path = opts.path ?? DEFAULT_CACHE_PATH
-  const ttlMs = opts.ttlMs ?? DEFAULT_TTL_MS
+  // Rate-limit results use a shorter TTL: long enough to absorb a fleet
+  // restart burst, short enough that subsequent boots get a live probe.
+  const isRateLimit = result.detail === 'quota check skipped: rate limited'
+  const ttlMs = opts.ttlMs ?? (isRateLimit ? RATE_LIMIT_TTL_MS : DEFAULT_TTL_MS)
   const now = opts.now ?? Date.now()
 
   const entry: QuotaCacheEntry = {

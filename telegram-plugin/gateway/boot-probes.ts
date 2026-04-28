@@ -192,33 +192,103 @@ function formatMemory(memoryCurrent: string): string {
   return `${mb} MB`
 }
 
-export async function probeAgentProcess(agentName: string): Promise<ProbeResult> {
+/**
+ * How often to retry after a non-active state during the re-probe loop.
+ * Exported for test injection.
+ */
+export const AGENT_RETRY_INTERVAL_MS = 1500
+
+/**
+ * Maximum additional wait beyond the settle window before committing to
+ * whatever the final state is. Exported for test injection.
+ */
+export const AGENT_RETRY_MAX_MS = 12_000
+
+type ExecFileResult = { stdout: string; stderr: string }
+type ExecFileFnType = (
+  cmd: string,
+  args: string[],
+) => Promise<ExecFileResult>
+
+/**
+ * Query systemctl for the agent service and return a snapshot of its state.
+ * Extracted so the re-probe loop can call it multiple times.
+ */
+async function queryAgentState(
+  agentName: string,
+  execFileImpl: ExecFileFnType,
+): Promise<{
+  state: string
+  kv: Record<string, string>
+} | { error: string }> {
+  let stdout: string
+  try {
+    const result = await execFileImpl('systemctl', [
+      '--user', 'show',
+      `switchroom-${agentName}.service`,
+      '-p', 'MainPID,ActiveState,MemoryCurrent,ActiveEnterTimestamp',
+    ])
+    stdout = result.stdout
+  } catch (err: unknown) {
+    return { error: `systemctl failed: ${(err as Error).message ?? String(err)}` }
+  }
+  const kv = parseSystemctlKv(stdout)
+  return { state: kv['ActiveState'] ?? 'unknown', kv }
+}
+
+export async function probeAgentProcess(
+  agentName: string,
+  opts: {
+    retryIntervalMs?: number
+    retryMaxMs?: number
+    /** Override for tests — replaces real delays */
+    sleepImpl?: (ms: number) => Promise<void>
+    /** Override for tests — replaces real execFile calls */
+    execFileImpl?: ExecFileFnType
+  } = {},
+): Promise<ProbeResult> {
+  const retryIntervalMs = opts.retryIntervalMs ?? AGENT_RETRY_INTERVAL_MS
+  const retryMaxMs = opts.retryMaxMs ?? AGENT_RETRY_MAX_MS
+  const sleep = opts.sleepImpl ?? ((ms: number) => new Promise(resolve => setTimeout(resolve, ms)))
+  const execFileFn: ExecFileFnType = opts.execFileImpl ?? execFile
+
   return withTimeout('Agent', (async (): Promise<ProbeResult> => {
-    let stdout: string
-    try {
-      const result = await execFile('systemctl', [
-        '--user', 'show',
-        `switchroom-${agentName}.service`,
-        '-p', 'MainPID,ActiveState,MemoryCurrent,ActiveEnterTimestamp',
-      ])
-      stdout = result.stdout
-    } catch (err: unknown) {
-      return { status: 'fail', label: 'Agent', detail: `systemctl failed: ${(err as Error).message ?? String(err)}` }
+    const startMs = Date.now()
+
+    // Re-probe loop: if state is not yet `active`, retry every retryIntervalMs
+    // up to retryMaxMs total elapsed. Transients (deactivating, activating,
+    // auto-restart) typically resolve within one or two retries.
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      const snapshot = await queryAgentState(agentName, execFileFn)
+
+      if ('error' in snapshot) {
+        return { status: 'fail', label: 'Agent', detail: snapshot.error }
+      }
+
+      const { state, kv } = snapshot
+
+      if (state === 'active') {
+        const pid = kv['MainPID'] ?? '?'
+        const uptime = formatUptime(kv['ActiveEnterTimestamp'] ?? '')
+        const mem = formatMemory(kv['MemoryCurrent'] ?? '')
+        const parts = [`PID ${pid}`, uptime, mem].filter(Boolean)
+        return { status: 'ok', label: 'Agent', detail: parts.join(' · ') }
+      }
+
+      const elapsedMs = Date.now() - startMs
+      if (elapsedMs >= retryMaxMs) {
+        // Committed to the current non-active state.
+        // `deactivating` is an unambiguous transient — honest severity is
+        // degraded (🟡), not fail (🔴). Any other non-active state is fail.
+        const status = state === 'deactivating' ? 'degraded' : 'fail'
+        return { status, label: 'Agent', detail: `service ${state}` }
+      }
+
+      // Still within retry budget — wait and try again.
+      await sleep(retryIntervalMs)
     }
-
-    const kv = parseSystemctlKv(stdout)
-    const state = kv['ActiveState'] ?? 'unknown'
-    if (state !== 'active') {
-      return { status: 'fail', label: 'Agent', detail: `service ${state}` }
-    }
-
-    const pid = kv['MainPID'] ?? '?'
-    const uptime = formatUptime(kv['ActiveEnterTimestamp'] ?? '')
-    const mem = formatMemory(kv['MemoryCurrent'] ?? '')
-    const parts = [`PID ${pid}`, uptime, mem].filter(Boolean)
-
-    return { status: 'ok', label: 'Agent', detail: parts.join(' · ') }
-  })())
+  })(), PROBE_TIMEOUT_MS + retryMaxMs)  // extend outer timeout to cover full retry budget
 }
 
 // ─── Probe: Gateway ──────────────────────────────────────────────────────────
@@ -306,7 +376,19 @@ export async function probeQuota(
     }
 
     if (resp.status === 429) {
-      return { status: 'degraded', label: 'Quota', detail: 'rate limited' }
+      // A 429 from /api/oauth/usage means the endpoint is rate-limiting our
+      // probe calls — it does NOT mean the user is out of quota. Conflating
+      // the two is the root cause of the false 🟡 "rate limited" alarm
+      // reported in #210. Return ok-with-note and cache it for 30 s so
+      // simultaneous fleet restarts read the cached result instead of piling
+      // up on the same endpoint (see quota-cache.ts: RATE_LIMIT_TTL_MS).
+      const rateLimitResult: ProbeResult = {
+        status: 'ok',
+        label: 'Quota',
+        detail: 'quota check skipped: rate limited',
+      }
+      writeQuotaCache(rateLimitResult)
+      return rateLimitResult
     }
     if (!resp.ok) {
       return { status: 'degraded', label: 'Quota', detail: `HTTP ${resp.status}` }

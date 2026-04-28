@@ -1106,6 +1106,11 @@ function buildWorkspaceContext(args: BuildWorkspaceContextArgs): Record<string, 
       ? shellSingleQuote(resolve(switchroomConfigPath))
       : undefined,
     modelQ: agentConfig.model ? shellSingleQuote(agentConfig.model) : undefined,
+    thinkingEffort: agentConfig.thinking_effort,
+    permissionMode: agentConfig.permission_mode,
+    fallbackModelQ: agentConfig.fallback_model
+      ? shellSingleQuote(agentConfig.fallback_model)
+      : undefined,
     userEnvQuoted: (() => {
       const combined = { ...channelsToEnv(agentConfig), ...(agentConfig.env ?? {}) };
       if (Object.keys(combined).length === 0) return undefined;
@@ -2156,6 +2161,11 @@ export function reconcileAgent(
       hindsightBankIdQ: shellSingleQuote(hindsightBankId),
       hindsightApiBaseUrlQ: shellSingleQuote(hindsightApiBaseUrl),
       modelQ: agentConfig.model ? shellSingleQuote(agentConfig.model) : undefined,
+      thinkingEffort: agentConfig.thinking_effort,
+      permissionMode: agentConfig.permission_mode,
+      fallbackModelQ: agentConfig.fallback_model
+        ? shellSingleQuote(agentConfig.fallback_model)
+        : undefined,
       userEnvQuoted: (() => {
         const combined = { ...channelsToEnv(agentConfig), ...(agentConfig.env ?? {}) };
         if (Object.keys(combined).length === 0) return undefined;

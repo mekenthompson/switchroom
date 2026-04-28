@@ -484,6 +484,32 @@ const profileFields = {
       "Model name must be alphanumeric with ._-/[]: only",
     )
     .optional(),
+  thinking_effort: z
+    .enum(["low", "medium", "high", "xhigh", "max"])
+    .optional()
+    .describe(
+      "Adaptive-thinking effort level passed as --effort to the claude CLI. " +
+      "lower = faster/cheaper, higher = more reasoning. Omit to use Claude's default.",
+    ),
+  permission_mode: z
+    .enum(["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"])
+    .optional()
+    .describe(
+      "Permission mode passed as --permission-mode to the claude CLI. " +
+      "Omit to use Claude's default (acceptEdits for switchroom agents). " +
+      "Warning: bypassPermissions and dontAsk skip all safety checks — use only in trusted sandboxes.",
+    ),
+  fallback_model: z
+    .string()
+    .regex(
+      /^[a-zA-Z0-9][a-zA-Z0-9._\-/\[\]:]*$/,
+      "Fallback model name must be alphanumeric with ._-/[]: only",
+    )
+    .optional()
+    .describe(
+      "Fallback model passed as --fallback-model to the claude CLI. " +
+      "Used when the primary model is overloaded. Note: only functional in --print (non-interactive) mode per Claude CLI docs; silently no-ops in interactive sessions.",
+    ),
   mcp_servers: z.record(z.string(), z.unknown()).optional(),
   hooks: AgentHooksSchema,
   env: z.record(z.string(), z.string()).optional(),
@@ -583,6 +609,34 @@ export const AgentSchema = z.object({
     )
     .optional()
     .describe("Claude model override (e.g., 'claude-sonnet-4-6')"),
+  thinking_effort: z
+    .enum(["low", "medium", "high", "xhigh", "max"])
+    .optional()
+    .describe(
+      "Adaptive-thinking effort level passed as --effort to the claude CLI. " +
+      "Per-agent override wins over defaults.thinking_effort. " +
+      "lower = faster/cheaper, higher = more reasoning. Omit to use Claude's default.",
+    ),
+  permission_mode: z
+    .enum(["acceptEdits", "auto", "bypassPermissions", "default", "dontAsk", "plan"])
+    .optional()
+    .describe(
+      "Permission mode passed as --permission-mode to the claude CLI. " +
+      "Per-agent override wins over defaults.permission_mode. " +
+      "Warning: bypassPermissions and dontAsk skip all safety checks — use only in trusted sandboxes.",
+    ),
+  fallback_model: z
+    .string()
+    .regex(
+      /^[a-zA-Z0-9][a-zA-Z0-9._\-/\[\]:]*$/,
+      "Fallback model name must be alphanumeric with ._-/[]: only",
+    )
+    .optional()
+    .describe(
+      "Fallback model passed as --fallback-model to the claude CLI. " +
+      "Per-agent override wins over defaults.fallback_model. " +
+      "Used when the primary model is overloaded. Note: only functional in --print (non-interactive) mode per Claude CLI docs; silently no-ops in interactive sessions.",
+    ),
   mcp_servers: z
     .record(z.string(), z.unknown())
     .optional()

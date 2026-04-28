@@ -160,6 +160,73 @@ describe("scaffoldAgent", () => {
     expect(startSh).not.toContain("export SWITCHROOM_CONFIG=");
   });
 
+  it("start.sh includes --effort flag when thinking_effort is set", () => {
+    const config = makeAgentConfig({ thinking_effort: "xhigh" });
+    const result = scaffoldAgent("effort-agent", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).toContain("--effort xhigh");
+  });
+
+  it("start.sh omits --effort when thinking_effort is not set", () => {
+    const config = makeAgentConfig();
+    const result = scaffoldAgent("no-effort-agent", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).not.toContain("--effort");
+  });
+
+  it("start.sh includes --permission-mode flag when permission_mode is set", () => {
+    const config = makeAgentConfig({ permission_mode: "plan" });
+    const result = scaffoldAgent("perm-agent", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).toContain("--permission-mode plan");
+  });
+
+  it("start.sh omits --permission-mode when permission_mode is not set", () => {
+    const config = makeAgentConfig();
+    const result = scaffoldAgent("no-perm-agent", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).not.toContain("--permission-mode");
+  });
+
+  it("start.sh includes --fallback-model flag when fallback_model is set", () => {
+    const config = makeAgentConfig({ fallback_model: "sonnet" });
+    const result = scaffoldAgent("fallback-agent", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).toContain("--fallback-model 'sonnet'");
+  });
+
+  it("start.sh omits --fallback-model when fallback_model is not set", () => {
+    const config = makeAgentConfig();
+    const result = scaffoldAgent("no-fallback-agent", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).not.toContain("--fallback-model");
+  });
+
+  it("reconcile re-renders start.sh with thinking_effort flag", () => {
+    const config = makeAgentConfig({ thinking_effort: "medium" });
+    const switchroomConfig: SwitchroomConfig = {
+      switchroom: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      agents: { "effort-reconcile": config },
+    } as SwitchroomConfig;
+    scaffoldAgent("effort-reconcile", config, tmpDir, telegramConfig, switchroomConfig);
+    reconcileAgent("effort-reconcile", config, tmpDir, telegramConfig, switchroomConfig);
+    const startSh = readFileSync(join(tmpDir, "effort-reconcile", "start.sh"), "utf-8");
+    expect(startSh).toContain("--effort medium");
+  });
+
+  it("reconcile re-renders start.sh with permission_mode flag", () => {
+    const config = makeAgentConfig({ permission_mode: "bypassPermissions" });
+    const switchroomConfig: SwitchroomConfig = {
+      switchroom: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      agents: { "perm-reconcile": config },
+    } as SwitchroomConfig;
+    scaffoldAgent("perm-reconcile", config, tmpDir, telegramConfig, switchroomConfig);
+    reconcileAgent("perm-reconcile", config, tmpDir, telegramConfig, switchroomConfig);
+    const startSh = readFileSync(join(tmpDir, "perm-reconcile", "start.sh"), "utf-8");
+    expect(startSh).toContain("--permission-mode bypassPermissions");
+  });
 
   it("scaffold wiring: documented callers write the clean-shutdown marker with a reason before restarting", () => {
     // Source-grep regression for the five documented call sites so a

@@ -635,13 +635,25 @@ export class VaultBroker {
         socket.write("OK\n");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        // Audit-log secret-leak guard (#206 review):
+        // openVault() bubbles up errors from the underlying KDF/cipher
+        // library. If that library ever embeds ciphertext bytes, key
+        // material, or passphrase context in its error message, putting
+        // `msg` verbatim into the audit log would defeat the very thing
+        // the log exists to record (who pulled what — never the value).
+        //
+        // Audit gets a constant string. The raw msg still travels to
+        // stderr (operator diagnostics) and to the client (so the user
+        // can see WHY their unlock failed) — those surfaces are not the
+        // append-only public-record audit channel.
+        process.stderr.write(`vault broker: unlock error: ${msg}\n`);
         this.auditLogger.write({
           ts: new Date().toISOString(),
           op: "unlock",
           caller: auditCaller,
           pid: auditPid,
           cgroup: auditCgroup,
-          result: `error:${msg}`,
+          result: "error:decryption failed",
         });
         socket.write(`ERR ${msg}\n`);
       } finally {

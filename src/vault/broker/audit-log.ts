@@ -82,7 +82,10 @@ export function callerFromPeer(peer: {
   pid: number;
   systemdUnit: string | null;
 }): string {
-  if (peer.systemdUnit !== null) {
+  // Guard empty string in addition to null. A malformed cgroup hierarchy
+  // can produce systemdUnit === "" — without this check the audit log
+  // would record `caller: ""` instead of falling back to the pid.
+  if (peer.systemdUnit !== null && peer.systemdUnit.length > 0) {
     return peer.systemdUnit;
   }
   return `pid:${peer.pid}`;

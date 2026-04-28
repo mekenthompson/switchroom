@@ -275,6 +275,14 @@ describe("callerFromPeer", () => {
     const caller = callerFromPeer({ pid: 99999, systemdUnit: null });
     expect(caller).toBe("pid:99999");
   });
+
+  it("falls back to pid:<n> when systemdUnit is the empty string", () => {
+    // Defensive guard for malformed cgroup hierarchies that produce
+    // empty-string unit names. Prevents the audit log from recording
+    // a literal `caller: ""` entry.
+    const caller = callerFromPeer({ pid: 42, systemdUnit: "" });
+    expect(caller).toBe("pid:42");
+  });
 });
 
 // ─── defaultAuditLogPath ──────────────────────────────────────────────────────

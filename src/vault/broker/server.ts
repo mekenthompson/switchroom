@@ -40,6 +40,7 @@ import {
   MAX_FRAME_BYTES,
   type BrokerStatus,
 } from "./protocol.js";
+import { createAuditLogger, callerFromPeer, type AuditLogger } from "./audit-log.js";
 
 const PID_FILE_DEFAULT = "~/.switchroom/vault-broker.pid";
 
@@ -69,6 +70,12 @@ export interface BrokerTestOpts {
    * calls the real `identify()`. DO NOT set outside tests.
    */
   _testIdentify?: (socketPath: string, socket: net.Socket) => PeerInfo | null;
+  /**
+   * If provided, replaces the real audit logger. Use in tests to inject a
+   * logger that writes to a tmp file instead of ~/.switchroom/vault-audit.log.
+   * DO NOT set outside tests.
+   */
+  _testAuditLogger?: AuditLogger;
 }
 
 export class VaultBroker {
@@ -80,6 +87,7 @@ export class VaultBroker {
   private socketPath: string = "";
   private unlockSocketPath: string = "";
   private vaultPath: string = "";
+  private auditLogger: AuditLogger;
 
   constructor(private readonly testOpts: BrokerTestOpts = {}) {
     // Defence-in-depth: BrokerTestOpts is exported (so vitest can construct
@@ -91,13 +99,18 @@ export class VaultBroker {
     const usingTestOpt =
       testOpts._testSecrets !== undefined ||
       testOpts._testConfig !== undefined ||
-      testOpts._testIdentify !== undefined;
+      testOpts._testIdentify !== undefined ||
+      testOpts._testAuditLogger !== undefined;
     if (usingTestOpt && process.env.NODE_ENV !== "test") {
       throw new Error(
-        "VaultBroker: BrokerTestOpts (_testSecrets/_testConfig/_testIdentify) " +
+        "VaultBroker: BrokerTestOpts (_testSecrets/_testConfig/_testIdentify/_testAuditLogger) " +
           "must not be set outside tests. Set NODE_ENV=test if you really mean it.",
       );
     }
+
+    // Use the injected logger for tests; create the real one for production.
+    // The real logger's path defaults to ~/.switchroom/vault-audit.log.
+    this.auditLogger = testOpts._testAuditLogger ?? createAuditLogger();
   }
 
   /**
@@ -386,8 +399,15 @@ export class VaultBroker {
       return;
     }
 
+    // Derive audit identity fields from peer (already computed by peercred at
+    // connection accept time — do NOT re-derive here).
+    const auditPid = peer?.pid ?? process.pid;
+    const auditCaller = peer !== null ? callerFromPeer(peer) : `pid:${process.pid}`;
+    const auditCgroup = peer?.systemdUnit ?? undefined;
+
     // Handle each op
     if (req.op === "status") {
+      // status is an informational op — not audited (no secret access, no ACL decision)
       const status = this.getStatus();
       socket.write(
         encodeResponse({ ok: true, status }),
@@ -397,6 +417,14 @@ export class VaultBroker {
 
     if (req.op === "lock") {
       this.lock();
+      this.auditLogger.write({
+        ts: new Date().toISOString(),
+        op: "lock",
+        caller: auditCaller,
+        pid: auditPid,
+        cgroup: auditCgroup,
+        result: "allowed",
+      });
       socket.write(encodeResponse({ ok: true, locked: true }));
       return;
     }
@@ -413,16 +441,33 @@ export class VaultBroker {
       // still list (for diagnostics) but a non-cron same-UID caller can't.
       // On non-Linux the socket-file mode 0600 remains the only gate.
       if (process.platform === "linux" && peer === null) {
+        const reason = "Unable to identify caller (peercred unavailable); denying on Linux";
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "list",
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: `denied:${reason}`,
+        });
         socket.write(
           encodeResponse(
             errorResponse(
               "DENIED",
-              "Unable to identify caller (peercred unavailable); denying on Linux",
+              reason,
             ),
           ),
         );
         return;
       }
+      this.auditLogger.write({
+        ts: new Date().toISOString(),
+        op: "list",
+        caller: auditCaller,
+        pid: auditPid,
+        cgroup: auditCgroup,
+        result: "allowed",
+      });
       socket.write(encodeResponse({ ok: true, keys: Object.keys(this.secrets) }));
       return;
     }
@@ -437,6 +482,15 @@ export class VaultBroker {
       if (peer !== null && this.config !== null) {
         const aclResult = checkAcl(peer, this.config, req.key);
         if (!aclResult.allow) {
+          this.auditLogger.write({
+            ts: new Date().toISOString(),
+            op: "get",
+            key: req.key,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: `denied:${aclResult.reason}`,
+          });
           socket.write(
             encodeResponse(
               errorResponse("DENIED", aclResult.reason),
@@ -446,11 +500,21 @@ export class VaultBroker {
         }
       } else if (process.platform === "linux" && peer === null) {
         // On Linux, peercred unavailable → fail-closed
+        const reason = "Unable to identify caller (peercred unavailable); denying on Linux";
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "get",
+          key: req.key,
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: `denied:${reason}`,
+        });
         socket.write(
           encodeResponse(
             errorResponse(
               "DENIED",
-              "Unable to identify caller (peercred unavailable); denying on Linux",
+              reason,
             ),
           ),
         );
@@ -460,12 +524,32 @@ export class VaultBroker {
 
       const entry = this.secrets[req.key];
       if (entry === undefined) {
+        // Key not found — still audited (caller was allowed but key doesn't exist)
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "get",
+          key: req.key,
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: "error:UNKNOWN_KEY",
+        });
         socket.write(
           encodeResponse(errorResponse("UNKNOWN_KEY", `Key not found: ${req.key}`)),
         );
         return;
       }
 
+      // Successful get — log only the key name, NEVER the value
+      this.auditLogger.write({
+        ts: new Date().toISOString(),
+        op: "get",
+        key: req.key,
+        caller: auditCaller,
+        pid: auditPid,
+        cgroup: auditCgroup,
+        result: "allowed",
+      });
       socket.write(encodeResponse(entryResponse(entry)));
       return;
     }
@@ -482,16 +566,28 @@ export class VaultBroker {
     // Same UID check for unlock socket. On Linux: verify via peercred,
     // pinned to this connection's fd (issue #129).
     // On other OSes: rely on socket file mode 0600.
+    let unlockPeer: PeerInfo | null = null;
     if (process.platform === "linux") {
-      const peer = this.testOpts._testIdentify
+      unlockPeer = this.testOpts._testIdentify
         ? this.testOpts._testIdentify(this.unlockSocketPath, socket)
         : identify(this.unlockSocketPath, socket);
-      if (peer === null) {
+      if (unlockPeer === null) {
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "unlock",
+          caller: `pid:${process.pid}`,
+          pid: process.pid,
+          result: "denied:unable to verify caller identity",
+        });
         socket.write("ERR unable to verify caller identity\n");
         socket.destroy();
         return;
       }
     }
+
+    const auditPid = unlockPeer?.pid ?? process.pid;
+    const auditCaller = unlockPeer !== null ? callerFromPeer(unlockPeer) : `pid:${process.pid}`;
+    const auditCgroup = unlockPeer?.systemdUnit ?? undefined;
 
     let buffer = "";
     socket.on("data", (chunk: Buffer) => {
@@ -513,6 +609,14 @@ export class VaultBroker {
       buffer = "";
 
       if (!passphrase) {
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "unlock",
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: "denied:passphrase cannot be empty",
+        });
         socket.write("ERR passphrase cannot be empty\n");
         socket.destroy();
         return;
@@ -520,9 +624,25 @@ export class VaultBroker {
 
       try {
         this.unlockFromPassphrase(passphrase);
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "unlock",
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: "allowed",
+        });
         socket.write("OK\n");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "unlock",
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: `error:${msg}`,
+        });
         socket.write(`ERR ${msg}\n`);
       } finally {
         socket.destroy();

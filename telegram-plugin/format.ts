@@ -266,9 +266,10 @@ export function sanitizeForTelegram(text: string): string {
   })
 
   // Rule 2: flatten nested bullet indentation.
-  // Matches lines with 2+ spaces (or a tab) at the start followed by - or *.
+  // Matches lines with a tab OR 2+ spaces at the start followed by - or *.
+  // A single tab is treated as sufficient indentation (standard 4-space equiv).
   // Converts to a middle-dot bullet so the sub-detail survives as readable text.
-  result = result.replace(/^[ \t]{2,}[*-] /gm, '· ')
+  result = result.replace(/^(?:\t+[ \t]*|[ \t]{2,})[*-] /gm, '· ')
 
   // Rule 4: strip trailing whitespace on each line.
   result = result.replace(/[ \t]+$/gm, '')

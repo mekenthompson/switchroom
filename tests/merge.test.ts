@@ -53,6 +53,60 @@ describe("mergeAgentConfig", () => {
     expect(result.model).toBe("opus");
   });
 
+  it("fills in thinking_effort from defaults when agent omits it", () => {
+    const defaults: AgentDefaults = { thinking_effort: "high" };
+    const result = mergeAgentConfig(defaults, baseAgent());
+    expect(result.thinking_effort).toBe("high");
+  });
+
+  it("per-agent thinking_effort wins over defaults", () => {
+    const defaults: AgentDefaults = { thinking_effort: "high" };
+    const agent = baseAgent({ thinking_effort: "xhigh" });
+    const result = mergeAgentConfig(defaults, agent);
+    expect(result.thinking_effort).toBe("xhigh");
+  });
+
+  it("thinking_effort stays undefined when neither side sets it", () => {
+    const result = mergeAgentConfig({ model: "sonnet" }, baseAgent());
+    expect(result.thinking_effort).toBeUndefined();
+  });
+
+  it("fills in permission_mode from defaults when agent omits it", () => {
+    const defaults: AgentDefaults = { permission_mode: "acceptEdits" };
+    const result = mergeAgentConfig(defaults, baseAgent());
+    expect(result.permission_mode).toBe("acceptEdits");
+  });
+
+  it("per-agent permission_mode wins over defaults", () => {
+    const defaults: AgentDefaults = { permission_mode: "acceptEdits" };
+    const agent = baseAgent({ permission_mode: "plan" });
+    const result = mergeAgentConfig(defaults, agent);
+    expect(result.permission_mode).toBe("plan");
+  });
+
+  it("permission_mode stays undefined when neither side sets it", () => {
+    const result = mergeAgentConfig({ model: "sonnet" }, baseAgent());
+    expect(result.permission_mode).toBeUndefined();
+  });
+
+  it("fills in fallback_model from defaults when agent omits it", () => {
+    const defaults: AgentDefaults = { fallback_model: "sonnet" };
+    const result = mergeAgentConfig(defaults, baseAgent());
+    expect(result.fallback_model).toBe("sonnet");
+  });
+
+  it("per-agent fallback_model wins over defaults", () => {
+    const defaults: AgentDefaults = { fallback_model: "sonnet" };
+    const agent = baseAgent({ fallback_model: "haiku" });
+    const result = mergeAgentConfig(defaults, agent);
+    expect(result.fallback_model).toBe("haiku");
+  });
+
+  it("fallback_model stays undefined when neither side sets it", () => {
+    const result = mergeAgentConfig({ model: "sonnet" }, baseAgent());
+    expect(result.fallback_model).toBeUndefined();
+  });
+
   it("leaves agent.extends unchanged — the cascade resolves profiles separately", () => {
     // mergeAgentConfig() is the defaults → agent primitive; profile
     // resolution happens in resolveAgentConfig(). AgentDefaults does

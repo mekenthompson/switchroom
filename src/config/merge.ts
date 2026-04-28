@@ -221,6 +221,15 @@ export function mergeAgentConfig(
   ) {
     merged.skip_permission_prompt = defaults.skip_permission_prompt;
   }
+  if (defaults.thinking_effort !== undefined && merged.thinking_effort === undefined) {
+    merged.thinking_effort = defaults.thinking_effort;
+  }
+  if (defaults.permission_mode !== undefined && merged.permission_mode === undefined) {
+    merged.permission_mode = defaults.permission_mode;
+  }
+  if (defaults.fallback_model !== undefined && merged.fallback_model === undefined) {
+    merged.fallback_model = defaults.fallback_model;
+  }
   // --- tools: union (dedup-preserving-order, defaults first) ---
   if (defaults.tools || merged.tools) {
     const dAllow = defaults.tools?.allow ?? [];

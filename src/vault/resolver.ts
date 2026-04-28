@@ -269,7 +269,7 @@ export function resolveVaultReferences(
  */
 export type ResolveViaBrokerResult =
   | { ok: true; config: SwitchroomConfig }
-  | { ok: false; reason: "denied" | "unreachable" | "locked" | "unknown" };
+  | { ok: false; reason: "denied" | "unreachable" | "locked" | "not_found" | "unknown" };
 
 /**
  * Resolve vault references in a config using the broker daemon.
@@ -315,6 +315,7 @@ export async function resolveVaultReferencesViaBroker(
   let sawDenied = false;
   let sawUnreachable = false;
   let sawLocked = false;
+  let sawNotFound = false;
 
   for (const key of refs) {
     const result = await getViaBrokerStructured(key, opts);
@@ -332,15 +333,16 @@ export async function resolveVaultReferencesViaBroker(
       } else {
         sawDenied = true;
       }
+    } else if (result.kind === "not_found") {
+      // Key is absent from the vault. Track it so the aggregate reason can
+      // distinguish "every key is missing" (a misconfig the caller should
+      // surface explicitly) from a connectivity/auth failure.
+      sawNotFound = true;
     }
-    // not_found: key is absent from the vault; other keys may still resolve.
-    // We don't treat not_found as a failure — partial resolution is fine;
-    // the caller will encounter the unresolved `vault:` reference later and
-    // can surface a proper "key not found" message then.
   }
 
   // Compute the aggregate reason for the structured failure result.
-  // If all refs resolved (even partially with not_found gaps), return ok.
+  // If all refs resolved, return ok.
   const resolvedCount = Object.keys(brokerSecrets).length;
   const allResolved = resolvedCount === refs.size;
 
@@ -349,25 +351,34 @@ export async function resolveVaultReferencesViaBroker(
   }
 
   // Partial or full failure. Determine why.
-  if (sawUnreachable && !sawDenied && !sawLocked) {
+  // Single-cause cases first (most informative).
+  if (sawUnreachable && !sawDenied && !sawLocked && !sawNotFound) {
     return { ok: false, reason: "unreachable" };
   }
-  if (sawLocked && !sawDenied && !sawUnreachable) {
+  if (sawLocked && !sawDenied && !sawUnreachable && !sawNotFound) {
     return { ok: false, reason: "locked" };
   }
-  if (sawDenied && !sawUnreachable && !sawLocked) {
+  if (sawDenied && !sawUnreachable && !sawLocked && !sawNotFound) {
     return { ok: false, reason: "denied" };
   }
-  // Mixed: cannot definitively classify — surface 'unknown' rather than guess.
-  if (sawDenied || sawUnreachable || sawLocked) {
-    return { ok: false, reason: "unknown" };
-  }
 
-  // Only not_found failures (no connectivity/auth issue): some keys are
-  // genuinely missing. Return what we could resolve; caller sees unresolved refs.
-  if (resolvedCount > 0) {
+  // Pure not_found, with at least one key resolved → partial success. Return
+  // what we could resolve; the caller will encounter unresolved `vault:`
+  // refs at use-time and can surface a proper "key X not found" error there.
+  if (sawNotFound && !sawDenied && !sawUnreachable && !sawLocked && resolvedCount > 0) {
     return { ok: true, config: resolveValue(config, brokerSecrets) as SwitchroomConfig };
   }
+
+  // Pure not_found, with zero keys resolved → all referenced keys are
+  // genuinely absent from the vault. Distinct from `unknown` so the caller
+  // can prompt the operator to check vault contents (rather than network /
+  // auth). Common case: keys were renamed in the vault but not in config.
+  if (sawNotFound && !sawDenied && !sawUnreachable && !sawLocked && resolvedCount === 0) {
+    return { ok: false, reason: "not_found" };
+  }
+
+  // Mixed failure modes — cannot definitively classify. Surface 'unknown'
+  // rather than guess; caller can still log raw reason flags for diagnosis.
   return { ok: false, reason: "unknown" };
 }
 

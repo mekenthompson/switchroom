@@ -477,13 +477,17 @@ export class VaultBroker {
         visibleKeys = Object.keys(this.secrets);
       }
 
+      // Audit the visible key count. A bare "allowed" hides the case where
+      // an identified cron unit's ACL filter narrows to zero keys — almost
+      // certainly a misconfiguration, but invisible in the log without the
+      // count. `allowed:N` lets an operator grep for `result: "allowed:0"`.
       this.auditLogger.write({
         ts: new Date().toISOString(),
         op: "list",
         caller: auditCaller,
         pid: auditPid,
         cgroup: auditCgroup,
-        result: "allowed",
+        result: `allowed:${visibleKeys.length}`,
       });
       socket.write(encodeResponse({ ok: true, keys: visibleKeys }));
       return;

@@ -711,14 +711,16 @@ describe("VaultBroker server: audit log emission (allowed cron unit)", () => {
     expect(rawLog).not.toContain("bar-value");
   });
 
-  it("list (allowed): emits exactly one audit line", async () => {
+  it("list (allowed): emits exactly one audit line with visible-key count", async () => {
     await rpc(socketPath, { v: 1, op: "list" });
     const lines = readAuditLines(auditLogPath);
     expect(lines).toHaveLength(1);
     const entry = lines[0];
     expect(entry.op).toBe("list");
     expect(entry.key).toBeUndefined();
-    expect(entry.result).toBe("allowed");
+    // #207 review-fix: result includes the visible-key count so an operator
+    // can grep for `result: "allowed:0"` (a likely misconfig signal).
+    expect(entry.result).toMatch(/^allowed:\d+$/);
     expect(entry.caller).toBe("switchroom-myagent-cron-0.service");
   });
 

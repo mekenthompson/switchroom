@@ -370,7 +370,11 @@ export function installAllUnits(config: SwitchroomConfig): void {
   // which never matched the `switchroom-vault-broker.service` reference used
   // by cron timers' After/Wants. Pass the bare `vault-broker` so the file
   // ends up correctly named.
-  if (!shouldInstallBrokerUnit(config)) {
+  // Cache the gate result — it iterates all agents + schedules, and we
+  // consult it twice (un-install branch + install branch).
+  const wantBroker = shouldInstallBrokerUnit(config);
+
+  if (!wantBroker) {
     // #207: un-install the broker unit if it exists on disk but the gate
     // flipped to false (e.g. the last schedule[i].secrets entry was just
     // removed from config). Per the `restart = reconcile + restart`
@@ -386,11 +390,18 @@ export function installAllUnits(config: SwitchroomConfig): void {
       try {
         execFileSync("systemctl", ["--user", "disable", "switchroom-vault-broker.service"], { stdio: "pipe" });
       } catch { /* may not be enabled */ }
-      unlinkSync(brokerUnitPath);
+      // Race guard: existsSync → unlinkSync is not atomic. If something
+      // else removes the file between the two calls (rare but possible
+      // during concurrent reconcile), unlinkSync would throw and skip
+      // daemonReload, leaving systemd's loaded units inconsistent with
+      // disk. Swallow the ENOENT and continue.
+      try {
+        unlinkSync(brokerUnitPath);
+      } catch { /* file already gone — daemon-reload will still fix systemd's view */ }
       daemonReload();
     }
   }
-  if (shouldInstallBrokerUnit(config)) {
+  if (wantBroker) {
     const homeDir = process.env.HOME ?? "/root";
     const bunBinDir = resolve(homeDir, ".bun", "bin");
     const brokerAutoUnlock = config.vault?.broker?.autoUnlock ?? false;

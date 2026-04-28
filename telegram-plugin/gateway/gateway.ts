@@ -207,6 +207,8 @@ import {
   statusViaBroker,
   lockViaBroker,
   unlockViaBroker,
+  listGrantsViaBroker,
+  revokeGrantViaBroker,
 } from '../../src/vault/broker/client.js'
 
 // ─── Stderr logging ───────────────────────────────────────────────────────
@@ -746,6 +748,8 @@ type PendingVaultOp =
   // Issue #158: passphrase collected for /vault unlock — sent directly to the
   // broker unlock socket, never logged or cached beyond the op itself.
   | { kind: 'unlock'; startedAt: number }
+  // Issue #228: waiting for confirmation before revoking a grant.
+  | { kind: 'revoke_confirm'; grantId: string; agent: string; keys: string[]; startedAt: number }
 const VAULT_INPUT_TTL_MS = 5 * 60 * 1000
 const pendingVaultOps = new Map<string, PendingVaultOp>()
 
@@ -4691,6 +4695,90 @@ async function handleVaultDeferCallback(ctx: Context, data: string): Promise<voi
 }
 
 /**
+ * Issue #228: handle vault grant management callbacks.
+ *
+ *   `vg:revoke:<grantId>`  — fetch grant details and show confirmation card.
+ *   `vg:confirm:<grantId>` — call broker revoke_grant, reply with success.
+ *   `vg:cancel:<grantId>`  — dismiss (clear keyboard, no broker call).
+ */
+async function handleVaultGrantCallback(ctx: Context, data: string): Promise<void> {
+  const senderId = String(ctx.from?.id ?? '')
+  const access = loadAccess()
+  if (!access.allowFrom.includes(senderId)) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+
+  const revokeMatch = /^vg:revoke:(.+)$/.exec(data)
+  if (revokeMatch) {
+    const grantId = revokeMatch[1]!
+    const result = await listGrantsViaBroker(undefined)
+    if (result.kind !== 'ok') {
+      await ctx.answerCallbackQuery({ text: 'Broker unreachable.' }).catch(() => {})
+      return
+    }
+    const grant = result.grants.find(g => g.id === grantId)
+    if (!grant) {
+      await ctx.answerCallbackQuery({ text: 'Grant not found (already revoked?).' }).catch(() => {})
+      await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {})
+      return
+    }
+    const cardText =
+      `🗑 Revoke <code>${escapeHtmlForTg(grantId)}</code>?\n` +
+      `Agent: <b>${escapeHtmlForTg(grant.agent_slug)}</b>\n` +
+      `Keys: <code>${escapeHtmlForTg(grant.key_allow.join(', '))}</code>`
+    const confirmKeyboard = new InlineKeyboard()
+      .text('✅ Confirm Revoke', `vg:confirm:${grantId}`)
+      .text('❌ Cancel', `vg:cancel:${grantId}`)
+    await ctx.answerCallbackQuery().catch(() => {})
+    await ctx.editMessageText(cardText, {
+      parse_mode: 'HTML',
+      reply_markup: confirmKeyboard,
+    }).catch(async () => {
+      const chatId = String(ctx.chat?.id ?? ctx.from?.id ?? '')
+      const threadId = ctx.callbackQuery.message?.message_thread_id
+      if (chatId) {
+        await bot.api.sendMessage(chatId, cardText, {
+          parse_mode: 'HTML',
+          reply_markup: confirmKeyboard,
+          ...(threadId != null ? { message_thread_id: threadId } : {}),
+        }).catch(() => {})
+      }
+    })
+    return
+  }
+
+  const confirmMatch = /^vg:confirm:(.+)$/.exec(data)
+  if (confirmMatch) {
+    const grantId = confirmMatch[1]!
+    const revokeResult = await revokeGrantViaBroker(grantId)
+    if (revokeResult.kind === 'unreachable') {
+      await ctx.answerCallbackQuery({ text: 'Broker unreachable.' }).catch(() => {})
+      return
+    }
+    if (revokeResult.kind === 'error') {
+      await ctx.answerCallbackQuery({ text: `Revoke failed: ${revokeResult.msg}` }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: '✅ Revoked' }).catch(() => {})
+    await ctx.editMessageText(
+      `✅ Grant <code>${escapeHtmlForTg(grantId)}</code> revoked. Token file removed.`,
+      { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+    ).catch(() => {})
+    return
+  }
+
+  const cancelMatch = /^vg:cancel:(.+)$/.exec(data)
+  if (cancelMatch) {
+    await ctx.answerCallbackQuery({ text: 'Cancelled.' }).catch(() => {})
+    await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {})
+    return
+  }
+
+  await ctx.answerCallbackQuery().catch(() => {})
+}
+
+/**
  * Issue #44: write a deferred secret to the vault using the now-cached
  * passphrase. Confirms with a masked ref + slug; matches the "captured
  * N secret" UX of the cached-passphrase happy path so the user
@@ -5055,7 +5143,60 @@ bot.command('vault', async ctx => {
       '/vault status — show broker state',
       '/vault unlock — unlock the broker (prompts for passphrase)',
       '/vault lock — lock the broker',
+      '/vault grants [agent] — list active capability grants (tap to revoke)',
     ].join('\n'), { html: true })
+    return
+  }
+
+  // Issue #228: /vault grants [agent] — list active grants grouped by agent
+  if (sub === 'grants') {
+    const agentFilter = args[1]  // optional agent name filter
+    const result = await listGrantsViaBroker(agentFilter)
+    if (result.kind === 'unreachable') {
+      await switchroomReply(ctx, '🔴 Broker is not running (or unreachable).', { html: true })
+      return
+    }
+    if (result.kind === 'error') {
+      await switchroomReply(ctx, `🔴 list_grants failed: ${escapeHtmlForTg(result.msg)}`, { html: true })
+      return
+    }
+    const { grants } = result
+    if (grants.length === 0) {
+      const filterNote = agentFilter ? ` for <code>${escapeHtmlForTg(agentFilter)}</code>` : ''
+      await switchroomReply(ctx, `📜 No active grants${filterNote}.`, { html: true })
+      return
+    }
+    // Group grants by agent_slug
+    const byAgent = new Map<string, typeof grants>()
+    for (const g of grants) {
+      const list = byAgent.get(g.agent_slug) ?? []
+      list.push(g)
+      byAgent.set(g.agent_slug, list)
+    }
+    // Build message text (grouped) + inline keyboard (one [Revoke] per grant per row)
+    const lines: string[] = ['<b>📜 Active grants</b>', '']
+    const keyboard = new InlineKeyboard()
+    for (const [agentName, agentGrants] of byAgent) {
+      lines.push(`<b>${escapeHtmlForTg(agentName)}:</b>`)
+      for (const g of agentGrants) {
+        const keys = g.key_allow.join(', ')
+        const expiry = g.expires_at
+          ? new Date(g.expires_at * 1000).toISOString().slice(0, 10)
+          : 'no expiry'
+        lines.push(`• <code>${escapeHtmlForTg(g.id)}</code> — ${escapeHtmlForTg(keys)}, expires ${expiry}`)
+        // callback_data: vg:revoke:<id> — max 64 bytes; grant IDs are "vg_" + 6 chars = 9 chars total → well within limit
+        keyboard.text(`🗑 Revoke ${g.id}`, `vg:revoke:${g.id}`).row()
+      }
+      lines.push('')
+    }
+    const chatId2 = String(ctx.chat!.id)
+    const threadId2 = resolveThreadId(chatId2, ctx.message?.message_thread_id)
+    await ctx.reply(lines.join('\n'), {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      reply_markup: keyboard,
+      ...(threadId2 != null ? { message_thread_id: threadId2 } : {}),
+    })
     return
   }
 
@@ -5290,6 +5431,15 @@ bot.on('callback_query:data', async ctx => {
   // Issue #44.
   if (data.startsWith('vd:')) {
     await handleVaultDeferCallback(ctx, data)
+    return
+  }
+
+  // Issue #228: vault grant management callbacks.
+  // vg:revoke:<id> — show confirmation card
+  // vg:confirm:<id> — execute revoke
+  // vg:cancel:<id> — dismiss
+  if (data.startsWith('vg:')) {
+    await handleVaultGrantCallback(ctx, data)
     return
   }
 

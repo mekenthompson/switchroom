@@ -99,7 +99,7 @@ describe('progress-card reducer', () => {
       { kind: 'tool_use', toolName: 'Bash', toolUseId: 'toolu_A' },
       { kind: 'tool_use', toolName: 'Read', toolUseId: 'toolu_B' },
       // Out-of-order results: B finishes first, with an error
-      { kind: 'tool_result', toolUseId: 'toolu_B', toolName: null, isError: true },
+      { kind: 'tool_result', toolUseId: 'toolu_B', toolName: null, isError: true, errorText: 'unhandled exception: segfault' },
       { kind: 'tool_result', toolUseId: 'toolu_A', toolName: null },
     ])
     expect(s.items.map((i) => [i.tool, i.state])).toEqual([
@@ -945,7 +945,7 @@ describe('progress-card reducer — multi-agent correlation', () => {
     expect(st.subAgents.get('X')?.state).toBe('done')
     st = reduce(
       st,
-      { kind: 'tool_result', toolUseId: 'toolu_p1', toolName: 'Agent', isError: true },
+      { kind: 'tool_result', toolUseId: 'toolu_p1', toolName: 'Agent', isError: true, errorText: 'unhandled exception in sub-agent' },
       7000,
     )
     expect(st.subAgents.get('X')?.state).toBe('failed')
@@ -1646,5 +1646,101 @@ describe('render — sub-second elapsed time is HTML-safe', () => {
     expect(html).not.toContain('<1s')
     // Must contain the safe ms representation
     expect(html).toContain('999ms')
+  })
+})
+
+// ─── Issue #202: tool-error-filter wiring ───────────────────────────────────
+//
+// Benign tool errors (file-not-found, no-match, recoverable Telegram, tool
+// setup, timeout) render as 'done' (✅) rather than 'failed' (❌). Real
+// errors still render as 'failed'. Empty/missing errorText fail-closed —
+// renders as 'failed' to avoid silently hiding errors with malformed
+// JSONL or older shapes.
+describe('progress-card reducer — tool-error-filter classification (#202)', () => {
+  function runWithError(errorText: string | undefined): 'done' | 'failed' | 'running' {
+    const events: SessionEvent[] = [
+      enqueue('test'),
+      { kind: 'tool_use', toolName: 'Bash', toolUseId: 'toolu_X' },
+      {
+        kind: 'tool_result',
+        toolUseId: 'toolu_X',
+        toolName: null,
+        isError: true,
+        ...(errorText !== undefined ? { errorText } : {}),
+      },
+    ]
+    const s = fold(events)
+    return s.items[0].state as 'done' | 'failed' | 'running'
+  }
+
+  // Pattern group 1: FILE_NOT_FOUND
+  it('FILE_NOT_FOUND error renders as done', () => {
+    expect(runWithError('Error: ENOENT: no such file or directory')).toBe('done')
+    expect(runWithError('file not found: /tmp/missing.txt')).toBe('done')
+    expect(runWithError('Path does not exist')).toBe('done')
+  })
+
+  // Pattern group 2: NO_MATCH
+  it('NO_MATCH error renders as done', () => {
+    expect(runWithError('grep: no matches found')).toBe('done')
+    expect(runWithError('returned no results')).toBe('done')
+    expect(runWithError('0 results returned from query')).toBe('done')
+  })
+
+  // Pattern group 3: TELEGRAM_RECOVERABLE
+  it('TELEGRAM_RECOVERABLE error renders as done', () => {
+    expect(runWithError('Bad Request: message is not modified')).toBe('done')
+    expect(runWithError('message to edit not found')).toBe('done')
+    expect(runWithError('MESSAGE_ID_INVALID')).toBe('done')
+  })
+
+  // Pattern group 4: TOOL_SETUP — narrowed to just "not a git repository"
+  // after a review found `command not found` and `permission denied` were
+  // too broad and could swallow real failures.
+  it('TOOL_SETUP error (running git outside a repo) renders as done', () => {
+    expect(runWithError('fatal: not a git repository (or any of the parent directories)')).toBe('done')
+  })
+
+  // Pattern group 5: TIMEOUT — bare `aborted` was dropped after review;
+  // matches DB transaction aborts, git merge aborts, etc.
+  it('TIMEOUT error renders as done', () => {
+    expect(runWithError('operation timed out after 30s')).toBe('done')
+    expect(runWithError('Request timeout')).toBe('done')
+    expect(runWithError('operation cancelled by client')).toBe('done')
+  })
+
+  // Real errors must still escalate. Includes the messages that were
+  // previously over-suppressed by the old TOOL_SETUP and TIMEOUT regexes.
+  it('real errors render as failed (regression guard)', () => {
+    expect(runWithError('AuthenticationError: invalid API key')).toBe('failed')
+    expect(runWithError('SyntaxError: unexpected token at line 12')).toBe('failed')
+    expect(runWithError('Connection refused: server is unreachable')).toBe('failed')
+    expect(runWithError('500 Internal Server Error')).toBe('failed')
+    expect(runWithError('unhandled exception: segfault in libc')).toBe('failed')
+    // Previously over-suppressed by TOOL_SETUP_RE — now must escalate
+    expect(runWithError('kubectl: command not found')).toBe('failed')
+    expect(runWithError('Permission denied: /etc/passwd')).toBe('failed')
+    // Previously over-suppressed by TIMEOUT_RE (bare `aborted`)
+    expect(runWithError('transaction aborted: deadlock detected')).toBe('failed')
+    expect(runWithError('git merge aborted: conflicts in 3 files')).toBe('failed')
+  })
+
+  // Fail-closed: empty / missing errorText keeps the loud failure state.
+  // Suppression requires *evidence* the error is benign.
+  it('isError=true with no errorText fail-closes to failed', () => {
+    expect(runWithError(undefined)).toBe('failed')
+    expect(runWithError('')).toBe('failed')
+  })
+
+  // isError=false (or undefined) is unaffected by errorText.
+  it('isError=false renders as done regardless of any errorText', () => {
+    const events: SessionEvent[] = [
+      enqueue('test'),
+      { kind: 'tool_use', toolName: 'Bash', toolUseId: 'toolu_X' },
+      // isError omitted (falsy) — this is the success path
+      { kind: 'tool_result', toolUseId: 'toolu_X', toolName: null },
+    ]
+    const s = fold(events)
+    expect(s.items[0].state).toBe('done')
   })
 })

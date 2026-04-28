@@ -36,23 +36,38 @@ const NO_MATCH_RE =
 const TELEGRAM_RECOVERABLE_RE =
   /message (is not modified|to edit not found|can't be deleted|was deleted)|MESSAGE_ID_INVALID|message not found/i
 
-// "Not a git repository" and similar tool-setup errors that aren't real failures
+// "Not a git repository" — narrow tool-setup pattern. Earlier drafts also
+// matched `command not found` and `permission denied` but those were too
+// broad: a real EACCES on /etc/passwd, a real "kubectl not found" during
+// a deploy, are genuine failures the user must see. Kept tight to the one
+// truly-benign case (running git outside a repo).
 const TOOL_SETUP_RE =
-  /not a git repository|command not found|permission denied/i
+  /not a git repository/i
 
-// Timeout / cancellation that the agent will retry
+// Timeout / cancellation that the agent will retry. The bare `aborted`
+// substring was previously included but matched DB transaction aborts,
+// git merge aborts, and policy-rejection messages — all real failures.
+// Dropped in favor of explicit timeout and operation-cancelled phrasing.
 const TIMEOUT_RE =
-  /timed? ?out|operation cancelled|aborted/i
+  /timed? ?out|operation cancelled/i
 
 /**
- * Returns true when a tool error text represents a benign outcome that
- * doesn't need ❌ in the UI and shouldn't trigger operator notifications.
+ * Returns true when a tool error text matches a known benign pattern (no
+ * results / resource absent / recoverable Telegram error / explicit timeout).
+ * Returns false for empty input, unknown text, or any text that doesn't
+ * match a pattern.
  *
- * The text parameter is the raw tool result content (the first ~500 chars
- * are sufficient for pattern matching — callers may truncate).
+ * The function is fail-closed: empty / undefined input → false. Callers
+ * that want to suppress only on positive evidence should call this directly;
+ * callers that need an extra short-circuit on missing input should guard at
+ * the call site with `text && isBenignToolError(text)`.
+ *
+ * The text parameter is the raw tool result content; the first ~500 chars
+ * are sufficient for pattern matching, and callers should truncate before
+ * calling for performance / event-size reasons.
  */
 export function isBenignToolError(text: string): boolean {
-  if (!text) return true // empty error = treat as benign
+  if (!text) return false
   return (
     FILE_NOT_FOUND_RE.test(text) ||
     NO_MATCH_RE.test(text) ||

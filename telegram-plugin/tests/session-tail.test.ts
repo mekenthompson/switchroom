@@ -132,7 +132,71 @@ describe('projectTranscriptLine', () => {
       },
     })
     expect(projectTranscriptLine(line)).toEqual([
-      { kind: 'tool_result', toolUseId: 'abc', toolName: null, isError: true },
+      { kind: 'tool_result', toolUseId: 'abc', toolName: null, isError: true, errorText: 'boom' },
+    ])
+  })
+
+  it('parses tool_result with content-block-array shape — concatenates text blocks', () => {
+    const line = JSON.stringify({
+      type: 'user',
+      message: {
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'xyz',
+            is_error: true,
+            content: [
+              { type: 'text', text: 'first line of error' },
+              { type: 'text', text: 'second line with detail' },
+              // Non-text blocks should be skipped without breaking
+              { type: 'image', source: { type: 'base64', data: '...' } },
+            ],
+          },
+        ],
+      },
+    })
+    expect(projectTranscriptLine(line)).toEqual([
+      {
+        kind: 'tool_result',
+        toolUseId: 'xyz',
+        toolName: null,
+        isError: true,
+        errorText: 'first line of error\nsecond line with detail',
+      },
+    ])
+  })
+
+  it('parses tool_result with is_error truncates errorText to 500 chars', () => {
+    const longText = 'A'.repeat(800)
+    const line = JSON.stringify({
+      type: 'user',
+      message: {
+        content: [
+          { type: 'tool_result', tool_use_id: 'long', is_error: true, content: longText },
+        ],
+      },
+    })
+    const result = projectTranscriptLine(line)
+    expect(result).toHaveLength(1)
+    const ev = result[0]
+    if (ev.kind !== 'tool_result') throw new Error('expected tool_result')
+    expect(ev.errorText).toBeDefined()
+    expect(ev.errorText!.length).toBe(500)
+    expect(ev.errorText!.startsWith('AAAA')).toBe(true)
+  })
+
+  it('parses tool_result with is_error=false omits errorText', () => {
+    // Success path — no error, no errorText captured.
+    const line = JSON.stringify({
+      type: 'user',
+      message: {
+        content: [
+          { type: 'tool_result', tool_use_id: 'ok', content: 'all good' },
+        ],
+      },
+    })
+    expect(projectTranscriptLine(line)).toEqual([
+      { kind: 'tool_result', toolUseId: 'ok', toolName: null, isError: undefined, errorText: undefined },
     ])
   })
 

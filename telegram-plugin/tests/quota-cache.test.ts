@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from 'fs
 import { tmpdir } from 'os'
 import { join } from 'path'
 
-import { readQuotaCache, writeQuotaCache, DEFAULT_TTL_MS } from '../gateway/quota-cache.js'
+import { readQuotaCache, writeQuotaCache, DEFAULT_TTL_MS, RATE_LIMIT_TTL_MS } from '../gateway/quota-cache.js'
 import type { ProbeResult } from '../gateway/boot-probes.js'
 
 let tmp: string
@@ -38,10 +38,18 @@ const failResult: ProbeResult = {
   detail: 'request failed: ECONNREFUSED',
 }
 
+/**
+ * The 429 result shape changed in #210: previously the probe returned
+ * { status: 'degraded', detail: 'rate limited' }; now it returns
+ * { status: 'ok', detail: 'quota check skipped: rate limited' } and is
+ * cached for 30 s (RATE_LIMIT_TTL_MS) rather than skipped entirely.
+ *
+ * This fixture represents the new 429 result shape.
+ */
 const rateLimitedResult: ProbeResult = {
-  status: 'degraded',
+  status: 'ok',
   label: 'Quota',
-  detail: 'rate limited',
+  detail: 'quota check skipped: rate limited',
 }
 
 const degradedSchemaUnknown: ProbeResult = {
@@ -118,9 +126,15 @@ describe('writeQuotaCache', () => {
     expect(existsSync(cachePath)).toBe(false)
   })
 
-  it('does NOT cache a rate-limited result (so next boot retries)', () => {
+  it('caches a rate-limited (429) result with short RATE_LIMIT_TTL_MS (#210 fix)', () => {
+    // #210: 429 results are now returned as ok-with-note and cached for 30 s
+    // (RATE_LIMIT_TTL_MS) rather than skipped, so fleet restarts absorb the
+    // burst without piling up on the endpoint.
     writeQuotaCache(rateLimitedResult, { path: cachePath })
-    expect(existsSync(cachePath)).toBe(false)
+    expect(existsSync(cachePath)).toBe(true)
+    const parsed = JSON.parse(readFileSync(cachePath, 'utf8'))
+    expect(parsed.result).toEqual(rateLimitedResult)
+    expect(parsed.ttlMs).toBe(RATE_LIMIT_TTL_MS)
   })
 
   it('caches a degraded "schema unknown" result (it is informational, not transient)', () => {
@@ -161,8 +175,12 @@ describe('readQuotaCache + writeQuotaCache round-trip', () => {
     expect(readQuotaCache({ path: cachePath, now: now + 60_000 })).toEqual(okResult)
   })
 
-  it('a rate-limited result is not cached, so reads return null', () => {
-    writeQuotaCache(rateLimitedResult, { path: cachePath })
-    expect(readQuotaCache({ path: cachePath })).toBeNull()
+  it('a rate-limited (429) result is cached and readable within RATE_LIMIT_TTL_MS (#210 fix)', () => {
+    const now = 1_700_000_000_000
+    writeQuotaCache(rateLimitedResult, { path: cachePath, now })
+    // Within 30 s window: cache hit
+    expect(readQuotaCache({ path: cachePath, now: now + 1000 })).toEqual(rateLimitedResult)
+    // After 30 s: cache miss
+    expect(readQuotaCache({ path: cachePath, now: now + RATE_LIMIT_TTL_MS + 1 })).toBeNull()
   })
 })

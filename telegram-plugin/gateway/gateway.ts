@@ -2078,24 +2078,39 @@ function handleSessionEvent(ev: SessionEvent): void {
       }
       // Issue #195: materialize the answer-lane stream as a fresh
       // sendMessage so the user's device gets a push notification on
-      // turn completion (edits don't fire pushes). Best-effort — if
-      // materialize fails, log and proceed; the existing reply path
-      // is still authoritative.
+      // turn completion (edits don't fire pushes).
+      //
+      // Guard with !currentTurnReplyCalled: the existing reply path is
+      // authoritative for the user-visible answer text. The agent normally
+      // calls reply/stream_reply during the turn, which posts the canonical
+      // message. Materializing the answer-lane on top of that produces a
+      // duplicate. Only materialize when no reply tool was invoked — which
+      // covers the case where the model emitted text but the agent never
+      // committed it via a tool call (rare, but the JTBD wants the user to
+      // see SOMETHING in that case rather than nothing).
+      //
+      // Either way we stop+null the stream — even when the reply path won,
+      // we don't want a leaked stream lingering past turn_end.
       if (activeAnswerStream != null) {
         const stream = activeAnswerStream
         activeAnswerStream = null
-        void stream
-          .materialize()
-          .catch((err) => {
-            process.stderr.write(
-              `telegram gateway: answer-stream materialize failed: ${
-                err instanceof Error ? err.message : String(err)
-              }\n`,
-            )
-          })
-          .finally(() => {
-            stream.stop()
-          })
+        if (!currentTurnReplyCalled) {
+          void stream
+            .materialize()
+            .catch((err) => {
+              process.stderr.write(
+                `telegram gateway: answer-stream materialize failed: ${
+                  err instanceof Error ? err.message : String(err)
+                }\n`,
+              )
+            })
+            .finally(() => {
+              stream.stop()
+            })
+        } else {
+          // Reply path won — discard the answer-lane silently.
+          stream.stop()
+        }
       }
       if (currentSessionChatId == null) return
       const chatId = currentSessionChatId

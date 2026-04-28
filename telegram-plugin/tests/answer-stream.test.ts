@@ -481,3 +481,111 @@ describe('answer-stream — maxChars guard', () => {
     expect(editMessageText).not.toHaveBeenCalled()
   })
 })
+
+describe('answer-stream — materialize() on draft transport', () => {
+  it('clears the draft and sends a fresh sendMessage on materialize', async () => {
+    const sendMessage = makeSendMessage()
+    const editMessageText = makeEditMessageText()
+    const sendMessageDraft = makeSendMessageDraft()
+    const stream = createAnswerStream({
+      chatId: 'chat1',
+      isPrivateChat: true,
+      minInitialChars: 0,
+      throttleMs: 250,
+      sendMessage,
+      editMessageText,
+      sendMessageDraft,
+    })
+
+    stream.update('hello world')
+    vi.advanceTimersByTime(500)
+    await flushMicrotasks()
+
+    expect(sendMessageDraft).toHaveBeenCalled()
+    const draftCallsBeforeMaterialize = sendMessageDraft.mock.calls.length
+
+    const finalId = await stream.materialize()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(sendMessage.mock.calls[0][1]).toBe('hello world')
+    expect(typeof finalId).toBe('number')
+
+    expect(sendMessageDraft.mock.calls.length).toBeGreaterThan(draftCallsBeforeMaterialize)
+    const lastDraftCall = sendMessageDraft.mock.calls[sendMessageDraft.mock.calls.length - 1]
+    expect(lastDraftCall[2]).toBe('')
+  })
+})
+
+describe('answer-stream — onSuperseded callback', () => {
+  it('invokes onSuperseded when a send resolves after forceNewMessage', async () => {
+    const onSuperseded = vi.fn()
+
+    let resolveSend: ((value: { message_id: number }) => void) | undefined
+    const sendMessage = vi.fn(
+      () =>
+        new Promise<{ message_id: number }>((resolve) => {
+          resolveSend = resolve
+        }),
+    ) as unknown as ReturnType<typeof vi.fn> & SendMessageFn
+
+    const editMessageText = makeEditMessageText()
+    const stream = createAnswerStream({
+      chatId: 'chat1',
+      isPrivateChat: false,
+      minInitialChars: 0,
+      throttleMs: 250,
+      sendMessage,
+      editMessageText,
+      onSuperseded,
+    })
+
+    stream.update('first message text')
+    vi.advanceTimersByTime(500)
+    await flushMicrotasks()
+
+    expect(sendMessage).toHaveBeenCalledTimes(1)
+    expect(resolveSend).toBeDefined()
+
+    stream.forceNewMessage()
+
+    resolveSend!({ message_id: 9999 })
+    await flushMicrotasks()
+
+    expect(onSuperseded).toHaveBeenCalledTimes(1)
+    expect(onSuperseded.mock.calls[0][0]).toEqual({
+      messageId: 9999,
+      textSnapshot: 'first message text',
+    })
+    expect(stream.messageId()).toBeUndefined()
+  })
+})
+
+describe('answer-stream — materialize() max-chars guard', () => {
+  it('does not send when buffered text exceeds 4096 chars', async () => {
+    const sendMessage = makeSendMessage()
+    const editMessageText = makeEditMessageText()
+    const warn = vi.fn()
+    const stream = createAnswerStream({
+      chatId: 'chat1',
+      isPrivateChat: false,
+      minInitialChars: 0,
+      throttleMs: 250,
+      sendMessage,
+      editMessageText,
+      warn,
+    })
+
+    stream.update('a'.repeat(4000))
+    vi.advanceTimersByTime(500)
+    await flushMicrotasks()
+    const sendsAfterStreaming = sendMessage.mock.calls.length
+
+    stream.update('b'.repeat(4097))
+    const result = await stream.materialize()
+
+    expect(result).toBeUndefined()
+    expect(sendMessage.mock.calls.length).toBe(sendsAfterStreaming)
+    expect(warn).toHaveBeenCalled()
+    expect(warn.mock.calls.some((c) => /4096|exceeds/i.test(String(c[0])))).toBe(true)
+  })
+})

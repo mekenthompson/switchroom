@@ -377,10 +377,28 @@ export function createAnswerStream(config: AnswerStreamConfig): AnswerStreamHand
         }
       }
 
-      // The text we want to materialize
-      const textToSend = lastSentText || pendingText
-      if (!textToSend || !textToSend.trim()) {
+      // The text we want to materialize. Prefer pendingText (most recent
+      // snapshot from the model) over lastSentText (what last reached the
+      // wire). They usually match, but if a buffered update was scheduled
+      // and not yet sent when materialize() was called, pendingText holds
+      // the freshest content.
+      const textToSend = (pendingText || lastSentText).trimEnd()
+      if (!textToSend) {
         log?.('answer-stream: materialize — nothing to send')
+        return undefined
+      }
+
+      // Telegram caps a single message at 4096 chars. The streaming path
+      // already guards on this in sendOrEdit; materialize must too, or
+      // long answers silently drop the final push notification (Telegram
+      // returns 400, the catch swallows). Per the JTBD anti-pattern
+      // "silent failure of any kind", warn and bail explicitly so the
+      // operator can correlate.
+      if (textToSend.length > TELEGRAM_MAX_CHARS) {
+        warn?.(
+          `answer-stream: materialize — text exceeds ${TELEGRAM_MAX_CHARS} chars (got ${textToSend.length}); skipping. ` +
+          `The reply path should have already delivered chunked output; this is a defensive guard.`,
+        )
         return undefined
       }
 
@@ -395,7 +413,7 @@ export function createAnswerStream(config: AnswerStreamConfig): AnswerStreamHand
       // nested quote that looks wrong.
 
       try {
-        const sent = await sendMessage(chatId, textToSend.trimEnd(), sendParams)
+        const sent = await sendMessage(chatId, textToSend, sendParams)
         const sentId = sent?.message_id
         if (typeof sentId === 'number' && Number.isFinite(sentId)) {
           streamMsgId = sentId

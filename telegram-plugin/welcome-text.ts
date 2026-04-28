@@ -316,6 +316,7 @@ export function switchroomHelpText(agentName: string): string {
     `<code>/vault status</code> — show broker state (locked/unlocked, uptime, key count)`,
     `<code>/vault unlock</code> — unlock the broker (prompts for passphrase via Telegram)`,
     `<code>/vault lock</code> — lock the broker`,
+    `<code>/vault grants [agent]</code> — list active capability grants (tap to revoke)`,
     `<code>/doctor</code> — health check (deps, services, MCP)`,
     `<code>/usage</code> — Pro/Max plan quota (5h + 7d windows)`,
     `<code>/switchroomhelp</code> — this help`,

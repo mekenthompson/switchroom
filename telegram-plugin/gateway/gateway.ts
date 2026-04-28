@@ -2068,8 +2068,15 @@ async function executeGetRecentMessages(args: Record<string, unknown>): Promise<
       const who = r.role === 'user' ? r.user ?? 'user' : 'assistant'
       const time = new Date(r.ts * 1000).toISOString()
       const attach = r.attachment_kind ? ` [${r.attachment_kind}]` : ''
-      const reaction = r.user_reaction ? ` [reaction:${r.user_reaction}]` : ''
-      return `[${time}] ${who}${attach}${reaction}: ${r.text}`
+      // Match server.ts get_recent_messages format exactly — both code paths
+      // serve the same MCP tool, so the agent's parsing must not depend on
+      // which entry point handled the call. See issue #119 for replyCtx;
+      // reaction tag added in #297 with the server.ts format as canonical.
+      const replyCtx = r.reply_to_message_id != null
+        ? ` ↪️#${r.reply_to_message_id}${r.reply_to_text ? `:"${r.reply_to_text.slice(0, 60)}${r.reply_to_text.length > 60 ? '…' : ''}"` : ''}`
+        : ''
+      const reactionTag = r.user_reaction ? ` [reaction: ${r.user_reaction}]` : ''
+      return `[${time}] ${who}${attach}${replyCtx}: ${r.text}${reactionTag}`
     })
     .join('\n')
   return {

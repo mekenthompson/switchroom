@@ -915,8 +915,9 @@ export {
   markdownToHtml,
   splitHtmlChunks,
   escapeHtml,
+  sanitizeForTelegram,
 } from './format.js'
-import { markdownToHtml, splitHtmlChunks, escapeHtml, repairEscapedWhitespace } from './format.js'
+import { markdownToHtml, splitHtmlChunks, escapeHtml, repairEscapedWhitespace, sanitizeForTelegram } from './format.js'
 
 type AttachmentMeta = {
   kind: string
@@ -1508,7 +1509,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         let effectiveText: string
         if (format === 'html') {
           parseMode = 'HTML' as const
-          effectiveText = markdownToHtml(text)
+          effectiveText = sanitizeForTelegram(markdownToHtml(text))
         } else if (format === 'markdownv2') {
           parseMode = 'MarkdownV2' as const
           effectiveText = escapeMarkdownV2(text)
@@ -1871,7 +1872,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
           {
             bot: lockedBot,
             retry: robustApiCall,
-            markdownToHtml,
+            markdownToHtml: (t: string) => sanitizeForTelegram(markdownToHtml(t)),
             escapeMarkdownV2,
             repairEscapedWhitespace,
             takeHandoffPrefix,
@@ -1974,7 +1975,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const access = loadAccess()
         const configParseMode = access.parseMode ?? 'html'
         const parseMode = configParseMode === 'html' ? 'HTML' : undefined
-        const effectiveText = configParseMode === 'html' ? markdownToHtml(text) : text
+        const effectiveText = configParseMode === 'html' ? sanitizeForTelegram(markdownToHtml(text)) : text
 
         const sendOpts = {
           ...(parseMode ? { parse_mode: parseMode } : {}),
@@ -2043,7 +2044,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         let editText: string
         if (editFormat === 'html') {
           editParseMode = 'HTML' as const
-          editText = markdownToHtml(editRawText)
+          editText = sanitizeForTelegram(markdownToHtml(editRawText))
         } else if (editFormat === 'markdownv2') {
           editParseMode = 'MarkdownV2' as const
           editText = escapeMarkdownV2(editRawText)
@@ -2544,7 +2545,7 @@ if (streamMode === 'checklist') {
       handleStreamReply(args, { activeDraftStreams, activeDraftParseModes, suppressPtyPreview }, {
         bot: lockedBot,
         retry: robustApiCall,
-        markdownToHtml,
+        markdownToHtml: (t: string) => sanitizeForTelegram(markdownToHtml(t)),
         escapeMarkdownV2,
         repairEscapedWhitespace,
         takeHandoffPrefix: () => '',
@@ -2819,7 +2820,7 @@ function handlePtyPartial(text: string): void {
   handlePtyPartialPure(text, state, {
     bot,
     retry: robustApiCall,
-    renderText: markdownToHtml,
+    renderText: (t: string) => sanitizeForTelegram(markdownToHtml(t)),
     logEvent: logStreamingEvent,
     onStreamSend: (chatId, messageId, charCount) => {
       logOutbound('pty_preview', chatId, messageId, charCount, 'initial_send')

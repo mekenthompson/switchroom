@@ -6,7 +6,7 @@ import { describe, test, expect } from 'vitest'
 
 // Import from the side-effect-free format module so tests don't trigger
 // server.ts's startup (env load, token check, grammy init).
-import { markdownToHtml, splitHtmlChunks, isLikelyTelegramHtml, repairEscapedWhitespace } from '../format.js'
+import { markdownToHtml, splitHtmlChunks, isLikelyTelegramHtml, repairEscapedWhitespace, sanitizeForTelegram } from '../format.js'
 
 // ---------------------------------------------------------------------------
 // markdownToHtml
@@ -708,5 +708,193 @@ describe('repairEscapedWhitespace', () => {
     expect(html).toContain('- bullet one')
     // Literal \n must not survive anywhere.
     expect(html).not.toContain('\\n')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sanitizeForTelegram — output invariants enforced pre-send
+// ---------------------------------------------------------------------------
+
+describe('sanitizeForTelegram', () => {
+  // ── Rule 1: strip ## headings ────────────────────────────────────────────
+
+  test('strips ## heading and converts to bold', () => {
+    const result = sanitizeForTelegram('## My Heading\n\nbody text')
+    expect(result).toContain('<b>My Heading</b>')
+    expect(result).not.toContain('## ')
+  })
+
+  test('strips ### heading and converts to bold', () => {
+    const result = sanitizeForTelegram('### Section\n\nbody')
+    expect(result).toContain('<b>Section</b>')
+    expect(result).not.toContain('### ')
+  })
+
+  test('strips #### heading and converts to bold', () => {
+    const result = sanitizeForTelegram('#### Sub\n\nbody')
+    expect(result).toContain('<b>Sub</b>')
+    expect(result).not.toContain('#### ')
+  })
+
+  test('strips # (h1) heading and converts to bold', () => {
+    const result = sanitizeForTelegram('# Title\n\nbody')
+    expect(result).toContain('<b>Title</b>')
+    expect(result).not.toContain('# Title')
+  })
+
+  // ── Rule 2: flatten nested bullets ──────────────────────────────────────
+
+  test('flattens 2-space-indented bullets', () => {
+    const result = sanitizeForTelegram('- top\n  - sub')
+    expect(result).toContain('· sub')
+    expect(result).not.toContain('  - sub')
+  })
+
+  test('flattens 4-space-indented bullets', () => {
+    const result = sanitizeForTelegram('- top\n    - deeply nested')
+    expect(result).toContain('· deeply nested')
+    expect(result).not.toContain('    - deeply nested')
+  })
+
+  test('flattens tab-indented bullets', () => {
+    const result = sanitizeForTelegram('- top\n\t- tabbed sub')
+    expect(result).toContain('· tabbed sub')
+    expect(result).not.toContain('\t- tabbed sub')
+  })
+
+  test('preserves unindented bullets unchanged', () => {
+    const result = sanitizeForTelegram('- item one\n- item two')
+    expect(result).toContain('- item one')
+    expect(result).toContain('- item two')
+    // No middle-dot substitution on top-level bullets
+    expect(result).not.toContain('· item one')
+  })
+
+  // ── Rule 3: collapse blank lines ────────────────────────────────────────
+
+  test('collapses 4 blank lines to 2', () => {
+    const result = sanitizeForTelegram('before\n\n\n\nafter')
+    expect(result).toBe('before\n\nafter')
+  })
+
+  test('collapses 3 blank lines to 2', () => {
+    const result = sanitizeForTelegram('a\n\n\nb')
+    expect(result).toBe('a\n\nb')
+  })
+
+  test('leaves exactly 2 blank lines alone', () => {
+    const result = sanitizeForTelegram('a\n\nb')
+    expect(result).toBe('a\n\nb')
+  })
+
+  // ── Rule 4: trailing whitespace ──────────────────────────────────────────
+
+  test('strips trailing spaces from lines', () => {
+    const result = sanitizeForTelegram('hello   \nworld  ')
+    expect(result).toBe('hello\nworld')
+  })
+
+  test('strips trailing tabs from lines', () => {
+    const result = sanitizeForTelegram('hello\t\t\nworld')
+    expect(result).toBe('hello\nworld')
+  })
+
+  // ── Rule 5: HTML escape inside code/pre ─────────────────────────────────
+
+  test('HTML-escapes bare < and > inside <code> block', () => {
+    const result = sanitizeForTelegram('<code>a < b && c > d</code>')
+    expect(result).toContain('<code>a &lt; b')
+    expect(result).toContain('&gt; d</code>')
+  })
+
+  test('HTML-escapes bare & inside <code> block', () => {
+    const result = sanitizeForTelegram('<code>foo & bar</code>')
+    expect(result).toContain('<code>foo &amp; bar</code>')
+  })
+
+  test('HTML-escapes bare < and > inside <pre> block', () => {
+    const result = sanitizeForTelegram('<pre><code>if a < b</code></pre>')
+    expect(result).toContain('&lt; b')
+  })
+
+  test('does not double-escape already-escaped &amp; in <code>', () => {
+    const result = sanitizeForTelegram('<code>a &amp; b</code>')
+    // Must remain single-escaped, not become &amp;amp;
+    expect(result).toContain('<code>a &amp; b</code>')
+    expect(result).not.toContain('&amp;amp;')
+  })
+
+  test('does not double-escape &lt; in <code>', () => {
+    const result = sanitizeForTelegram('<code>&lt;div&gt;</code>')
+    expect(result).toContain('<code>&lt;div&gt;</code>')
+    expect(result).not.toContain('&amp;lt;')
+  })
+
+  test('does not double-escape &#123; numeric entity in <code>', () => {
+    const result = sanitizeForTelegram('<code>&#123; x &#125;</code>')
+    expect(result).toContain('&#123;')
+    expect(result).not.toContain('&amp;#123;')
+  })
+
+  // ── Code block exclusion from structural rules ───────────────────────────
+
+  test('does not strip ## heading inside <code> block', () => {
+    const result = sanitizeForTelegram('<code>## not a heading</code>')
+    // The ## stays; only < > & are touched inside code
+    expect(result).toContain('## not a heading')
+  })
+
+  test('does not flatten bullets inside <code> block', () => {
+    const result = sanitizeForTelegram('<code>  - not flattened</code>')
+    // The indented bullet stays verbatim inside code
+    expect(result).toContain('  - not flattened')
+  })
+
+  test('does not strip ## heading inside <pre> block', () => {
+    const result = sanitizeForTelegram('<pre><code class="language-bash"># comment\n## heading\n</code></pre>')
+    expect(result).toContain('## heading')
+  })
+
+  // ── Idempotency ──────────────────────────────────────────────────────────
+
+  test('is idempotent for heading conversion', () => {
+    const once = sanitizeForTelegram('## Heading\n\nbody')
+    const twice = sanitizeForTelegram(once)
+    expect(twice).toBe(once)
+  })
+
+  test('is idempotent for bullet flattening', () => {
+    const once = sanitizeForTelegram('- top\n  - sub\n    - deep')
+    const twice = sanitizeForTelegram(once)
+    expect(twice).toBe(once)
+  })
+
+  test('is idempotent for blank-line collapse', () => {
+    const once = sanitizeForTelegram('a\n\n\n\nb')
+    const twice = sanitizeForTelegram(once)
+    expect(twice).toBe(once)
+  })
+
+  test('is idempotent for code-block escaping', () => {
+    const once = sanitizeForTelegram('<code>a < b & c > d</code>')
+    const twice = sanitizeForTelegram(once)
+    expect(twice).toBe(once)
+  })
+
+  test('is idempotent for a combined realistic message', () => {
+    const input = [
+      '## Status Report',
+      '',
+      '- top item',
+      '  - sub item one',
+      '  - sub item two',
+      '',
+      '',
+      '',
+      'Here is some <code>a < b</code> inline code.',
+    ].join('\n')
+    const once = sanitizeForTelegram(input)
+    const twice = sanitizeForTelegram(once)
+    expect(twice).toBe(once)
   })
 })

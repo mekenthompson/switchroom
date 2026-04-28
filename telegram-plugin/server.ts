@@ -197,6 +197,10 @@ import { createStreamController } from './stream-controller.js'
 import { handlePtyPartialPure, type PtyHandlerState } from './pty-partial-handler.js'
 import { handleStreamReply } from './stream-reply-handler.js'
 import { createChatLock } from './chat-lock.js'
+import {
+  validateInlineKeyboard,
+  type AnyButton,
+} from './telegram-button-constraints.js'
 import { logStreamingEvent } from './streaming-metrics.js'
 import { buildAttachmentPath, assertInsideInbox } from './attachment-path.js'
 import { startSessionTail, type SessionEvent, type SessionTailHandle } from './session-tail.js'
@@ -1592,6 +1596,23 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? 4000, MAX_CHUNK_LIMIT))
         const replyMode = access.replyToMode ?? 'first'
 
+        // inline_keyboard: validate and build reply_markup (URL buttons only, v1).
+        // Validation rejects buttons missing text or url and flags constraint
+        // violations. reply_markup is attached to the LAST chunk so the buttons
+        // appear on the final visible message rather than an intermediate one.
+        let replyMarkup: { inline_keyboard: AnyButton[][] } | undefined
+        const rawKeyboard = args.inline_keyboard as AnyButton[][] | undefined
+        if (rawKeyboard != null) {
+          const validationErrors = validateInlineKeyboard(rawKeyboard)
+          if (validationErrors.length > 0) {
+            const summary = validationErrors
+              .map((e) => `${e.path}.${e.field}: ${e.reason}`)
+              .join('; ')
+            throw new Error(`inline_keyboard validation failed: ${summary}`)
+          }
+          replyMarkup = { inline_keyboard: rawKeyboard }
+        }
+
         // Use smart HTML chunking for HTML mode, legacy chunking otherwise
         const chunks = parseMode === 'HTML'
           ? splitHtmlChunks(effectiveText, limit)
@@ -1673,11 +1694,15 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               reply_to != null &&
               replyMode !== 'off' &&
               (replyMode === 'all' || i === 0)
+            // Attach inline keyboard to the last chunk only — buttons on
+            // intermediate chunks would be orphaned when the next chunk arrives.
+            const isLastChunk = i === chunks.length - 1
             const sendOpts = {
               ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
               ...(parseMode ? { parse_mode: parseMode } : {}),
               ...(threadId != null ? { message_thread_id: threadId } : {}),
               ...(disableLinkPreview ? { link_preview_options: { is_disabled: true } } : {}),
+              ...(replyMarkup != null && isLastChunk ? { reply_markup: replyMarkup } : {}),
             }
 
             // Chunk 0 edit-in-place path: edit the existing preview
@@ -1689,6 +1714,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
               const editOpts: Record<string, unknown> = {}
               if (parseMode) editOpts.parse_mode = parseMode
               if (disableLinkPreview) editOpts.link_preview_options = { is_disabled: true }
+              // Include inline keyboard if this is also the only (last) chunk.
+              if (replyMarkup != null && isLastChunk) editOpts.reply_markup = replyMarkup
               try {
                 await robustApiCall(
                   () => lockedBot.api.editMessageText(chat_id, previewMessageId!, chunks[i], editOpts),

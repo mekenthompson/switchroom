@@ -111,6 +111,25 @@ export interface ProgressDriverConfig {
     taskIndex: number
     taskTotal: number
   }) => void
+  /**
+   * Fired when a turn ends with no reply sent (silentEnd=true). The outer
+   * layer can write a state file so the Stop hook can block the session and
+   * re-prompt the agent. The callback returns `{ suppressed: true }` when the
+   * retry is allowed (retryCount was 0) — in that case the driver will
+   * re-render the final card WITHOUT the "🙊 Ended without reply" warning so
+   * the user doesn't see a false-positive before the retry lands.
+   *
+   * On the second silent-end (retryCount exhausted) the callback returns
+   * `{ suppressed: false }` and the warning card renders as normal.
+   *
+   * Not fired for autonomous turns (wasAutonomous=true) — those intentionally
+   * produce no user-visible reply.
+   */
+  onSilentEnd?: (args: {
+    chatId: string
+    threadId?: string
+    turnKey: string
+  }) => { suppressed: boolean } | void
   /** Min ms between edits for a given chat+thread. Default 500. */
   minIntervalMs?: number
   /** Coalesce window — burst events within this land as one render. Default 400. */
@@ -296,6 +315,12 @@ interface PerChatState {
    * reply and ending without one is entirely expected.
    */
   wasAutonomous: boolean
+  /**
+   * Set by completeTurnFully when onSilentEnd returns { suppressed: true }.
+   * Causes flush() to render the final card without the "🙊 Ended without
+   * reply" header so no false-positive appears before the retry reply lands.
+   */
+  silentEndSuppressed: boolean
 }
 
 export interface ProgressDriver {
@@ -489,6 +514,26 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
   function completeTurnFully(cs: PerChatState): void {
     if (cs.completionFired) return
     cs.completionFired = true
+    // Fire onSilentEnd when the turn ends without a reply (and isn't an
+    // autonomous wakeup). The callback can write a state file so the Stop
+    // hook can block the session and re-prompt the agent. If it returns
+    // { suppressed: true } we re-render the final card without the warning
+    // so no false-positive flash appears before the retry reply lands.
+    const isSilentEnd = !cs.replyToolCalled && !cs.wasAutonomous
+    if (isSilentEnd && config.onSilentEnd) {
+      try {
+        const result = config.onSilentEnd({ chatId: cs.chatId, threadId: cs.threadId, turnKey: cs.turnKey })
+        if (result?.suppressed === true) {
+          cs.silentEndSuppressed = true
+          // Re-render the final card without the "🙊 Ended without reply" header.
+          // flush() checks silentEndSuppressed, so a plain forceDone flush here
+          // will render "✅ Done" instead of the warning.
+          flush(cs, /*forceDone*/ true)
+        }
+      } catch {
+        /* never let the callback break the completion path */
+      }
+    }
     const taskNum = taskNumFor(cs)
     const summary = summariseTurn(cs.state, now())
     if (config.onTurnEnd) {
@@ -636,7 +681,9 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         // "Working…". The renderer applies the same gate, so passing the
         // unconditional flag here is safe.
         // Issue #259: suppress for autonomous wakeup turns (no reply is expected).
-        const silentEnd = !cs.replyToolCalled && !cs.wasAutonomous
+        // silentEndSuppressed: set when a retry is queued (first silent-end) so
+        // the heartbeat renders "✅ Done" instead of "🙊 Ended without reply".
+        const silentEnd = !cs.replyToolCalled && !cs.wasAutonomous && !cs.silentEndSuppressed
         // Issue #137: agent called reply/stream_reply (replyToolCalled=true)
         // but the actual outbound never landed (recordOutboundDelivered was
         // never called for this card). Distinct from silentEnd because the
@@ -749,7 +796,11 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     // Issue #259: autonomous wakeup turns never produce a reply by design —
     // suppress the silent-end warning so the card renders "✅ Done" instead
     // of "🙊 Ended without reply" when ScheduleWakeup / CronCreate fires.
-    const silentEnd = !chatState.replyToolCalled && !chatState.wasAutonomous
+    // silentEndSuppressed is set by completeTurnFully when onSilentEnd returns
+    // { suppressed: true } — used to re-render the final card without the
+    // warning after a retry is queued, preventing a false-positive flash.
+    const silentEnd =
+      !chatState.replyToolCalled && !chatState.wasAutonomous && !chatState.silentEndSuppressed
     const replyNotDelivered =
       chatState.replyToolCalled && chatState.outboundDeliveredCount === 0
     const html = render(
@@ -967,6 +1018,7 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
           replyToolCalled: false,
           outboundDeliveredCount: 0,
           wasAutonomous: false,
+          silentEndSuppressed: false,
         }
         chats.set(slot.turnKey, chatState)
         if (event.isSync) {

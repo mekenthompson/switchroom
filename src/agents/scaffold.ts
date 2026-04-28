@@ -1436,6 +1436,16 @@ export function scaffoldAgent(
           timeout: 15,
           async: true,
         });
+        // Silent-end auto-interrupt: when the agent ends a turn without
+        // sending a reply, return decision:block to re-prompt the agent
+        // (capped at 1 retry per turn — see hook + gateway state file).
+        // Must be SYNC so Claude Code reads stdout for the block decision.
+        switchroomStopHooks.push({
+          type: "command",
+          command: `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "silent-end-interrupt-stop.mjs")}"`,
+          timeout: 5,
+          async: false,
+        });
       }
       const switchroomStop = switchroomStopHooks.length > 0
         ? [{ hooks: switchroomStopHooks }]
@@ -2452,6 +2462,14 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
         command: `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "secret-scrub-stop.mjs")}"`,
         timeout: 15,
         async: true,
+      });
+      // Silent-end auto-interrupt (mirror of scaffoldAgent above —
+      // keep these two blocks in sync).
+      switchroomStopHooksReconcile.push({
+        type: "command",
+        command: `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "silent-end-interrupt-stop.mjs")}"`,
+        timeout: 5,
+        async: false,
       });
     }
     const switchroomStop = switchroomStopHooksReconcile.length > 0

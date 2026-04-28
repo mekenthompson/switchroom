@@ -20,12 +20,13 @@
  *   /delete <agent>         — 2-step confirm → archive dir + destroy unit
  *   /update                 — switchroom update (paginated output)
  *   /create-agent [name]    — multi-turn flow: profile → bot token → OAuth
+ *   /setup [slug]           — guided new-agent wizard (slug → persona → model → emoji → token → allowlist → start)
  */
 
 import { Bot, InlineKeyboard, type Context } from 'grammy'
-import { readFileSync, chmodSync } from 'fs'
+import { readFileSync, writeFileSync, chmodSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { listWorktrees } from '../../src/worktree/list.js'
 import { installPluginLogger } from '../plugin-logger.js'
 import {
@@ -70,7 +71,21 @@ import {
 } from './foreman-create-flow.js'
 import { listAvailableProfiles } from '../../src/agents/profiles.js'
 import { createAgent, completeCreation } from '../../src/agents/create-orchestrator.js'
-import { validateBotToken } from '../../src/setup/telegram-api.js'
+import { validateBotToken, validateBotTokenMatchesAgent } from '../../src/setup/telegram-api.js'
+import { resolveAgentsDir, loadConfig } from '../../src/config/loader.js'
+import {
+  getSetupState,
+  setSetupState,
+  clearSetupState,
+  listActiveSetupFlows,
+} from './setup-state.js'
+import {
+  startSetupFlow,
+  handleSetupText,
+  makeSetupInitialState,
+  advanceSetupState,
+  setupStepLabel,
+} from './setup-flow.js'
 
 // ─── Stderr logging ───────────────────────────────────────────────────────
 installPluginLogger()
@@ -212,7 +227,8 @@ bot.command('start', async ctx => {
     '  /restart &lt;agent&gt; — restart an agent',
     '  /delete &lt;agent&gt; — delete an agent (2-step confirm)',
     '  /update — update switchroom',
-    '  /create-agent [name] — create a new agent (multi-turn)',
+    '  /setup [slug] — guided new-agent wizard',
+    '  /create-agent [name] — create a new agent (legacy multi-turn)',
   ].join('\n'), { html: true })
 })
 
@@ -230,12 +246,13 @@ bot.command('help', async ctx => {
     '/restart &lt;agent&gt; — restart an agent via systemctl',
     '/delete &lt;agent&gt; — delete agent (confirms, then archives dir)',
     '/update — pull latest switchroom + reconcile agents',
-    '/create-agent [name] — interactive new-agent wizard',
+    '/setup [slug] — guided wizard: slug → persona → model → emoji → token → start',
+    '/create-agent [name] — legacy interactive new-agent wizard',
     '',
     '<b>Examples:</b>',
     '<code>/logs gymbro --tail 100</code>',
     '<code>/restart gymbro</code>',
-    '<code>/create-agent gymbro</code>',
+    '<code>/setup gymbro</code>',
   ].join('\n'), { html: true })
 })
 
@@ -364,6 +381,85 @@ bot.command('worktrees', async ctx => {
   }
 })
 
+// ─── /setup ───────────────────────────────────────────────────────────────
+//
+// Guided wizard: slug → persona name → model → emoji → bot token → allowlist
+// confirmation → reconcile (createAgent) + start.
+//
+// Deferral notes:
+//   // TODO(#188): BotFather auto-flow — currently user creates bot manually
+//   // TODO(#189): OAuth code paste step — currently shows manual terminal instruction
+//   // TODO(#190): Skills selector — currently shows placeholder message
+
+bot.command(['setup', 'createagent'], async ctx => {
+  const chatId = String(ctx.chat!.id)
+  const inlineSlug = ((ctx.match ?? '') as string).trim().split(/\s+/)[0] || null
+
+  // If there's already an active setup flow, remind the user
+  const existing = getSetupState(chatId)
+  if (existing && existing.step !== 'done') {
+    await switchroomReply(ctx, [
+      `A setup wizard is already in progress for <b>${escapeHtmlForTg(existing.slug ?? '?')}</b> (${setupStepLabel(existing.step)}).`,
+      '',
+      'Continue by sending your answer, or type <code>cancel</code> to abort.',
+    ].join('\n'), { html: true })
+    return
+  }
+
+  const action = startSetupFlow(inlineSlug)
+
+  if (action.kind === 'error') {
+    await switchroomReply(ctx, action.message, { html: true })
+    return
+  }
+
+  if (action.kind === 'ask-slug') {
+    const state = makeSetupInitialState(chatId, null)
+    setSetupState(state)
+    await switchroomReply(ctx, [
+      '<b>New agent wizard</b>',
+      '',
+      'Step 1/5: What slug (short name) should this agent use?',
+      '<i>e.g. <code>gymbro</code> — lowercase, hyphens/underscores OK, max 51 chars</i>',
+      '',
+      'Type <code>cancel</code> at any time to abort.',
+    ].join('\n'), { html: true })
+    return
+  }
+
+  if (action.kind === 'ask-persona') {
+    const state = makeSetupInitialState(chatId, inlineSlug)
+    setSetupState(state)
+    await switchroomReply(ctx, [
+      `<b>New agent wizard</b> — slug: <code>${escapeHtmlForTg(inlineSlug!)}</code>`,
+      '',
+      'Step 2/5: What should this agent\'s persona name be?',
+      '<i>e.g. <code>Gym Bro</code> — displayed in greetings and topics</i>',
+    ].join('\n'), { html: true })
+    return
+  }
+})
+
+// ─── /cancel (setup wizard abort) ────────────────────────────────────────
+
+bot.command('cancel', async ctx => {
+  const chatId = String(ctx.chat!.id)
+  const setupState = getSetupState(chatId)
+  if (setupState && setupState.step !== 'done') {
+    clearSetupState(chatId)
+    await switchroomReply(ctx, 'Setup wizard cancelled. Type /setup to start a new one.', { html: false })
+    return
+  }
+  // No active setup flow — check create-agent flow
+  const createState = getState(chatId)
+  if (createState && createState.step !== 'done') {
+    clearState(chatId)
+    await switchroomReply(ctx, 'Create-agent flow cancelled.', { html: false })
+    return
+  }
+  await switchroomReply(ctx, 'No active wizard to cancel.', { html: false })
+})
+
 // ─── /create-agent ────────────────────────────────────────────────────────
 
 bot.command('create_agent', async ctx => {
@@ -485,16 +581,244 @@ bot.on('message:text', async ctx => {
     return
   }
 
-  // 2. Check for active create-agent flow
+  // 2. Check for active /setup wizard flow
+  const setupState = getSetupState(chatId)
+  if (setupState && setupState.step !== 'done') {
+    await handleSetupFlowText(ctx, chatId, text, setupState)
+    return
+  }
+
+  // 3. Check for active create-agent flow
   const flowState = getState(chatId)
   if (flowState && flowState.step !== 'done') {
     await handleCreateFlowText(ctx, chatId, text, flowState)
     return
   }
 
-  // 3. Unknown text
+  // 4. Unknown text
   await switchroomReply(ctx, 'Unknown command. Try /help.', { html: true })
 })
+
+// ─── Setup wizard: text handler ───────────────────────────────────────────
+
+async function handleSetupFlowText(
+  ctx: Context,
+  chatId: string,
+  text: string,
+  setupState: NonNullable<ReturnType<typeof getSetupState>>,
+): Promise<void> {
+  const callerId = String(ctx.from?.id ?? '')
+  const action = handleSetupText({ state: setupState, text, callerId })
+
+  switch (action.kind) {
+    // ── Slug step ──────────────────────────────────────────────────────────
+    case 'ask-persona': {
+      const updated = advanceSetupState(setupState, { step: 'asked-persona', slug: action.slug })
+      setSetupState(updated)
+      await switchroomReply(ctx, [
+        `Slug: <code>${escapeHtmlForTg(action.slug)}</code>`,
+        '',
+        'Step 2/5: What persona name should this agent have?',
+        '<i>e.g. <code>Gym Bro</code> — displayed in greetings</i>',
+      ].join('\n'), { html: true })
+      return
+    }
+
+    // ── Persona step ───────────────────────────────────────────────────────
+    case 'ask-model': {
+      const updated = advanceSetupState(setupState, {
+        step: 'asked-model',
+        slug: action.slug,
+        persona: action.persona,
+      })
+      setSetupState(updated)
+      await switchroomReply(ctx, [
+        `Persona: <b>${escapeHtmlForTg(action.persona)}</b>`,
+        '',
+        'Step 3/5: Which Claude model should this agent use?',
+        'Options: <code>sonnet</code>, <code>opus</code>, <code>haiku</code>, or a full model ID.',
+        'Type <code>skip</code> to use the profile default.',
+      ].join('\n'), { html: true })
+      return
+    }
+
+    // ── Model step ─────────────────────────────────────────────────────────
+    case 'ask-emoji': {
+      const updated = advanceSetupState(setupState, {
+        step: 'asked-emoji',
+        model: action.model,
+      })
+      setSetupState(updated)
+      const modelNote = action.model
+        ? `Model: <code>${escapeHtmlForTg(action.model)}</code>`
+        : 'Model: <i>profile default</i>'
+      await switchroomReply(ctx, [
+        modelNote,
+        '',
+        'Step 4/5: What emoji should represent this agent\'s Telegram topic?',
+        'Type <code>skip</code> to use the default.',
+      ].join('\n'), { html: true })
+      return
+    }
+
+    // ── Emoji step ─────────────────────────────────────────────────────────
+    case 'ask-bot-token': {
+      const updated = advanceSetupState(setupState, {
+        step: 'asked-bot-token',
+        emoji: action.emoji,
+      })
+      setSetupState(updated)
+      const emojiNote = action.emoji
+        ? `Emoji: ${action.emoji}`
+        : 'Emoji: <i>default</i>'
+      // TODO(#188): BotFather auto-flow — currently user creates bot manually
+      await switchroomReply(ctx, [
+        emojiNote,
+        '',
+        'Step 5/5: Paste the BotFather token for the new agent\'s bot.',
+        '',
+        '<b>To create a bot:</b>',
+        '1. Open @BotFather in Telegram',
+        '2. Send <code>/newbot</code> and follow the prompts',
+        '3. Copy and paste the token here',
+        '',
+        '<i>Note: the token will be briefly visible in this chat.</i>',
+      ].join('\n'), { html: true })
+      return
+    }
+
+    // ── Bot-token step ─────────────────────────────────────────────────────
+    case 'confirm-allowlist': {
+      const botToken = text.trim()
+      const updated = advanceSetupState(setupState, {
+        step: 'confirming-allowlist',
+        botToken,
+      })
+      setSetupState(updated)
+      await switchroomReply(ctx, [
+        'Token received.',
+        '',
+        `Your Telegram user ID is <code>${escapeHtmlForTg(action.callerId)}</code>.`,
+        '',
+        'Reply <b>yes</b> to set this as the only allowed user for the new agent,',
+        'or paste a different user ID.',
+      ].join('\n'), { html: true })
+      return
+    }
+
+    // ── Allowlist confirmation step → provision agent ──────────────────────
+    case 'call-reconcile': {
+      const { slug, persona, model, emoji, botToken, allowedUserId } = action
+      const updated = advanceSetupState(setupState, {
+        step: 'reconciling',
+        allowedUserId,
+      })
+      setSetupState(updated)
+
+      await switchroomReply(ctx, `Validating token…`, { html: false })
+
+      // Validate token first
+      let botInfo: { username: string } | null = null
+      try {
+        botInfo = await validateBotToken(botToken)
+      } catch (err) {
+        const updatedBack = advanceSetupState(updated, { step: 'asked-bot-token' })
+        setSetupState(updatedBack)
+        await switchroomReply(ctx, [
+          `Token rejected by Telegram — ${escapeHtmlForTg((err as Error).message)}`,
+          '',
+          'Please get a fresh token from @BotFather and paste it here:',
+        ].join('\n'), { html: true })
+        return
+      }
+
+      const botUsername = botInfo?.username ?? null
+      await switchroomReply(ctx, `Token OK (@${escapeHtmlForTg(botUsername ?? '?')}). Provisioning agent <b>${escapeHtmlForTg(slug)}</b>…`, { html: true })
+
+      // Use 'default' profile — skills/profile selection is deferred
+      // TODO(#178): Skills selector — currently uses 'default' profile always
+      const profile = 'default'
+
+      // Build model override: if user picked a model, set it in persona config
+      // after scaffolding. For now we pass it via a comment; the scaffold uses
+      // profile defaults. Full model override is handled post-scaffold.
+      // TODO(#189): OAuth code paste step — currently shows manual terminal instruction
+      try {
+        const result = await createAgent({
+          name: slug,
+          profile,
+          telegramBotToken: botToken,
+          rollbackOnFail: true,
+        })
+
+        // Mark flow done
+        const doneState = advanceSetupState(updated, { step: 'done' })
+        setSetupState(doneState)
+        clearSetupState(chatId)
+
+        const oauthLines = result.loginUrl
+          ? [
+              '',
+              '<b>Complete OAuth:</b>',
+              `<a href="${result.loginUrl}">Open this URL to log in</a>`,
+              `Then run: <code>switchroom auth code ${escapeHtmlForTg(slug)}</code>`,
+            ]
+          : [
+              '',
+              // TODO(#189): OAuth code paste step — currently shows manual terminal instruction
+              '<b>Complete OAuth from terminal:</b>',
+              `<code>switchroom auth code ${escapeHtmlForTg(slug)}</code>`,
+            ]
+
+        // Skills can be added later
+        // TODO(#190): Skills selector — currently shows placeholder message
+        await switchroomReply(ctx, [
+          `<b>${escapeHtmlForTg(persona)}</b> (@${escapeHtmlForTg(botUsername ?? slug)}) is scaffolded!`,
+          ...oauthLines,
+          '',
+          '<i>Skills can be added later via yaml or future /skills command.</i>',
+        ].join('\n'), { html: true })
+      } catch (err) {
+        // Rollback happened inside createAgent — reset to bot-token step
+        const updatedBack = advanceSetupState(updated, { step: 'asked-bot-token' })
+        setSetupState(updatedBack)
+        await switchroomReply(ctx, [
+          `<b>Provisioning failed:</b> ${escapeHtmlForTg((err as Error).message)}`,
+          '',
+          'To retry, paste a bot token again. Or type <code>cancel</code> to abort.',
+        ].join('\n'), { html: true })
+      }
+      return
+    }
+
+    // ── Error (validation failure, stayInStep re-prompt) ──────────────────
+    case 'error': {
+      if (!action.stayInStep) {
+        clearSetupState(chatId)
+      }
+      await switchroomReply(ctx, action.message, { html: true })
+      return
+    }
+
+    // ── Cancel ─────────────────────────────────────────────────────────────
+    case 'cancel': {
+      clearSetupState(chatId)
+      if (action.reason === 'user-cancelled') {
+        await switchroomReply(ctx, 'Setup wizard cancelled. Type /setup to start over.', { html: false })
+      } else {
+        await switchroomReply(ctx, `Setup wizard stopped (${action.reason}). Type /setup to start over.`, { html: false })
+      }
+      return
+    }
+
+    // ── Done (shouldn't reach here via text) ──────────────────────────────
+    case 'done': {
+      clearSetupState(chatId)
+      await switchroomReply(ctx, 'Setup already complete. Type /setup to create another agent.', { html: false })
+      return
+    }
+  }
+}
 
 async function handleCreateFlowText(
   ctx: Context,
@@ -647,9 +971,29 @@ void runPollingLoop(bot, {
         { command: 'version', description: 'Show versions + running agent health' },
         { command: 'worktrees', description: 'List active git worktrees claimed by sub-agents' },
         { command: 'create_agent', description: 'Create new agent: /create-agent [name]' },
+        { command: 'setup', description: 'New agent wizard: /setup [slug]' },
+        { command: 'cancel', description: 'Cancel active wizard' },
       ])
     } catch (err) {
       process.stderr.write(`foreman: setMyCommands failed: ${err}\n`)
+    }
+
+    // Resume any in-progress setup wizard flows that survived a restart
+    try {
+      const activeSetupFlows = listActiveSetupFlows(60 * 60 * 1000) // 1 hour
+      for (const flow of activeSetupFlows) {
+        try {
+          await bot.api.sendMessage(
+            flow.chatId,
+            `Picking up /setup wizard for <b>${escapeHtmlForTg(flow.slug ?? '?')}</b> (${setupStepLabel(flow.step)})…\n\nType your response to continue, or /cancel to abort.`,
+            { parse_mode: 'HTML' },
+          )
+        } catch (err) {
+          process.stderr.write(`foreman: failed to resume setup flow for chat ${flow.chatId}: ${err}\n`)
+        }
+      }
+    } catch (err) {
+      process.stderr.write(`foreman: failed to list active setup flows: ${err}\n`)
     }
 
     // Resume any in-progress create-agent flows that survived a restart

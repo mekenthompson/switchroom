@@ -52,6 +52,47 @@ export type StreamingEvent =
       durationMs: number
       suppressClearedCount: number
     }
+  /**
+   * Emitted when the gateway receives an inbound message (from Telegram)
+   * and immediately sets the 👀 ack reaction. Delta = gateway-receive → ack.
+   * Acceptance item 7: time-to-ack instrumentation.
+   */
+  | {
+      kind: 'inbound_ack'
+      chatId: string
+      messageId: number
+      ackDelayMs: number
+    }
+  /**
+   * Emitted at turn_end. Records the longest contiguous interval during
+   * the turn where no signal (progress-card edit, text event, status
+   * reaction update, or answer-lane update) was sent to the user.
+   * Acceptance item 7: longest-silent-gap-during-turn instrumentation.
+   */
+  | {
+      kind: 'turn_signal_gap'
+      chatId: string
+      longestGapMs: number
+      turnDurationMs: number
+    }
+  /**
+   * Emitted when the answer-lane sends or edits a message.
+   */
+  | {
+      kind: 'answer_lane_update'
+      chatId: string
+      messageId: number | undefined
+      charCount: number
+      transport: 'draft' | 'message' | 'edit'
+    }
+  /**
+   * Emitted when the answer-lane is materialized at turn-end.
+   */
+  | {
+      kind: 'answer_lane_materialized'
+      chatId: string
+      messageId: number | undefined
+    }
 
 /**
  * True iff the env gate is on. Re-read on every call so tests can toggle

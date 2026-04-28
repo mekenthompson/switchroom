@@ -111,6 +111,25 @@ export interface ProgressDriverConfig {
     taskIndex: number
     taskTotal: number
   }) => void
+  /**
+   * Fired when a turn ends with no reply sent (silentEnd=true). The outer
+   * layer can write a state file so the Stop hook can block the session and
+   * re-prompt the agent. The callback returns `{ suppressed: true }` when the
+   * retry is allowed (retryCount was 0) — in that case the driver will
+   * re-render the final card WITHOUT the "🙊 Ended without reply" warning so
+   * the user doesn't see a false-positive before the retry lands.
+   *
+   * On the second silent-end (retryCount exhausted) the callback returns
+   * `{ suppressed: false }` and the warning card renders as normal.
+   *
+   * Not fired for autonomous turns (wasAutonomous=true) — those intentionally
+   * produce no user-visible reply.
+   */
+  onSilentEnd?: (args: {
+    chatId: string
+    threadId?: string
+    turnKey: string
+  }) => { suppressed: boolean } | void
   /** Min ms between edits for a given chat+thread. Default 500. */
   minIntervalMs?: number
   /** Coalesce window — burst events within this land as one render. Default 400. */
@@ -296,6 +315,19 @@ interface PerChatState {
    * reply and ending without one is entirely expected.
    */
   wasAutonomous: boolean
+  /**
+   * Set by prepareSilentEndSuppression when onSilentEnd returns
+   * { suppressed: true }. Causes flush() to render the final card without
+   * the "🙊 Ended without reply" header so no false-positive appears before
+   * the retry reply lands.
+   */
+  silentEndSuppressed: boolean
+  /**
+   * Idempotent guard for prepareSilentEndSuppression — ensures the
+   * onSilentEnd callback (which writes the Stop-hook state file) only
+   * fires once per turn even if multiple sites call into the helper.
+   */
+  silentEndPrepared: boolean
 }
 
 export interface ProgressDriver {
@@ -486,9 +518,43 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
    *   - Deferred completion (last sub-agent finishes after parent turn_end)
    *   - Abandonment (closeZombie for maxIdle / enqueue-force-close)
    */
+  /**
+   * Prepare silent-end suppression BEFORE the final flush.
+   *
+   * Must run before the outer `flush(cs, true)` at every site that calls
+   * `completeTurnFully`, so the render at that flush already knows whether
+   * to suppress the "🙊 Ended without reply" header. If we relied on
+   * `completeTurnFully` to set the flag and re-flush, the outer flush would
+   * already have queued a warning-card edit/send to Telegram — and in the
+   * worst case (the first edit finalizes before the second arrives) the
+   * user sees both the warning AND the corrected card as separate messages.
+   *
+   * Idempotent — `silentEndPrepared` guards against re-firing the
+   * `onSilentEnd` callback (which writes a state file the Stop hook reads).
+   */
+  function prepareSilentEndSuppression(cs: PerChatState): void {
+    if (cs.silentEndPrepared) return
+    cs.silentEndPrepared = true
+    const isSilentEnd = !cs.replyToolCalled && !cs.wasAutonomous
+    if (!isSilentEnd || !config.onSilentEnd) return
+    try {
+      const result = config.onSilentEnd({ chatId: cs.chatId, threadId: cs.threadId, turnKey: cs.turnKey })
+      if (result?.suppressed === true) {
+        cs.silentEndSuppressed = true
+      }
+    } catch {
+      /* never let the callback break the completion path */
+    }
+  }
+
   function completeTurnFully(cs: PerChatState): void {
     if (cs.completionFired) return
     cs.completionFired = true
+    // Defensive: if a caller forgot to call prepareSilentEndSuppression
+    // before its flush, run it now so the onSilentEnd callback still fires
+    // (the Stop hook still gets the state file). The flag is already set
+    // for any caller that did call it (idempotent guard).
+    prepareSilentEndSuppression(cs)
     const taskNum = taskNumFor(cs)
     const summary = summariseTurn(cs.state, now())
     if (config.onTurnEnd) {
@@ -548,6 +614,11 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     // `maxIdleMs` heartbeat ceiling.
     if (hasAnyRunningSubAgent(cs.state)) return
     process.stderr.write(`telegram gateway: progress-card: deferred completion firing turnKey=${cs.turnKey} (last sub-agent finished)\n`)
+    // Set silentEndSuppressed BEFORE the outer flush so the rendered card
+    // already excludes the "🙊 Ended without reply" header when a retry is
+    // queued. Otherwise the outer flush would queue a warning-card edit
+    // and a follow-up correction edit could race or land as a second msg.
+    prepareSilentEndSuppression(cs)
     flush(cs, /*forceDone*/ true)
     completeTurnFully(cs)
   }
@@ -584,6 +655,8 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       }
       cs.state = { ...cs.state, subAgents: closed }
     }
+    // Set silentEndSuppressed BEFORE the outer flush — see deferred path.
+    prepareSilentEndSuppression(cs)
     flush(cs, /*forceDone*/ true)
     completeTurnFully(cs)
     // Don't clear pendingSyncEchoes — the echo may arrive after zombie close.
@@ -636,7 +709,9 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         // "Working…". The renderer applies the same gate, so passing the
         // unconditional flag here is safe.
         // Issue #259: suppress for autonomous wakeup turns (no reply is expected).
-        const silentEnd = !cs.replyToolCalled && !cs.wasAutonomous
+        // silentEndSuppressed: set when a retry is queued (first silent-end) so
+        // the heartbeat renders "✅ Done" instead of "🙊 Ended without reply".
+        const silentEnd = !cs.replyToolCalled && !cs.wasAutonomous && !cs.silentEndSuppressed
         // Issue #137: agent called reply/stream_reply (replyToolCalled=true)
         // but the actual outbound never landed (recordOutboundDelivered was
         // never called for this card). Distinct from silentEnd because the
@@ -749,7 +824,11 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     // Issue #259: autonomous wakeup turns never produce a reply by design —
     // suppress the silent-end warning so the card renders "✅ Done" instead
     // of "🙊 Ended without reply" when ScheduleWakeup / CronCreate fires.
-    const silentEnd = !chatState.replyToolCalled && !chatState.wasAutonomous
+    // silentEndSuppressed is set by completeTurnFully when onSilentEnd returns
+    // { suppressed: true } — used to re-render the final card without the
+    // warning after a retry is queued, preventing a false-positive flash.
+    const silentEnd =
+      !chatState.replyToolCalled && !chatState.wasAutonomous && !chatState.silentEndSuppressed
     const replyNotDelivered =
       chatState.replyToolCalled && chatState.outboundDeliveredCount === 0
     const html = render(
@@ -967,6 +1046,8 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
           replyToolCalled: false,
           outboundDeliveredCount: 0,
           wasAutonomous: false,
+          silentEndSuppressed: false,
+          silentEndPrepared: false,
         }
         chats.set(slot.turnKey, chatState)
         if (event.isSync) {
@@ -1055,6 +1136,12 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       if (event.kind === 'turn_end' || event.kind === 'enqueue' || stageChanged) {
         if (event.kind === 'turn_end') {
           process.stderr.write(`telegram gateway: progress-card: turn_end flush chatId=${chatState.chatId} threadId=${chatState.threadId ?? '-'} turnKey=${chatState.turnKey}\n`)
+          // Only fire silent-end prep when we're actually about to complete —
+          // i.e. no sub-agents still running. The sub-agent defer path
+          // returns below and prep will run later via maybeCompleteDeferredTurn.
+          if (!hasAnyRunningSubAgent(chatState.state)) {
+            prepareSilentEndSuppression(chatState)
+          }
         }
         flush(chatState, /*forceDone*/ event.kind === 'turn_end')
         if (event.kind === 'turn_end') {

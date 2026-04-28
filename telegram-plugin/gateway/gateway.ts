@@ -6279,6 +6279,43 @@ if (streamMode === 'checklist') {
         })
       }
     },
+    onSilentEnd: ({ chatId, turnKey }) => {
+      // Write a state file so the Stop hook can detect a silent-end and
+      // block the session to re-prompt the agent. The hook increments
+      // retryCount; on the second silent-end (retryCount >= 1) it allows
+      // the stop so this warning card renders.
+      const statePath = join(STATE_DIR, 'silent-end-pending.json')
+      let retryCount = 0
+      try {
+        if (existsSync(statePath)) {
+          const prev = JSON.parse(readFileSync(statePath, 'utf8'))
+          // Only inherit retryCount from a stale file when it belongs to the
+          // SAME turn — otherwise a previous turn's exhausted counter would
+          // suppress the retry on a fresh silent-end.
+          if (prev.turnKey === turnKey) {
+            retryCount = typeof prev.retryCount === 'number' ? prev.retryCount : 0
+          }
+        }
+      } catch {
+        retryCount = 0
+      }
+      const suppressed = retryCount === 0
+      try {
+        writeFileSync(
+          statePath,
+          JSON.stringify({ chatId, turnKey, retryCount, timestamp: Date.now() }),
+          'utf8',
+        )
+        process.stderr.write(
+          `telegram gateway: silent-end: wrote state file turnKey=${turnKey} retryCount=${retryCount} suppressed=${suppressed}\n`,
+        )
+      } catch (err) {
+        process.stderr.write(
+          `telegram gateway: silent-end: failed to write state file: ${(err as Error).message}\n`,
+        )
+      }
+      return { suppressed }
+    },
     maxIdleMs: 5 * 60_000,
   })
   process.stderr.write('telegram gateway: progress-card driver active\n')

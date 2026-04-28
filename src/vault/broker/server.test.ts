@@ -419,6 +419,141 @@ describe("VaultBroker server: gated paths (allowed cron identity via _testIdenti
   });
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #207 — Item 1: list ACL scope narrowing
+//
+// Verifies that a cron unit whose schedule only grants a SUBSET of keys sees
+// only those keys in `list`, even though the vault contains more. Regression:
+// the interactive (non-Linux / no-peer) path must still see all keys.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("VaultBroker server: list ACL scope narrowing (issue #207)", () => {
+  let broker: VaultBroker;
+  let socketPath: string;
+  let tmpDir: string;
+  let prevNonLinuxFlag: string | undefined;
+
+  // Cron unit that is only allowed to read "foo" — not "baz" or "filekey"
+  const FAKE_PEER_NARROW = {
+    uid: process.getuid?.() ?? 1000,
+    pid: 77777,
+    exe: "/usr/bin/bash",
+    systemdUnit: "switchroom-myagent-cron-0.service" as string | null,
+  };
+
+  function makeNarrowAclConfig() {
+    // schedule[0] only grants "foo" — the other two test keys must be hidden
+    return {
+      switchroom: { version: 1 },
+      telegram: { bot_token: "test", forum_chat_id: "123" },
+      vault: {
+        path: "~/.switchroom/vault.enc",
+        broker: { socket: "~/.switchroom/vault-broker.sock", enabled: true },
+      },
+      agents: {
+        myagent: {
+          schedule: [{ secrets: ["foo"] }],
+        },
+      },
+    } as any;
+  }
+
+  beforeEach(async () => {
+    prevNonLinuxFlag = process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
+    process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = "1";
+
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "broker-list-acl-test-"));
+    socketPath = path.join(tmpDir, "test.sock");
+
+    broker = new VaultBroker({
+      _testSecrets: cloneSecrets(),      // vault has foo + baz + filekey
+      _testConfig: makeNarrowAclConfig(), // cron only allowed to see "foo"
+      _testIdentify: () => FAKE_PEER_NARROW,
+    });
+    await broker.start(socketPath, undefined, undefined);
+  });
+
+  afterEach(() => {
+    broker.stop();
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (prevNonLinuxFlag === undefined) {
+      delete process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
+    } else {
+      process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = prevNonLinuxFlag;
+    }
+  });
+
+  it("list: cron scope sees only ACL-allowed keys (not the full vault)", async () => {
+    // Vault has ["foo", "baz", "filekey"]; cron ACL only grants ["foo"]
+    const resp = await rpc(socketPath, { v: 1, op: "list" });
+    expect(resp.ok).toBe(true);
+    if (resp.ok && "keys" in resp) {
+      expect(resp.keys).toEqual(["foo"]);
+    }
+  });
+
+  it("list: cron scope does NOT reveal keys outside its allowlist", async () => {
+    const resp = await rpc(socketPath, { v: 1, op: "list" });
+    expect(resp.ok).toBe(true);
+    if (resp.ok && "keys" in resp) {
+      // "baz" and "filekey" are in the vault but outside the cron's ACL
+      expect(resp.keys).not.toContain("baz");
+      expect(resp.keys).not.toContain("filekey");
+    }
+  });
+});
+
+describe("VaultBroker server: list full set on non-Linux (regression guard, issue #207)", () => {
+  // Regression: the interactive / non-Linux path must still return all keys
+  // after the ACL-filter change. We spin a broker with no _testIdentify, which
+  // means peer===null (same as non-Linux behaviour), and verify all keys come back.
+  let broker: VaultBroker;
+  let socketPath: string;
+  let tmpDir: string;
+  let prevNonLinuxFlag: string | undefined;
+
+  beforeEach(async () => {
+    prevNonLinuxFlag = process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
+    process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = "1";
+
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "broker-list-full-test-"));
+    socketPath = path.join(tmpDir, "test.sock");
+
+    broker = new VaultBroker({
+      _testSecrets: cloneSecrets(),
+      _testConfig: makeMinimalConfig(),
+      // No _testIdentify → peer will be null on Linux (blocked by peercred gate)
+      // but absent the guard we exercise on non-Linux: no peer, no filter.
+      _testIdentify: () => null,
+    });
+    await broker.start(socketPath, undefined, undefined);
+  });
+
+  afterEach(() => {
+    broker.stop();
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    if (prevNonLinuxFlag === undefined) {
+      delete process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
+    } else {
+      process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = prevNonLinuxFlag;
+    }
+  });
+
+  it("list: non-Linux (no peer) sees all keys — no scope filter applied", async () => {
+    if (process.platform === "linux") {
+      // On Linux peer===null triggers the peercred deny gate before we reach
+      // the ACL-filter code — that deny path is already tested in the
+      // "denied identity" suite above. This regression guard is non-Linux only.
+      return;
+    }
+    const resp = await rpc(socketPath, { v: 1, op: "list" });
+    expect(resp.ok).toBe(true);
+    if (resp.ok && "keys" in resp) {
+      expect(resp.keys.sort()).toEqual(Object.keys(TEST_SECRETS).sort());
+    }
+  });
+});
+
 describe("VaultBroker server: gated paths (denied identity via _testIdentify)", () => {
   let broker: VaultBroker;
   let socketPath: string;

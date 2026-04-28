@@ -460,6 +460,23 @@ export class VaultBroker {
         );
         return;
       }
+
+      // Issue #207: apply ACL scope filter to `list` so crons see only the
+      // keys they are allowed to read. An identified peer (cron unit) has a
+      // per-schedule allowlist in config; we iterate every key and include
+      // it only when checkAcl() says allow. Interactive sessions (peer===null
+      // on non-Linux, or no config) continue to see all keys — their only
+      // gate is the socket file mode 0600.
+      let visibleKeys: string[];
+      if (peer !== null && this.config !== null) {
+        visibleKeys = Object.keys(this.secrets).filter(
+          (key) => checkAcl(peer, this.config!, key).allow,
+        );
+      } else {
+        // Non-Linux (no peercred) or no config: full list as before.
+        visibleKeys = Object.keys(this.secrets);
+      }
+
       this.auditLogger.write({
         ts: new Date().toISOString(),
         op: "list",
@@ -468,7 +485,7 @@ export class VaultBroker {
         cgroup: auditCgroup,
         result: "allowed",
       });
-      socket.write(encodeResponse({ ok: true, keys: Object.keys(this.secrets) }));
+      socket.write(encodeResponse({ ok: true, keys: visibleKeys }));
       return;
     }
 

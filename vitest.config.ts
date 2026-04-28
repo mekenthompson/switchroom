@@ -46,6 +46,16 @@ export default defineConfig({
       "**/telegram-plugin/tests/quota-cache.test.ts",
       "**/telegram-plugin/tests/silent-reply-guard.test.ts",
       "**/telegram-plugin/tests/unhandled-rejection-policy.test.ts",
+      // The following tests transitively import bun:sqlite (via grants-db.ts
+      // or bun:test) and therefore can't run under vitest/Node. Each is
+      // covered by the test:bun script.
+      "**/tests/vault-broker-passphrase.test.ts",
+      "**/src/cli/vault-get-broker.test.ts",
+      "**/src/vault/resolver-via-broker.test.ts",
+      "**/src/vault/broker/scope.test.ts",
+      "**/src/vault/broker/server.test.ts",
+      "**/telegram-plugin/tests/boot-probes.test.ts",
+      "**/telegram-plugin/tests/setup-state.test.ts",
     ],
     coverage: {
       provider: "v8",

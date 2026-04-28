@@ -77,6 +77,7 @@ function subAgentTurnDuration() {
 
 interface WatcherHarness {
   notifications: string[]
+  logs: string[]
   advance: (ms: number) => void
   // Trigger the poll timer manually
   poll: () => void
@@ -117,6 +118,7 @@ function makeHarness(opts: {
 
   let currentTime = 1000
   const notifications: string[] = []
+  const logs: string[] = []
 
   // Track all JSONL content per path for statSync + read simulation
   const fileContents: Map<string, Buffer> = new Map()
@@ -209,7 +211,7 @@ function makeHarness(opts: {
       if (idx !== -1) intervals.splice(idx, 1)
     },
     fs: mockFs,
-    log: (_msg: string) => {}, // silence in tests
+    log: (msg: string) => { logs.push(msg) },
   })
 
   const advance = (ms: number): void => {
@@ -231,6 +233,7 @@ function makeHarness(opts: {
 
   return {
     notifications,
+    logs,
     advance,
     poll,
     watcher,
@@ -483,9 +486,9 @@ describe('startSubagentWatcher', () => {
     // Advance past stall threshold without any new JSONL activity
     h.advance(65_000)
 
-    const stallNotifs = h.notifications.filter((n) => n.includes('Worker idle'))
-    expect(stallNotifs.length).toBeGreaterThanOrEqual(1)
-    expect(stallNotifs[0]).toContain('Worker idle')
+    const stallLogs = h.logs.filter((n) => n.includes('stall detected'))
+    expect(stallLogs.length).toBeGreaterThanOrEqual(1)
+    expect(stallLogs[0]).toContain('stall detected')
 
     h.watcher.stop()
   })
@@ -518,8 +521,8 @@ describe('startSubagentWatcher', () => {
     h.poll()
     h.advance(65_000) // past stall threshold
 
-    const stallNotifs = h.notifications.filter((n) => n.includes('Worker idle'))
-    expect(stallNotifs).toHaveLength(0)
+    const stallLogs = h.logs.filter((n) => n.includes('stall detected'))
+    expect(stallLogs).toHaveLength(0)
 
     h.watcher.stop()
   })
@@ -553,8 +556,8 @@ describe('startSubagentWatcher', () => {
     h.advance(65_000)
     h.advance(65_000) // advance past threshold AGAIN
 
-    const stallNotifs = h.notifications.filter((n) => n.includes('Worker idle'))
-    expect(stallNotifs.length).toBe(1)
+    const stallLogs = h.logs.filter((n) => n.includes('stall detected'))
+    expect(stallLogs.length).toBe(1)
 
     h.watcher.stop()
   })

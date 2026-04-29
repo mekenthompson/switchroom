@@ -52,6 +52,45 @@ export function getPlaywrightMcpSettingsEntry(): { key: string; value: McpServer
 }
 
 /**
+ * Describes a single built-in default MCP entry.
+ *
+ * - `key`: the mcpServers key in settings.json (e.g. "playwright")
+ * - `value`: the MCP server config object to write
+ * - `optOutKey`: the key in `mcp_servers` that an agent uses to opt out
+ *   (currently always the same as `key`, but kept explicit so the type is
+ *   self-documenting and future entries can differ)
+ */
+export interface BuiltinMcpEntry {
+  key: string;
+  value: McpServerConfig;
+  /** The key an agent sets to `false` in `mcp_servers` to suppress this default. */
+  optOutKey: string;
+}
+
+/**
+ * Return the complete list of built-in default MCP entries that every agent
+ * should receive unless explicitly opted out.
+ *
+ * This is the single source of truth consumed by both:
+ *   - `scaffoldAgent` / `reconcileAgent` (scaffold.ts) — at agent creation and
+ *     on every `switchroom agent reconcile` run
+ *   - `reconcileDefaultMcps` (update.ts) — at `switchroom update` time, so
+ *     agents created before a default was introduced pick it up automatically
+ *
+ * To add a new built-in default: add an entry here. Both scaffold and update
+ * paths will pick it up automatically.
+ *
+ * Agents can opt out of any entry by setting
+ * `mcp_servers: { <optOutKey>: false }` in their switchroom.yaml config.
+ */
+export function getBuiltinDefaultMcpEntries(): BuiltinMcpEntry[] {
+  const playwright = getPlaywrightMcpSettingsEntry();
+  return [
+    { key: playwright.key, value: playwright.value, optOutKey: playwright.key },
+  ];
+}
+
+/**
  * Return the MCP server entry for the Switchroom management server.
  *
  * The switchroom-mcp server is a thin wrapper around the `switchroom` CLI,

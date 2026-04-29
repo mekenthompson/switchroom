@@ -1260,7 +1260,7 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
     sessionMaxTurns: agentConfig.session?.max_turns,
     handoffEnabled: agentConfig.session_continuity?.enabled !== false,
     handoffShowLine: agentConfig.session_continuity?.show_handoff_line !== false,
-    resumeMode: agentConfig.session_continuity?.resume_mode ?? "auto",
+    resumeMode: agentConfig.session_continuity?.resume_mode ?? "handoff",
     resumeMaxBytes:
       agentConfig.session_continuity?.resume_max_bytes ?? 2_000_000,
   };
@@ -2213,6 +2213,47 @@ export function reconcileAgent(
     );
   }
 
+  // --- Migration warning: resume_mode default changed from 'auto' to 'handoff' (#362) ---
+  // When an agent has no explicit resume_mode in its YAML config (the most
+  // common case for existing installs), it was previously using 'auto' silently.
+  // The new default is 'handoff'. We warn once so users know their agent will
+  // behave differently, and suppress subsequent warns with a marker file.
+  {
+    const explicitResumeMode = agentConfig.session_continuity?.resume_mode;
+    const markerPath = join(agentDir, ".resume-mode-migration-warned");
+    if (!explicitResumeMode && !existsSync(markerPath)) {
+      console.warn(
+        `  ${chalk.yellow("⚠")} [${name}] resume_mode default changed from 'auto' to 'handoff' (switchroom #362).`,
+      );
+      console.warn(
+        `     Your agent will now start a fresh Claude session on every restart, using a`,
+      );
+      console.warn(
+        `     context briefing instead of --continue. This prevents stale MCP servers`,
+      );
+      console.warn(
+        `     from carrying over and compounds well with the Phase 1 restart changes.`,
+      );
+      console.warn(
+        `     To restore the old behaviour, add to switchroom.yaml:`,
+      );
+      console.warn(
+        `       session_continuity:`,
+      );
+      console.warn(
+        `         resume_mode: auto`,
+      );
+      console.warn(
+        `     (This warning fires once per agent directory and is then suppressed.)`,
+      );
+      try {
+        writeFileSync(markerPath, `resume_mode default changed to handoff at reconcile\n`, "utf-8");
+      } catch {
+        /* best-effort — if we can't write the marker, we'll warn again next time */
+      }
+    }
+  }
+
   // --- Phase 4: migrate CLAUDE.custom.md to workspace/ (one-time) ---
   const legacyCustomPath = join(agentDir, "CLAUDE.custom.md");
   const workspaceDir = join(agentDir, "workspace");
@@ -2382,7 +2423,7 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
       sessionMaxTurns: agentConfig.session?.max_turns,
       handoffEnabled: agentConfig.session_continuity?.enabled !== false,
       handoffShowLine: agentConfig.session_continuity?.show_handoff_line !== false,
-      resumeMode: agentConfig.session_continuity?.resume_mode ?? "auto",
+      resumeMode: agentConfig.session_continuity?.resume_mode ?? "handoff",
       resumeMaxBytes:
         agentConfig.session_continuity?.resume_max_bytes ?? 2_000_000,
     };

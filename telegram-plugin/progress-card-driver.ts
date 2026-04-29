@@ -183,7 +183,7 @@ export interface ProgressDriverConfig {
    * before the timer fires (and isFirstEmit is still true), no card
    * is ever shown — the user only sees the final reply.
    *
-   * Default 30000 (30 seconds). Set to 0 to disable.
+   * Default 3000 (3 seconds). Set to 0 to disable.
    */
   initialDelayMs?: number
   /**
@@ -513,7 +513,7 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
   const editBudgetThreshold = config.editBudgetThreshold ?? 18
   const editBudgetCoalesceMs = config.editBudgetCoalesceMs ?? 3000
   const maxIdleMs = config.maxIdleMs ?? 30 * 60_000
-  const initialDelayMs = config.initialDelayMs ?? 30_000
+  const initialDelayMs = config.initialDelayMs ?? 3_000
   const maxConsecutive4xx = config.maxConsecutive4xx ?? 3
   const orphanPromotionMs = config.orphanPromotionMs ?? 5_000
   const coldSubAgentThresholdMs = config.coldSubAgentThresholdMs ?? 30_000

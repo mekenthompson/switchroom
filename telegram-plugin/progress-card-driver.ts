@@ -246,6 +246,52 @@ export interface ProgressDriverConfig {
 }
 
 /**
+ * Issue #399: Sync the per-chat running-sub-agent registry after any state
+ * transition that may have moved agents to a terminal state.
+ *
+ * Factored out from the inline block inside `ingest` so it can be called
+ * from three paths that can transition agents to done/failed without going
+ * through the normal ingest post-reduce step:
+ *   1. ingest post-reduce (existing call site, refactored)
+ *   2. cold-jsonl-synth path (Gap-4, heartbeat)
+ *   3. closeZombie direct mutation path
+ *   4. deferred-completion-timeout force-close (Gap-8, heartbeat)
+ */
+export function syncChatRunningSubagents(
+  prev: ProgressCardState,
+  next: ProgressCardState,
+  cBaseKey: string,
+  chatRunningSubagents: Map<string, Map<string, SubAgentState>>,
+): void {
+  if (prev.subAgents === next.subAgents) return
+  // Check for new or newly-running entries (sub_agent_started path).
+  for (const [agentId, sa] of next.subAgents) {
+    if (sa.state === 'running') {
+      const prevSa = prev.subAgents.get(agentId)
+      if (prevSa == null || prevSa.state !== 'running') {
+        // Newly running — register in chat-scoped registry.
+        let chatMap = chatRunningSubagents.get(cBaseKey)
+        if (chatMap == null) {
+          chatMap = new Map<string, SubAgentState>()
+          chatRunningSubagents.set(cBaseKey, chatMap)
+        }
+        chatMap.set(agentId, sa)
+      }
+    } else if (sa.state === 'done' || sa.state === 'failed') {
+      // Terminal state — remove from chat registry if present.
+      chatRunningSubagents.get(cBaseKey)?.delete(agentId)
+    }
+  }
+  // Also handle entries that were removed from subAgents entirely
+  // (shouldn't happen normally but be defensive).
+  for (const agentId of prev.subAgents.keys()) {
+    if (!next.subAgents.has(agentId)) {
+      chatRunningSubagents.get(cBaseKey)?.delete(agentId)
+    }
+  }
+}
+
+/**
  * Compact one-line summary of a completed turn for the handoff sidecar.
  * Shape: `"<tool-count> tool[s], <duration> — <user-request>"`.
  * Falls back gracefully when fields are missing (empty items → "no tools";
@@ -761,6 +807,7 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     // ALL running sub-agents explicitly (including orphans) so the final
     // render shows all work accounted for.
     if (hasAnyRunningSubAgent(cs.state)) {
+      const prevStateForSync = cs.state
       const closed = new Map(cs.state.subAgents)
       const nowMs = now()
       for (const [k, sa] of closed) {
@@ -769,6 +816,14 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         }
       }
       cs.state = { ...cs.state, subAgents: closed }
+      // Issue #399: sync the chat-scoped running-sub-agent registry so
+      // stale entries don't carry over into the next turn's progress card.
+      syncChatRunningSubagents(
+        prevStateForSync,
+        cs.state,
+        baseKey(cs.chatId, cs.threadId),
+        chatRunningSubagents,
+      )
     }
     // Set silentEndSuppressed BEFORE the outer flush — see deferred path.
     prepareSilentEndSuppression(cs)
@@ -947,7 +1002,17 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         process.stderr.write(
           `telegram gateway: progress-card: cold-jsonl-synth-turn-end agentId=${agentId} turnKey=${cs.turnKey} (Gap 4 #313)\n`,
         )
+        const prevStateGap4 = cs.state
         cs.state = reduce(cs.state, { kind: 'sub_agent_turn_end', agentId }, now())
+        // Issue #399: sync the chat-scoped running-sub-agent registry so the
+        // cold-synth terminal transition doesn't leave a stale entry that would
+        // carry over into the next turn's progress card.
+        syncChatRunningSubagents(
+          prevStateGap4,
+          cs.state,
+          baseKey(cs.chatId, cs.threadId),
+          chatRunningSubagents,
+        )
         cs.lastEventAt = now()
         maybeCompleteDeferredTurn(cs)
         if (!cs.completionFired) flush(cs, false)
@@ -964,6 +1029,7 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         // "⚠️ Stalled — forced close" because stalledClose=true now overrides
         // trulyDone in progress-card.ts.
         if (hasAnyRunningSubAgent(cs.state)) {
+          const prevStateGap8 = cs.state
           const closed = new Map(cs.state.subAgents)
           const nowMs = now()
           for (const [k, sa] of closed) {
@@ -972,6 +1038,14 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
             }
           }
           cs.state = { ...cs.state, subAgents: closed }
+          // Issue #399: sync the chat-scoped running-sub-agent registry so
+          // stale entries from this force-close don't carry into the next turn.
+          syncChatRunningSubagents(
+            prevStateGap8,
+            cs.state,
+            baseKey(cs.chatId, cs.threadId),
+            chatRunningSubagents,
+          )
         }
         prepareSilentEndSuppression(cs)
         flush(cs, /*forceDone*/ true, /*stalledClose*/ true)
@@ -1347,39 +1421,19 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       const stageChanged = chatState.state.stage !== prev.stage
       const visibleChanged = visibleDiff(prev, chatState.state)
 
-      // Issue #334: mirror sub-agent state changes into the chat-scoped
+      // Issue #334/#399: mirror sub-agent state changes into the chat-scoped
       // running-sub-agent registry so new turns can seed from it.
       // We diff prev.subAgents vs chatState.state.subAgents to catch all
       // mutation paths: sub_agent_started, sub_agent_turn_end, and parent
       // tool_result (which can finalize a sub-agent via parentToolUseId).
-      if (prev.subAgents !== chatState.state.subAgents) {
-        const cBaseKey = baseKey(chatState.chatId, chatState.threadId)
-        // Check for new or newly-running entries (sub_agent_started path).
-        for (const [agentId, sa] of chatState.state.subAgents) {
-          if (sa.state === 'running') {
-            const prevSa = prev.subAgents.get(agentId)
-            if (prevSa == null || prevSa.state !== 'running') {
-              // Newly running — register in chat-scoped registry.
-              let chatMap = chatRunningSubagents.get(cBaseKey)
-              if (chatMap == null) {
-                chatMap = new Map<string, SubAgentState>()
-                chatRunningSubagents.set(cBaseKey, chatMap)
-              }
-              chatMap.set(agentId, sa)
-            }
-          } else if (sa.state === 'done' || sa.state === 'failed') {
-            // Terminal state — remove from chat registry if present.
-            chatRunningSubagents.get(cBaseKey)?.delete(agentId)
-          }
-        }
-        // Also handle entries that were removed from subAgents entirely
-        // (shouldn't happen normally but be defensive).
-        for (const agentId of prev.subAgents.keys()) {
-          if (!chatState.state.subAgents.has(agentId)) {
-            chatRunningSubagents.get(cBaseKey)?.delete(agentId)
-          }
-        }
-      }
+      // Factored into syncChatRunningSubagents (issue #399) so closeZombie
+      // and the heartbeat's cold-jsonl-synth path can call the same logic.
+      syncChatRunningSubagents(
+        prev,
+        chatState.state,
+        baseKey(chatState.chatId, chatState.threadId),
+        chatRunningSubagents,
+      )
 
       // Issue #132: track whether the agent has called `reply` or
       // `stream_reply` at least once this turn so the renderer can

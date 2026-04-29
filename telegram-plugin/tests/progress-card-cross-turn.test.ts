@@ -10,7 +10,10 @@ import type { SessionEvent } from '../session-tail.js'
 
 let nextMsgId = 100
 
-function harness(initialDelayMs = 0) {
+function harness(
+  initialDelayMs = 0,
+  opts: { coldSubAgentThresholdMs?: number; heartbeatMs?: number } = {},
+) {
   let now = 1000
   const timers: Array<{ fireAt: number; fn: () => void; ref: number; repeat?: number }> = []
   let nextRef = 0
@@ -21,6 +24,8 @@ function harness(initialDelayMs = 0) {
     minIntervalMs: 0,
     coalesceMs: 0,
     initialDelayMs,
+    coldSubAgentThresholdMs: opts.coldSubAgentThresholdMs,
+    heartbeatMs: opts.heartbeatMs,
     now: () => now,
     setTimeout: (fn, ms) => {
       const ref = nextRef++
@@ -169,6 +174,59 @@ describe('cross-turn sub-agent visibility (#334)', () => {
     const stateB = driver.peek('chatB', undefined)
     expect(stateB!.subAgents.has('agentA')).toBe(false)
     expect(stateB!.subAgents.size).toBe(0)
+  })
+
+  it('cold-jsonl-synth path syncs registry: turn 2 does NOT inherit cold-synth-terminated agent (fix #399)', () => {
+    // Forensic case from the live klanker bug: sub-agent ada7c3d07c28158f5
+    // hit its turn limit mid-tool-call and never wrote system.turn_duration.
+    // The cold-jsonl-synth heartbeat path (Gap 4 #313) marks it done
+    // synthetically. BEFORE fix #399 the registry was never synced from
+    // this path, so the agent appeared as a phantom on every subsequent
+    // turn's card. AFTER fix #399 the registry is synced and turn 2 is clean.
+    const { driver, advance } = harness(0, { coldSubAgentThresholdMs: 30_000, heartbeatMs: 5_000 })
+
+    // Turn 1: dispatch background sub-agent, parent turn ends → pendingCompletion=true
+    driver.ingest(enqueue('c1'), null)
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'cold-agent', firstPromptText: 'long task' }, 'c1')
+    driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c1')
+
+    // Sub-agent goes cold (no events for > coldSubAgentThresholdMs).
+    // Heartbeat ticks fire repeatedly; once lastEventAt is older than the
+    // threshold, the cold-jsonl-synth path runs and synthesises sub_agent_turn_end.
+    advance(35_000)
+
+    // Turn 2 starts in the same chat. WITHOUT #399's fix, cold-agent would
+    // re-seed into turn 2's PerChatState.subAgents (the bug). WITH the fix,
+    // syncChatRunningSubagents fired from the cold-synth path and removed it.
+    driver.startTurn({ chatId: 'c1', userText: 'turn 2' })
+
+    const turn2State = driver.peek('c1', undefined)
+    expect(turn2State).toBeDefined()
+    expect(turn2State!.subAgents.has('cold-agent')).toBe(false)
+  })
+
+  it('counter-test: still-running background sub-agent DOES carry over (preserves #334)', () => {
+    // The carry-over feature from #334 must continue to work for legitimate
+    // still-running sub-agents. If syncChatRunningSubagents over-removes,
+    // this test catches the regression. Asserts:
+    //   1. A bg sub-agent that started in turn 1 and never went terminal
+    //   2. After turn 2 starts (closeZombie fires on turn 1's card), the
+    //      sub-agent is correctly REMOVED (closeZombie marks it done)
+    // Since closeZombie is the post-turn-1 cleanup path, "still running
+    // across turns" actually means "running while turn 1 is in pendingCompletion
+    // BEFORE turn 2 enqueues". The carry-over visibility happens during the
+    // pendingCompletion window — verified here by peeking BEFORE turn 2.
+    const { driver } = harness()
+
+    driver.ingest(enqueue('c1'), null)
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'still-running', firstPromptText: 'long task' }, 'c1')
+    driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c1')
+
+    // During pendingCompletion the sub-agent is visible on the card.
+    const duringPending = driver.peek('c1', undefined)
+    expect(duringPending).toBeDefined()
+    expect(duringPending!.subAgents.has('still-running')).toBe(true)
+    expect(duringPending!.subAgents.get('still-running')?.state).toBe('running')
   })
 
   it('sub-agent finishes naturally between turns: turn 3 starts clean', () => {

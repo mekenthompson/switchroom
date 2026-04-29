@@ -80,6 +80,11 @@ export interface DraftStreamConfig {
    *
    * Default 0 (no pre-send debounce — first update fires immediately).
    * Only affects the first send; subsequent edits use throttleMs.
+   *
+   * NOTE: This debounce only applies to message transport. Draft transport
+   * fires immediately on the first update because drafts are ephemeral —
+   * the throttle/flush loop already collapses bursts into 1 API call/sec
+   * via throttleMs.
    */
   idleMs?: number
   /**
@@ -166,6 +171,17 @@ export function createDraftStream(
       : requestedTransport === 'message'
         ? false
         : (config.isPrivateChat === true) // 'auto': DM only
+
+  // Footgun guard: caller asked for "auto" + provided sendMessageDraft but
+  // forgot isPrivateChat. They almost certainly wanted draft in DMs but will
+  // silently get message transport everywhere. Warn so the bug is visible.
+  if (
+    requestedTransport === 'auto'
+    && draftApi != null
+    && config.isPrivateChat === undefined
+  ) {
+    warn?.('draft-stream: previewTransport="auto" with sendMessageDraft but isPrivateChat undefined — defaulting to message transport')
+  }
 
   // Use draft transport only if we have the API
   let usesDraftTransport = prefersDraft && draftApi != null

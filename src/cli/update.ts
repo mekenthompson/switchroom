@@ -6,6 +6,7 @@ import { dirname, join, resolve } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { withConfigError, getConfig } from "./helpers.js";
 import { reconcileAgent } from "../agents/scaffold.js";
+import { reconcileAllAgentDefaultMcps } from "../agents/reconcile-default-mcps.js";
 import { restartAgent, writeRestartReasonMarker } from "../agents/lifecycle.js";
 import { installAllUnits } from "../agents/systemd.js";
 import { resolveAgentsDir } from "../config/loader.js";
@@ -458,6 +459,36 @@ async function runPostBuildPhase(opts: {
     );
     console.error(chalk.red("    Aborting update — fix unit generation and re-run."));
     process.exit(1);
+  }
+
+  // Reconcile built-in default MCPs into every agent on disk. Additive only —
+  // never removes existing entries, respects per-agent opt-outs. Runs before
+  // the full reconcileAgent loop so agents that exist on disk but aren't in
+  // switchroom.yaml (orphaned agents) also pick up new defaults. For agents
+  // that ARE in config, reconcileAgent will fully rebuild mcpServers anyway —
+  // this step is a belt-and-suspenders that also surfaces explicit per-agent
+  // logging so the operator can see exactly what was added.
+  {
+    console.log(chalk.bold(`\n  Reconciling built-in default MCPs...`));
+    const agentOptOuts: Record<string, Record<string, unknown>> = {};
+    for (const [name, agentCfg] of Object.entries(config.agents)) {
+      if (agentCfg?.mcp_servers) {
+        agentOptOuts[name] = agentCfg.mcp_servers as Record<string, unknown>;
+      }
+    }
+    const mcpResults = reconcileAllAgentDefaultMcps(agentsDir, agentOptOuts);
+    for (const r of mcpResults) {
+      if (r.added.length > 0) {
+        console.log(chalk.green(`    ${r.name}: added ${r.added.join(", ")}`));
+      } else if (r.optedOut.length > 0 && r.alreadyPresent.length === 0) {
+        console.log(chalk.gray(`    ${r.name}: opted out of ${r.optedOut.join(", ")}`));
+      } else {
+        console.log(chalk.gray(`    ${r.name}: already present`));
+      }
+    }
+    if (mcpResults.length === 0) {
+      console.log(chalk.gray("    no agent directories found"));
+    }
   }
 
   // Reconcile-all-first. Pre-flight every agent before touching any live

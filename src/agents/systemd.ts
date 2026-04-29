@@ -77,6 +77,18 @@ StandardOutput=journal
 StandardError=journal
 Restart=on-failure
 RestartSec=5
+# Cgroup-wide kill so restart actually kills claude (issue #361).
+# ExecStart wraps claude in \`script -qfc\` for PTY allocation (autoaccept
+# needs a TTY). The PTY layer detaches claude from the unit cgroup, so a
+# plain SIGTERM to the ExecStart PID only kills \`script\`; claude survives
+# and the Apr 17 incident showed the same PID running 12 days after the
+# service "restarted". KillMode=control-group sends SIGTERM to every
+# process in the cgroup (including detached descendants), waits
+# TimeoutStopSec, then SIGKILL if anything is still alive.
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
+TimeoutStopSec=15
 # Memory ceiling: MemoryHigh triggers kernel reclaim at 1.5G so the
 # process is throttled before hitting the hard ceiling. MemoryMax=2G is
 # the hard limit — once hit, the kernel OOM-kills the unit. Combined
@@ -243,6 +255,11 @@ StandardOutput=journal
 StandardError=journal
 Restart=always
 RestartSec=3
+# Cgroup-wide kill so restart actually kills the gateway process (issue #361).
+# Same script PTY cgroup-escape issue as the agent unit — see generateUnit().
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
 # Give the gateway 45s to drain its long-poll on SIGTERM. The drain
 # itself budgets 35s (SHUTDOWN_DRAIN_BUDGET_MS in gateway.ts) plus a
 # 5s force-exit safety; the extra 5s is systemd-side headroom before
@@ -300,6 +317,11 @@ StandardOutput=journal
 StandardError=journal
 Restart=always
 RestartSec=3
+# Cgroup-wide kill so restart actually kills the foreman process (issue #361).
+# Same script PTY cgroup-escape issue as the agent unit — see generateUnit().
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
 TimeoutStopSec=30
 WorkingDirectory=${foremanDir}
 EnvironmentFile=-%h/.switchroom/.env.vault
@@ -707,6 +729,13 @@ Type=simple
 ExecStart=${bunBin} ${switchroomCli} vault broker start --foreground
 Restart=on-failure
 RestartSec=2
+# Cgroup-wide kill for consistency with agent/gateway units (issue #361).
+# The broker doesn't use the script PTY wrapper but may spawn subprocesses;
+# control-group kill ensures a clean slate on every restart.
+KillMode=control-group
+KillSignal=SIGTERM
+SendSIGKILL=yes
+TimeoutStopSec=15
 ${credentialLine}# Type=simple — see generateBrokerUnit() for the sd_notify-stream-vs-datagram
 # rationale. The hand-rolled sd_notify in the broker is non-functional;
 # Type=notify caused a restart loop that destroyed unlock state.

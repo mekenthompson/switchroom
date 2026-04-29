@@ -656,21 +656,35 @@ describe("scaffoldAgent", () => {
   });
 
   it("start.sh respects session_continuity.resume_mode in the generated script", () => {
-    // auto (default)
+    // handoff is now the default (no explicit resume_mode in config)
+    const defaultResult = scaffoldAgent(
+      "resume-default",
+      makeAgentConfig(),
+      tmpDir,
+      telegramConfig,
+    );
+    const defaultScript = readFileSync(join(defaultResult.agentDir, "start.sh"), "utf-8");
+    expect(defaultScript).toContain('SWITCHROOM_RESUME_MODE="handoff"');
+    expect(defaultScript).toContain('SWITCHROOM_RESUME_MAX_BYTES="2000000"');
+    // handoff mode does NOT pass --continue
+    expect(defaultScript).not.toMatch(/CONTINUE_FLAG="--continue"/);
+
+    // explicit auto — opt-in to old behaviour
     const autoResult = scaffoldAgent(
       "resume-auto",
-      makeAgentConfig(),
+      makeAgentConfig({
+        session_continuity: { resume_mode: "auto" },
+      } as Partial<AgentConfig>),
       tmpDir,
       telegramConfig,
     );
     const autoScript = readFileSync(join(autoResult.agentDir, "start.sh"), "utf-8");
     expect(autoScript).toContain('SWITCHROOM_RESUME_MODE="auto"');
-    expect(autoScript).toContain('SWITCHROOM_RESUME_MAX_BYTES="2000000"');
     // auto mode emits the size-check branch
     expect(autoScript).toMatch(/case "\$SWITCHROOM_RESUME_MODE" in/);
     expect(autoScript).toContain('CONTINUE_FLAG="--continue"');
 
-    // explicit continue
+    // explicit continue — always passes --continue (regression guard for opt-in)
     const contResult = scaffoldAgent(
       "resume-cont",
       makeAgentConfig({
@@ -681,6 +695,7 @@ describe("scaffoldAgent", () => {
     );
     const contScript = readFileSync(join(contResult.agentDir, "start.sh"), "utf-8");
     expect(contScript).toContain('SWITCHROOM_RESUME_MODE="continue"');
+    expect(contScript).toContain('CONTINUE_FLAG="--continue"');
 
     // explicit handoff
     const hoResult = scaffoldAgent(
@@ -693,6 +708,8 @@ describe("scaffoldAgent", () => {
     );
     const hoScript = readFileSync(join(hoResult.agentDir, "start.sh"), "utf-8");
     expect(hoScript).toContain('SWITCHROOM_RESUME_MODE="handoff"');
+    // handoff mode: CONTINUE_FLAG stays empty (no --continue)
+    expect(hoScript).not.toMatch(/CONTINUE_FLAG="--continue"/);
 
     // custom byte threshold
     const customResult = scaffoldAgent(

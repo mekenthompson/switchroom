@@ -80,22 +80,25 @@ _find_latest_jsonl() {
 }
 
 # Session resume policy. The mode is set at scaffold time from
-# session_continuity.resume_mode (default 'auto'). Effective behaviors:
+# session_continuity.resume_mode (default 'handoff' as of #362). Effective
+# behaviors:
 #
-#   auto (default): if the latest JSONL transcript under
+#   handoff (default): never pass --continue. Claude starts fresh every
+#     restart and reads a briefing assembled from recent Telegram messages,
+#     Hindsight recall, and today's daily memory file. Prevents stale MCP
+#     servers / settings from being carried over across restarts.
+#   auto: if the latest JSONL transcript under
 #     $CLAUDE_CONFIG_DIR/projects/ is smaller than
 #     SWITCHROOM_RESUME_MAX_BYTES and newer than 7 days, pass
 #     --continue. Otherwise start fresh and let the handoff briefing
-#     (below) inject a summary.
+#     inject a summary.
 #   continue: always pass --continue. Flaky for large transcripts;
 #     use only if you know your sessions stay small.
-#   handoff: never pass --continue. Rely entirely on the handoff
-#     briefing for continuity.
-#   none: never resume. Start completely fresh every launch.
+#   none: never resume. Start completely fresh every launch, no briefing.
 #
 # In every mode, Hindsight auto-recall still surfaces long-term memories
 # on each UserPromptSubmit so recent context isn't lost.
-SWITCHROOM_RESUME_MODE="{{#if resumeMode}}{{{resumeMode}}}{{else}}auto{{/if}}"
+SWITCHROOM_RESUME_MODE="{{#if resumeMode}}{{{resumeMode}}}{{else}}handoff{{/if}}"
 SWITCHROOM_RESUME_MAX_BYTES="{{#if resumeMaxBytes}}{{{resumeMaxBytes}}}{{else}}2000000{{/if}}"
 CONTINUE_FLAG=""
 
@@ -201,7 +204,14 @@ fi
 # without firing the Stop hook, we fall back to a synchronous
 # summarization capped at 2s — if that doesn't finish, skip gracefully
 # and rely on Hindsight's per-turn auto-recall.
+#
+# In 'handoff' mode (the default as of #362), when no .handoff.md is
+# available from the Stop hook, we also run handoff-briefing.sh which
+# assembles a context briefing from recent Telegram messages, Hindsight
+# recall, and today's daily memory file. This briefing is stored at
+# .handoff-briefing.md and merged alongside (or instead of) .handoff.md.
 HANDOFF_FILE="{{agentDir}}/.handoff.md"
+HANDOFF_BRIEFING_FILE="{{agentDir}}/.handoff-briefing.md"
 if [ ! -s "$HANDOFF_FILE" ]; then
   _LATEST_JSONL=$(_find_latest_jsonl "$CLAUDE_CONFIG_DIR/projects")
   if [ -n "$_LATEST_JSONL" ]; then
@@ -211,11 +221,35 @@ if [ ! -s "$HANDOFF_FILE" ]; then
       timeout 2 switchroom handoff "{{name}}" 2>/dev/null || true
     fi
   fi
+  # In handoff mode, run the briefing assembler as a fallback / supplement.
+  # It combines recent Telegram messages, Hindsight recall, and today's
+  # daily memory into a compact context brief. Requires python3 (stdlib
+  # sqlite3) for the Telegram history section; other sections only need
+  # curl + jq (both optional — each source degrades gracefully).
+  if [ "$SWITCHROOM_RESUME_MODE" = "handoff" ] && command -v handoff-briefing.sh >/dev/null 2>&1; then
+    export AGENT_DIR="{{agentDir}}"
+    timeout 5 handoff-briefing.sh 2>/dev/null || true
+  fi
 fi
 # Telegram plugin reads this to decide whether to prepend the visible
 # "↩️ Picked up where we left off — <topic>" line on the first reply.
 export SWITCHROOM_HANDOFF_SHOW_LINE={{#if handoffShowLine}}true{{else}}false{{/if}}
 APPEND_PROMPT={{#if systemPromptAppendShellQuoted}}{{{systemPromptAppendShellQuoted}}}{{else}}""{{/if}}
+# Inject .handoff-briefing.md first (assembled from live sources), then
+# .handoff.md (LLM-generated session summary from Stop hook). If both
+# exist, separate them with a divider so the agent sees both.
+if [ -s "$HANDOFF_BRIEFING_FILE" ]; then
+  _BRIEFING_CONTENT=$(cat "$HANDOFF_BRIEFING_FILE")
+  if [ -n "$APPEND_PROMPT" ]; then
+    APPEND_PROMPT="$APPEND_PROMPT
+
+---
+
+$_BRIEFING_CONTENT"
+  else
+    APPEND_PROMPT="$_BRIEFING_CONTENT"
+  fi
+fi
 if [ -s "$HANDOFF_FILE" ]; then
   _HANDOFF_CONTENT=$(cat "$HANDOFF_FILE")
   if [ -n "$APPEND_PROMPT" ]; then

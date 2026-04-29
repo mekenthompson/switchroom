@@ -298,11 +298,13 @@ export const SessionContinuitySchema = z
       .enum(["auto", "continue", "handoff", "none"])
       .optional()
       .describe(
-        "How to resume the next session. 'auto' (default) uses --continue " +
-        "when the latest JSONL is smaller than resume_max_bytes, else " +
-        "falls back to the summarized handoff briefing. 'continue' always " +
-        "passes --continue. 'handoff' always uses the summarized briefing. " +
-        "'none' starts fresh every time.",
+        "How to resume the next session. 'handoff' (default as of #362) " +
+        "never passes --continue; a fresh Claude starts each restart and " +
+        "reads a briefing assembled from recent Telegram messages, Hindsight " +
+        "recall, and today's daily memory file. 'auto' uses --continue when " +
+        "the latest JSONL is smaller than resume_max_bytes, else falls back " +
+        "to the handoff briefing. 'continue' always passes --continue. " +
+        "'none' starts completely fresh every time.",
       ),
     resume_max_bytes: z
       .number()

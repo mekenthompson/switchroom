@@ -6760,15 +6760,10 @@ if (streamMode === 'checklist') {
       const agentDir = resolveAgentDirFromEnv()
       if (agentDir != null) writeLastTurnSummary(agentDir, summary)
     },
-    onTurnComplete: ({ chatId, threadId, turnKey, summary }) => {
+    onTurnComplete: ({ chatId, threadId, turnKey }) => {
       process.stderr.write(`telegram gateway: progress-card: onTurnComplete callback turnKey=${turnKey}\n`)
       pinMgr.completeTurn({ chatId, threadId, turnKey })
       pinWatchdog.clear(turnKey)
-      if (threadId != null) {
-        lockedBot.api.sendMessage(chatId, `✅ Done — ${summary}`).catch((err: Error) => {
-          process.stderr.write(`telegram gateway: completion message failed: ${err.message}\n`)
-        })
-      }
     },
     onSilentEnd: ({ chatId, turnKey }) => {
       // Write a state file so the Stop hook can detect a silent-end and

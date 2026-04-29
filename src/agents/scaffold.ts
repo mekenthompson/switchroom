@@ -1429,9 +1429,12 @@ export function scaffoldAgent(
 
       // Playwright browser automation MCP (built-in default).
       // Agents can suppress this with `mcp_servers: { playwright: false }` in
-      // switchroom.yaml. The `false` value is filtered by filterMcpServers()
-      // in the HBS context above, but we also check here so the post-template
-      // merge step honours opt-outs expressed in mcp_servers.
+      // switchroom.yaml. Playwright is added as a built-in here AFTER the
+      // template renders user-declared mcp_servers — so this is the only
+      // place that decides whether to wire it in. The opt-out check below
+      // reads the user's mcp_servers map directly to honour `false` even
+      // though that sentinel never reaches the template (filterMcpServers
+      // strips it).
       const playwrightMcpEntry = getPlaywrightMcpSettingsEntry();
       const agentOptOut = (agentConfig.mcp_servers ?? {})[playwrightMcpEntry.key] === false;
       if (!agentOptOut && !settings.mcpServers[playwrightMcpEntry.key]) {

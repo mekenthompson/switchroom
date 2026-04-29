@@ -44,7 +44,9 @@ export function getPlaywrightMcpSettingsEntry(): { key: string; value: McpServer
     key: "playwright",
     value: {
       command: "npx",
-      args: ["-y", "@playwright/mcp@latest", "--snapshot"],
+      // Pinned: Microsoft ships breaking changes without major-version bumps.
+      // Bump deliberately when validating against a newer release.
+      args: ["-y", "@playwright/mcp@0.0.71", "--snapshot"],
     },
   };
 }

@@ -297,7 +297,7 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
     .command("enable-auto-unlock")
     .description(
       "Encrypt vault passphrase via systemd-creds and write to the credential path. " +
-      "After this, set vault.broker.autoUnlock=true and reconcile to take effect.",
+      "After this, set vault.broker.autoUnlock=true and restart the agent to take effect.",
     )
     .action(async () => {
       const parentOpts = program.opts();
@@ -370,7 +370,7 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
       console.log("");
       console.log("Next steps:");
       console.log("  1. Set vault.broker.autoUnlock: true in switchroom.yaml");
-      console.log("  2. switchroom reconcile        # re-renders the broker unit");
+      console.log("  2. switchroom update           # re-renders and restarts everything");
       console.log("  3. systemctl --user restart switchroom-vault-broker.service");
       console.log("");
       console.log("Verify with: switchroom vault broker status (after restart)");
@@ -379,7 +379,7 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
   // ── disable-auto-unlock ──────────────────────────────────────────────────
   broker
     .command("disable-auto-unlock")
-    .description("Remove the auto-unlock credential file. Reconcile + restart broker after.")
+    .description("Remove the auto-unlock credential file. Run switchroom update + restart broker after.")
     .action(() => {
       const parentOpts = program.opts();
       const credPath = getAutoUnlockCredPath(parentOpts.config);
@@ -394,7 +394,7 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
         console.log("");
         console.log("Next steps:");
         console.log("  1. Set vault.broker.autoUnlock: false in switchroom.yaml (or remove)");
-        console.log("  2. switchroom reconcile");
+        console.log("  2. switchroom update           # re-renders and restarts everything");
         console.log("  3. systemctl --user restart switchroom-vault-broker.service");
       } catch (err) {
         console.error(`Failed to remove credential file: ${err instanceof Error ? err.message : String(err)}`);

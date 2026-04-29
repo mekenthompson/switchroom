@@ -624,7 +624,7 @@ export async function checkTelegram(config: SwitchroomConfig): Promise<CheckResu
         name: `${name}: bot token`,
         status: "fail",
         detail: `TELEGRAM_BOT_TOKEN missing from ${envPath}`,
-        fix: `Run \`switchroom agent reconcile ${name}\` and ensure the vault contains telegram_bot_token`,
+        fix: `Run \`switchroom agent restart ${name}\` and ensure the vault contains telegram_bot_token`,
       });
       continue;
     }
@@ -672,7 +672,7 @@ export async function checkTelegram(config: SwitchroomConfig): Promise<CheckResu
  * Without that env var the gateway falls back to `basename(process.cwd())`,
  * which is literally the string "telegram" because `WorkingDirectory` is
  * `.../<agent>/telegram`. That makes every self-targeting command
- * (`/restart`, `/reconcile --restart`, `/update`, etc.) resolve the agent
+ * (`/restart`, `/update`, etc.) resolve the agent
  * as "telegram" — a name that doesn't exist in switchroom.yaml — so the
  * detached `switchroom agent <verb>` child exits non-zero and the user
  * sees nothing happen. See `generateGatewayUnit()` in
@@ -695,7 +695,7 @@ export function checkGatewayUnit(
       name: label,
       status: "warn",
       detail: `${unitPath} not installed`,
-      fix: `Run \`switchroom reconcile --restart\` to install the gateway unit`,
+      fix: `Run \`switchroom agent restart all\` to install the gateway unit`,
     };
   }
 
@@ -707,7 +707,7 @@ export function checkGatewayUnit(
       name: label,
       status: "fail",
       detail: `unreadable: ${(err as Error).message}`,
-      fix: `Run \`switchroom reconcile --restart\``,
+      fix: `Run \`switchroom agent restart all\``,
     };
   }
 
@@ -717,8 +717,8 @@ export function checkGatewayUnit(
       name: label,
       status: "fail",
       detail:
-        `missing \`${expected}\` — self-targeting commands (/restart, /reconcile) will silently fail`,
-      fix: `Run \`switchroom reconcile --restart\` to regenerate the gateway unit and bounce the gateway`,
+        `missing \`${expected}\` — self-targeting commands (/restart, /update) will silently fail`,
+      fix: `Run \`switchroom agent restart all\` to regenerate the gateway unit and bounce the gateway`,
     };
   }
 
@@ -847,7 +847,7 @@ function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[
     if (agentConfig.channels?.telegram?.plugin === "switchroom") {
       // 4a. Gateway unit health — ensures the generated systemd unit
       // pins the agent name into the gateway process's environment so
-      // self-targeting commands (/restart, /reconcile, /update) resolve
+      // self-targeting commands (/restart, /update) resolve
       // correctly instead of falling back to basename(cwd) == "telegram".
       results.push(checkGatewayUnit(name));
 
@@ -857,7 +857,7 @@ function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[
           name: `${name}: .mcp.json`,
           status: "fail",
           detail: "missing",
-          fix: `Run \`switchroom agent reconcile ${name}\``,
+          fix: `Run \`switchroom agent restart ${name}\``,
         });
       } else {
         try {
@@ -871,14 +871,14 @@ function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[
               name: `${name}: .mcp.json`,
               status: "fail",
               detail: "missing switchroom-telegram entry",
-              fix: `Run \`switchroom agent reconcile ${name} --restart\``,
+              fix: `Run \`switchroom agent restart ${name}\``,
             });
           } else if (memoryEnabled && !hasHindsight) {
             results.push({
               name: `${name}: .mcp.json`,
               status: "warn",
               detail: "memory enabled in switchroom.yaml but hindsight missing from .mcp.json",
-              fix: `Run \`switchroom agent reconcile ${name} --restart\``,
+              fix: `Run \`switchroom agent restart ${name}\``,
             });
           } else {
             results.push({
@@ -892,7 +892,7 @@ function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[
             name: `${name}: .mcp.json`,
             status: "fail",
             detail: `parse error: ${(err as Error).message}`,
-            fix: `Run \`switchroom agent reconcile ${name}\``,
+            fix: `Run \`switchroom agent restart ${name}\``,
           });
         }
       }

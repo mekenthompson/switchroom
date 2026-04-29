@@ -268,7 +268,7 @@ export function registerMemoryCommand(program: Command): void {
           console.log(chalk.gray(`  Updated ${configPath} with memory.config.url = ${url}`));
           console.log(
             chalk.gray(
-              "  Run `switchroom agent reconcile all --restart` to apply this to existing agents."
+              "  Run `switchroom agent restart all` to apply this to existing agents."
             )
           );
         }

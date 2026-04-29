@@ -505,8 +505,9 @@ describe('progress-card multi-agent harness', () => {
         }
         await wait(200)
         const midHtml = bot.edits[bot.edits.length - 1].html
-        // New format: each sub-agent's running tool renders inside its expandable as ◉
-        expect(midHtml).toContain('◉')
+        // After #315: each sub-agent's running tool renders inside its expandable as
+        // `◉ <code>Read</code>` (no `└` connector; description in header only).
+        expect(midHtml).toContain('◉ <code>Read</code>')
 
         // Parent tool_results for all 4
         for (let i = 1; i <= 4; i++) {

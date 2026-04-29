@@ -1157,7 +1157,7 @@ describe('progress-card reducer — multi-agent correlation', () => {
       const mainSection = html.split('[Sub-agents')[0]
       expect(mainSection).toContain('🤖')
       expect(mainSection).not.toContain('● Agent')
-      // Sub-agent activity line shows the current tool (new format: ◉ without └ prefix)
+      // Sub-agent activity line shows the current tool (no └ prefix after #315)
       expect(html).toContain('◉')
       expect(html).toContain('Read')
     } finally {
@@ -1191,12 +1191,12 @@ describe('progress-card reducer — multi-agent correlation', () => {
       const html = render(st, 8000)
       expect(html).toContain('●')
       expect(html).toContain('task A')
-      // New format: main blockquote has the one-line summary (● task A),
-      // expandable blockquote has the per-sub-agent forensics with tool count.
-      // The two are in separate blockquotes so we check them independently.
+      // After #315 dedup: main blockquote has the one-line summary; expandable
+      // blockquote has the per-sub-agent forensics. Tool count moves to its own
+      // line in the expandable, so check assertions independently.
       expect(html).toMatch(/● task A/)
       expect(html).toContain('1 tools')
-      // Active tool spinner (◉) must not appear in a done state
+      // Active tool spinner (◉) must not appear in a done state.
       expect(html).not.toContain('◉')
     } finally {
       delete process.env.PROGRESS_CARD_MULTI_AGENT

@@ -1240,9 +1240,13 @@ function renderSubAgent(
     ]
   }
 
-  // Running: two-line block.
+  // Running: header + activity + footer block.
+  // Header shows dispatch context (agent ID) + description once. Elapsed time
+  // and tool count move to the footer so the description never duplicates (#315).
   const elapsed = formatDuration(now - sa.startedAt)
-  const headerLine = `  🤖 <b>${escapeHtml(truncate(desc, 50))}</b>${typeSuffix} · ⏱ ${elapsed}${spawnedSuffix}`
+  const shortId = sa.agentId.slice(0, 8)
+  const headerLine = `  🤖 📂 <code>#${shortId}</code> ${escapeHtml(truncate(desc, 50))}${typeSuffix}${spawnedSuffix}`
+  const footerLine = `     ${sa.toolCount} tools · ⏱ ${elapsed}`
 
   // Activity-line fallback chain — never render the literal "(idle)" string.
   // Priority: currently-executing tool > pending narrative text > last
@@ -1252,7 +1256,8 @@ function renderSubAgent(
     const curDur = formatDuration(now - cur.startedAt)
     return [
       headerLine,
-      `     └ ${STEP_ACTIVE} ${renderItemCore(cur.tool, cur.label, false, cur.humanAuthored)} <i>(${curDur})</i> · ${sa.toolCount} tools`,
+      `     ${STEP_ACTIVE} ${renderItemCore(cur.tool, cur.label, false, cur.humanAuthored)} <i>(${curDur})</i>`,
+      footerLine,
     ]
   }
   if (sa.pendingPreamble && sa.pendingPreamble.length > 0) {
@@ -1260,7 +1265,8 @@ function renderSubAgent(
     if (preambleLine.length > 0) {
       return [
         headerLine,
-        `     └ 🤔 <i>${escapeHtml(truncate(preambleLine, 60))}</i> · ${sa.toolCount} tools`,
+        `     🤔 <i>${escapeHtml(truncate(preambleLine, 60))}</i>`,
+        footerLine,
       ]
     }
   }
@@ -1268,10 +1274,11 @@ function renderSubAgent(
     const last = sa.lastCompletedTool
     return [
       headerLine,
-      `     └ ✓ <i>just finished</i> ${renderItemCore(last.tool, last.label, false, last.humanAuthored)} · ${sa.toolCount} tools`,
+      `     ✓ <i>just finished</i> ${renderItemCore(last.tool, last.label, false, last.humanAuthored)}`,
+      footerLine,
     ]
   }
-  return [headerLine, `     └ 💭 <i>thinking…</i> · ${sa.toolCount} tools`]
+  return [headerLine, `     💭 <i>thinking…</i>`, footerLine]
 }
 
 /**

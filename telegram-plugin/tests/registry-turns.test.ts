@@ -145,12 +145,12 @@ describe('recordTurnEnd', () => {
   it('sets ended_at and ended_via on an existing row', () => {
     const db = openTurnsDbInMemory()
     recordTurnStart(db, { turnKey: '111:5', chatId: '111' })
-    recordTurnEnd(db, { turnKey: '111:5', endedVia: 'turn_end' })
+    recordTurnEnd(db, { turnKey: '111:5', endedVia: 'stop' })
     const row = db.prepare('SELECT * FROM turns WHERE turn_key = ?').get('111:5') as
       | Record<string, unknown>
       | undefined
     expect(row!['ended_at']).toBeTypeOf('number')
-    expect(row!['ended_via']).toBe('turn_end')
+    expect(row!['ended_via']).toBe('stop')
     db.close()
   })
 
@@ -159,7 +159,7 @@ describe('recordTurnEnd', () => {
     recordTurnStart(db, { turnKey: '111:6', chatId: '111' })
     recordTurnEnd(db, {
       turnKey: '111:6',
-      endedVia: 'turn_end',
+      endedVia: 'stop',
       lastAssistantMsgId: '77',
       lastAssistantDone: true,
     })
@@ -177,7 +177,7 @@ describe('recordTurnEnd', () => {
     recordTurnStart(db, { turnKey: '111:7', chatId: '111' })
     recordTurnEnd(db, {
       turnKey: '111:7',
-      endedVia: 'turn_end',
+      endedVia: 'stop',
       lastAssistantDone: false,
     })
     const row = db.prepare('SELECT * FROM turns WHERE turn_key = ?').get('111:7') as
@@ -212,7 +212,7 @@ describe('recordTurnStart + recordTurnEnd round-trip', () => {
 
     recordTurnEnd(db, {
       turnKey: '222:1',
-      endedVia: 'turn_end',
+      endedVia: 'stop',
       lastAssistantMsgId: 'msg2',
       lastAssistantDone: true,
     })
@@ -221,7 +221,7 @@ describe('recordTurnStart + recordTurnEnd round-trip', () => {
       | Record<string, unknown>
       | undefined
     expect(after!['ended_at']).toBeTypeOf('number')
-    expect(after!['ended_via']).toBe('turn_end')
+    expect(after!['ended_via']).toBe('stop')
     expect(after!['last_assistant_msg_id']).toBe('msg2')
     expect(after!['last_assistant_done']).toBe(1)
     expect(after!['last_user_msg_id']).toBe('msg1')
@@ -239,7 +239,7 @@ describe('findOrphanedTurns', () => {
     recordTurnStart(db, { turnKey: '333:1', chatId: '333' })
     recordTurnStart(db, { turnKey: '333:2', chatId: '333' })
     // Close one turn
-    recordTurnEnd(db, { turnKey: '333:1', endedVia: 'turn_end' })
+    recordTurnEnd(db, { turnKey: '333:1', endedVia: 'stop' })
 
     const orphans = findOrphanedTurns(db, '333')
     expect(orphans).toHaveLength(1)
@@ -250,7 +250,7 @@ describe('findOrphanedTurns', () => {
   it('returns empty array when no orphaned turns exist', () => {
     const db = openTurnsDbInMemory()
     recordTurnStart(db, { turnKey: '333:3', chatId: '333' })
-    recordTurnEnd(db, { turnKey: '333:3', endedVia: 'turn_end' })
+    recordTurnEnd(db, { turnKey: '333:3', endedVia: 'stop' })
 
     expect(findOrphanedTurns(db, '333')).toHaveLength(0)
     db.close()
@@ -305,7 +305,7 @@ describe('markOrphanedAsRestarted', () => {
   it('does not touch already-closed turns', () => {
     const db = openTurnsDbInMemory()
     recordTurnStart(db, { turnKey: '555:3', chatId: '555' })
-    recordTurnEnd(db, { turnKey: '555:3', endedVia: 'turn_end' })
+    recordTurnEnd(db, { turnKey: '555:3', endedVia: 'stop' })
     recordTurnStart(db, { turnKey: '555:4', chatId: '555' })
 
     markOrphanedAsRestarted(db)
@@ -313,7 +313,7 @@ describe('markOrphanedAsRestarted', () => {
     const closed = db.prepare(
       "SELECT ended_via FROM turns WHERE turn_key = '555:3'",
     ).get() as Record<string, unknown>
-    expect(closed['ended_via']).toBe('turn_end')
+    expect(closed['ended_via']).toBe('stop')
 
     const swept = db.prepare(
       "SELECT ended_via FROM turns WHERE turn_key = '555:4'",
@@ -336,7 +336,7 @@ describe('markOrphanedAsRestarted', () => {
   it('returns 0 when there are no open turns', () => {
     const db = openTurnsDbInMemory()
     recordTurnStart(db, { turnKey: '777:1', chatId: '777' })
-    recordTurnEnd(db, { turnKey: '777:1', endedVia: 'turn_end' })
+    recordTurnEnd(db, { turnKey: '777:1', endedVia: 'stop' })
 
     expect(markOrphanedAsRestarted(db)).toBe(0)
     db.close()

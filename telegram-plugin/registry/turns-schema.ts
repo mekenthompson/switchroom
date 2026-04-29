@@ -17,7 +17,7 @@
  *     thread_id     TEXT             -- nullable: forum topics only
  *     started_at    INTEGER NOT NULL -- unix ms
  *     ended_at      INTEGER          -- nullable until turn ends
- *     ended_via     TEXT             -- 'turn_end' | 'restart' | 'unknown'
+ *     ended_via     TEXT             -- 'stop' | 'sigterm' | 'restart' | 'timeout' | 'unknown'
  *     last_assistant_msg_id TEXT     -- last outbound message_id in this turn
  *     last_assistant_done   INTEGER  -- 0|1; 1 = stream_reply done=true sent
  *     last_user_msg_id      TEXT     -- inbound message_id that started the turn
@@ -80,7 +80,7 @@ function loadDatabaseClass(): SqliteDatabaseConstructor {
 // Types
 // ---------------------------------------------------------------------------
 
-export type TurnEndedVia = 'turn_end' | 'restart' | 'unknown'
+export type TurnEndedVia = 'stop' | 'sigterm' | 'restart' | 'timeout' | 'unknown'
 
 export interface Turn {
   turn_key: string

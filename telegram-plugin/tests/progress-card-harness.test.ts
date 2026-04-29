@@ -509,9 +509,10 @@ describe('progress-card multi-agent harness', () => {
         }
         await wait(200)
         const midHtml = bot.edits[bot.edits.length - 1].html
-        // After #315: each sub-agent's running tool renders inside its expandable as
-        // `◉ <code>Read</code>` (no `└` connector; description in header only).
-        expect(midHtml).toContain('◉ <code>Read</code>')
+        // After #352: each sub-agent's running tool renders inside its expandable as
+        // `↳ <code>Read</code>` (↳ arrow prefix; description in expandable header only).
+        // The old `◉ <code>Read</code>` format (pre-#352 inline row) is no longer used.
+        expect(midHtml).toContain('↳ <code>Read</code>')
 
         // Parent tool_results for all 4
         for (let i = 1; i <= 4; i++) {
@@ -521,10 +522,12 @@ describe('progress-card multi-agent harness', () => {
         await wait(250)
 
         const finalHtml = bot.edits[bot.edits.length - 1].html
-        // New format: 4 expandables remain, each in done state (● 📂 header)
+        // New format (#352): 4 expandables remain, each in done state.
+        // The old `● 📂 #<id>` row format was replaced by expandable blockquotes
+        // with `🤖 <b>description</b>  ✅ done · <duration>` headers.
         const finalExpandables = (finalHtml.match(/<blockquote expandable>/g) ?? []).length
         expect(finalExpandables).toBe(4)
-        const doneHeaders = (finalHtml.match(/● 📂/g) ?? []).length
+        const doneHeaders = (finalHtml.match(/✅ done/g) ?? []).length
         expect(doneHeaders).toBe(4)
         const doneEdits = bot.edits.filter((e) => e.done)
         expect(doneEdits.length).toBeGreaterThanOrEqual(1)
@@ -558,14 +561,20 @@ describe('progress-card multi-agent harness', () => {
         appendFileSync(sub, subAgentTurnEndLine())
         await wait(200)
         const earlyHtml = bot.edits[bot.edits.length - 1].html
-        // Tentative ✅ for the sub-agent on early turn_end — header is "● 📂 #aidX <b>investigate</b>"
-        expect(earlyHtml).toMatch(/● 📂 #aidX <b>investigate<\/b>/)
-        // Parent tool_result with isError=true overrides → ✗
+        // Tentative ✅ for the sub-agent on early turn_end — new format (#352):
+        // expandable header is `🤖 <b>investigate</b>  ✅ done · <duration>`.
+        // The old `● 📂 #aidX <b>investigate</b>` inline row format was removed.
+        expect(earlyHtml).toContain('<blockquote expandable>')
+        expect(earlyHtml).toContain('<b>investigate</b>')
+        expect(earlyHtml).toContain('✅ done')
+        // Parent tool_result with isError=true overrides → ❌ failed in expandable
         appendFileSync(parent, toolResultLine('toolu_p1', true))
         appendFileSync(parent, turnEndLine())
         await wait(250)
         const finalHtml = bot.edits[bot.edits.length - 1].html
-        expect(finalHtml).toMatch(/✗ 📂 #aidX <b>investigate<\/b>/)
+        // isError=true on parent flips sub-agent to failed state; expandable shows ❌ failed.
+        // Old format was `✗ 📂 #aidX <b>investigate</b>` — replaced by expandable header.
+        expect(finalHtml).toContain('❌ failed')
       } finally {
         tail.stop()
         driver.dispose?.()
@@ -677,8 +686,13 @@ describe('progress-card multi-agent harness', () => {
         await wait(250)
         const html = bot.edits[bot.edits.length - 1].html
         expect(html).toContain('parent sub')
-        expect(html).toContain('(spawned 1)')
-        // Sub-sub-agent must NOT appear as its own row
+        // PR #352 dropped the `(spawned N)` suffix from the expandable header.
+        // nestedSpawnCount is still tracked in state but no longer rendered —
+        // the sub-sub-agent's activity is suppressed entirely at the render layer.
+        // Verify: only 1 expandable (the parent sub-agent); no second row for the inner.
+        const expandableCount = (html.match(/<blockquote expandable>/g) ?? []).length
+        expect(expandableCount).toBe(1)
+        // Sub-sub-agent must NOT appear as its own row or expandable
         expect(html).not.toContain('inner')
       } finally {
         tail.stop()

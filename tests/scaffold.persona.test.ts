@@ -95,7 +95,7 @@ describe("scaffoldAgent — persona (Phase 2)", () => {
     expect(claudeMd).not.toContain("motivational");
   });
 
-  it("CLAUDE.md is slim (target <3KB)", () => {
+  it("CLAUDE.md is slim (target <16KB)", () => {
     const config = makeAgentConfig({
       soul: {
         name: "Coach",
@@ -108,7 +108,10 @@ describe("scaffoldAgent — persona (Phase 2)", () => {
     const result = scaffoldAgent("health-coach", config, tmpDir, telegramConfig);
     const claudeMd = readFileSync(join(result.agentDir, "CLAUDE.md"), "utf-8");
 
-    // CLAUDE.md should be significantly smaller without persona block
-    expect(claudeMd.length).toBeLessThan(12000); // generous cap, target is 3KB
+    // CLAUDE.md should be significantly smaller without persona block.
+    // Cap raised from 12000 → 16000: the template grew with vault, hindsight,
+    // sub-agent delegation, and Telegram interaction guidance added in v0.3-v0.4.
+    // The doc is load-bearing — trimming risks cutting useful guidance.
+    expect(claudeMd.length).toBeLessThan(16000); // generous cap; target is lean but not 3KB
   });
 });

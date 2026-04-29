@@ -65,6 +65,14 @@ export default defineConfig({
       "**/telegram-plugin/registry/subagents.test.ts",
       // turns-writer.test.ts uses bun:sqlite — excluded here, run via test:bun.
       "**/telegram-plugin/tests/turns-writer.test.ts",
+      // api-registry.test.ts uses bun:sqlite + bun:test — excluded here, run via test:bun.
+      "**/telegram-plugin/registry/api-registry.test.ts",
+      // turns-schema.test.ts uses bun:sqlite + bun:test — excluded here, run via test:bun.
+      "**/telegram-plugin/registry/turns-schema.test.ts",
+      // idle-footer-wiring.test.ts uses bun:sqlite + bun:test — excluded here, run via test:bun.
+      "**/telegram-plugin/tests/idle-footer-wiring.test.ts",
+      // subagent-tracker-hooks.test.ts uses bun:test — excluded here, run via test:bun.
+      "**/telegram-plugin/tests/subagent-tracker-hooks.test.ts",
     ],
     coverage: {
       provider: "v8",

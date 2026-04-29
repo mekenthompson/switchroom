@@ -74,48 +74,52 @@ function enqueue(chatId: string, text = 'hi'): SessionEvent {
 }
 
 describe('cross-turn sub-agent visibility (#334)', () => {
-  it('Test 1: background sub-agent from turn 1 appears on turn 2 card', () => {
-    const { driver, emits } = harness()
+  it('Test 1: closeZombie on turn-1 force-close removes sub-agent from registry (fix #399)', () => {
+    // When turn 2 starts while turn 1 has a pending background sub-agent,
+    // the ingest enqueue path calls closeZombie on turn 1's card. closeZombie
+    // explicitly abandons all running sub-agents (marks them done for display),
+    // and — after fix #399 — also removes them from chatRunningSubagents.
+    // Therefore turn 2 starts clean (no carry-over of abandoned agents).
+    const { driver } = harness()
 
     // Turn 1: dispatch a background sub-agent, then turn ends.
     driver.ingest(enqueue('c1'), null)
     driver.ingest({ kind: 'sub_agent_started', agentId: 'bg-agent', firstPromptText: 'do work' }, 'c1')
     driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c1')
 
-    // Turn 1 is now in pendingCompletion (sub-agent still running).
-    // Turn 2 starts — this should seed the new card with the running sub-agent.
+    // Turn 2 starts — triggers closeZombie on turn 1 → removes bg-agent from registry.
     driver.startTurn({ chatId: 'c1', userText: 'new prompt' })
 
     const turn2State = driver.peek('c1', undefined)
     expect(turn2State).toBeDefined()
-    expect(turn2State!.subAgents.has('bg-agent')).toBe(true)
-    expect(turn2State!.subAgents.get('bg-agent')!.state).toBe('running')
+    // bg-agent was abandoned by closeZombie; it must NOT carry over into turn 2.
+    expect(turn2State!.subAgents.has('bg-agent')).toBe(false)
   })
 
-  it('Test 2: sub-agent finishing after turn 1 ends updates turn 2 card', () => {
-    const { driver, emits } = harness()
+  it('Test 2: sub-agent finishing naturally before new turn does not appear on turn 2', () => {
+    // When a sub-agent finishes via sub_agent_turn_end (natural completion),
+    // it is removed from chatRunningSubagents by the ingest sync (fix #399
+    // also keeps this path correct). Turn 2 starts clean.
+    const { driver } = harness()
 
     // Turn 1: dispatch background sub-agent.
     driver.ingest(enqueue('c1'), null)
     driver.ingest({ kind: 'sub_agent_started', agentId: 'bg-agent', firstPromptText: 'do work' }, 'c1')
+    // Sub-agent finishes naturally before turn 2 starts.
+    driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'bg-agent', durationMs: 5000 }, 'c1')
     driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c1')
 
     // Turn 2 starts.
     driver.startTurn({ chatId: 'c1', userText: 'next prompt' })
 
-    // Sub-agent finishes while turn 2 is running.
-    driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'bg-agent', durationMs: 5000 }, 'c1')
-
     const turn2State = driver.peek('c1', undefined)
     expect(turn2State).toBeDefined()
-    // The sub-agent should now show as done on the turn 2 card.
-    const sa = turn2State!.subAgents.get('bg-agent')
-    expect(sa).toBeDefined()
-    expect(sa!.state).toBe('done')
+    // bg-agent finished before turn 2 — must NOT appear.
+    expect(turn2State!.subAgents.has('bg-agent')).toBe(false)
   })
 
   it('Test 3: foreground sub-agent (completes mid-turn 1) does NOT appear on turn 2', () => {
-    const { driver, emits } = harness()
+    const { driver } = harness()
 
     // Turn 1: foreground sub-agent — starts and finishes before turn ends.
     driver.ingest(enqueue('c1'), null)
@@ -132,7 +136,9 @@ describe('cross-turn sub-agent visibility (#334)', () => {
     expect(turn2State!.subAgents.has('fg-agent')).toBe(false)
   })
 
-  it('multiple background sub-agents: all running ones carry over', () => {
+  it('multiple background sub-agents: closeZombie removes all from registry (fix #399)', () => {
+    // When closeZombie abandons all running sub-agents, they are all removed
+    // from chatRunningSubagents. Turn 2 starts with an empty sub-agent map.
     const { driver } = harness()
 
     driver.ingest(enqueue('c1'), null)
@@ -140,13 +146,13 @@ describe('cross-turn sub-agent visibility (#334)', () => {
     driver.ingest({ kind: 'sub_agent_started', agentId: 'bg2', firstPromptText: 'task 2' }, 'c1')
     driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c1')
 
+    // New turn triggers closeZombie → all running agents marked done → removed from registry.
     driver.startTurn({ chatId: 'c1', userText: 'turn 2' })
 
     const state = driver.peek('c1', undefined)
-    expect(state!.subAgents.has('bg1')).toBe(true)
-    expect(state!.subAgents.has('bg2')).toBe(true)
-    expect(state!.subAgents.get('bg1')!.state).toBe('running')
-    expect(state!.subAgents.get('bg2')!.state).toBe('running')
+    // Both abandoned agents must NOT carry over.
+    expect(state!.subAgents.has('bg1')).toBe(false)
+    expect(state!.subAgents.has('bg2')).toBe(false)
   })
 
   it('different chats do not cross-contaminate', () => {
@@ -165,9 +171,10 @@ describe('cross-turn sub-agent visibility (#334)', () => {
     expect(stateB!.subAgents.size).toBe(0)
   })
 
-  it('sub-agents seeded into turn 2 are independent: finishing in turn 2 does not affect turn 3 seed', () => {
-    // Verifies that the sub-agent finishing in turn 2 removes it from the
-    // chat-scoped registry so turn 3 does NOT see it (independence of turns).
+  it('sub-agent finishes naturally between turns: turn 3 starts clean', () => {
+    // Verifies that a sub-agent finishing via sub_agent_turn_end (natural
+    // completion via the ingest path) is removed from chatRunningSubagents
+    // so subsequent turns do not see it.
     const { driver } = harness()
 
     // Turn 1: background sub-agent dispatched.
@@ -175,19 +182,19 @@ describe('cross-turn sub-agent visibility (#334)', () => {
     driver.ingest({ kind: 'sub_agent_started', agentId: 'bg1', firstPromptText: 'shared?' }, 'c1')
     driver.ingest({ kind: 'turn_end', durationMs: 500 }, 'c1')
 
-    // Turn 2: sub-agent is seeded in.
-    driver.startTurn({ chatId: 'c1', userText: 'turn 2' })
-    expect(driver.peek('c1', undefined)!.subAgents.has('bg1')).toBe(true)
-
-    // Sub-agent finishes during turn 2 — this should remove it from the registry.
+    // Sub-agent finishes naturally BEFORE turn 2 starts.
     driver.ingest({ kind: 'sub_agent_turn_end', agentId: 'bg1', durationMs: 3000 }, 'c1')
+
+    // Turn 2 starts — bg1 already finished, so registry is empty.
+    driver.startTurn({ chatId: 'c1', userText: 'turn 2' })
+    expect(driver.peek('c1', undefined)!.subAgents.has('bg1')).toBe(false)
+
     driver.ingest({ kind: 'turn_end', durationMs: 1000 }, 'c1')
 
     // Turn 3: the finished sub-agent must NOT appear.
     driver.startTurn({ chatId: 'c1', userText: 'turn 3' })
     const stateT3 = driver.peek('c1', undefined)
     expect(stateT3).toBeDefined()
-    // bg1 completed in turn 2; turn 3 should start clean.
     expect(stateT3!.subAgents.has('bg1')).toBe(false)
   })
 })

@@ -50,6 +50,13 @@ describe("switchroom update --force", () => {
     expect(forcePassCount).toBeGreaterThanOrEqual(2);
   });
 
+  it("guards against --force combined with --no-restart", () => {
+    // --force has no effect when the restart phase is skipped, so the two
+    // flags are mutually exclusive. The guard must exit 1 with a clear error.
+    expect(src).toMatch(/opts\.force && opts\.restart === false/);
+    expect(src).toMatch(/--force and --no-restart are mutually exclusive/);
+  });
+
   it("still writes the deployed-SHA after a --force restart", () => {
     // SHA write must come AFTER the restart loop (not inside the settle-gate
     // block). Verify the SHA write and the settle-gate skip are separate.

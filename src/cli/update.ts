@@ -632,7 +632,8 @@ export function registerUpdateCommand(program: Command): void {
       "Skip the rolling-restart settle gate. Faster, but if the new\n" +
       "binary fails to start, the whole fleet will be cycled to the\n" +
       "broken build before you notice. Use only when you know what\n" +
-      "you're doing or are recovering from a stuck restart."
+      "you're doing or are recovering from a stuck restart.\n" +
+      "Exit code is 0 regardless of agent health — health-check externally."
     )
     // Hidden internal flags for the self-reexec resume path
     .option("--phase <phase>", undefined, undefined)
@@ -670,6 +671,13 @@ export function registerUpdateCommand(program: Command): void {
             force: state.force ?? false,
           });
           return;
+        }
+
+        // Guard: --force and --no-restart are mutually exclusive — force has
+        // no effect when the restart phase is skipped entirely.
+        if (opts.force && opts.restart === false) {
+          console.error(chalk.red("  --force and --no-restart are mutually exclusive."));
+          process.exit(1);
         }
 
         // ── Normal (pre-build) path ─────────────────────────────────────────

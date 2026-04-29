@@ -32,6 +32,7 @@ import {
   getBaseProfilePath,
   renderTemplate,
   copyProfileSkills,
+  renderProfileClaudeTemplate,
 } from "./profiles.js";
 import { getHindsightSettingsEntry, getSwitchroomMcpSettingsEntry, getBuiltinDefaultMcpEntries } from "../memory/scaffold-integration.js";
 import { applyTelegramProgressGuidance, applyCronTelegramGuidance } from "./sub-agent-telegram-prompt.js";
@@ -1765,6 +1766,13 @@ export function scaffoldAgent(
   // Profile-bundled skills land in .claude/skills/ so Claude Code discovers
   // them alongside user-declared global skills.
   copyProfileSkills(profilePath, join(agentDir, ".claude", "skills"));
+
+  // --- Materialize profile CLAUDE.md from .hbs template ---
+  // Render profiles/<name>/CLAUDE.md from its .hbs source so the profile's
+  // rendered output is up-to-date at scaffold time. This is idempotent —
+  // no-op when the .hbs doesn't exist. Chunks 3+4 wire the @import and
+  // reconcile migration respectively.
+  renderProfileClaudeTemplate(agentConfig.extends ?? DEFAULT_PROFILE);
 
   // --- Symlink global skills from switchroom.skills_dir ---
   //

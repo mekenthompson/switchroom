@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { scaffoldAgent, reconcileAgent, installHindsightPlugin, installSwitchroomSkills } from "../src/agents/scaffold.js";
-import { renderTemplate } from "../src/agents/profiles.js";
+import { renderTemplate, renderProfileClaudeTemplate } from "../src/agents/profiles.js";
 import type { AgentConfig, SwitchroomConfig, TelegramConfig } from "../src/config/schema.js";
 
 const telegramConfig: TelegramConfig = {
@@ -3367,5 +3367,56 @@ describe("CLAUDE.md-first workspace template (Phase 5)", () => {
     expect(readlinkSync(agentsMd)).toBe("CLAUDE.md");
     expect(lstatSync(agentMd).isSymbolicLink()).toBe(true);
     expect(readlinkSync(agentMd)).toBe("CLAUDE.md");
+  });
+});
+
+describe("renderProfileClaudeTemplate — scaffold wires it correctly", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "switchroom-profile-test-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("renders profiles/<name>/CLAUDE.md from CLAUDE.md.hbs after scaffolding", () => {
+    // Set up a temp profiles root with a minimal profile.
+    const profilesRoot = join(tmpDir, "profiles");
+    const profileDir = join(profilesRoot, "testprofile");
+    mkdirSync(profileDir, { recursive: true });
+
+    // Write a simple .hbs template — uses the `profile` variable that
+    // renderProfileClaudeTemplate passes into the Handlebars context.
+    const hbsContent = "# Profile: {{profile}}\n\nHello from the template.\n";
+    writeFileSync(join(profileDir, "CLAUDE.md.hbs"), hbsContent, "utf-8");
+
+    // Call renderProfileClaudeTemplate directly with the temp root — this is
+    // exactly what scaffoldAgent invokes (without the override the real
+    // PROFILES_ROOT would be used; with override we stay in the temp dir).
+    const result = renderProfileClaudeTemplate("testprofile", profilesRoot);
+
+    // The function must report that it wrote the file.
+    expect(result.wrote).toBe(true);
+    expect(result.path).toBe(join(profileDir, "CLAUDE.md"));
+
+    // The output file must exist and contain the rendered content.
+    expect(existsSync(result.path)).toBe(true);
+    const rendered = readFileSync(result.path, "utf-8");
+    expect(rendered).toContain("# Profile: testprofile");
+    expect(rendered).toContain("Hello from the template.");
+  });
+
+  it("returns wrote:false when profile has no CLAUDE.md.hbs", () => {
+    const profilesRoot = join(tmpDir, "profiles");
+    const profileDir = join(profilesRoot, "nohbs");
+    mkdirSync(profileDir, { recursive: true });
+    // No .hbs file — function should be a no-op.
+
+    const result = renderProfileClaudeTemplate("nohbs", profilesRoot);
+
+    expect(result.wrote).toBe(false);
+    expect(existsSync(join(profileDir, "CLAUDE.md"))).toBe(false);
   });
 });

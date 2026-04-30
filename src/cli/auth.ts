@@ -106,7 +106,7 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
     findings.push({
       code: "credentials_missing",
       severity: "error",
-      summary: "no .credentials.json AND no .oauth-token — agent has never been authenticated",
+      summary: "no .credentials.json AND no .oauth-token - agent has never been authenticated",
     });
   } else if (!hasCreds) {
     // .oauth-token alone is the legacy state — works for in-process
@@ -127,7 +127,7 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
       findings.push({
         code: "credentials_malformed",
         severity: "error",
-        summary: ".credentials.json is not valid JSON — file corrupted",
+        summary: ".credentials.json is not valid JSON - file corrupted",
       });
     }
     if (parsed) {
@@ -136,7 +136,7 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
         findings.push({
           code: "credentials_malformed",
           severity: "error",
-          summary: ".credentials.json missing claudeAiOauth.accessToken — file corrupted",
+          summary: ".credentials.json missing claudeAiOauth.accessToken - file corrupted",
         });
       } else {
         // Token shape OK; check expiry.
@@ -154,7 +154,7 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
           findings.push({
             code: "refresh_token_missing",
             severity: "warn",
-            summary: "no refreshToken — claude can't self-refresh; will break when access token expires",
+            summary: "no refreshToken - claude can't self-refresh; will break when access token expires",
           });
         }
       }
@@ -329,7 +329,7 @@ export function registerAuthCommand(program: Command): void {
         }
         console.log();
         if (diagnosis.severity === "ok") {
-          console.log(chalk.green("  ✓ Auth healthy — nothing to do."));
+          console.log(chalk.green("  ok: Auth healthy - nothing to do."));
           console.log();
           return;
         }

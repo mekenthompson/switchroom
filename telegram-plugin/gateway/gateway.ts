@@ -639,7 +639,16 @@ try {
         `SWITCHROOM_PENDING_ENDED_VIA=${pending.ended_via ?? 'unknown'}`,
         `SWITCHROOM_PENDING_STARTED_AT=${pending.started_at}`,
       ]
-      writeFileSync(pendingEnvPath, lines.join('\n') + '\n', { mode: 0o600 })
+      // Atomic write: tmp + rename. Without this, a crash mid-write
+      // (power loss, OOM, panic) leaves a truncated `.pending-turn.env`
+      // that start.sh `source`s — partial SWITCHROOM_PENDING_* vars
+      // half-trigger the resume protocol with incomplete context, or
+      // a malformed line breaks shell parsing inside the source.
+      // Same pattern used by the access-file write a few hundred lines
+      // above and by src/issues/store.ts.
+      const pendingEnvTmp = `${pendingEnvPath}.tmp-${process.pid}`
+      writeFileSync(pendingEnvTmp, lines.join('\n') + '\n', { mode: 0o600 })
+      renameSync(pendingEnvTmp, pendingEnvPath)
       process.stderr.write(`telegram gateway: pending-turn env written to ${pendingEnvPath} turnKey=${pending.turn_key} endedVia=${pending.ended_via ?? 'open'}\n`)
     } else if (existsSync(pendingEnvPath)) {
       rmSync(pendingEnvPath, { force: true })
@@ -2213,11 +2222,13 @@ async function executeDownloadAttachment(args: Record<string, unknown>): Promise
   }
   const file = await bot.api.getFile(file_id)
   if (!file.file_path) throw new Error('Telegram returned no file_path — file may have expired')
-  // Build download URL — token is embedded but NEVER included in error messages
+  // Build download URL — token is embedded but NEVER included in error messages.
+  // Bounded fetch (30s) — without a timeout, the agent's tool_call hangs
+  // indefinitely on a stalled CDN connection.
   const downloadUrl = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
   let res: Response
   try {
-    res = await fetch(downloadUrl)
+    res = await fetch(downloadUrl, { signal: AbortSignal.timeout(30_000) })
   } catch (err) {
     // Sanitize: never leak the token in network error messages
     throw new Error(`download failed: network error`)
@@ -6487,9 +6498,15 @@ bot.on('message:photo', async ctx => {
       const file = await ctx.api.getFile(best.file_id)
       if (!file.file_path) return undefined
       // Build download URL — token is embedded in the URL but never exposed
-      // in error messages or logs (caught and sanitized below)
+      // in error messages or logs (caught and sanitized below).
+      //
+      // Bounded fetch: a stalled Telegram CDN connection without a
+      // timeout would hang the entire inbound handler, blocking the
+      // user's photo from ever being acked or seen by the agent.
+      // 15s is generous for normal photos (typical 100ms-2s) and
+      // tight enough to surface a real outage.
       const downloadUrl = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
-      const res = await fetch(downloadUrl)
+      const res = await fetch(downloadUrl, { signal: AbortSignal.timeout(15_000) })
       if (!res.ok) {
         process.stderr.write(`telegram gateway: photo download failed: HTTP ${res.status}\n`)
         return undefined

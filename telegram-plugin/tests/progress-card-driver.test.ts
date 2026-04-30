@@ -3626,3 +3626,118 @@ describe('progress-card driver — promote-on-sub-agent', () => {
     expect(emits.filter((e) => e.isFirstEmit)).toHaveLength(1)
   })
 })
+
+describe('recordSubAgentNarrative — Issue #305 Option A', () => {
+  it('happy path: applies narrative + flushes', () => {
+    // initialDelayMs=0 so the card emits eagerly and flush() actually
+    // produces a visible emit (not deferred).
+    const { driver, emits } = harness(0, 0, { initialDelayMs: 0 })
+
+    driver.startTurn({ chatId: 'c1', userText: 'investigate' })
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'A1', firstPromptText: 'P' }, 'c1')
+
+    const emitsBefore = emits.length
+    const result = driver.recordSubAgentNarrative({
+      chatId: 'c1',
+      agentId: 'A1',
+      text: 'Analyzing 12 files',
+    })
+
+    expect(result).toEqual({ ok: true })
+
+    const peeked = driver.peek('c1')
+    expect(peeked).toBeDefined()
+    const sub = peeked!.subAgents.get('A1')
+    expect(sub).toBeDefined()
+    expect(sub!.currentNarrative).toBe('Analyzing 12 files')
+
+    // Flush actually fired (visibleDiff caught the narrative change).
+    expect(emits.length).toBeGreaterThan(emitsBefore)
+  })
+
+  it('replace, not append: second narrative wins', () => {
+    const { driver } = harness(0, 0, { initialDelayMs: 0 })
+
+    driver.startTurn({ chatId: 'c1', userText: 'investigate' })
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'A1', firstPromptText: 'P' }, 'c1')
+
+    driver.recordSubAgentNarrative({ chatId: 'c1', agentId: 'A1', text: 'first' })
+    driver.recordSubAgentNarrative({ chatId: 'c1', agentId: 'A1', text: 'second' })
+
+    const sub = driver.peek('c1')!.subAgents.get('A1')!
+    expect(sub.currentNarrative).toBe('second')
+  })
+
+  it('unknown agentId: returns unknown_agent and does not flush', () => {
+    const { driver, emits } = harness(0, 0, { initialDelayMs: 0 })
+
+    driver.startTurn({ chatId: 'c1', userText: 'q' })
+    // NOTE: no sub_agent_started for 'A1'.
+
+    const emitsBefore = emits.length
+    const result = driver.recordSubAgentNarrative({
+      chatId: 'c1',
+      agentId: 'A1',
+      text: 'never lands',
+    })
+
+    expect(result).toEqual({ ok: false, reason: 'unknown_agent' })
+    // No additional flush.
+    expect(emits.length).toBe(emitsBefore)
+  })
+
+  it('no active card: returns no_active_card without throwing', () => {
+    const { driver, emits } = harness(0, 0, { initialDelayMs: 0 })
+
+    // No startTurn, no enqueue — nothing is active for 'c1'.
+    const emitsBefore = emits.length
+    const result = driver.recordSubAgentNarrative({
+      chatId: 'c1',
+      agentId: 'A1',
+      text: 'orphaned',
+    })
+
+    expect(result).toEqual({ ok: false, reason: 'no_active_card' })
+    expect(emits.length).toBe(emitsBefore)
+  })
+
+  it('card already completion-fired: returns no_active_card', () => {
+    const { driver, emits, advance } = harness(0, 0, { initialDelayMs: 0 })
+
+    driver.startTurn({ chatId: 'c1', userText: 'q' })
+    // No sub-agent — so forceCompleteTurn fully completes (no defer path).
+    // The point is that after completionFired flips, the card is no longer
+    // active for narrative purposes even if peek() can still find the state.
+    driver.forceCompleteTurn({ chatId: 'c1' })
+    advance(0)
+
+    const emitsBefore = emits.length
+    const result = driver.recordSubAgentNarrative({
+      chatId: 'c1',
+      agentId: 'A1',
+      text: 'after the fact',
+    })
+
+    expect(result).toEqual({ ok: false, reason: 'no_active_card' })
+    expect(emits.length).toBe(emitsBefore)
+  })
+
+  it('visibleDiff entry: back-to-back narratives each trigger a flush', () => {
+    // Without the visibleDiff entry, only the first narrative would
+    // re-render — the second would be filtered out because no other
+    // user-visible field changed. This test guards against that.
+    const { driver, emits } = harness(0, 0, { initialDelayMs: 0 })
+
+    driver.startTurn({ chatId: 'c1', userText: 'q' })
+    driver.ingest({ kind: 'sub_agent_started', agentId: 'A1', firstPromptText: 'P' }, 'c1')
+
+    const beforeFirst = emits.length
+    driver.recordSubAgentNarrative({ chatId: 'c1', agentId: 'A1', text: 'one' })
+    const afterFirst = emits.length
+    expect(afterFirst).toBeGreaterThan(beforeFirst)
+
+    driver.recordSubAgentNarrative({ chatId: 'c1', agentId: 'A1', text: 'two' })
+    const afterSecond = emits.length
+    expect(afterSecond).toBeGreaterThan(afterFirst)
+  })
+})

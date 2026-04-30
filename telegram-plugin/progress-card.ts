@@ -134,6 +134,15 @@ export interface SubAgentState {
    */
   readonly firstNarrativeText?: string
   /**
+   * Most-recent narrative line pushed via the gateway's `progress_update`
+   * MCP tool (issue #305 Option A). Distinct from:
+   *   - `firstNarrativeText` — one-shot, used as description fallback
+   *   - `pendingPreamble`    — one-shot pre-tool narration from session-tail
+   * `currentNarrative` is replace-on-each-call (last write wins). Cleared
+   * naturally on terminal-state render via the existing branch.
+   */
+  readonly currentNarrative?: string | null
+  /**
    * The tool most recently completed by this sub-agent. Captured on
    * `sub_agent_tool_result` (before the toolUseId match clears
    * `currentTool`). Used by the render fallback chain when the sub-agent
@@ -694,6 +703,22 @@ export function reduce(
         // chain. Once set, never overwrite — we want the sub-agent's
         // initial framing, not its latest chatter.
         firstNarrativeText: sa.firstNarrativeText ?? event.text,
+        lastEventAt: now,
+      })
+      return { ...state, subAgents: next }
+    }
+
+    case 'sub_agent_narrative': {
+      // Issue #305 Option A: most-recent-wins narrative line pushed by the
+      // sub-agent via the gateway's `progress_update` MCP tool. Replace-only
+      // (last write wins); no milestoneVersion bump (per-tick update, not a
+      // structural transition). No-op if the sub-agent isn't known yet.
+      const sa = state.subAgents.get(event.agentId)
+      if (!sa) return state
+      const next = new Map(state.subAgents)
+      next.set(event.agentId, {
+        ...sa,
+        currentNarrative: event.text,
         lastEventAt: now,
       })
       return { ...state, subAgents: next }
@@ -1497,6 +1522,10 @@ function renderSubAgentExpandable(
     if (sa.currentTool) {
       const cur = sa.currentTool
       innerLines.push(`↳ ${renderItemCore(cur.tool, cur.label, false, cur.humanAuthored)}`)
+    } else if (sa.currentNarrative && sa.currentNarrative.length > 0) {
+      // Issue #305 Option A: MCP-pushed narrative wins over pendingPreamble
+      // when both are set — it's an explicit "tell the user this now" call.
+      innerLines.push(`↳ <i>${escapeHtml(truncate(sa.currentNarrative, 200))}</i>`)
     } else if (sa.pendingPreamble && sa.pendingPreamble.length > 0) {
       const preambleLine = sa.pendingPreamble.split('\n')[0].trim()
       if (preambleLine.length > 0) {

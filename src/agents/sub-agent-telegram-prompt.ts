@@ -1,22 +1,13 @@
 /**
- * Telegram progress-update guidance for sub-agent prompts — DISABLED (#256).
+ * Telegram progress-update guidance for sub-agent prompts.
  *
- * This module previously appended a "## Telegram visibility" block to every
- * sub-agent prompt when the parent agent ran in a Telegram-rooted session
- * (originally introduced in #32). That block instructed sub-agents to call
- * `mcp__switchroom-telegram__progress_update` so the user could see live
- * progress from parallel workers.
- *
- * Removed in #256 because:
- *  - The parent's progress card already provides equivalent visibility:
- *    sub-agent tool counts and descriptions render there automatically.
- *  - With parallel workers each posting "Got it…" and "Done with X…" the
- *    Telegram thread became noisy and ate the user's attention budget.
- *  - The JTBD (user sees worker activity) is preserved through the progress
- *    card; the spam is gone.
- *
- * The exported function signatures are kept intact so callers in scaffold.ts
- * continue to compile without changes.
+ * Originally introduced in #32; disabled in #256 because each
+ * `progress_update` call posted a fresh Telegram message and parallel
+ * sub-agents spammed the chat. Re-enabled in #305 Option A (PR #413):
+ * the gateway now routes sub-agent `progress_update` calls onto the
+ * parent's pinned progress card row body instead of sending separate
+ * messages, so the spam concern is gone and the JTBD (user sees what
+ * the sub-agent is doing) is restored without attention cost.
  *
  * Cron guidance (issue #269): scheduled tasks run as isolated `claude -p`
  * invocations with no live session. They must deliver their Telegram message
@@ -30,11 +21,8 @@
 
 /**
  * Returns true when the agent is wired up with a Telegram channel and
- * we have at least one chat to address.
- *
- * @deprecated The result of this function is no longer acted on —
- *   `applyTelegramProgressGuidance` always returns the body unchanged (#256).
- *   Kept for call-site compatibility.
+ * we have at least one chat to address. Used as the precondition for
+ * appending Telegram progress guidance to a sub-agent prompt.
  */
 export function shouldAppendTelegramProgressGuidance(args: {
   telegramEnabled: boolean
@@ -44,49 +32,46 @@ export function shouldAppendTelegramProgressGuidance(args: {
 }
 
 /**
- * Markdown block that was previously appended to a sub-agent's prompt body.
- *
- * @deprecated No longer appended to any prompt (#256). Kept for call-site
- *   compatibility.
+ * Markdown block appended to a sub-agent's prompt body when the parent
+ * runs on Telegram. The sub-agent's `progress_update` calls land on the
+ * parent's pinned progress card (PR #413, issue #305 Option A) — they
+ * do NOT send separate Telegram messages, so this is cheap and safe to
+ * call at every meaningful inflection point.
  */
 export function buildTelegramProgressGuidance(args: {
   defaultChatId: string
 }): string {
   return `
 
-## Telegram visibility (parent runs on Telegram)
+## Progress visibility on the parent's pinned card
 
-Your parent agent's user is reading this conversation on Telegram, NOT in this terminal. Your tool calls and intermediate output do not reach the user — they only see what gets posted via the parent's reply tool, or what *you* explicitly post.
+Your parent agent runs in a Telegram chat. The user reads on a phone, not in this terminal. Tool calls and intermediate output do not reach them — only what is posted to the parent's pinned progress card.
 
-When you do non-trivial work, post brief check-ins via \`mcp__switchroom-telegram__progress_update\` so the user knows you're alive:
+When you call \`mcp__switchroom-telegram__progress_update\` from inside this sub-agent, the gateway routes the text onto your row in the parent's pinned card (replace-on-write, capped at ~200 chars). It does NOT send a separate Telegram message, so call it freely at meaningful inflection points:
 
-- **Plan formed** — "Got it. Going to do X first, then Y."
-- **Pivot or blocker** — "First approach didn't work because <reason>. Trying <alternative>."
-- **Chunk finished** — "Done with X. Starting Y now."
+- **Start of work** — "Analyzing 12 files in /src/auth"
+- **Blocker / pivot** — "First approach hit X, switching to Y"
+- **Major chunk done** — "Tests green, opening PR"
 
-One sentence each. Don't narrate every tool call. Skip updates for trivial one-shot tasks.
+One short line per call. Skip for trivial one-shot tasks. Don't narrate every tool call — the parent card already shows your tool ring buffer.
 
-The default chat is **${args.defaultChatId}** (the parent agent's primary user). If the parent is handling a forum topic or a different chat in this turn, prefer that chat by passing the same \`chat_id\` (and \`message_thread_id\` if any) the parent is using — check the recent inbound message context.
+Pass \`chat_id\` = \`${args.defaultChatId}\` unless the parent is handling a different chat in this turn, in which case use whatever chat_id the parent saw on its inbound message.
 `
 }
 
 /**
- * Returns the sub-agent prompt body unchanged.
- *
- * Previously appended Telegram progress guidance when the parent ran in a
- * Telegram-rooted session. Disabled in #256: visibility is already provided
- * by the parent's progress card, and the per-worker check-in messages were
- * producing noise that hurt the user's attention budget.
- *
- * The `args` parameter is accepted but ignored so call sites in scaffold.ts
- * continue to compile without modification.
+ * Append Telegram progress guidance to the sub-agent prompt body when
+ * the parent runs in a Telegram-rooted session. Idempotent on the gate:
+ * if `telegramEnabled` is false or no `defaultChatId` is known, the body
+ * is returned unchanged.
  */
 export function applyTelegramProgressGuidance(
   body: string,
   args: { telegramEnabled: boolean; defaultChatId: string | undefined },
 ): string {
-  // Feature disabled (#256): always return body unchanged.
-  return body
+  if (!shouldAppendTelegramProgressGuidance(args)) return body
+  // shouldAppend guarantees defaultChatId is a non-empty string.
+  return body + buildTelegramProgressGuidance({ defaultChatId: args.defaultChatId as string })
 }
 
 /**

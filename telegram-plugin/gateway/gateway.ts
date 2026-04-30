@@ -207,6 +207,12 @@ import { startIssuesWatcher, type IssuesWatcherHandle } from '../issues-watcher.
 import { list as listIssues, resolve as resolveIssue } from '../../src/issues/index.js'
 import { summarizeToolForTitle } from '../permission-title.js'
 import {
+  readClaudeJsonOverage,
+  evaluateCreditState,
+  loadCreditState,
+  saveCreditState,
+} from '../credits-watch.js'
+import {
   VERSION,
   COMMIT_SHA,
   COMMIT_DATE,
@@ -5068,6 +5074,56 @@ async function runAutoFallbackCheck(opts: { trigger: 'scheduled' | 'manual' }): 
   }
 }
 
+/**
+ * Credit-exhaustion watcher loop body (#348). Reads the agent's
+ * `.claude.json` for `cachedExtraUsageDisabledReason`, evaluates the
+ * transition against the last-notified state, and emits a Telegram
+ * message via the existing access.allowFrom path when the state
+ * crosses a fatal-billing boundary.
+ *
+ * Idempotent: if the state hasn't changed since the last check, no
+ * message is sent. State persists across gateway restarts via
+ * `<stateDir>/credits-watch.json` so a restart inside an out-of-credits
+ * window doesn't re-spam the user.
+ */
+async function runCreditWatch(): Promise<void> {
+  const agentDir = resolveAgentDirFromEnv()
+  const agentName = getMyAgentName()
+  const claudeConfigDir = join(agentDir, '.claude')
+  const stateDir = STATE_DIR
+  const reason = readClaudeJsonOverage(claudeConfigDir)
+  const prev = loadCreditState(stateDir)
+  const decision = evaluateCreditState({
+    agentName,
+    currentReason: reason,
+    prev,
+    now: Date.now(),
+  })
+  if (decision.kind === 'skip') {
+    return
+  }
+  // Notify path. Send to all configured allowFrom chats — the
+  // assumption mirrors auto-fallback's notification routing.
+  const access = loadAccess()
+  for (const chat_id of access.allowFrom) {
+    try {
+      await bot.api.sendMessage(chat_id, decision.message, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+      })
+    } catch (err) {
+      process.stderr.write(`telegram gateway: credit-watch notify chat=${chat_id} failed: ${err}\n`)
+    }
+  }
+  // Persist state regardless of whether send succeeded — losing a
+  // notify is bad, but re-spamming on every poll tick is worse.
+  try {
+    saveCreditState(stateDir, decision.newState)
+  } catch (err) {
+    process.stderr.write(`telegram gateway: credit-watch state persist failed: ${err}\n`)
+  }
+}
+
 bot.command('authfallback', async ctx => {
   if (!isAuthorizedSender(ctx)) return
   const result = await runAutoFallbackCheck({ trigger: 'manual' })
@@ -7594,6 +7650,31 @@ void (async () => {
         const AUTO_FALLBACK_POLL_MS = Number(process.env.SWITCHROOM_AUTO_FALLBACK_POLL_MS ?? 60 * 60_000)
         if (AUTO_FALLBACK_POLL_MS > 0) {
           setInterval(() => { void runAutoFallbackCheck({ trigger: 'scheduled' }) }, AUTO_FALLBACK_POLL_MS).unref()
+        }
+
+        // Credit-exhaustion watcher (#348). Reads `<agentDir>/.claude/.claude.json`
+        // for `cachedExtraUsageDisabledReason`. Fires a Telegram notification
+        // on transition into / out of fatal billing states (out_of_credits,
+        // org_level_disabled, credits_exhausted, extra_usage_disabled).
+        // Pre-#348, cron tasks against an exhausted account silently failed
+        // because stdout was discarded — direct violation of P1 JTBD (silent
+        // failure is the worst case).
+        //
+        // Cadence: 15 min by default; tuned to be cheaper than the API
+        // quota poll because this is a local file read (no network).
+        // SWITCHROOM_CREDIT_WATCH_POLL_MS=0 disables.
+        const CREDIT_WATCH_POLL_MS = Number(process.env.SWITCHROOM_CREDIT_WATCH_POLL_MS ?? 15 * 60_000)
+        if (CREDIT_WATCH_POLL_MS > 0) {
+          // Run an immediate check at boot so a recent fatal transition
+          // doesn't have to wait 15 min to surface.
+          void runCreditWatch().catch((err) => {
+            process.stderr.write(`telegram gateway: credit-watch initial run failed: ${err}\n`)
+          })
+          setInterval(() => {
+            void runCreditWatch().catch((err) => {
+              process.stderr.write(`telegram gateway: credit-watch scheduled run failed: ${err}\n`)
+            })
+          }, CREDIT_WATCH_POLL_MS).unref()
         }
 
         // Restart-watchdog: poll systemd's NRestarts for the agent unit.

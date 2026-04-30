@@ -36,6 +36,13 @@ Thumbs.db
 *.tsbuildinfo
 telegram-plugin/server.js
 
+# Rendered profile artifact — Handlebars source is profiles/<name>/CLAUDE.md.hbs;
+# renderProfileClaudeTemplate (src/agents/profiles.ts) writes profiles/<name>/CLAUDE.md
+# next to it. The rendered output is per-machine and per-render; only .hbs is tracked.
+# Without this entry the artifact appears as untracked and blocks `switchroom update`'s
+# clean-tree precondition. See #402.
+profiles/*/CLAUDE.md
+
 # Python bytecode (from vendored Hindsight plugin)
 __pycache__/
 *.pyc

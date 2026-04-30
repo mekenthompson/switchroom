@@ -8,6 +8,30 @@ export const HINDSIGHT_DEFAULT_API_PORT = 8888;
 export const HINDSIGHT_DEFAULT_UI_PORT = 9999;
 
 /**
+ * Default cap on observations per *tag scope*.
+ *
+ * Upstream Hindsight defaults `HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE`
+ * to `-1` (unlimited). Once a tag scope hits the cap, consolidation
+ * stops creating new observations and only updates/deletes existing
+ * ones — bounding the cost of consolidating a single long-running
+ * scope. Tagless observations are unaffected.
+ *
+ * Switchroom retains with `retainTags: ["{session_id}"]` (vendored
+ * plugin default), so a "tag scope" maps roughly to "one session." A
+ * very long Telegram session that runs for weeks can accumulate
+ * thousands of observations under one scope — that's the case 1000
+ * targets. Most sessions are far below the cap, so for typical
+ * agents this is defense-in-depth rather than an active limit.
+ *
+ * This is NOT a fix for vectorize-io/hindsight#1284 (the upstream
+ * unbounded-growth bug for consolidation across a whole bank); it's a
+ * companion safety rail until that lands. Operators who want a
+ * different value can stop the container and re-run `docker run`
+ * with `-e HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE=N`.
+ */
+export const HINDSIGHT_DEFAULT_MAX_OBSERVATIONS_PER_SCOPE = 1000;
+
+/**
  * Check if a TCP port is free for binding on 127.0.0.1.
  * Returns true if free, false if something is already listening.
  */
@@ -139,7 +163,13 @@ export function startHindsight(
 ): void {
   const apiPort = ports?.apiPort ?? HINDSIGHT_DEFAULT_API_PORT;
   const uiPort = ports?.uiPort ?? HINDSIGHT_DEFAULT_UI_PORT;
-  const envArgs: string[] = [];
+  const envArgs: string[] = [
+    // Per-tag-scope observation cap. Bounds the size of a single
+    // long-running session (switchroom retains tagged with
+    // `{session_id}`). See HINDSIGHT_DEFAULT_MAX_OBSERVATIONS_PER_SCOPE
+    // for the rationale and how it relates to vectorize-io/hindsight#1284.
+    "-e", `HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE=${HINDSIGHT_DEFAULT_MAX_OBSERVATIONS_PER_SCOPE}`,
+  ];
   if (provider) envArgs.push("-e", `HINDSIGHT_API_LLM_PROVIDER=${provider}`);
   if (apiKey) envArgs.push("-e", `HINDSIGHT_API_LLM_API_KEY=${apiKey}`);
   const args = [
@@ -202,9 +232,11 @@ export function getHindsightMcpUrl(): {
  * Generate a docker-compose snippet for Hindsight.
  */
 export function generateHindsightComposeSnippet(provider?: string): string {
-  const envLines = provider
-    ? [`      - LLM_PROVIDER=${provider}`]
-    : [];
+  const envLines = [
+    // Always-on cap — see startHindsight() for context.
+    `      - HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE=${HINDSIGHT_DEFAULT_MAX_OBSERVATIONS_PER_SCOPE}`,
+  ];
+  if (provider) envLines.push(`      - LLM_PROVIDER=${provider}`);
 
   return [
     "services:",
@@ -214,9 +246,8 @@ export function generateHindsightComposeSnippet(provider?: string): string {
     "    ports:",
     "      - \"8888:8888\"",
     "      - \"9999:9999\"",
-    ...(envLines.length > 0
-      ? ["    environment:", ...envLines]
-      : []),
+    "    environment:",
+    ...envLines,
     "    volumes:",
     "      - switchroom-hindsight-data:/home/hindsight/.pg0",
     "    restart: unless-stopped",

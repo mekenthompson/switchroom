@@ -5083,6 +5083,60 @@ async function refreshPinnedBanner(reason: string): Promise<void> {
   }
 }
 
+// Pinned slot-banner state (#421). One banner per gateway process,
+// in the owner chat (access.allowFrom[0]). Per-topic forum support
+// + multi-chat pinning are tracked as #421 follow-ups.
+let pinnedBannerState: BannerState | null = null
+
+async function refreshPinnedBanner(reason: string): Promise<void> {
+  try {
+    const ownerChatId = loadAccess().allowFrom[0]
+    if (!ownerChatId) return
+    const agentDir = resolveAgentDirFromEnv()
+    const agentName = getMyAgentName()
+    const slot = currentActiveSlot(agentDir)
+    const action = decideBannerAction(pinnedBannerState, slot, agentName, DEFAULT_SLOT)
+    if (action.kind === 'noop') return
+    if (action.kind === 'unpin') {
+      try {
+        await bot.api.unpinChatMessage(ownerChatId, action.messageId)
+      } catch (err) {
+        process.stderr.write(`telegram gateway: banner unpin failed (${reason}): ${err}\n`)
+      }
+      pinnedBannerState = null
+      return
+    }
+    if (action.kind === 'pin') {
+      const sent = await bot.api.sendMessage(ownerChatId, action.text, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+      })
+      try {
+        await bot.api.pinChatMessage(ownerChatId, sent.message_id, { disable_notification: true })
+      } catch (err) {
+        process.stderr.write(`telegram gateway: banner pin failed (${reason}): ${err}\n`)
+        return
+      }
+      pinnedBannerState = { messageId: sent.message_id, slot: action.slot }
+      return
+    }
+    if (action.kind === 'edit') {
+      try {
+        await bot.api.editMessageText(ownerChatId, action.messageId, action.text, {
+          parse_mode: 'HTML',
+          link_preview_options: { is_disabled: true },
+        })
+        pinnedBannerState = { messageId: action.messageId, slot: action.slot }
+      } catch (err) {
+        process.stderr.write(`telegram gateway: banner edit failed (${reason}): ${err}\n`)
+      }
+      return
+    }
+  } catch (err) {
+    process.stderr.write(`telegram gateway: banner refresh error (${reason}): ${err}\n`)
+  }
+}
+
 type AutoFallbackCheckResult =
   | { kind: 'no-action'; reason: string; decision: 'noop' | 'fallback-skipped' }
   | { kind: 'executed'; previousSlot: string; newSlot: string }

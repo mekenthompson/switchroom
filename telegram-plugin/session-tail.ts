@@ -96,6 +96,7 @@ export type SessionEvent =
   | { kind: 'sub_agent_started'; agentId: string; firstPromptText: string; subagentType?: string }
   | { kind: 'sub_agent_tool_use'; agentId: string; toolUseId: string | null; toolName: string; input?: Record<string, unknown> }
   | { kind: 'sub_agent_text'; agentId: string; text: string }
+  | { kind: 'sub_agent_narrative'; agentId: string; text: string }
   | { kind: 'sub_agent_tool_result'; agentId: string; toolUseId: string; isError?: boolean; errorText?: string }
   | { kind: 'sub_agent_turn_end'; agentId: string }
   | { kind: 'sub_agent_nested_spawn'; agentId: string }

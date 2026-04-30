@@ -224,6 +224,7 @@ import {
 } from '../registry/turns-schema.js'
 import { applySubagentsSchema } from '../registry/subagents-schema.js'
 import { formatIdleFooter } from '../idle-footer.js'
+import { resolveCallingSubagent } from './resolve-calling-subagent.js'
 
 // ─── Stderr logging ───────────────────────────────────────────────────────
 installPluginLogger()
@@ -1971,6 +1972,45 @@ async function executeProgressUpdate(args: Record<string, unknown>): Promise<unk
       }
     }
     progressUpdateTurnCount.set(key, currentCount + 1)
+  }
+
+  // Issue #305 Option A — try the card-injection path first.
+  // If the call originates from a sub-agent and the parent has an active
+  // pinned card, narrative lands as the sub-agent's row body. Falls through
+  // to the message-send path on miss (parent-agent calls, no active card,
+  // race with watcher backfill, etc).
+  const agentIdHint = (typeof args.agent_id === 'string' && args.agent_id) || null
+  const toolUseIdHint = (typeof args.tool_use_id === 'string' && args.tool_use_id) || null
+  const subAgent = resolveCallingSubagent({
+    db: turnsDb,
+    chatId: chat_id,
+    threadId,
+    agentIdHint,
+    toolUseIdHint,
+  })
+  if (subAgent != null && progressDriver != null) {
+    const cardText = text.length > 200 ? text.slice(0, 199) + '…' : text
+    const result = progressDriver.recordSubAgentNarrative({
+      chatId: chat_id,
+      threadId: threadId != null ? String(threadId) : undefined,
+      agentId: subAgent.agentId,
+      text: cardText,
+    })
+    if (result.ok) {
+      progressUpdateLastSent.set(key, now)
+      try {
+        signalTracker.noteSignal(key, Date.now())
+      } catch { /* best-effort signal */ }
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ ok: true, mode: 'card', agent_id: subAgent.agentId }),
+          },
+        ],
+      }
+    }
+    // Otherwise fall through to message-send below.
   }
 
   // Send plain message (no quote-reply)

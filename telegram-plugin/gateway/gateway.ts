@@ -201,6 +201,7 @@ import { determineRestartReason } from './boot-reason.js'
 import { shouldSkipDuplicateBootCard, type RestartReason } from './boot-card.js'
 import { createIssuesCardHandle, type IssuesCardHandle } from '../issues-card.js'
 import { startIssuesWatcher, type IssuesWatcherHandle } from '../issues-watcher.js'
+import { list as listIssues, resolve as resolveIssue } from '../../src/issues/index.js'
 import {
   VERSION,
   COMMIT_SHA,
@@ -6263,11 +6264,10 @@ bot.command('issues', async ctx => {
     try {
       const stateDir = process.env.TELEGRAM_STATE_DIR
       if (stateDir) {
-        const { list, resolve: resolveOne } = require('../../src/issues/index.js') as typeof import('../../src/issues/index.js')
-        const events = list(stateDir)
+        const events = listIssues(stateDir)
         let n = 0
         for (const e of events) {
-          n += resolveOne(stateDir, e.fingerprint)
+          n += resolveIssue(stateDir, e.fingerprint)
         }
         await switchroomReply(ctx, `Resolved ${n} issue${n === 1 ? '' : 's'}.`, { html: true })
         return

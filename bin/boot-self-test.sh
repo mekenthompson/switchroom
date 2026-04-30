@@ -106,16 +106,22 @@ if [ -z "$DIAG_JSON" ]; then
   exit 0
 fi
 
-# Resolve cli_unauthenticated unconditionally — it's no longer
-# produced by this script, and any leftover entries from older
-# versions should clean up on the next reconcile + restart.
-resolve_one cli_unauthenticated
+# Resolve every known auth code FIRST so the new record below reflects
+# the *current* heal diagnosis, not a coalesced max severity from
+# stale prior boots. The issue store promotes severity on coalesce
+# (never demotes) — so without this pre-resolve, an agent that was
+# critical yesterday and is only warn today would still show as
+# critical. Each boot is a fresh empirical observation; the resolved
+# audit trail is preserved under --include-resolved for history.
+for code in "${ALL_CODES[@]}"; do
+  resolve_one "$code"
+done
 
-# Walk findings; record each present, resolve each absent code.
+# Walk findings; record each present at heal's actual severity.
 PRESENT_CODES=$(printf '%s' "$DIAG_JSON" | jq -r '.findings[]?.code' 2>/dev/null)
 
 for code in "${ALL_CODES[@]}"; do
-  [ "$code" = "cli_unauthenticated" ] && continue # already resolved above
+  [ "$code" = "cli_unauthenticated" ] && continue # legacy code — never re-record
   if printf '%s\n' "$PRESENT_CODES" | grep -qx "$code"; then
     severity=$(printf '%s' "$DIAG_JSON" | jq -r --arg c "$code" '.findings[] | select(.code == $c) | .severity' | head -1)
     summary=$(printf '%s' "$DIAG_JSON" | jq -r --arg c "$code" '.findings[] | select(.code == $c) | .summary' | head -1)
@@ -128,8 +134,6 @@ for code in "${ALL_CODES[@]}"; do
 $recommendation"
     fi
     record "$code" "$severity" "$AGENT_NAME $summary" "$detail"
-  else
-    resolve_one "$code"
   fi
 done
 

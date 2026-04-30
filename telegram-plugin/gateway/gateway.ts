@@ -202,6 +202,7 @@ import { shouldSkipDuplicateBootCard, type RestartReason } from './boot-card.js'
 import { createIssuesCardHandle, type IssuesCardHandle } from '../issues-card.js'
 import { startIssuesWatcher, type IssuesWatcherHandle } from '../issues-watcher.js'
 import { list as listIssues, resolve as resolveIssue } from '../../src/issues/index.js'
+import { summarizeToolForTitle } from '../permission-title.js'
 import {
   VERSION,
   COMMIT_SHA,
@@ -1514,7 +1515,10 @@ const ipcServer: IpcServer = createIpcServer({
     const { requestId, toolName, description, inputPreview } = msg
     pendingPermissions.set(requestId, { tool_name: toolName, description, input_preview: inputPreview, startedAt: Date.now() })
     const access = loadAccess()
-    const text = `🔐 Permission: ${toolName}`
+    // Lift the most-identifying field into the title so the user can
+    // approve at a glance — e.g. `Skill (mail)` instead of bare `Skill`.
+    // See #186.
+    const text = `🔐 Permission: ${summarizeToolForTitle(toolName, inputPreview)}`
     const keyboard = new InlineKeyboard()
       .text('See more', `perm:more:${requestId}`)
       .text('✅ Allow', `perm:allow:${requestId}`)
@@ -7092,6 +7096,21 @@ if (streamMode === 'checklist') {
       process.stderr.write(`telegram gateway: progress-card: onTurnComplete callback turnKey=${turnKey}\n`)
       pinMgr.completeTurn({ chatId, threadId, turnKey })
       pinWatchdog.clear(turnKey)
+      // Clean up silent-end-pending.json once the turn delivered for real.
+      // Without this, the file lingers between sessions and the Stop hook
+      // can read a stale `retryCount` from a long-resolved turn. See #289.
+      try {
+        const statePath = join(STATE_DIR, 'silent-end-pending.json')
+        if (existsSync(statePath)) {
+          const prev = JSON.parse(readFileSync(statePath, 'utf8'))
+          if (prev.turnKey === turnKey) {
+            unlinkSync(statePath)
+          }
+        }
+      } catch {
+        // Best-effort: a stale file or vanished mid-read is fine — the
+        // hook will re-create it on the next silent-end if needed.
+      }
       if (threadId != null) {
         lockedBot.api.sendMessage(chatId, `✅ Done — ${summary}`).catch((err: Error) => {
           process.stderr.write(`telegram gateway: completion message failed: ${err.message}\n`)

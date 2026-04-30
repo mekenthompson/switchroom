@@ -1922,6 +1922,61 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
   return { content: [{ type: 'text', text: `${result.status} (id: ${result.messageId ?? 'pending'})` }] }
 }
 
+/**
+ * Issue #305 Option A — resolve which sub-agent (by jsonl_agent_id) is
+ * calling progress_update. Three resolution strategies, in priority order:
+ *   1. agentIdHint — exact match on subagents.jsonl_agent_id
+ *   2. toolUseIdHint — exact match on subagents.id (parent's Agent tool_use_id)
+ *   3. Heuristic: most-recently-started running sub-agent in the active turn
+ *      for this chat. Logs a stderr warning when multiple candidates exist.
+ *
+ * Returns null if no match (caller falls through to message-send).
+ * Never throws; SQL errors return null.
+ */
+function resolveCallingSubagent(opts: {
+  db: ReturnType<typeof openTurnsDb> | null
+  chatId: string
+  threadId?: number | string
+  agentIdHint: string | null
+  toolUseIdHint: string | null
+}): { agentId: string } | null {
+  if (opts.db == null) return null
+  try {
+    if (opts.agentIdHint != null) {
+      const row = opts.db.prepare(
+        "SELECT jsonl_agent_id FROM subagents WHERE jsonl_agent_id = ? AND status = 'running'"
+      ).get(opts.agentIdHint) as { jsonl_agent_id: string } | undefined
+      if (row?.jsonl_agent_id) return { agentId: row.jsonl_agent_id }
+    }
+    if (opts.toolUseIdHint != null) {
+      const row = opts.db.prepare(
+        "SELECT jsonl_agent_id FROM subagents WHERE id = ? AND status = 'running'"
+      ).get(opts.toolUseIdHint) as { jsonl_agent_id: string | null } | undefined
+      if (row?.jsonl_agent_id) return { agentId: row.jsonl_agent_id }
+    }
+    // Heuristic fallback.
+    const turnRow = opts.db.prepare(
+      "SELECT turn_key FROM turns WHERE chat_id = ? AND ended_at IS NULL ORDER BY started_at DESC LIMIT 1"
+    ).get(opts.chatId) as { turn_key: string } | undefined
+    if (turnRow?.turn_key == null) return null
+    const candidates = opts.db.prepare(
+      "SELECT jsonl_agent_id FROM subagents WHERE parent_turn_key = ? AND status = 'running' AND jsonl_agent_id IS NOT NULL ORDER BY started_at DESC"
+    ).all(turnRow.turn_key) as Array<{ jsonl_agent_id: string }>
+    if (candidates.length === 0) return null
+    if (candidates.length > 1) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `progress_update: heuristic resolution selected most-recent of ${candidates.length} running sub-agents (chat=${opts.chatId}); pass agent_id explicitly to avoid mis-attribution`
+      )
+    }
+    return { agentId: candidates[0].jsonl_agent_id }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('progress_update: resolveCallingSubagent SQL error', err)
+    return null
+  }
+}
+
 async function executeProgressUpdate(args: Record<string, unknown>): Promise<unknown> {
   if (!args.chat_id) throw new Error('progress_update: chat_id is required')
   if (!args.text) throw new Error('progress_update: text is required')
@@ -1971,6 +2026,45 @@ async function executeProgressUpdate(args: Record<string, unknown>): Promise<unk
       }
     }
     progressUpdateTurnCount.set(key, currentCount + 1)
+  }
+
+  // Issue #305 Option A — try the card-injection path first.
+  // If the call originates from a sub-agent and the parent has an active
+  // pinned card, narrative lands as the sub-agent's row body. Falls through
+  // to the message-send path on miss (parent-agent calls, no active card,
+  // race with watcher backfill, etc).
+  const agentIdHint = (typeof args.agent_id === 'string' && args.agent_id) || null
+  const toolUseIdHint = (typeof args.tool_use_id === 'string' && args.tool_use_id) || null
+  const subAgent = resolveCallingSubagent({
+    db: turnsDb,
+    chatId: chat_id,
+    threadId,
+    agentIdHint,
+    toolUseIdHint,
+  })
+  if (subAgent != null && progressDriver != null) {
+    const cardText = text.length > 200 ? text.slice(0, 199) + '…' : text
+    const result = progressDriver.recordSubAgentNarrative({
+      chatId: chat_id,
+      threadId: threadId != null ? String(threadId) : undefined,
+      agentId: subAgent.agentId,
+      text: cardText,
+    })
+    if (result.ok) {
+      progressUpdateLastSent.set(key, now)
+      try {
+        signalTracker.noteSignal(key, Date.now())
+      } catch { /* best-effort signal */ }
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ ok: true, mode: 'card', agent_id: subAgent.agentId }),
+          },
+        ],
+      }
+    }
+    // Otherwise fall through to message-send below.
   }
 
   // Send plain message (no quote-reply)

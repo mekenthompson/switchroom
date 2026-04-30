@@ -80,6 +80,22 @@ export function vaultTokenFilePath(agentSlug: string): string {
 export function readVaultTokenFile(agentSlug: string): string | null {
   const filePath = vaultTokenFilePath(agentSlug);
   try {
+    // Defense-in-depth: token file MUST be 0600 (owner-only). The broker
+    // treats the token as full auth (peercred ACL is bypassed when a
+    // valid token is presented), so a widened mode = anyone in the same
+    // UID can exfiltrate the bearer. Real causes: backup tools restoring
+    // with default umask, an errant chmod, an rsync without -p. Fail
+    // closed and tell the operator how to fix.
+    const stat = fs.statSync(filePath);
+    const mode = stat.mode & 0o777;
+    if ((mode & 0o077) !== 0) {
+      process.stderr.write(
+        `[vault-broker] Refusing to read ${filePath} with mode ${mode.toString(8).padStart(3, "0")} ` +
+        `(must be 0600). Delete the file and re-mint with 'switchroom vault grant mint <agent>'. ` +
+        `Falling through to peercred ACL.\n`,
+      );
+      return null;
+    }
     const raw = fs.readFileSync(filePath, "utf8");
     const token = raw.split("\n")[0].trim();
     return token.length > 0 ? token : null;

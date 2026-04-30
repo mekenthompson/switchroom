@@ -1198,10 +1198,10 @@ export function render(
     }
   }
 
-  // Build the main card: header + body wrapped in <blockquote>.
+  // Build the main card: header + body (no blockquote wrapper).
   const bodyText = bodyLines.join('\n').trimStart()
   const mainCard = bodyText
-    ? `${headerLines.join('\n')}\n<blockquote>${bodyText}</blockquote>`
+    ? `${headerLines.join('\n')}\n${bodyText}`
     : headerLines.join('\n')
 
   // Sub-agent expandable sections — one <blockquote expandable> per agent,
@@ -1216,6 +1216,7 @@ export function render(
   const expandableParts: string[] = []
   if (multiAgentActive && state.subAgents.size > 0) {
     const counts = countSubAgentStates(state.subAgents, now)
+    expandableParts.push('')
     expandableParts.push(renderSubAgentSummaryHeader(counts))
     for (const sa of sortSubAgentsChrono(state.subAgents)) {
       const cached = expandableCache?.get(sa.agentId)
@@ -1374,7 +1375,7 @@ function renderSubAgentSummaryHeader(c: SubAgentCounts): string {
   if (c.failed > 0) parts.push(`❌ ${c.failed}`)
   if (c.stalled > 0) parts.push(`⚠️ ${c.stalled}`)
   const counters = parts.length > 0 ? ` · ${parts.join(' · ')}` : ''
-  return `🤖 Sub-agents${counters}`
+  return `<b><u>🤖 Sub-agents</u></b>${counters}`
 }
 
 /**

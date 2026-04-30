@@ -2119,8 +2119,8 @@ describe('progress-card multi-agent layout snapshots', () => {
       const doneCount = (html.match(/✅ done/g) ?? []).length
       expect(doneCount).toBe(3)
 
-      // Header summary line shows emoji counts ("🤖 Sub-agents · ✅ 3").
-      expect(html).toContain('🤖 Sub-agents · ✅ 3')
+      // Header summary line shows emoji counts ("<b><u>🤖 Sub-agents</u></b> · ✅ 3").
+      expect(html).toContain('<b><u>🤖 Sub-agents</u></b> · ✅ 3')
 
       // 3 expandable forensic blocks, one per sub-agent
       const expandableCount = (html.match(/<blockquote expandable>/g) ?? []).length
@@ -2166,7 +2166,7 @@ describe('progress-card multi-agent layout snapshots', () => {
       const html = render(st, 3000)
 
       // Header summary line lists each non-zero count.
-      expect(html).toContain('🤖 Sub-agents · ✅ 1 · 🔄 1 · ❌ 1')
+      expect(html).toContain('<b><u>🤖 Sub-agents</u></b> · ✅ 1 · 🔄 1 · ❌ 1')
 
       // Each per-agent header carries the right status emoji + label.
       expect(html).toContain('🤖 <b>finished work</b>')
@@ -2203,7 +2203,7 @@ describe('progress-card multi-agent layout snapshots', () => {
       const html = render(st, 3000)
 
       // Header summary line: only the failed count, no done/running/stalled.
-      expect(html).toContain('🤖 Sub-agents · ❌ 3')
+      expect(html).toContain('<b><u>🤖 Sub-agents</u></b> · ❌ 3')
       expect(html).not.toContain('✅')
       expect(html).not.toContain('🔄')
 
@@ -2227,7 +2227,7 @@ describe('progress-card multi-agent layout snapshots', () => {
       const html = render(st, 72_100)
 
       // Stalled state surfaces in both the header summary and per-agent header.
-      expect(html).toContain('🤖 Sub-agents · ⚠️ 1')
+      expect(html).toContain('<b><u>🤖 Sub-agents</u></b> · ⚠️ 1')
       expect(html).toContain('⚠️ stalled')
 
       // The sub-agent's underlying state stays 'running' — stalled is a

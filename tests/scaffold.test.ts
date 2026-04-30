@@ -1933,6 +1933,81 @@ describe("scaffoldAgent with global defaults cascade", () => {
     expect(startSh).toMatch(/exec claude.*'--effort' 'high' '--add-dir' '\/tmp\/has space'/);
   });
 
+  it("add_dirs become repeated --add-dir flags (#199)", () => {
+    const agentConfig = makeAgentConfig({
+      add_dirs: ["/share/collab", "/home/me/finance"],
+    });
+    const result = scaffoldAgent(
+      "adddirs-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+    );
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).toContain("--add-dir '/share/collab'");
+    expect(startSh).toContain("--add-dir '/home/me/finance'");
+  });
+
+  it("allowed_tools become a single quoted --allowedTools flag (#199)", () => {
+    const agentConfig = makeAgentConfig({
+      allowed_tools: ["Bash(git *)", "Bash(npm *)", "Edit"],
+    });
+    const result = scaffoldAgent(
+      "allowedtools-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+    );
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).toMatch(/--allowedTools 'Bash\(git \*\) Bash\(npm \*\) Edit'/);
+  });
+
+  it("disallowed_tools become a single quoted --disallowedTools flag (#199)", () => {
+    const agentConfig = makeAgentConfig({
+      disallowed_tools: ["WebFetch", "Bash(rm *)"],
+    });
+    const result = scaffoldAgent(
+      "disallowedtools-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+    );
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).toMatch(/--disallowedTools 'WebFetch Bash\(rm \*\)'/);
+  });
+
+  it("add_dirs + allowed_tools + cli_args coexist (#199)", () => {
+    const agentConfig = makeAgentConfig({
+      cli_args: ["--effort", "high"],
+      add_dirs: ["/share"],
+      allowed_tools: ["Edit"],
+    });
+    const result = scaffoldAgent(
+      "combined-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+    );
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).toContain("'--effort' 'high'");
+    expect(startSh).toContain("--add-dir '/share'");
+    expect(startSh).toContain("--allowedTools 'Edit'");
+  });
+
+  it("agents with no add_dirs/allowed_tools/disallowed_tools render no flags (#199)", () => {
+    const agentConfig = makeAgentConfig();
+    const result = scaffoldAgent(
+      "bare-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+    );
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).not.toContain("--add-dir");
+    expect(startSh).not.toContain("--allowedTools");
+    expect(startSh).not.toContain("--disallowedTools");
+  });
+
   it("channels.telegram.plugin: 'switchroom' writes .mcp.json for forked telegram plugin", () => {
     const agentConfig = makeAgentConfig({
       channels: { telegram: { plugin: "switchroom" } },
@@ -2873,6 +2948,28 @@ describe("session freshness in start.sh", () => {
     expect(startSh).not.toContain("_IDLE");
     expect(startSh).not.toContain("_TURNS");
     expect(startSh).not.toContain(".resume-next-start");
+  });
+
+  it("session.max_idle wires SWITCHROOM_SESSION_MAX_IDLE_SECS into auto-mode resume (#218)", () => {
+    const agentConfig = makeAgentConfig({
+      session: { max_idle: "2h" },
+      session_continuity: { resume_mode: "auto" },
+    });
+    const result = scaffoldAgent(
+      "idle-bound-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+    );
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+
+    // Configured max_idle is exported as the env var (2h = 7200s).
+    expect(startSh).toContain('SWITCHROOM_SESSION_MAX_IDLE_SECS="7200"');
+    // Auto-mode comparison consults the env var (with 7d default fallback).
+    expect(startSh).toContain('"${SWITCHROOM_SESSION_MAX_IDLE_SECS:-604800}"');
+    // The hard-coded 604800 from the comparison should no longer appear
+    // — it now lives only in the bash-default fallback.
+    expect(startSh).not.toMatch(/-lt 604800 ];/);
   });
 
   it("installs the Stop hook for handoff by default", () => {

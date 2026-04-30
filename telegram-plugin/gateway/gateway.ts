@@ -2792,6 +2792,19 @@ function handleSessionEvent(ev: SessionEvent): void {
       pendingPtyPartial = null
       closeActivityLane(chatId, threadId)
       closeProgressLane(chatId, threadId)
+      // Issue #416 — clean up an unconsumed pre-allocated draft. Telegram's
+      // current Bot API exposes no deleteMessageDraft, but sendMessageDraft
+      // with empty text effectively clears the placeholder (same trick the
+      // draft-stream uses on finalize). Best-effort: failures are silent.
+      const orphanDraft = preAllocatedDrafts.get(chatId)
+      if (orphanDraft != null) {
+        preAllocatedDrafts.delete(chatId)
+        if (sendMessageDraftFn != null) {
+          void sendMessageDraftFn(chatId, orphanDraft.draftId, '').catch(() => {
+            /* best-effort cleanup */
+          })
+        }
+      }
       // Stage 3b: stamp turn-end in the registry as endedVia='stop' (clean
       // turn_end emit). The kill paths (schedule_restart / SIGTERM) handle
       // the 'restart' / 'sigterm' cases separately in 3c.

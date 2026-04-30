@@ -38,7 +38,11 @@ afterEach(() => {
 })
 
 function runHook(scriptPath: string, event: object, extraEnv: Record<string, string> = {}) {
-  const result = spawnSync('node', [scriptPath], {
+  // Invoke the hook with the current runtime (bun under `bun test`, node
+  // in production), not a hard-coded 'node'. The hook script detects bun
+  // and uses bun:sqlite, so it works on CI agents that lack node:sqlite
+  // and the sqlite3 CLI.
+  const result = spawnSync(process.execPath, [scriptPath], {
     input: JSON.stringify(event),
     encoding: 'utf8',
     env: {

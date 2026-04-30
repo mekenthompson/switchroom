@@ -8,21 +8,26 @@ export const HINDSIGHT_DEFAULT_API_PORT = 8888;
 export const HINDSIGHT_DEFAULT_UI_PORT = 9999;
 
 /**
- * Default cap on observations per consolidation scope.
+ * Default cap on observations per *tag scope*.
  *
- * Upstream Hindsight defaults this to "unbounded" — observation entries
- * accumulate forever inside a bank. For a 24/7 conversational agent
- * (switchroom's primary use case) that means experience entries grow
- * indefinitely; vectorize-io/hindsight#1284 is the open upstream
- * tracking issue. Setting `HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE` on
- * the container caps the count and lets older observations be
- * consolidated/aged out.
+ * Upstream Hindsight defaults `HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE`
+ * to `-1` (unlimited). Once a tag scope hits the cap, consolidation
+ * stops creating new observations and only updates/deletes existing
+ * ones — bounding the cost of consolidating a single long-running
+ * scope. Tagless observations are unaffected.
  *
- * 1000 is a reasonable starting cap for a personal assistant pattern:
- * comfortably above any single user's likely-relevant memory window,
- * comfortably below the point where consolidation costs balloon. Tunable
- * by setting `HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE` directly on the
- * `docker run` invocation if you want to override.
+ * Switchroom retains with `retainTags: ["{session_id}"]` (vendored
+ * plugin default), so a "tag scope" maps roughly to "one session." A
+ * very long Telegram session that runs for weeks can accumulate
+ * thousands of observations under one scope — that's the case 1000
+ * targets. Most sessions are far below the cap, so for typical
+ * agents this is defense-in-depth rather than an active limit.
+ *
+ * This is NOT a fix for vectorize-io/hindsight#1284 (the upstream
+ * unbounded-growth bug for consolidation across a whole bank); it's a
+ * companion safety rail until that lands. Operators who want a
+ * different value can stop the container and re-run `docker run`
+ * with `-e HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE=N`.
  */
 export const HINDSIGHT_DEFAULT_MAX_OBSERVATIONS_PER_SCOPE = 1000;
 
@@ -159,9 +164,10 @@ export function startHindsight(
   const apiPort = ports?.apiPort ?? HINDSIGHT_DEFAULT_API_PORT;
   const uiPort = ports?.uiPort ?? HINDSIGHT_DEFAULT_UI_PORT;
   const envArgs: string[] = [
-    // Cap unbounded observation growth (vectorize-io/hindsight#1284).
-    // Always set on switchroom-managed containers so 24/7 agent banks
-    // don't accumulate indefinitely.
+    // Per-tag-scope observation cap. Bounds the size of a single
+    // long-running session (switchroom retains tagged with
+    // `{session_id}`). See HINDSIGHT_DEFAULT_MAX_OBSERVATIONS_PER_SCOPE
+    // for the rationale and how it relates to vectorize-io/hindsight#1284.
     "-e", `HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE=${HINDSIGHT_DEFAULT_MAX_OBSERVATIONS_PER_SCOPE}`,
   ];
   if (provider) envArgs.push("-e", `HINDSIGHT_API_LLM_PROVIDER=${provider}`);

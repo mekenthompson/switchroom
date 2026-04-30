@@ -183,9 +183,28 @@ export interface ProgressDriverConfig {
    * before the timer fires (and isFirstEmit is still true), no card
    * is ever shown — the user only sees the final reply.
    *
-   * Default 3000 (3 seconds). Set to 0 to disable.
+   * The card can be promoted out of suppression early when a sub-agent
+   * starts (see `promoteOnSubAgent`) — long-running tool work and
+   * background dispatches stay visible without waiting the full delay.
+   *
+   * Default 30000 (30 seconds). Set to 0 to disable.
    */
   initialDelayMs?: number
+  /**
+   * Promote the first emit immediately when a sub-agent transitions to
+   * running during the suppression window, when the watcher fires
+   * `onSubAgentStall`, or when `startTurn` carries over running
+   * sub-agents from a prior turn (#334 carry-over). The card jumps
+   * straight to visible instead of waiting for `initialDelayMs`.
+   *
+   * Fast-turn suppression (`turn_end` before the card has emitted) is
+   * unchanged — it short-circuits in `flush()` regardless of this flag.
+   *
+   * Default true. Set to false to disable promotion entirely (the card
+   * will only appear after `initialDelayMs` elapses, even when sub-agents
+   * are dispatched mid-turn).
+   */
+  promoteOnSubAgent?: boolean
   /**
    * Number of consecutive 4xx Telegram API failures on card edits before
    * the card is marked terminal and all further edits are suppressed for
@@ -262,8 +281,9 @@ export function syncChatRunningSubagents(
   next: ProgressCardState,
   cBaseKey: string,
   chatRunningSubagents: Map<string, Map<string, SubAgentState>>,
-): void {
-  if (prev.subAgents === next.subAgents) return
+): { newRunningAppeared: boolean } {
+  if (prev.subAgents === next.subAgents) return { newRunningAppeared: false }
+  let newRunningAppeared = false
   // Check for new or newly-running entries (sub_agent_started path).
   for (const [agentId, sa] of next.subAgents) {
     if (sa.state === 'running') {
@@ -276,6 +296,7 @@ export function syncChatRunningSubagents(
           chatRunningSubagents.set(cBaseKey, chatMap)
         }
         chatMap.set(agentId, sa)
+        newRunningAppeared = true
       }
     } else if (sa.state === 'done' || sa.state === 'failed') {
       // Terminal state — remove from chat registry if present.
@@ -289,6 +310,7 @@ export function syncChatRunningSubagents(
       chatRunningSubagents.get(cBaseKey)?.delete(agentId)
     }
   }
+  return { newRunningAppeared }
 }
 
 /**
@@ -582,7 +604,8 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
   const editBudgetThreshold = config.editBudgetThreshold ?? 18
   const editBudgetCoalesceMs = config.editBudgetCoalesceMs ?? 3000
   const maxIdleMs = config.maxIdleMs ?? 30 * 60_000
-  const initialDelayMs = config.initialDelayMs ?? 3_000
+  const initialDelayMs = config.initialDelayMs ?? 30_000
+  const promoteOnSubAgent = config.promoteOnSubAgent ?? true
   const maxConsecutive4xx = config.maxConsecutive4xx ?? 3
   const orphanPromotionMs = config.orphanPromotionMs ?? 5_000
   const coldSubAgentThresholdMs = config.coldSubAgentThresholdMs ?? 30_000
@@ -1220,6 +1243,39 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
   }
 
   /**
+   * Promote a card out of the initial-delay suppression window early.
+   * Idempotent — short-circuits if the card has already emitted, the
+   * delay has already elapsed, or the card is terminal.
+   *
+   * Sets `deferredFirstEmitTimer = DELAY_ELAPSED` so the very next
+   * `flush()` call bypasses the suppression branch and emits a real
+   * card render. Cancels any in-flight deferred timer to prevent a
+   * second emit when the original `initialDelayMs` clock would have
+   * fired. Calls `flush()` directly so the card surfaces immediately.
+   *
+   * Used by:
+   *   - sub-agent state diff in `ingest()` when a sub-agent transitions
+   *     to running during the suppression window
+   *   - the enqueue branch when carriedOver running sub-agents seed the
+   *     fresh PerChatState (#334 cross-turn carry-over)
+   *   - `onSubAgentStall()` when a watcher reports a stalled sub-agent
+   *     before the card has emitted
+   */
+  function promoteFirstEmit(cs: PerChatState, reason: string): void {
+    if (!cs.isFirstEmit) return
+    if (cs.deferredFirstEmitTimer === DELAY_ELAPSED) return
+    if (cs.apiFailures.terminal) return
+    if (cs.deferredFirstEmitTimer != null) {
+      clearT(cs.deferredFirstEmitTimer)
+    }
+    cs.deferredFirstEmitTimer = DELAY_ELAPSED
+    process.stderr.write(
+      `telegram gateway: progress-card: promoteFirstEmit turnKey=${cs.turnKey} reason=${reason}\n`,
+    )
+    flush(cs, /*forceDone*/ false)
+  }
+
+  /**
    * True if `a` and `b` differ in any field that actually appears in the
    * rendered card (items, stage, userRequest, latestText). Internal
    * bookkeeping fields like `thinking` that don't reach render() don't
@@ -1390,7 +1446,25 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
           pendingSyncEchoes.set(baseKey(chatId, threadId), now())
         }
         startHeartbeatIfNeeded()
-        flush(chatState, /*forceDone*/ false)
+        // #334 cross-turn carry-over: a fresh PerChatState seeded with
+        // running sub-agents from a prior turn already has visible work
+        // to surface. Skip suppression and emit immediately. The diff-
+        // based promote in the reducer block above misses this case
+        // because the carried-over sub-agents were copied during
+        // `initialState()` reduction — there is no prev→next transition
+        // for it to detect.
+        //
+        // Defensive: post-#401, `closeZombie` syncs the chat-scoped
+        // registry on every parent-replacement enqueue, so carriedOver
+        // is empty in the common path. Keeping the hook means future
+        // regressions in the sync path (or a code path that bypasses
+        // closeZombie) still produce a visible card instead of a
+        // silently-suppressed turn.
+        if (promoteOnSubAgent && carriedOver != null && carriedOver.size > 0) {
+          promoteFirstEmit(chatState, 'carried_over_subagents')
+        } else {
+          flush(chatState, /*forceDone*/ false)
+        }
         return
       } else if (chatId == null) {
         // Non-enqueue event with no explicit chat: fall back to the
@@ -1428,12 +1502,32 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       // tool_result (which can finalize a sub-agent via parentToolUseId).
       // Factored into syncChatRunningSubagents (issue #399) so closeZombie
       // and the heartbeat's cold-jsonl-synth path can call the same logic.
-      syncChatRunningSubagents(
+      // Returns `newRunningAppeared` so the caller can promote the card
+      // out of initial-delay suppression on a fresh sub-agent transition.
+      const { newRunningAppeared: newRunningSubAgentAppeared } = syncChatRunningSubagents(
         prev,
         chatState.state,
         baseKey(chatState.chatId, chatState.threadId),
         chatRunningSubagents,
       )
+
+      // Promote the card out of initial-delay suppression as soon as a
+      // sub-agent transitions to running. Long-running sub-agent dispatches
+      // are exactly the case where the user wants to see what's happening
+      // — waiting the full `initialDelayMs` before showing the card means
+      // 30s of staring at a frozen draft bubble. Diff-based detection
+      // (rather than gating on a specific event kind) catches every path
+      // that reaches `running`: real `sub_agent_started`, heartbeat orphan
+      // promotion, and parent-tool-result correlation.
+      if (
+        newRunningSubAgentAppeared
+        && promoteOnSubAgent
+        && chatState.isFirstEmit
+        && chatState.deferredFirstEmitTimer !== DELAY_ELAPSED
+        && !chatState.apiFailures.terminal
+      ) {
+        promoteFirstEmit(chatState, 'sub_agent_started')
+      }
 
       // Issue #132: track whether the agent has called `reply` or
       // `stream_reply` at least once this turn so the renderer can
@@ -1823,6 +1917,18 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         // so the stale value is exactly what makes the badge appear.
         // All we need to do here is force a re-render so the user sees it.
         //
+        // If the card is still suppressed (no first emit yet), the user
+        // has nothing on screen — the stall warning needs to be visible
+        // immediately. Promote out of the initial-delay window before
+        // forcing the heartbeat tick.
+        if (
+          promoteOnSubAgent
+          && cs.isFirstEmit
+          && cs.deferredFirstEmitTimer !== DELAY_ELAPSED
+          && !cs.apiFailures.terminal
+        ) {
+          promoteFirstEmit(cs, 'sub_agent_stall')
+        }
         // Force the next heartbeat tick to emit by clearing the diff-guard
         // buckets for this turnKey. Note: this clears the chat-level and
         // sub-agent-tick buckets — distinct from cs.lastEventAt (chat-level,

@@ -95,7 +95,13 @@ steps:
       # landed (those tests were added but no build step was wired into
       # CI). Build is fast (~1s) and gated by the same if_changed globs
       # that gate the test run, so this only runs when Core tests do.
-      bun run build
+      #
+      # Invoke the script directly under bun rather than via `bun run
+      # build` (which executes `node scripts/build.mjs`). Buildkite
+      # hosted agents don't always ship node on PATH; bun was just
+      # installed two lines above and has full Node-compat for the
+      # stdlib calls scripts/build.mjs makes.
+      bun scripts/build.mjs
       # Buildkite Test Engine collector: streams per-test timing to the
       # switchroom-vitest suite. When unset, vitest.config.ts falls back to
       # the default reporter and no upload is attempted.

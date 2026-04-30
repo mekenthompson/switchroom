@@ -197,6 +197,7 @@ import { createStreamController } from './stream-controller.js'
 import { handlePtyPartialPure, type PtyHandlerState } from './pty-partial-handler.js'
 import { handleStreamReply, buildAccentHeader } from './stream-reply-handler.js'
 import { createChatLock } from './chat-lock.js'
+import { summarizeToolForTitle } from './permission-title.js'
 import {
   validateInlineKeyboard,
   type AnyButton,
@@ -1225,7 +1226,10 @@ mcp.setNotificationHandler(
       expiresAt: Date.now() + PENDING_PERMISSION_TTL_MS,
     })
     const access = loadAccess()
-    const text = `🔐 Permission: ${tool_name}`
+    // Lift the most-identifying field into the title so the user can
+    // approve at a glance — e.g. `Skill (mail)` instead of bare `Skill`.
+    // See #186.
+    const text = `🔐 Permission: ${summarizeToolForTitle(tool_name, input_preview)}`
     const keyboard = new InlineKeyboard()
       .text('See more', `perm:more:${request_id}`)
       .text('✅ Allow', `perm:allow:${request_id}`)

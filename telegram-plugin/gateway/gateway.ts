@@ -93,6 +93,10 @@ import { validateStringArray } from './access-validator.js'
 const REPLY_TO_TEXT_MAX = 200
 import { markdownToHtml, splitHtmlChunks, repairEscapedWhitespace } from '../format.js'
 import {
+  validateInlineKeyboard,
+  type AnyButton,
+} from '../telegram-button-constraints.js'
+import {
   startText as buildStartText,
   helpText as buildHelpText,
   statusPairedText as buildStatusPairedText,
@@ -1825,6 +1829,24 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
     : chunk(effectiveText, limit, access.chunkMode ?? 'length')
   const sentIds: number[] = []
 
+  // #271 (URL-button half): validate and build reply_markup. Attached
+  // to the LAST chunk only so buttons appear on the final visible message.
+  // Mirrors the pattern in server.ts — see buttons-validator for the
+  // accepted shapes (URL buttons land here; callback_data buttons require
+  // separate IPC routing for callback_query that is not yet wired).
+  let replyMarkup: { inline_keyboard: AnyButton[][] } | undefined
+  const rawKeyboard = args.inline_keyboard as AnyButton[][] | undefined
+  if (rawKeyboard != null) {
+    const validationErrors = validateInlineKeyboard(rawKeyboard)
+    if (validationErrors.length > 0) {
+      const summary = validationErrors
+        .map((e) => `${e.path}.${e.field}: ${e.reason}`)
+        .join('; ')
+      throw new Error(`inline_keyboard validation failed: ${summary}`)
+    }
+    replyMarkup = { inline_keyboard: rawKeyboard }
+  }
+
   const replySKey = streamKey(chat_id, threadId)
   suppressPtyPreview.add(replySKey)
   let previewMessageId: number | null = null
@@ -1889,6 +1911,7 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
     for (let i = 0; i < chunks.length; i++) {
       const shouldReplyTo =
         reply_to != null && replyMode !== 'off' && (replyMode === 'all' || i === 0)
+      const isLastChunk = i === chunks.length - 1
       const sendOpts = {
         ...(shouldReplyTo
           ? {
@@ -1901,6 +1924,7 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
         ...(parseMode ? { parse_mode: parseMode } : {}),
         ...(threadId != null ? { message_thread_id: threadId } : {}),
         ...(disableLinkPreview ? { link_preview_options: { is_disabled: true } } : {}),
+        ...(replyMarkup != null && isLastChunk ? { reply_markup: replyMarkup } : {}),
         ...(protectContent ? { protect_content: true } : {}),
       }
 
@@ -1908,6 +1932,7 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
         const editOpts: Record<string, unknown> = {}
         if (parseMode) editOpts.parse_mode = parseMode
         if (disableLinkPreview) editOpts.link_preview_options = { is_disabled: true }
+        if (replyMarkup != null && isLastChunk) editOpts.reply_markup = replyMarkup
         try {
           await robustApiCall(
             () => lockedBot.api.editMessageText(chat_id, previewMessageId!, chunks[i], editOpts),
@@ -2030,6 +2055,23 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
   if (preAllocated != null) {
     preAllocatedDrafts.delete(streamChatId)
   }
+
+  // #271 (URL-button half): validate inline_keyboard for stream_reply.
+  // Only attached on done=true so buttons land on the final answer
+  // message, not on intermediate draft edits.
+  let streamReplyMarkup: { inline_keyboard: AnyButton[][] } | undefined
+  const rawStreamKeyboard = args.inline_keyboard as AnyButton[][] | undefined
+  if (rawStreamKeyboard != null && Boolean(args.done)) {
+    const validationErrors = validateInlineKeyboard(rawStreamKeyboard)
+    if (validationErrors.length > 0) {
+      const summary = validationErrors
+        .map((e) => `${e.path}.${e.field}: ${e.reason}`)
+        .join('; ')
+      throw new Error(`inline_keyboard validation failed: ${summary}`)
+    }
+    streamReplyMarkup = { inline_keyboard: rawStreamKeyboard }
+  }
+
   const result = await handleStreamReply(
     {
       chat_id: streamChatId,
@@ -2041,6 +2083,7 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
       quote: args.quote as boolean | undefined,
       ...(args.protect_content === true ? { protect_content: true } : {}),
       ...(args.quote_text != null ? { quote_text: args.quote_text as string } : {}),
+      ...(streamReplyMarkup != null ? { reply_markup: streamReplyMarkup } : {}),
     },
     { activeDraftStreams, activeDraftParseModes, suppressPtyPreview },
     {

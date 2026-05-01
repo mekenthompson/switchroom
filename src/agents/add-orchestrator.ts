@@ -10,9 +10,11 @@
  *     for a `/start` DM from the new bot, then auto-writes
  *     telegram/access.json with the captured user_id. No second
  *     `switchroom setup` run required.
- *   - Final preflight loud-fail — autoaccept wrapper, vault-managed bot
- *     token, systemd unit running. Each failed check produces an
- *     actionable error message rather than silent breakage.
+ *   - Final preflight loud-fail — autoaccept wrapper, bot token present,
+ *     systemd unit running, access.json populated, MCP servers configured,
+ *     and bot token managed via vault reference (workstream 3 of #543,
+ *     closes #364 / #424 silent-failure modes). Each failed check produces
+ *     an actionable error message rather than silent breakage.
  *
  * BotFather automation (#188) and the profile/skill picker (#190) are out
  * of scope for this workstream — both are stubbed with TODO markers
@@ -97,11 +99,18 @@ export interface AddAgentResult {
   preflight: PreflightReport;
 }
 
+export interface PreflightCheck {
+  ok: boolean;
+  detail: string;
+}
+
 export interface PreflightReport {
-  autoacceptWrapper: { ok: boolean; detail: string };
-  botTokenPresent: { ok: boolean; detail: string };
-  systemdActive: { ok: boolean; detail: string };
-  accessJsonAllowFrom: { ok: boolean; detail: string };
+  autoacceptWrapper: PreflightCheck;
+  botTokenPresent: PreflightCheck;
+  systemdActive: PreflightCheck;
+  accessJsonAllowFrom: PreflightCheck;
+  mcpServersConfigured: PreflightCheck;
+  vaultBotTokenManaged: PreflightCheck;
 }
 
 const DEFAULT_PAIR_TIMEOUT_MS = 5 * 60 * 1000;
@@ -223,13 +232,16 @@ export async function addAgent(opts: AddAgentOpts): Promise<AddAgentResult> {
     agentDir,
     expectedUserId: userId,
     isUnitActive: isActive,
+    configPath: opts.configPath,
   });
 
   const ok =
     preflight.autoacceptWrapper.ok &&
     preflight.botTokenPresent.ok &&
     preflight.systemdActive.ok &&
-    preflight.accessJsonAllowFrom.ok;
+    preflight.accessJsonAllowFrom.ok &&
+    preflight.mcpServersConfigured.ok &&
+    preflight.vaultBotTokenManaged.ok;
 
   for (const [k, v] of Object.entries(preflight)) {
     const mark = v.ok ? "ok" : "FAIL";
@@ -246,6 +258,13 @@ interface PreflightInputs {
   agentDir: string;
   expectedUserId: string;
   isUnitActive: (unitName: string) => boolean;
+  /**
+   * Optional path to switchroom.yaml — used to verify that the agent's
+   * bot token is referenced through the vault rather than living in
+   * plaintext. Per epic #543 line 39 + #424, a missing vault reference
+   * for the bot token is a silent-failure mode worth surfacing.
+   */
+  configPath?: string;
 }
 
 /**
@@ -258,7 +277,7 @@ interface PreflightInputs {
  * Exported for tests.
  */
 export function runFinalPreflight(inputs: PreflightInputs): PreflightReport {
-  const { name, agentDir, expectedUserId, isUnitActive } = inputs;
+  const { name, agentDir, expectedUserId, isUnitActive, configPath } = inputs;
 
   // 1. Autoaccept wrapper present in the systemd unit (when applicable).
   //    The unit text either contains "expect" (dev plugin path) or doesn't
@@ -357,11 +376,113 @@ export function runFinalPreflight(inputs: PreflightInputs): PreflightReport {
     }
   }
 
+  // 5. MCP servers configured in .claude/settings.json — silent-failure
+  //    mode: agent boots, but Hindsight / switchroom-telegram never load
+  //    because the settings file is missing or has an empty mcpServers
+  //    block. Per #424 we want this loud at preflight time.
+  const settingsPath = resolve(agentDir, ".claude", "settings.json");
+  let mcp: PreflightCheck;
+  if (!existsSync(settingsPath)) {
+    mcp = {
+      ok: false,
+      detail:
+        `.claude/settings.json missing at ${settingsPath}. ` +
+        `Fix: switchroom agent reconcile ${name}`,
+    };
+  } else {
+    try {
+      const fs = require("node:fs") as typeof import("node:fs");
+      const parsed = JSON.parse(fs.readFileSync(settingsPath, "utf-8"));
+      const servers =
+        parsed && typeof parsed === "object" && parsed.mcpServers
+          ? Object.keys(parsed.mcpServers)
+          : [];
+      if (servers.length === 0) {
+        mcp = {
+          ok: false,
+          detail:
+            `.claude/settings.json has no mcpServers block. ` +
+            `Hindsight + switchroom-telegram will not load. ` +
+            `Fix: switchroom agent reconcile ${name}`,
+        };
+      } else {
+        mcp = {
+          ok: true,
+          detail: `mcpServers configured: ${servers.join(", ")}`,
+        };
+      }
+    } catch (err) {
+      mcp = {
+        ok: false,
+        detail: `.claude/settings.json unparseable: ${(err as Error).message}`,
+      };
+    }
+  }
+
+  // 6. Bot token managed via vault reference (not plaintext in yaml).
+  //    Reads the switchroom.yaml entry for this agent — if its
+  //    telegram.bot_token is a literal string rather than a vault://
+  //    reference, the operator has a foot-gun: rotation requires a
+  //    yaml edit and there's no audit trail. Surface it loudly per #424.
+  let vaultMgd: PreflightCheck;
+  if (!configPath) {
+    // No config path supplied — skip rather than spuriously fail. Tests
+    // and ad-hoc preflight runs may not have a yaml available.
+    vaultMgd = {
+      ok: true,
+      detail: "skipped (no switchroom.yaml path supplied)",
+    };
+  } else if (!existsSync(configPath)) {
+    vaultMgd = {
+      ok: false,
+      detail: `switchroom.yaml not found at ${configPath}`,
+    };
+  } else {
+    try {
+      const fs = require("node:fs") as typeof import("node:fs");
+      const yaml = require("yaml") as typeof import("yaml");
+      const cfg = yaml.parse(fs.readFileSync(configPath, "utf-8"));
+      const agentEntry = cfg?.agents?.[name];
+      const rawToken =
+        agentEntry?.channels?.telegram?.bot_token ??
+        agentEntry?.telegram?.bot_token ??
+        undefined;
+      if (!rawToken || typeof rawToken !== "string") {
+        vaultMgd = {
+          ok: false,
+          detail:
+            `No telegram.bot_token configured for agent "${name}" in ${configPath}. ` +
+            `Fix: add a vault://${name}.bot_token reference and store the secret with: switchroom vault set ${name}.bot_token`,
+        };
+      } else if (!rawToken.startsWith("vault://")) {
+        vaultMgd = {
+          ok: false,
+          detail:
+            `telegram.bot_token for "${name}" is plaintext in ${configPath}. ` +
+            `Fix: rotate via BotFather, store in vault (switchroom vault set ${name}.bot_token), ` +
+            `then replace yaml value with vault://${name}.bot_token`,
+        };
+      } else {
+        vaultMgd = {
+          ok: true,
+          detail: `bot_token referenced via vault: ${rawToken}`,
+        };
+      }
+    } catch (err) {
+      vaultMgd = {
+        ok: false,
+        detail: `failed to read switchroom.yaml: ${(err as Error).message}`,
+      };
+    }
+  }
+
   return {
     autoacceptWrapper: autoaccept,
     botTokenPresent: token,
     systemdActive: active,
     accessJsonAllowFrom: access,
+    mcpServersConfigured: mcp,
+    vaultBotTokenManaged: vaultMgd,
   };
 }
 

@@ -38,6 +38,17 @@ vi.mock("../setup/onboarding.js", () => ({
   }),
 }));
 
+vi.mock("../setup/profile-picker.js", () => ({
+  // Default stub — fast-path with whatever profile the test passes,
+  // pretending zero bundled skills (so pruneBundledSkills no-ops).
+  runProfilePicker: vi.fn(async (opts: { existingProfile?: string }) => ({
+    profile: opts.existingProfile ?? "default",
+    skills: [],
+    allSkills: [],
+    pickerShown: false,
+  })),
+}));
+
 vi.mock("../setup/telegram-api.js", () => ({
   pollForDmStart: vi.fn(),
   // Stubbed so the BotFather walkthrough's fast path (existingToken
@@ -52,8 +63,9 @@ vi.mock("../setup/telegram-api.js", () => ({
   assertBotUsernameMatchesAgent: vi.fn(),
 }));
 
-import { addAgent, runFinalPreflight } from "./add-orchestrator.js";
+import { addAgent, runFinalPreflight, pruneBundledSkills } from "./add-orchestrator.js";
 import { createAgent, completeCreation } from "./create-orchestrator.js";
+import { runProfilePicker } from "../setup/profile-picker.js";
 
 // Default BotFather walkthrough stub — every addAgent test injects this so
 // the orchestrator never reaches the real validateBotToken (no network).
@@ -606,5 +618,172 @@ describe("runFinalPreflight", () => {
     });
     expect(report.systemdActive.ok).toBe(false);
     expect(report.systemdActive.detail).toMatch(/switchroom agent start bot/);
+  });
+});
+
+describe("addAgent — profile picker wiring (#190)", () => {
+  it("invokes the picker with existingProfile when --profile supplied, and threads result into createAgent", async () => {
+    const { agentDir } = setupAgentDir();
+    writeFileSync(
+      join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
+      "[Unit]\nExecStart=expect ...\n",
+    );
+
+    (createAgent as any).mockResolvedValue({
+      sessionName: "s",
+      agentDir,
+      loginUrl: undefined,
+    });
+    (completeCreation as any).mockResolvedValue({
+      outcome: { kind: "success" },
+      started: true,
+      instructions: [],
+    });
+
+    // Override the default picker stub so we can assert the resolved
+    // profile is the one the orchestrator passes to createAgent.
+    (runProfilePicker as any).mockResolvedValueOnce({
+      profile: "health-coach",
+      skills: ["check-in"],
+      allSkills: ["check-in", "weekly-review"],
+      pickerShown: false,
+    });
+
+    const result = await addAgent({
+      name: "bot",
+      profile: "health-coach",
+      skills: "check-in",
+      botToken: "fake:token",
+      topology: "dm",
+      runBotFather: fakeBotFather(),
+      allowFromUserId: "1",
+      readOAuthCode: async () => "code",
+      isUnitActive: () => true,
+      log: () => {},
+    });
+
+    expect(runProfilePicker).toHaveBeenCalled();
+    const pickerCall = (runProfilePicker as any).mock.calls.at(-1)![0];
+    expect(pickerCall.existingProfile).toBe("health-coach");
+    expect(pickerCall.existingSkills).toBe("check-in");
+    expect((createAgent as any).mock.calls[0]![0].profile).toBe("health-coach");
+    expect(result.profile).toBe("health-coach");
+    expect(result.skills).toEqual(["check-in"]);
+  });
+
+  it("runs the picker interactively when --profile is omitted", async () => {
+    const { agentDir } = setupAgentDir();
+    writeFileSync(
+      join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
+      "[Unit]\nExecStart=expect ...\n",
+    );
+
+    (createAgent as any).mockResolvedValue({
+      sessionName: "s",
+      agentDir,
+      loginUrl: undefined,
+    });
+    (completeCreation as any).mockResolvedValue({
+      outcome: { kind: "success" },
+      started: true,
+      instructions: [],
+    });
+
+    (runProfilePicker as any).mockResolvedValueOnce({
+      profile: "coding",
+      skills: ["architecture", "code-review"],
+      allSkills: ["architecture", "code-review"],
+      pickerShown: true,
+    });
+
+    const result = await addAgent({
+      name: "bot",
+      // profile intentionally omitted
+      botToken: "fake:token",
+      topology: "dm",
+      runBotFather: fakeBotFather(),
+      allowFromUserId: "1",
+      readOAuthCode: async () => "code",
+      readLine: async () => "1",
+      isUnitActive: () => true,
+      log: () => {},
+    });
+
+    expect(runProfilePicker).toHaveBeenCalled();
+    const pickerCall = (runProfilePicker as any).mock.calls.at(-1)![0];
+    expect(pickerCall.existingProfile).toBeUndefined();
+    expect(typeof pickerCall.readLine).toBe("function");
+    expect(result.profile).toBe("coding");
+  });
+
+  it("aborts the wizard when the picker throws, before scaffolding", async () => {
+    const { agentDir } = setupAgentDir();
+    (createAgent as any).mockResolvedValue({
+      sessionName: "s",
+      agentDir,
+      loginUrl: undefined,
+    });
+
+    (runProfilePicker as any).mockRejectedValueOnce(
+      new Error('Unknown profile: "nope"'),
+    );
+
+    await expect(
+      addAgent({
+        name: "bot",
+        profile: "nope",
+        botToken: "fake:token",
+        topology: "dm",
+        runBotFather: fakeBotFather(),
+        allowFromUserId: "1",
+        readOAuthCode: async () => "code",
+        log: () => {},
+      }),
+    ).rejects.toThrow(/Unknown profile/);
+
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+});
+
+describe("pruneBundledSkills", () => {
+  it("removes scoped subdirs that aren't in keep, leaves others alone", () => {
+    const { mkdtempSync, mkdirSync, writeFileSync, existsSync } =
+      require("node:fs") as typeof import("node:fs");
+    const root = mkdtempSync(join(tmpdir(), "prune-skills-"));
+    const skillsDir = join(root, ".claude", "skills");
+    mkdirSync(skillsDir, { recursive: true });
+    // bundled (in scope) subdirs
+    mkdirSync(join(skillsDir, "check-in"));
+    writeFileSync(join(skillsDir, "check-in", "SKILL.md"), "x");
+    mkdirSync(join(skillsDir, "weekly-review"));
+    // global skill (not in scope) — must be left untouched
+    mkdirSync(join(skillsDir, "humanizer"));
+
+    const removed = pruneBundledSkills(
+      root,
+      ["check-in"],
+      ["check-in", "weekly-review"],
+    );
+
+    expect(removed).toEqual(["weekly-review"]);
+    expect(existsSync(join(skillsDir, "check-in"))).toBe(true);
+    expect(existsSync(join(skillsDir, "weekly-review"))).toBe(false);
+    expect(existsSync(join(skillsDir, "humanizer"))).toBe(true);
+  });
+
+  it("no-ops when .claude/skills is missing", () => {
+    const { mkdtempSync } = require("node:fs") as typeof import("node:fs");
+    const root = mkdtempSync(join(tmpdir(), "prune-skills-empty-"));
+    expect(pruneBundledSkills(root, [], ["a", "b"])).toEqual([]);
+  });
+
+  it("no-ops when scope is empty (profile ships nothing)", () => {
+    const { mkdtempSync, mkdirSync } =
+      require("node:fs") as typeof import("node:fs");
+    const root = mkdtempSync(join(tmpdir(), "prune-skills-noscope-"));
+    mkdirSync(join(root, ".claude", "skills", "humanizer"), { recursive: true });
+    expect(pruneBundledSkills(root, [], [])).toEqual([]);
+    const { existsSync } = require("node:fs") as typeof import("node:fs");
+    expect(existsSync(join(root, ".claude", "skills", "humanizer"))).toBe(true);
   });
 });

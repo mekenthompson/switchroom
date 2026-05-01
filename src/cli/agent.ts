@@ -1852,7 +1852,14 @@ export function registerAgentCommand(program: Command): void {
     .description(
       "n+1 bot wizard — scaffold + auth + start + DM-pair + preflight in one verb (epic #543)."
     )
-    .requiredOption("--profile <profile>", "Profile to extend from (e.g. 'health-coach')")
+    .option(
+      "--profile <profile>",
+      "Profile to extend from (e.g. 'health-coach'). Omit to run the interactive picker (#190); or set SWITCHROOM_PROFILE.",
+    )
+    .option(
+      "--skills <selector>",
+      'Bundled-skill subset for the chosen profile: "all" (default), "none", or a comma-separated list of skill names. Or set SWITCHROOM_SKILLS.',
+    )
     .option(
       "--topology <topology>",
       "Channel topology: 'dm' (default) or 'forum' (forum support deferred — see #190)",
@@ -1882,7 +1889,8 @@ export function registerAgentCommand(program: Command): void {
       withConfigError(async (
         name: string,
         opts: {
-          profile: string;
+          profile?: string;
+          skills?: string;
           topology: string;
           botToken?: string;
           botUsername?: string;
@@ -1955,7 +1963,8 @@ export function registerAgentCommand(program: Command): void {
         try {
           const result = await addAgent({
             name,
-            profile: opts.profile,
+            profile: opts.profile ?? process.env.SWITCHROOM_PROFILE,
+            skills: opts.skills ?? process.env.SWITCHROOM_SKILLS,
             botToken,
             botUsername: opts.botUsername,
             loose: opts.loose,

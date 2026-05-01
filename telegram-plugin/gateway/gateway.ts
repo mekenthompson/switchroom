@@ -3786,6 +3786,16 @@ async function handleInbound(
       messageThreadId,
       alreadyHasDraft: preAllocatedDrafts.has(chat_id),
     })
+    // Operator-friendly diagnostic: log every decision (skip + allocate)
+    // and the success branch of the API call. Was previously silent on
+    // success — only failures logged via .catch — which made "is
+    // pre-alloc firing at all?" impossible to verify post-deploy
+    // without instrumenting the code. Cheap (one stderr line per
+    // inbound message); the placeholder UX is load-bearing enough
+    // that this trace is worth keeping.
+    process.stderr.write(
+      `telegram gateway: pre-alloc decision chatId=${chat_id} threadId=${messageThreadId ?? 'none'} → ${decision.allocate ? 'allocate' : `skip:${decision.reason}`}\n`,
+    )
     if (decision.allocate) {
       const draftId = allocateDraftId()
       // Best-effort, non-blocking: any failure (transport down, API not
@@ -3794,6 +3804,7 @@ async function handleInbound(
       void sendMessageDraftFn!(chat_id, draftId, PRE_ALLOC_PLACEHOLDER_TEXT)
         .then(() => {
           preAllocatedDrafts.set(chat_id, { draftId, allocatedAt: Date.now() })
+          process.stderr.write(`telegram gateway: pre-allocate draft ok chatId=${chat_id} draftId=${draftId}\n`)
         })
         .catch((err) => {
           process.stderr.write(

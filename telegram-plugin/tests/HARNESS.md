@@ -147,3 +147,60 @@ case) and the pure tests honest (no accidental coupling to bot calls).
 - **Don't assert on the entire Telegram payload** — assert on the
   semantic fields (chat_id, text, parse_mode). Bot API adds optional
   fields over time and full-payload snapshots churn.
+
+## Pattern 6 — fixture-based integration tests for external-format parsers
+
+When code parses output produced by an **external system you don't
+control** (Claude Code's TUI, the Anthropic API stream-json, journalctl
+output, `git log` text), unit tests with synthesised input are not
+enough. The synthesis matches the test author's mental model of the
+format — but the real format drifts on every upstream release, and
+synthesised tests can't catch the drift.
+
+**Lesson learned the hard way (PR #486):** `pty-tail.ts`'s
+`V1Extractor` was tested against synthesised Claude Code TUI output
+that "matched the real shape." Then Claude Code collapsed tool-call
+rendering by default, the marker `switchroom-telegram - reply` stopped
+appearing in the buffer, and V1Extractor silently started returning
+null on every call. The IPC plumbing tests still passed (they fed
+mock data); the bridge → gateway wiring tests still passed (they fed
+mock partials). The only failure mode that matters — "in production,
+does this actually emit anything?" — wasn't covered by any test.
+
+**Pattern**: capture a real chunk of the external format as a fixture
+and assert the parser produces a non-null result.
+
+```ts
+// telegram-plugin/tests/fixtures/service-log-current-claude-code.bin
+//   ← captured via: tail -c 30000 ~/.switchroom/agents/<agent>/service.log
+
+import { readFileSync } from 'node:fs'
+const FIXTURE = readFileSync(
+  resolve(__dirname, 'fixtures', 'service-log-current-claude-code.bin'),
+  'utf8',
+)
+
+it('extractor handles current production output', async () => {
+  const term = await feedToTerm(FIXTURE)
+  const result = new V1Extractor().extract(term)
+  expect(result).not.toBeNull()
+})
+```
+
+**Maintenance**: when upstream's format changes the test fails. The
+failure tells you exactly what changed (message includes the byte
+range that no longer matches). Either:
+
+1. The format reverted (CI flake, just rerun)
+2. The format drifted (update the parser AND recapture the fixture)
+3. The feature stops working (remove the parser + dependents,
+   document why)
+
+**Where to capture from**: the canonical source for each external
+format. For PTY-tail it's `~/.switchroom/agents/<agent>/service.log`.
+For Anthropic API stream-json it'd be a saved `--output-format
+stream-json` dump. For journalctl, a captured `--since … -o cat`
+window.
+
+See `telegram-plugin/tests/pty-tail-real-fixture.test.ts` for the
+worked example.

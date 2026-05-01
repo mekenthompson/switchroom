@@ -3776,15 +3776,23 @@ async function handleInbound(
     // so the user sees a real "I'm working" signal, not three dots that
     // could read as "still loading the message." Hooks can refine this
     // mid-turn via the `update_placeholder` IPC message.
+    // #479 fix: drop the DM-only gate so non-forum group chats also get
+    // the 🔵 thinking… placeholder within ~1s. Pre-fix the placeholder UX
+    // was locked to DMs even though sendMessageDraft works in groups —
+    // exactly the population (groups, including the standard switchroom
+    // forum-topic layout) that reported "feels dead until the status
+    // card appears." Forum topics still excluded via the messageThreadId
+    // guard because sendMessageDraft doesn't accept message_thread_id;
+    // forum-topic placeholder needs a separate path (out of scope here).
     if (
       sendMessageDraftFn != null
-      && isDmChatId(chat_id)
       && messageThreadId == null
       && !preAllocatedDrafts.has(chat_id)
     ) {
       const draftId = allocateDraftId()
       // Best-effort, non-blocking: any failure (transport down, API not
-      // available) falls through to today's behavior.
+      // available, group rejects sendMessageDraft) falls through to
+      // today's behavior — the existing .catch already silently logs.
       void sendMessageDraftFn(chat_id, draftId, '🔵 thinking…')
         .then(() => {
           preAllocatedDrafts.set(chat_id, { draftId, allocatedAt: Date.now() })
@@ -6575,27 +6583,53 @@ bot.command('issues', async ctx => {
     // "Clear all" = list current, resolve each. The CLI's `prune` is
     // for retention; clearing live issues is a UI concern. Implement
     // here by walking the list and resolving each. Best-effort.
+    //
+    // #443: require an explicit `--confirm` flag. A fat-finger
+    // `/issues clear` used to mass-resolve every unresolved entry in
+    // one shot — destructive verbs deserve a guard. Bare `/issues
+    // clear` now counts and prints the prompt; `--confirm` actually
+    // executes.
     try {
       const stateDir = process.env.TELEGRAM_STATE_DIR
-      if (stateDir) {
-        const events = listIssues(stateDir)
-        let n = 0
-        for (const e of events) {
-          n += resolveIssue(stateDir, e.fingerprint)
-        }
-        await switchroomReply(ctx, `Resolved ${n} issue${n === 1 ? '' : 's'}.`, { html: true })
+      if (!stateDir) {
+        await switchroomReply(ctx, 'clear: no TELEGRAM_STATE_DIR; cannot operate.', { html: true })
         return
       }
+      const confirmed = parts.slice(1).includes('--confirm')
+      if (!confirmed) {
+        const events = listIssues(stateDir)
+        const n = events.length
+        if (n === 0) {
+          await switchroomReply(ctx, 'No unresolved issues to clear.', { html: true })
+          return
+        }
+        const noun = n === 1 ? 'issue' : 'issues'
+        await switchroomReply(
+          ctx,
+          [
+            `This will resolve <b>${n} ${noun}</b>. To confirm, run:`,
+            '',
+            '<code>/issues clear --confirm</code>',
+          ].join('\n'),
+          { html: true },
+        )
+        return
+      }
+      const events = listIssues(stateDir)
+      let n = 0
+      for (const e of events) {
+        n += resolveIssue(stateDir, e.fingerprint)
+      }
+      await switchroomReply(ctx, `Resolved ${n} issue${n === 1 ? '' : 's'}.`, { html: true })
+      return
     } catch (err) {
       await switchroomReply(ctx, `clear failed: ${escapeHtmlForTg((err as Error).message)}`, { html: true })
       return
     }
-    await switchroomReply(ctx, 'clear: no TELEGRAM_STATE_DIR; cannot operate.', { html: true })
-    return
   }
   await switchroomReply(
     ctx,
-    'Usage: <code>/issues</code> | <code>/issues resolve &lt;fingerprint&gt;</code> | <code>/issues clear</code>',
+    'Usage: <code>/issues</code> | <code>/issues resolve &lt;fingerprint&gt;</code> | <code>/issues clear [--confirm]</code>',
     { html: true },
   )
 })

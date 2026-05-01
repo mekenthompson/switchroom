@@ -23,6 +23,7 @@ import { homedir } from 'os'
 import { join, extname, sep, basename } from 'path'
 
 import { installPluginLogger } from '../plugin-logger.js'
+import { decideDmCommandGate } from '../dm-command-gate.js'
 import { StatusReactionController } from '../status-reactions.js'
 import { isTelegramReplyTool, isTelegramSurfaceTool } from '../tool-names.js'
 import { createTypingWrapper } from '../typing-wrap.js'
@@ -3084,6 +3085,26 @@ type GateResult =
   | { action: 'drop' }
   | { action: 'pair'; code: string; isResend: boolean }
 
+/**
+ * Wrap `decideDmCommandGate` (pure helper in
+ * `../dm-command-gate.ts`) with grammy ctx + access.json side effects.
+ * Returns null (silent drop) on every reject path. See
+ * dm-command-gate.ts for the upstream backport (#894) rationale.
+ */
+function dmCommandGate(ctx: Context): { access: Access; senderId: string } | null {
+  const access = loadAccess()
+  const pruned = pruneExpired(access)
+  if (pruned) saveAccess(access)
+  const decision = decideDmCommandGate({
+    chatType: ctx.chat?.type,
+    senderId: ctx.from?.id != null ? String(ctx.from.id) : undefined,
+    dmPolicy: access.dmPolicy,
+    allowFrom: access.allowFrom,
+  })
+  if (!decision.allow) return null
+  return { access, senderId: decision.senderId }
+}
+
 function gate(ctx: Context): GateResult {
   const access = loadAccess()
   const pruned = pruneExpired(access)
@@ -4687,22 +4708,27 @@ function buildAgentMetadata(agentName: string): AgentMetadata {
 }
 
 bot.command('start', async ctx => {
-  if (ctx.chat?.type !== 'private') return
-  const access = loadAccess()
-  const disabled = access.dmPolicy === 'disabled'
+  // dmCommandGate (#894 backport): silent drop on disabled or
+  // non-allowlisted senders so the bot doesn't leak its existence.
+  const gated = dmCommandGate(ctx)
+  if (!gated) return
+  const disabled = gated.access.dmPolicy === 'disabled'
   await ctx.reply(buildStartText(getMyAgentName(), disabled), { parse_mode: 'HTML' })
 })
 
 bot.command('help', async ctx => {
-  if (ctx.chat?.type !== 'private') return
+  if (!dmCommandGate(ctx)) return
   await ctx.reply(buildHelpText(getMyAgentName()), { parse_mode: 'HTML' })
 })
 
 bot.command('status', async ctx => {
-  if (ctx.chat?.type !== 'private') return
-  const from = ctx.from; if (!from) return
-  const senderId = String(from.id)
-  const access = loadAccess()
+  // dmCommandGate (#894 backport) drops disabled / non-allowlisted in
+  // allowlist mode. Pairing-mode users still fall through to either
+  // the pending-code branch or the unpaired branch.
+  const gated = dmCommandGate(ctx)
+  if (!gated) return
+  const { access, senderId } = gated
+  const from = ctx.from!
   if (access.allowFrom.includes(senderId)) {
     const userTag = from.username ? `@${from.username}` : senderId
     const meta = buildAgentMetadata(getMyAgentName())
@@ -7553,6 +7579,16 @@ void (async () => {
         await clearStaleTelegramPollingState(bot.api)
         return bot.api.getMe()
       })
+      // Backport of upstream `7e401ed` (claude-plugins-official #1397):
+      // reset the backoff counter on successful poll-loop start so a
+      // transient mid-session 409 doesn't compound with prior attempts
+      // and push the next retry past 15s. Note: the rest of #1397
+      // (retry on non-409 transient errors) is supplanted in the
+      // gateway by the deliberate process.exit(1) below — systemd's
+      // Restart=always recovers from non-409 failures with a clean
+      // reboot, which has been the chosen strategy since the 2026-04-29
+      // "live-but-silent gateway" incident.
+      attempt = 0
       botUsername = me.username
       process.stderr.write(`telegram gateway: polling as @${me.username}\n`)
       if (TOPIC_ID != null) process.stderr.write(`telegram gateway: topic filter active — thread_id=${TOPIC_ID}\n`)

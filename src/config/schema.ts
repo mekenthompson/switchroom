@@ -1014,15 +1014,18 @@ export const VaultConfigSchema = z.object({
         .default(true)
         .describe("Whether to start the vault-broker daemon on agent launch"),
       autoUnlock: z.boolean().default(false).describe(
-        "Auto-unlock the broker at start via systemd LoadCredentialEncrypted=. " +
-        "Off by default. When enabled, broker reads the passphrase from " +
-        "$CREDENTIALS_DIRECTORY/vault-passphrase. Run `switchroom vault " +
-        "broker enable-auto-unlock` once to set up the encrypted credential."
+        "Auto-unlock the vault at broker start using a machine-bound " +
+        "encrypted blob. Off by default. When enabled, the broker reads " +
+        "the configured blob path, derives the AES key from /etc/machine-id, " +
+        "decrypts the passphrase, and unlocks the vault — no sudo, no " +
+        "systemd-creds, no TPM. Run `switchroom vault broker " +
+        "enable-auto-unlock` once to write the blob."
       ),
-      autoUnlockCredentialPath: z.string().default("~/.config/credstore.encrypted/vault-passphrase").describe(
-        "Path to the systemd-creds-encrypted passphrase file. Default is " +
-        "the systemd-idiomatic user credential store. Tilde-expansion happens " +
-        "at install time."
+      autoUnlockCredentialPath: z.string().default("~/.config/switchroom/auto-unlock.bin").describe(
+        "Path to the machine-bound auto-unlock blob (see " +
+        "src/vault/auto-unlock.ts for the format). Default lives under the " +
+        "user's switchroom config dir at mode 0600. Tilde-expansion happens " +
+        "at read time."
       ),
     })
     .default({})

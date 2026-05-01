@@ -231,32 +231,36 @@ Unit installed at `~/.config/systemd/user/switchroom-vault-broker.service`.
 By default, the broker holds the unlocked state in memory only — every
 restart (host reboot, service crash, reconcile that re-renders the unit)
 wipes it and requires `switchroom vault broker unlock` again. For
-unattended hosts where this is too painful, switchroom supports
-auto-unlock via [systemd `LoadCredentialEncrypted=`](https://systemd.io/CREDENTIALS/):
+unattended hosts where this is too painful, switchroom can encrypt the
+passphrase with a key derived from `/etc/machine-id` and have the broker
+unlock itself at boot:
 
 ```bash
 switchroom vault broker enable-auto-unlock   # one-time setup, prompts for passphrase
-# Then in switchroom.yaml:
-#   vault:
-#     broker:
-#       autoUnlock: true
-switchroom reconcile                          # re-render broker unit with LoadCredentialEncrypted=
-systemctl --user restart switchroom-vault-broker.service
 ```
 
-After this, the broker auto-unlocks on every start. Disable with
-`switchroom vault broker disable-auto-unlock`.
+Done. The wizard prompts for your vault passphrase, encrypts it with
+AES-256-GCM keyed off `/etc/machine-id`, writes the result to
+`~/.config/switchroom/auto-unlock.bin` (mode 0600), flips
+`vault.broker.autoUnlock: true` in `switchroom.yaml`, restarts the
+broker, and verifies the vault came up unlocked. Every subsequent boot
+the broker reads + decrypts + unlocks itself.
 
-**Security tradeoff — read this before enabling.** The passphrase is
-encrypted with a per-user key derived by `systemd-creds` and stored at
-`~/.config/credstore.encrypted/vault-passphrase` (configurable via
-`vault.broker.autoUnlockCredentialPath`). Anyone with code execution as
-your user — or root on the host — can call `systemd-creds decrypt` and
-recover the passphrase. This is the same blast radius as today's TTY
-unlock (a process running as you can already attach to the broker and
-exfiltrate secrets), but the convenience-vs-security knob is real:
-auto-unlock means a lost laptop is a lost vault even if the vault file
-itself is encrypted at rest. Use only on hosts you trust.
+Disable with `switchroom vault broker disable-auto-unlock`.
+
+**Security tradeoff — read this before enabling.** The encrypted blob
+lives at mode 0600 in your home directory; the encryption key is
+derived from `/etc/machine-id` plus a per-file random salt. This means
+disk theft is safe (the blob doesn't decrypt on any other machine) and
+other UNIX users on the same box can't read it — but root on the host
+*can* read both the blob and the machine-id, so once root is on the
+machine the passphrase is recoverable. Same blast radius as the
+running broker process (anything with code-exec as you can already
+attach to the broker socket and exfiltrate secrets), but it shifts the
+convenience-vs-security knob: auto-unlock means a lost laptop is a lost
+vault even if the vault file itself is encrypted at rest. Use only on
+hosts you trust. See [docs/auto-unlock.md](docs/auto-unlock.md) for the
+full threat model and recovery instructions.
 
 ## CLI Reference
 

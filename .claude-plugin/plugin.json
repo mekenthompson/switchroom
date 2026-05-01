@@ -1,7 +1,7 @@
 {
   "name": "switchroom",
-  "version": "0.1.0",
-  "description": "Operate switchroom — a multi-agent orchestrator for Claude Code — from inside a Claude Code session via skills for install, status, logs, config, restart, reconcile, schedule, and health.",
+  "version": "0.2.0",
+  "description": "Operate switchroom — a multi-agent orchestrator for Claude Code — from inside a Claude Code session. Adds slash commands (/switchroom:setup, /switchroom:start, /switchroom:stop, /switchroom:status) and skills for install, status, logs, config, restart, reconcile, schedule, and health.",
   "author": {
     "name": "Ken Thompson"
   },

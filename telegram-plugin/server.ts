@@ -384,6 +384,7 @@ import {
 import { sweepActivePins, sweepBotAuthoredPins } from './active-pins-sweep.js'
 import { logPinEvent, classifyPinError, errorMessage } from './pin-event-log.js'
 import { validateStringArray } from './gateway/access-validator.js'
+import { decideDmCommandGate } from './dm-command-gate.js'
 
 /**
  * One-shot carry-over from the session-end summarizer: a short topic
@@ -794,6 +795,27 @@ function gate(ctx: Context): GateResult {
   }
 
   return { action: 'drop' }
+}
+
+/**
+ * Wrap `decideDmCommandGate` (pure helper in `./dm-command-gate.ts`) with
+ * the grammy ctx + access.json side effects. Returns the loaded access
+ * snapshot + senderId when the handler should proceed; returns null
+ * (silent drop) on every reject path. See dm-command-gate.ts for the
+ * upstream backport (#894) rationale.
+ */
+function dmCommandGate(ctx: Context): { access: Access; senderId: string } | null {
+  const access = loadAccess()
+  const pruned = pruneExpired(access)
+  if (pruned) saveAccess(access)
+  const decision = decideDmCommandGate({
+    chatType: ctx.chat?.type,
+    senderId: ctx.from?.id != null ? String(ctx.from.id) : undefined,
+    dmPolicy: access.dmPolicy,
+    allowFrom: access.allowFrom,
+  })
+  if (!decision.allow) return null
+  return { access, senderId: decision.senderId }
 }
 
 function isMentioned(ctx: Context, extraPatterns?: string[]): boolean {
@@ -3526,14 +3548,16 @@ process.on('SIGINT', shutdown)
 // the gate's behavior for unrecognized groups.
 
 bot.command('start', async ctx => {
-  if (ctx.chat?.type !== 'private') return
-  const access = loadAccess()
-  const disabled = access.dmPolicy === 'disabled'
+  // dmCommandGate (#894 backport): silent drop on disabled or
+  // non-allowlisted senders so the bot doesn't leak its existence.
+  const gated = dmCommandGate(ctx)
+  if (!gated) return
+  const disabled = gated.access.dmPolicy === 'disabled'
   await ctx.reply(buildStartText(getMyAgentName(), disabled), { parse_mode: 'HTML' })
 })
 
 bot.command('help', async ctx => {
-  if (ctx.chat?.type !== 'private') return
+  if (!dmCommandGate(ctx)) return
   await ctx.reply(buildHelpText(getMyAgentName()), { parse_mode: 'HTML' })
 })
 
@@ -3585,11 +3609,13 @@ function buildAgentMetadata(agentName: string): {
 }
 
 bot.command('status', async ctx => {
-  if (ctx.chat?.type !== 'private') return
-  const from = ctx.from
-  if (!from) return
-  const senderId = String(from.id)
-  const access = loadAccess()
+  // dmCommandGate (#894 backport) drops disabled / non-allowlisted in
+  // allowlist mode. Pairing-mode users still fall through to either
+  // the pending-code branch or the unpaired branch.
+  const gated = dmCommandGate(ctx)
+  if (!gated) return
+  const { access, senderId } = gated
+  const from = ctx.from!
 
   if (access.allowFrom.includes(senderId)) {
     const userTag = from.username ? `@${from.username}` : senderId
@@ -6386,6 +6412,10 @@ void (async () => {
       // Pre-fetch bot info (the runner doesn't expose an onStart callback
       // like bot.start does, so we have to call getMe ourselves).
       const me = await bot.api.getMe()
+      // Backport of upstream `7e401ed`: reset the backoff counter on
+      // successful poll-loop start so a transient mid-session failure
+      // doesn't combine with prior attempts to push delays past 15s.
+      attempt = 0
       botUsername = me.username
       process.stderr.write(`telegram channel: polling as @${me.username}\n`)
       if (TOPIC_ID != null) {
@@ -6619,20 +6649,28 @@ void (async () => {
       await runnerHandle.task()
       return // graceful stop
     } catch (err) {
-      if (err instanceof GrammyError && err.error_code === 409) {
-        const delay = Math.min(1000 * attempt, 15000)
-        const detail = attempt === 1
-          ? ' — another instance is polling (zombie session, or a second Claude Code running?)'
-          : ''
-        process.stderr.write(
-          `telegram channel: 409 Conflict${detail}, retrying in ${delay / 1000}s\n`,
-        )
-        await new Promise(r => setTimeout(r, delay))
-        continue
-      }
+      // Backport of upstream `7e401ed` (claude-plugins-official #1397):
+      // retry polling on ALL transient errors, not just 409. A single
+      // ETIMEDOUT / ECONNRESET / DNS failure used to fall through and
+      // `return`, ending the polling loop forever — the MCP process
+      // stayed alive (stdin keeps it running), outbound tools kept
+      // working, but the bot was deaf to inbound messages until a full
+      // restart. Now we retry with exponential-capped backoff like 409.
       if (err instanceof Error && err.message === 'Aborted delay') return
-      process.stderr.write(`telegram channel: polling failed: ${err}\n`)
-      return
+      const is409 = err instanceof GrammyError && err.error_code === 409
+      if (is409 && attempt >= 8) {
+        process.stderr.write(
+          `telegram channel: 409 Conflict persists after ${attempt} attempts — ` +
+          `another poller is holding the bot token (stray 'bun server.ts' process or a second session). Exiting.\n`,
+        )
+        return
+      }
+      const delay = Math.min(1000 * attempt, 15000)
+      const detail = is409
+        ? `409 Conflict${attempt === 1 ? ' — another instance is polling (zombie session, or a second Claude Code running?)' : ''}`
+        : `polling error: ${err}`
+      process.stderr.write(`telegram channel: ${detail}, retrying in ${delay / 1000}s\n`)
+      await new Promise(r => setTimeout(r, delay))
     }
   }
 })()

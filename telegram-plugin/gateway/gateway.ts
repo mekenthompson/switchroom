@@ -24,6 +24,7 @@ import { join, extname, sep, basename } from 'path'
 
 import { installPluginLogger } from '../plugin-logger.js'
 import { decideDmCommandGate } from '../dm-command-gate.js'
+import { redactAuthCodeMessage } from '../auth-code-redact.js'
 import { StatusReactionController } from '../status-reactions.js'
 import { isTelegramReplyTool, isTelegramSurfaceTool } from '../tool-names.js'
 import { createTypingWrapper } from '../typing-wrap.js'
@@ -1285,6 +1286,11 @@ const GATEWAY_STARTED_AT_MS = Date.now()
 // Boot card: feature flag (default on) + handle for unpinning on first turn
 const BOOT_CARD_ENABLED = process.env.SWITCHROOM_BOOT_CARD !== 'false'
 let activeBootCard: BootCardHandle | null = null
+// In-flight indicator for the boot card sendMessage. Set synchronously
+// at the start of an emission, cleared in finally. The bridge-reconnect
+// dedupe checks this so it can't race against the boot path's await.
+// See issue #489 (klanker msgId 4715 + 4716, 2026-05-01 10:13:15).
+let bootCardPending = false
 
 // Issues card (#428) — pinned per-agent surface listing current
 // unresolved entries from the issue sink (#425). Idempotent across
@@ -1416,12 +1422,12 @@ const ipcServer: IpcServer = createIpcServer({
     // card. The restart-marker carries the ack chat; if absent we fall back to
     // resolveBootChatId so crash-recovery reconnects also get a card.
     //
-    // Skip if the boot path already posted a card this lifetime — the boot
-    // path runs first (in the IIFE at end of file) and `activeBootCard` is
-    // set as soon as it succeeds. Without this guard, both paths fire on a
-    // single gateway start (observed: msgId 2245 + 2248 within 5s for klanker
-    // at 11:19:47 on 2026-04-26). See `shouldSkipDuplicateBootCard`.
-    const dedupeDecision = shouldSkipDuplicateBootCard({ activeBootCard }, 'bridge-reconnect')
+    // Skip if the boot path already posted a card OR is currently in-flight
+    // on its sendMessage await (issue #489 — klanker msgId 4715+4716,
+    // 2026-05-01). The original dedupe (msgId 2245+2248, 2026-04-26) only
+    // covered the post-resolution case; bootCardPending closes the in-flight
+    // race window. See `shouldSkipDuplicateBootCard`.
+    const dedupeDecision = shouldSkipDuplicateBootCard({ activeBootCard, bootCardPending }, 'bridge-reconnect')
     if (dedupeDecision.skip) {
       process.stderr.write(`telegram gateway: bridge-reconnect: skipping boot card (${dedupeDecision.reason})\n`)
     } else {
@@ -1452,6 +1458,10 @@ const ipcServer: IpcServer = createIpcServer({
             sendMessage: (cid, text, opts) => lockedBot.api.sendMessage(cid, text, opts as Parameters<typeof lockedBot.api.sendMessage>[2]) as Promise<{ message_id: number }>,
             editMessageText: (cid, mid, text, opts) => lockedBot.api.editMessageText(cid, mid, text, opts as Parameters<typeof lockedBot.api.editMessageText>[3]),
           }
+          // Symmetric to the boot path: claim ownership synchronously so a
+          // second bridge-reconnect in the same lifetime can't race against
+          // an in-flight sendMessage here either (#489).
+          bootCardPending = true
           startBootCard(chatId, threadId, botApiForCard, {
             agentName: agentDisplayName,
             agentSlug,
@@ -1464,6 +1474,8 @@ const ipcServer: IpcServer = createIpcServer({
             activeBootCard = handle
           }).catch((err: Error) => {
             process.stderr.write(`telegram gateway: bridge-reconnect: boot card error: ${err.message}\n`)
+          }).finally(() => {
+            bootCardPending = false
           })
         } else {
           const ageSec = markerAgeMs != null ? Math.max(1, Math.round(markerAgeMs / 1000)) : 0
@@ -3370,12 +3382,11 @@ async function handleInbound(
           await switchroomReply(ctx, formatted.text, { html: true })
         }
       }
-      if (msgId != null) {
-        void bot.api.deleteMessage(chat_id, msgId).catch(() => {})
-        void bot.api.setMessageReaction(chat_id, msgId, [
-          { type: 'emoji', emoji: '🔑' as ReactionTypeEmoji['emoji'] },
-        ]).catch(() => {})
-      }
+      // Redact the OAuth code paste from chat history (#488).
+      // Single-use code so a third party can't replay it after exchange,
+      // but plaintext OAuth tokens in chat history are still poor
+      // hygiene. The helper handles delete + 🔑 reaction silently.
+      redactAuthCodeMessage(bot.api, chat_id, msgId)
       return
     }
     pendingReauthFlows.delete(chat_id)
@@ -5296,6 +5307,8 @@ bot.command('auth', async ctx => {
       }
     }
     pendingReauthFlows.delete(String(ctx.chat!.id))
+    // Redact the OAuth code from chat history (#488).
+    redactAuthCodeMessage(bot.api, String(ctx.chat!.id), ctx.message?.message_id ?? null)
     return
   }
   if (intent.kind === 'cancel') {
@@ -6368,6 +6381,8 @@ bot.command('reauth', async ctx => {
       }
     }
     pendingReauthFlows.delete(chatId)
+    // Redact the OAuth code from chat history (#488).
+    redactAuthCodeMessage(bot.api, chatId, ctx.message?.message_id ?? null)
     return
   }
   // raw is treated as an agent name
@@ -7757,6 +7772,10 @@ void (async () => {
                   sendMessage: (cid, text, opts) => lockedBot.api.sendMessage(cid, text, opts as Parameters<typeof lockedBot.api.sendMessage>[2]) as Promise<{ message_id: number }>,
                   editMessageText: (cid, mid, text, opts) => lockedBot.api.editMessageText(cid, mid, text, opts as Parameters<typeof lockedBot.api.editMessageText>[3]),
                 }
+                // Claim emission ownership synchronously BEFORE the await so
+                // the bridge-reconnect dedupe (which can run during this
+                // sendMessage round-trip) sees an in-flight emit. See #489.
+                bootCardPending = true
                 try {
                   const handle = await startBootCard(chatId, threadId, botApiForCard, {
                     agentName: agentDisplayName,
@@ -7770,6 +7789,8 @@ void (async () => {
                   activeBootCard = handle
                 } catch (err) {
                   process.stderr.write(`telegram gateway: boot: boot card error: ${err}\n`)
+                } finally {
+                  bootCardPending = false
                 }
               } else {
                 const ageSec = markerAgeMs != null ? Math.max(1, Math.round(markerAgeMs / 1000)) : 0

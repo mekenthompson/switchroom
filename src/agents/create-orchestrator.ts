@@ -253,12 +253,20 @@ export async function createAgent(
   const schedule = agentConfig.schedule ?? [];
   if (schedule.length > 0) {
     await withRollback(() => {
-      installScheduleTimers(name, agentDir, schedule);
-      // Push timer rollback BEFORE enabling so partial installs are also cleaned up.
+      // #26 fix: push the timer-cleanup rollback entry BEFORE
+      // installScheduleTimers runs, not after. The previous order left a
+      // window where the loop inside installScheduleTimers could throw
+      // mid-write (e.g. ENOSPC after timer 0 written but before timer 1)
+      // and the rollback was never registered — orphan .timer + .service
+      // files for partially-written units stayed on disk forever. The
+      // rollback is idempotent (calls installScheduleTimers with empty
+      // schedule, which removes every timer file for this agent
+      // regardless of how many were written), so registering it before
+      // the work is safe.
       rollbackStack.push(() => {
-        // Uninstall timers by passing an empty schedule (removes all timer units).
         try { installScheduleTimers(name, agentDir, []); } catch { /* best effort */ }
       });
+      installScheduleTimers(name, agentDir, schedule);
       daemonReload();
       enableScheduleTimers(name, schedule.length);
     });

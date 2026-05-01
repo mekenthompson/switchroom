@@ -84,6 +84,7 @@ import {
   installUnit,
   uninstallUnit,
   resolveGatewayUnitName,
+  installScheduleTimers,
 } from "./systemd.js";
 import { startAuthSession, submitAuthCode } from "../auth/manager.js";
 import { startAgent } from "./lifecycle.js";
@@ -659,5 +660,60 @@ describe("createAgent + completeCreation end-to-end", () => {
 
     expect(completion.outcome.kind).toBe("success");
     expect(completion.started).toBe(true);
+  });
+
+  it("rolls back partially-installed timers when installScheduleTimers throws mid-loop (#26)", async () => {
+    // Pre-#26 fix: rollback was registered AFTER installScheduleTimers
+    // returned. If it threw mid-loop (e.g. ENOSPC after timer 0 but
+    // before timer 1), the rollback was never pushed and orphan
+    // .timer/.service files for the partial write stayed on disk
+    // forever. Post-fix: rollback is pushed BEFORE the call, so
+    // partial-failure cleanup also runs.
+    const agentDir = makeAgentDir();
+    vi.mocked(loadConfig).mockReturnValue({
+      agents: {
+        gymbro: {
+          extends: "health-coach",
+          channels: { telegram: { plugin: "switchroom" } },
+          schedule: [
+            { cron: "0 8 * * *", prompt: "Morning" },
+            { cron: "0 20 * * *", prompt: "Evening" },
+          ],
+        },
+      },
+      telegram: { bot_token: "stub", forum_chat_id: "-100111111111" },
+    } as any);
+
+    // Simulate: ScheduleTimers throws on first call (the one inside the
+    // forward path). The rollback path's invocation (with empty schedule)
+    // should still succeed.
+    let invocationCount = 0;
+    vi.mocked(installScheduleTimers).mockImplementation(
+      (_name: string, _dir: string, schedule: Array<unknown>) => {
+        invocationCount++;
+        // Forward call has the populated schedule; rollback call has [].
+        if (schedule.length > 0) {
+          throw new Error("ENOSPC: no space left on device");
+        }
+        // Rollback path — succeed.
+      },
+    );
+
+    await expect(
+      createAgent({
+        name: "gymbro",
+        profile: "health-coach",
+        telegramBotToken: "123:abc",
+        configPath: join(agentDir, "switchroom.yaml"),
+        rollbackOnFail: true,
+      }),
+    ).rejects.toThrow("ENOSPC");
+
+    // Rollback fired — the empty-schedule cleanup invocation was made.
+    // Pre-fix this would not have happened (the rollback was never registered).
+    expect(invocationCount).toBeGreaterThanOrEqual(2);
+    const calls = vi.mocked(installScheduleTimers).mock.calls;
+    const rollbackCall = calls.find((c) => Array.isArray(c[2]) && c[2].length === 0);
+    expect(rollbackCall).toBeDefined();
   });
 });

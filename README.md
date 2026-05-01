@@ -101,6 +101,18 @@ Switchroom is **not a harness**. Each agent runs the unmodified `claude` binary,
 
 Ubuntu 24.04 LTS, 4GB RAM. Linux only.
 
+### From inside Claude Code (the on-ramp)
+
+If you already use Claude Code, this is the shortest path. Inside any session:
+
+```
+/plugin marketplace add switchroom/switchroom
+/plugin install switchroom@switchroom
+/switchroom:setup
+```
+
+`/switchroom:setup` walks you through deps, `switchroom setup` (Telegram + vault + first agent), and `switchroom agent start`. Once it's done you have `/switchroom:start`, `/switchroom:stop`, and `/switchroom:status` for day-to-day. See [`docs/publishing.md`](docs/publishing.md).
+
 ### One-liner (fresh box)
 
 ```bash

@@ -11,7 +11,7 @@
     {
       "name": "switchroom",
       "source": "./",
-      "description": "Skills for operating switchroom: install, status, logs, config, restart, reconcile, schedule, health, architecture, and Telegram integration guidance.",
+      "description": "Slash commands and skills for operating switchroom — Phase 0 install on-ramp (/switchroom:setup), lifecycle (/switchroom:start, /switchroom:stop, /switchroom:status), plus skills for install, logs, config, restart, reconcile, schedule, health, and architecture.",
       "homepage": "https://github.com/mekenthompson/switchroom",
       "repository": "https://github.com/mekenthompson/switchroom",
       "license": "MIT",

@@ -7645,6 +7645,22 @@ void (async () => {
         didOneTimeSetup = true
         void registerSwitchroomBotCommands().catch(() => {})
 
+        // #412 boot-cleanup: clear any pre-existing turn-active marker.
+        // By definition no turn can be in flight when the gateway just
+        // started — any leftover marker is from a turn that never
+        // completed (gateway killed mid-turn, restart while waiting on
+        // a tool, etc). Without this, the watchdog reads the orphan
+        // mtime, sees age >= TURN_HANG_SECS, and restarts the agent —
+        // which kills the gateway mid-cleanup, leaving the marker
+        // again. Result: a 2-min flap loop.
+        //
+        // Safe vs the long-running background sub-agent case: this
+        // only runs at boot. A parent that's mid-flight with a
+        // background worker writes a fresh marker on its next
+        // tool_use (e.g. dispatching the worker), so the marker
+        // tracks the live turn from there.
+        try { removeTurnActiveMarker(STATE_DIR) } catch { /* best-effort */ }
+
         // Boot-time pin sweep
         try {
           const bootAccess = loadAccess()

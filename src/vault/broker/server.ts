@@ -32,6 +32,12 @@ import * as path from "node:path";
 import type { SwitchroomConfig } from "../../config/schema.js";
 import { openVault, type VaultEntry } from "../vault.js";
 import { resolvePath } from "../../config/loader.js";
+import {
+  AutoUnlockDecryptError,
+  DEFAULT_AUTO_UNLOCK_PATH,
+  MachineIdUnavailableError,
+  readAutoUnlockFile,
+} from "../auto-unlock.js";
 import { identify, type PeerInfo } from "./peercred.js";
 import { checkAcl, checkEntryScope, agentSlugFromPeer, parseCronUnit } from "./acl.js";
 import {
@@ -222,9 +228,11 @@ export class VaultBroker {
     // Notify systemd if NOTIFY_SOCKET is set
     this._sdNotify("READY=1\n");
 
-    // Auto-unlock from $CREDENTIALS_DIRECTORY if the credential was injected
-    // by systemd LoadCredentialEncrypted= (opt-in via vault.broker.autoUnlock).
-    this._tryAutoUnlockFromCredentials();
+    // Auto-unlock if configured. Tries the machine-bound blob first (the
+    // default mechanism, opt-in via vault.broker.autoUnlock=true), then
+    // falls back to $CREDENTIALS_DIRECTORY for power users running the
+    // broker as a system unit with systemd LoadCredentialEncrypted=.
+    this._tryAutoUnlock();
 
     if (process.platform !== "linux") {
       // Reachable only when SWITCHROOM_BROKER_ALLOW_NON_LINUX=1 was set
@@ -1084,12 +1092,79 @@ export class VaultBroker {
   }
 
   /**
-   * Attempt to auto-unlock from $CREDENTIALS_DIRECTORY/vault-passphrase.
-   * Called once at startup after sd_notify READY=1. Any failure is non-fatal —
-   * the broker stays alive and interactive unlock via the unlock socket remains
-   * available as a fallback.
+   * Attempt to auto-unlock the vault at start. Called once after the sockets
+   * are bound and sd_notify READY=1 has fired. Any failure is non-fatal —
+   * the broker stays running and the user can unlock interactively.
+   *
+   * Sources, in order:
+   *   1. The machine-bound auto-unlock blob written by
+   *      `switchroom vault broker enable-auto-unlock` — default at
+   *      ~/.config/switchroom/auto-unlock.bin (configurable via
+   *      vault.broker.autoUnlockCredentialPath).
+   *   2. `$CREDENTIALS_DIRECTORY/vault-passphrase` — for power users who
+   *      installed the broker as a system unit with systemd
+   *      LoadCredentialEncrypted=. We don't ship that mode by default but
+   *      the read path stays cheap so power users aren't blocked.
    */
-  private _tryAutoUnlockFromCredentials(): void {
+  private _tryAutoUnlock(): void {
+    if (this._tryAutoUnlockFromMachineBoundFile()) return;
+    this._tryAutoUnlockFromSystemdCredentials();
+  }
+
+  /**
+   * Read ~/.config/switchroom/auto-unlock.bin (or configured path), decrypt
+   * with the key derived from /etc/machine-id + the per-file salt, push the
+   * passphrase into unlockFromPassphrase. Returns true if we attempted —
+   * regardless of success — so the caller knows whether to try other paths.
+   *
+   * Returns false only when auto-unlock is not configured (file path absent).
+   */
+  private _tryAutoUnlockFromMachineBoundFile(): boolean {
+    const configuredPath =
+      this.config?.vault?.broker?.autoUnlockCredentialPath ?? DEFAULT_AUTO_UNLOCK_PATH;
+    const filePath = resolvePath(configuredPath);
+    if (!existsSync(filePath)) return false;
+
+    let passphrase: string;
+    try {
+      passphrase = readAutoUnlockFile(filePath);
+    } catch (err) {
+      if (err instanceof AutoUnlockDecryptError) {
+        process.stderr.write(
+          `[vault-broker] auto-unlock decrypt failed (${err.reason}): ${err.message}\n` +
+          `[vault-broker] staying locked; use \`switchroom vault broker unlock\` interactively\n`,
+        );
+      } else if (err instanceof MachineIdUnavailableError) {
+        process.stderr.write(
+          `[vault-broker] auto-unlock unavailable: ${err.message}\n`,
+        );
+      } else {
+        process.stderr.write(
+          `[vault-broker] auto-unlock read failed: ${(err as Error).message}\n`,
+        );
+      }
+      return true; // we attempted; don't fall through to systemd-creds path
+    }
+    try {
+      this.unlockFromPassphrase(passphrase);
+      process.stderr.write(`[vault-broker] auto-unlocked from ${filePath}\n`);
+    } catch (err) {
+      process.stderr.write(
+        `[vault-broker] auto-unlock applied passphrase but vault rejected it: ` +
+        `${(err as Error).message}; staying locked\n`,
+      );
+    }
+    passphrase = "";
+    return true;
+  }
+
+  /**
+   * Compat path: when run as a system unit with `LoadCredentialEncrypted=`,
+   * systemd materializes the decrypted credential at
+   * `$CREDENTIALS_DIRECTORY/vault-passphrase`. Power users opting into that
+   * setup get the same auto-unlock semantics with no further config.
+   */
+  private _tryAutoUnlockFromSystemdCredentials(): void {
     const dir = process.env.CREDENTIALS_DIRECTORY;
     if (!dir) return;
     const credPath = `${dir}/vault-passphrase`;
@@ -1101,28 +1176,27 @@ export class VaultBroker {
       if (code === "ENOENT") {
         process.stderr.write(
           `[vault-broker] note: CREDENTIALS_DIRECTORY set but vault-passphrase ` +
-          `not present; staying locked\n`
+          `not present; staying locked\n`,
         );
         return;
       }
       process.stderr.write(
         `[vault-broker] auto-unlock read failed: ${(err as Error).message}; ` +
-        `falling back to interactive\n`
+        `falling back to interactive\n`,
       );
       return;
     }
     try {
       this.unlockFromPassphrase(passphrase);
       process.stderr.write(
-        `[vault-broker] auto-unlocked from $CREDENTIALS_DIRECTORY/vault-passphrase\n`
+        `[vault-broker] auto-unlocked from $CREDENTIALS_DIRECTORY/vault-passphrase\n`,
       );
     } catch (err) {
       process.stderr.write(
         `[vault-broker] auto-unlock failed: ${(err as Error).message}; ` +
-        `falling back to interactive\n`
+        `falling back to interactive\n`,
       );
     }
-    // Drop the local reference. (Cannot guarantee GC, but no other ref retained.)
     passphrase = "";
   }
 

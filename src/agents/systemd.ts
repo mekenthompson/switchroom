@@ -438,24 +438,12 @@ export function installAllUnits(config: SwitchroomConfig): void {
   if (wantBroker) {
     const homeDir = process.env.HOME ?? "/root";
     const bunBinDir = resolve(homeDir, ".bun", "bin");
-    const brokerAutoUnlock = config.vault?.broker?.autoUnlock ?? false;
-    let autoUnlockOpt: { credentialPath: string } | undefined;
-    if (brokerAutoUnlock) {
-      const rawCredPath =
-        config.vault?.broker?.autoUnlockCredentialPath ??
-        "~/.config/credstore.encrypted/vault-passphrase";
-      const credPath = resolvePath(rawCredPath);
-      if (existsSync(credPath)) {
-        autoUnlockOpt = { credentialPath: credPath };
-      } else {
-        process.stderr.write(
-          `[switchroom] note: vault.broker.autoUnlock=true but credential file ` +
-          `is missing at ${credPath}; broker will start in interactive mode. ` +
-          `Run \`switchroom vault broker enable-auto-unlock\` to set up.\n`
-        );
-      }
-    }
-    const brokerContent = generateBrokerUnit({ homeDir, bunBinDir, autoUnlock: autoUnlockOpt });
+    // Auto-unlock is now done by the broker process itself reading
+    // ~/.config/switchroom/auto-unlock.bin (machine-bound, AES-GCM). The
+    // unit template no longer needs LoadCredentialEncrypted= for the default
+    // path — that's reserved for power users running the broker as a system
+    // unit (option A in issue #540), opted into explicitly via a future flag.
+    const brokerContent = generateBrokerUnit({ homeDir, bunBinDir });
     installUnit("vault-broker", brokerContent);
     // installedAgents holds the OS unit name (with the `switchroom-` prefix
     // that systemctl needs).
@@ -768,10 +756,12 @@ export interface BrokerUnitOpts {
   bunBinDir: string;
   /**
    * When present, appends `LoadCredentialEncrypted=vault-passphrase:<path>`
-   * to the [Service] block so systemd decrypts the credential at start and
-   * injects it via $CREDENTIALS_DIRECTORY. The broker reads the file at
-   * `$CREDENTIALS_DIRECTORY/vault-passphrase` and calls unlockFromPassphrase()
-   * automatically.
+   * to the [Service] block. Reserved for the system-unit deployment mode
+   * (issue #540) where the broker runs as root and systemd materializes the
+   * credential via its own keystore. The default user-unit deployment uses
+   * the broker's machine-bound auto-unlock (see src/vault/auto-unlock.ts)
+   * and does NOT pass this option — the broker reads + decrypts the blob
+   * itself with no systemd-creds plumbing.
    */
   autoUnlock?: { credentialPath: string };
 }

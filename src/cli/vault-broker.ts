@@ -31,9 +31,8 @@ import { VaultBroker, registerShutdownHandlers } from "../vault/broker/server.js
 import { openVault } from "../vault/vault.js";
 import {
   applyAutoUnlock,
-  detectSystemdCreds,
+  autoUnlockSupported,
   encryptCredential,
-  EncryptCancelledError,
   EncryptFailedError,
 } from "./vault-auto-unlock.js";
 
@@ -337,15 +336,11 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
       const apply = opts.apply !== false;
       const parentOpts = program.opts();
 
-      if (process.platform !== "linux") {
-        console.error("enable-auto-unlock requires Linux (systemd-creds is Linux-only).");
-        process.exit(1);
-      }
-
-      if (!detectSystemdCreds()) {
+      if (!autoUnlockSupported()) {
         console.error(
-          "systemd-creds not found on PATH. Requires systemd >= 250. " +
-          "Try: sudo apt install systemd",
+          "Auto-unlock requires a readable /etc/machine-id (or " +
+          "/var/lib/dbus/machine-id). On a fresh install, run " +
+          "`sudo systemd-machine-id-setup` once and try again.",
         );
         process.exit(1);
       }
@@ -363,7 +358,6 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
         return; // unreachable; satisfies TS narrowing
       }
 
-      let scope: string;
       try {
         try {
           openVault(passphrase, vaultPath);
@@ -375,10 +369,10 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
         }
 
         try {
-          scope = await encryptCredential(passphrase, credPath);
+          encryptCredential(passphrase, credPath);
         } catch (err) {
-          // encryptCredential prints its own diagnostics; we just need to exit.
-          if (err instanceof EncryptCancelledError || err instanceof EncryptFailedError) {
+          if (err instanceof EncryptFailedError) {
+            console.error(err.message);
             process.exit(1);
           }
           throw err;
@@ -387,14 +381,13 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
         passphrase = "";
       }
 
-      console.log(`✓ Auto-unlock credential written to ${credPath} (scope: ${scope!})`);
+      console.log(`✓ Auto-unlock blob written to ${credPath} (machine-bound)`);
 
       if (!apply) {
         console.log("");
         console.log("Staged only (--no-apply). To activate:");
         console.log("  1. Set vault.broker.autoUnlock: true in switchroom.yaml");
-        console.log("  2. switchroom reconcile        # re-renders the broker unit");
-        console.log("  3. systemctl --user restart switchroom-vault-broker.service");
+        console.log("  2. systemctl --user restart switchroom-vault-broker.service");
         return;
       }
 

@@ -49,14 +49,38 @@ function setupAgentDir(): { agentDir: string } {
   const root = mkdtempSync(join(tmpdir(), "agent-add-"));
   const agentDir = join(root, "agent");
   mkdirSync(join(agentDir, "telegram"), { recursive: true });
+  mkdirSync(join(agentDir, ".claude"), { recursive: true });
   // pretend the bot token landed
   writeFileSync(join(agentDir, "telegram", ".env"), "TELEGRAM_BOT_TOKEN=fake:token\n");
+  // stub MCP servers in settings.json so runFinalPreflight's MCP check passes by default
+  writeFileSync(
+    join(agentDir, ".claude", "settings.json"),
+    JSON.stringify({
+      mcpServers: {
+        hindsight: { type: "http", url: "http://localhost:18888/mcp/" },
+        "switchroom-telegram": { type: "stdio", command: "bun" },
+      },
+    }),
+  );
   // stub a unit file under a fake $HOME so runFinalPreflight finds it
   const fakeHome = mkdtempSync(join(tmpdir(), "agent-add-home-"));
   process.env.HOME = fakeHome;
   const unitDir = join(fakeHome, ".config/systemd/user");
   mkdirSync(unitDir, { recursive: true });
   return { agentDir };
+}
+
+function writeStubConfig(opts: { agentName: string; botToken: string }): string {
+  const root = mkdtempSync(join(tmpdir(), "agent-add-cfg-"));
+  const cfgPath = join(root, "switchroom.yaml");
+  const yamlBody =
+    `agents:\n` +
+    `  ${opts.agentName}:\n` +
+    `    channels:\n` +
+    `      telegram:\n` +
+    `        bot_token: ${opts.botToken}\n`;
+  writeFileSync(cfgPath, yamlBody);
+  return cfgPath;
 }
 
 beforeEach(() => {
@@ -266,7 +290,7 @@ describe("runFinalPreflight", () => {
     expect(report.accessJsonAllowFrom.detail).toMatch(/does not contain 999/);
   });
 
-  it("returns ok when all four checks pass", () => {
+  it("returns ok when all six checks pass", () => {
     const { agentDir } = setupAgentDir();
     writeFileSync(
       join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
@@ -286,6 +310,138 @@ describe("runFinalPreflight", () => {
     expect(report.botTokenPresent.ok).toBe(true);
     expect(report.systemdActive.ok).toBe(true);
     expect(report.accessJsonAllowFrom.ok).toBe(true);
+    expect(report.mcpServersConfigured.ok).toBe(true);
+    expect(report.vaultBotTokenManaged.ok).toBe(true);
+  });
+
+  it("flags missing .claude/settings.json (MCP servers absent)", () => {
+    const { agentDir } = setupAgentDir();
+    // Remove settings.json that setupAgentDir created
+    const fs = require("node:fs") as typeof import("node:fs");
+    fs.rmSync(join(agentDir, ".claude", "settings.json"));
+    writeFileSync(
+      join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
+      "[Unit]\nExecStart=expect ...\n",
+    );
+    writeFileSync(
+      join(agentDir, "telegram", "access.json"),
+      JSON.stringify({ allowFrom: ["1"] }),
+    );
+    const report = runFinalPreflight({
+      name: "bot",
+      agentDir,
+      expectedUserId: "1",
+      isUnitActive: () => true,
+    });
+    expect(report.mcpServersConfigured.ok).toBe(false);
+    expect(report.mcpServersConfigured.detail).toMatch(/settings\.json missing/);
+    expect(report.mcpServersConfigured.detail).toMatch(/reconcile bot/);
+  });
+
+  it("flags empty mcpServers block in settings.json", () => {
+    const { agentDir } = setupAgentDir();
+    writeFileSync(
+      join(agentDir, ".claude", "settings.json"),
+      JSON.stringify({ mcpServers: {} }),
+    );
+    writeFileSync(
+      join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
+      "[Unit]\nExecStart=expect ...\n",
+    );
+    const report = runFinalPreflight({
+      name: "bot",
+      agentDir,
+      expectedUserId: "1",
+      isUnitActive: () => true,
+    });
+    expect(report.mcpServersConfigured.ok).toBe(false);
+    expect(report.mcpServersConfigured.detail).toMatch(/no mcpServers block|will not load/);
+  });
+
+  it("flags plaintext bot_token in switchroom.yaml", () => {
+    const { agentDir } = setupAgentDir();
+    writeFileSync(
+      join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
+      "[Unit]\nExecStart=expect ...\n",
+    );
+    writeFileSync(
+      join(agentDir, "telegram", "access.json"),
+      JSON.stringify({ allowFrom: ["1"] }),
+    );
+    const cfgPath = writeStubConfig({ agentName: "bot", botToken: "12345:plaintext_token" });
+    const report = runFinalPreflight({
+      name: "bot",
+      agentDir,
+      expectedUserId: "1",
+      isUnitActive: () => true,
+      configPath: cfgPath,
+    });
+    expect(report.vaultBotTokenManaged.ok).toBe(false);
+    expect(report.vaultBotTokenManaged.detail).toMatch(/plaintext/);
+    expect(report.vaultBotTokenManaged.detail).toMatch(/vault:\/\/bot\.bot_token/);
+  });
+
+  it("accepts vault:// reference for bot_token", () => {
+    const { agentDir } = setupAgentDir();
+    writeFileSync(
+      join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
+      "[Unit]\nExecStart=expect ...\n",
+    );
+    writeFileSync(
+      join(agentDir, "telegram", "access.json"),
+      JSON.stringify({ allowFrom: ["1"] }),
+    );
+    const cfgPath = writeStubConfig({ agentName: "bot", botToken: "vault://bot.bot_token" });
+    const report = runFinalPreflight({
+      name: "bot",
+      agentDir,
+      expectedUserId: "1",
+      isUnitActive: () => true,
+      configPath: cfgPath,
+    });
+    expect(report.vaultBotTokenManaged.ok).toBe(true);
+    expect(report.vaultBotTokenManaged.detail).toMatch(/vault:\/\/bot\.bot_token/);
+  });
+
+  it("vaultBotTokenManaged is skipped when no configPath supplied", () => {
+    const { agentDir } = setupAgentDir();
+    writeFileSync(
+      join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
+      "[Unit]\nExecStart=expect ...\n",
+    );
+    writeFileSync(
+      join(agentDir, "telegram", "access.json"),
+      JSON.stringify({ allowFrom: ["1"] }),
+    );
+    const report = runFinalPreflight({
+      name: "bot",
+      agentDir,
+      expectedUserId: "1",
+      isUnitActive: () => true,
+    });
+    expect(report.vaultBotTokenManaged.ok).toBe(true);
+    expect(report.vaultBotTokenManaged.detail).toMatch(/skipped/);
+  });
+
+  it("flags missing switchroom.yaml when configPath given but file absent", () => {
+    const { agentDir } = setupAgentDir();
+    writeFileSync(
+      join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
+      "[Unit]\nExecStart=expect ...\n",
+    );
+    writeFileSync(
+      join(agentDir, "telegram", "access.json"),
+      JSON.stringify({ allowFrom: ["1"] }),
+    );
+    const report = runFinalPreflight({
+      name: "bot",
+      agentDir,
+      expectedUserId: "1",
+      isUnitActive: () => true,
+      configPath: "/no/such/switchroom.yaml",
+    });
+    expect(report.vaultBotTokenManaged.ok).toBe(false);
+    expect(report.vaultBotTokenManaged.detail).toMatch(/not found/);
   });
 
   it("flags inactive systemd unit with actionable detail", () => {

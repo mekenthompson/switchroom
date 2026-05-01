@@ -27,7 +27,7 @@ export const PLACEHOLDER_TEXT_MAX_LEN = 200
 /** Outcome enum for tests + observability. */
 export type UpdatePlaceholderOutcome =
   | { kind: 'edited'; chatId: string; draftId: number; text: string }
-  | { kind: 'skipped'; reason: 'no-draft-api' | 'no-draft-for-chat' | 'empty-text' }
+  | { kind: 'skipped'; reason: 'no-draft-api' | 'no-draft-for-chat' | 'empty-text' | 'draft-consumed' }
   | { kind: 'edit-failed'; chatId: string; draftId: number; error: Error }
 
 /**
@@ -38,6 +38,23 @@ export type UpdatePlaceholderOutcome =
 export interface PreAllocatedDraftEntry {
   draftId: number
   allocatedAt: number
+  /**
+   * Optional flag set by gateway.ts during the small window between
+   * allocateDraftId() and the sendMessageDraft API resolving. The
+   * handler treats apiPending entries as valid — Telegram serializes
+   * ops by draftId, so an edit racing the initial post is sequenced
+   * safely on the server side. Closes #472 finding #8.
+   */
+  apiPending?: boolean
+  /**
+   * Optional flag set by executeReply / executeStreamReply once the
+   * draft has been handed off to the agent's reply path. The handler
+   * MUST bail (kind: 'skipped', reason: 'draft-consumed') when set —
+   * otherwise a hook update_placeholder racing the consume can leave
+   * a stale "thinking" overlay visible alongside the agent's reply.
+   * Closes #472 finding #9.
+   */
+  consumed?: boolean
 }
 
 export interface UpdatePlaceholderInput {
@@ -87,6 +104,17 @@ export function handleUpdatePlaceholder(
   const preAllocated = preAllocatedDrafts.get(msg.chatId)
   if (preAllocated == null) {
     const result: UpdatePlaceholderOutcome = { kind: 'skipped', reason: 'no-draft-for-chat' }
+    onResult?.(result)
+    return result
+  }
+
+  // Closes #472 finding #9 — the consume sites in gateway.ts mark the
+  // entry consumed instead of deleting it, precisely so this race-window
+  // can be detected. An update_placeholder edit landing AFTER the agent's
+  // reply has cleared the draft would resurrect "📚 recalling" text under
+  // the just-sent reply.
+  if (preAllocated.consumed === true) {
+    const result: UpdatePlaceholderOutcome = { kind: 'skipped', reason: 'draft-consumed' }
     onResult?.(result)
     return result
   }

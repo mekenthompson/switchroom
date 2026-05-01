@@ -569,43 +569,82 @@ function syncGlobalSkills(
  * Symlink every switchroom-* skill from the switchroom project's built-in skills/
  * directory into <agentDir>/.claude/skills/<name>.
  *
- * This runs unconditionally on every scaffold/reconcile so all agents
- * automatically get the management skills (switchroom-cli, switchroom-health,
- * etc.) without needing to list them in switchroom.yaml.
+ * **Role gate (#235 follow-up).** Only `role: "foreman"` agents get
+ * the bundled operator skills. Default-role assistants are fleet
+ * agents doing user-facing tasks; loading switchroom-manage / install
+ * / health into their tool list adds cognitive overhead per turn for
+ * no benefit (they never call these skills). For non-foreman roles
+ * this function actively REMOVES any pre-existing operator skill
+ * symlinks (idempotent retraction) so a role flip foreman → assistant
+ * cleans up correctly on the next reconcile.
  *
  * Rules:
  *   - Only directories that start with "switchroom-" and contain a SKILL.md
- *     file are linked.
+ *     file are linked (when installing).
  *   - The destination .claude/skills/ directory is created if absent.
- *   - Existing entries at the destination are left untouched (idempotent).
+ *   - Existing entries at the destination are left untouched on install
+ *     (idempotent symlink refresh; pre-existing real dirs/files preserved).
+ *   - On retraction, only switchroom-installed symlinks are removed —
+ *     never real dirs/files (operator may have placed those manually).
  */
-export function installSwitchroomSkills(agentDir: string): void {
+export function installSwitchroomSkills(
+  agentDir: string,
+  opts: { role?: "assistant" | "foreman" } = {},
+): void {
   const builtinSkillsDir = resolve(import.meta.dirname, "../../skills");
   if (!existsSync(builtinSkillsDir)) return;
 
   const targetDir = join(agentDir, ".claude", "skills");
   mkdirSync(targetDir, { recursive: true });
 
+  // Discover the universe of switchroom-* skills upfront so the same
+  // list drives both install and retract paths.
   let entries: string[];
   try {
     entries = readdirSync(builtinSkillsDir);
   } catch {
     return;
   }
-
-  for (const name of entries) {
-    if (!name.startsWith("switchroom-")) continue;
+  const switchroomSkillNames = entries.filter((name) => {
+    if (!name.startsWith("switchroom-")) return false;
     const src = join(builtinSkillsDir, name);
-    // Only link directories that contain SKILL.md
-    let srcStat;
     try {
-      srcStat = lstatSync(src);
+      const st = lstatSync(src);
+      return st.isDirectory() && existsSync(join(src, "SKILL.md"));
     } catch {
-      continue;
+      return false;
     }
-    if (!srcStat.isDirectory()) continue;
-    if (!existsSync(join(src, "SKILL.md"))) continue;
+  });
 
+  // Role gate: only foreman agents get the operator skills auto-installed.
+  // For other roles, retract any pre-existing symlinks (idempotent).
+  if (opts.role !== "foreman") {
+    for (const name of switchroomSkillNames) {
+      const dest = join(targetDir, name);
+      let existing;
+      try {
+        existing = lstatSync(dest);
+      } catch {
+        continue; // nothing to retract
+      }
+      // Only remove symlinks we plausibly installed. Don't touch real
+      // dirs or files the operator placed there manually.
+      if (!existing.isSymbolicLink()) continue;
+      let currentTarget: string | null = null;
+      try {
+        currentTarget = readlinkSync(dest);
+      } catch { /* unreadable — assume foreign, leave alone */ }
+      if (currentTarget !== join(builtinSkillsDir, name)) continue;
+      try {
+        rmSync(dest, { force: true });
+      } catch { /* best effort */ }
+    }
+    return;
+  }
+
+  // Foreman path: install (or refresh stale) symlinks for each skill.
+  for (const name of switchroomSkillNames) {
+    const src = join(builtinSkillsDir, name);
     const dest = join(targetDir, name);
     // Idempotent: leave correctly-pointing symlinks and real dirs alone.
     // But refresh stale symlinks whose target is a different switchroom-
@@ -1878,7 +1917,10 @@ export function scaffoldAgent(
   }
 
   // --- Install built-in switchroom-* skills into .claude/skills/ ---
-  installSwitchroomSkills(agentDir);
+  // Role-gated (#235 follow-up): only foreman agents get the operator
+  // skills auto-symlinked. Default `assistant` role retracts any stale
+  // ones that may exist from before this gate landed.
+  installSwitchroomSkills(agentDir, { role: agentConfig.role });
 
   // --- Set up plugin symlinks ---
   setupPlugins(agentDir, usesSwitchroomTelegramPlugin(agentConfig));
@@ -2993,7 +3035,10 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
   }
 
   // --- Install built-in switchroom-* skills into .claude/skills/ ---
-  installSwitchroomSkills(agentDir);
+  // Role-gated (#235 follow-up). Reconcile honors role flips both
+  // ways: assistant → foreman installs the symlinks; foreman →
+  // assistant retracts them.
+  installSwitchroomSkills(agentDir, { role: agentConfig.role });
 
   // --- Reconcile .mcp.json (switchroom-telegram plugin agents only) ---
   if (usesSwitchroomTelegramPlugin(agentConfig)) {

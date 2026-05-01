@@ -3435,13 +3435,13 @@ describe("installSwitchroomSkills", () => {
     expect(existsSync(join(freshAgentDir, ".claude", "skills", "switchroom-manage"))).toBe(true);
   });
 
-  it("scaffoldAgent installs switchroom skills into .claude/skills/ automatically", () => {
+  it("scaffoldAgent installs switchroom skills when role: foreman (#235 follow-up)", () => {
     // The real installSwitchroomSkills resolves to the project's skills/ directory.
     // Verify that after scaffoldAgent the .claude/skills directory exists and
-    // contains at least one switchroom-* symlink (assuming the real skills/ is present).
+    // contains at least one switchroom-* symlink for foreman-role agents.
     const result = scaffoldAgent(
-      "auto-skills-agent",
-      makeAgentConfig(),
+      "auto-skills-foreman",
+      makeAgentConfig({ role: "foreman" }),
       tmpDir,
       telegramConfig,
     );
@@ -3453,25 +3453,65 @@ describe("installSwitchroomSkills", () => {
     expect(switchroomEntries.length).toBeGreaterThan(0);
   });
 
-  it("reconcileAgent installs switchroom skills into .claude/skills/ automatically", () => {
-    const agentConfig = makeAgentConfig();
+  it("scaffoldAgent does NOT install switchroom skills for default-role assistant agents", () => {
+    // Role gate: assistant agents (the default) get no operator skills.
+    // The .claude/skills/ directory still gets created (other skill paths
+    // may use it), but no switchroom-* entries should land there.
+    const result = scaffoldAgent(
+      "auto-skills-assistant",
+      makeAgentConfig(),
+      tmpDir,
+      telegramConfig,
+    );
+    const claudeSkillsDir = join(result.agentDir, ".claude", "skills");
+    expect(existsSync(claudeSkillsDir)).toBe(true);
+    const entries = require("node:fs").readdirSync(claudeSkillsDir) as string[];
+    const switchroomEntries = entries.filter((e: string) => e.startsWith("switchroom-"));
+    expect(switchroomEntries).toEqual([]);
+  });
+
+  it("reconcileAgent installs switchroom skills when role: foreman", () => {
+    const agentConfig = makeAgentConfig({ role: "foreman" });
     const switchroomConfig: SwitchroomConfig = {
       switchroom: { version: 1, agents_dir: tmpDir },
       telegram: telegramConfig,
-      agents: { "rec-skills": agentConfig },
+      agents: { "rec-skills-foreman": agentConfig },
     } as SwitchroomConfig;
 
-    scaffoldAgent("rec-skills", agentConfig, tmpDir, telegramConfig, switchroomConfig);
+    scaffoldAgent("rec-skills-foreman", agentConfig, tmpDir, telegramConfig, switchroomConfig);
     // Remove .claude/skills to simulate a fresh state
-    rmSync(join(tmpDir, "rec-skills", ".claude", "skills"), { recursive: true, force: true });
+    rmSync(join(tmpDir, "rec-skills-foreman", ".claude", "skills"), { recursive: true, force: true });
 
-    reconcileAgent("rec-skills", agentConfig, tmpDir, telegramConfig, switchroomConfig);
+    reconcileAgent("rec-skills-foreman", agentConfig, tmpDir, telegramConfig, switchroomConfig);
 
-    const claudeSkillsDir = join(tmpDir, "rec-skills", ".claude", "skills");
+    const claudeSkillsDir = join(tmpDir, "rec-skills-foreman", ".claude", "skills");
     expect(existsSync(claudeSkillsDir)).toBe(true);
     const entries = require("node:fs").readdirSync(claudeSkillsDir) as string[];
     const switchroomEntries = entries.filter((e: string) => e.startsWith("switchroom-"));
     expect(switchroomEntries.length).toBeGreaterThan(0);
+  });
+
+  it("reconcileAgent retracts switchroom skills when role flips foreman → assistant", () => {
+    // Setup: scaffold as foreman, confirm operator skills present.
+    const foremanCfg = makeAgentConfig({ role: "foreman" });
+    const switchroomConfig: SwitchroomConfig = {
+      switchroom: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      agents: { "role-flip": foremanCfg },
+    } as SwitchroomConfig;
+    scaffoldAgent("role-flip", foremanCfg, tmpDir, telegramConfig, switchroomConfig);
+    const claudeSkillsDir = join(tmpDir, "role-flip", ".claude", "skills");
+    let entries = require("node:fs").readdirSync(claudeSkillsDir) as string[];
+    expect(entries.filter((e: string) => e.startsWith("switchroom-")).length).toBeGreaterThan(0);
+
+    // Flip role to assistant and reconcile — operator skills should retract.
+    const assistantCfg = makeAgentConfig(); // role omitted = assistant default
+    reconcileAgent("role-flip", assistantCfg, tmpDir, telegramConfig, {
+      ...switchroomConfig,
+      agents: { "role-flip": assistantCfg },
+    } as SwitchroomConfig);
+    entries = require("node:fs").readdirSync(claudeSkillsDir) as string[];
+    expect(entries.filter((e: string) => e.startsWith("switchroom-"))).toEqual([]);
   });
 });
 

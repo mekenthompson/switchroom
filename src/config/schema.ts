@@ -712,6 +712,17 @@ export const AgentSchema = z.object({
     .string()
     .optional()
     .describe("Emoji for the topic (e.g., '🏋️')"),
+  role: z
+    .enum(["assistant", "foreman"])
+    .optional()
+    .describe(
+      "Agent role. Default (omitted) is `assistant` — a fleet agent doing " +
+      "user-facing tasks. `foreman` opts the agent in to switchroom's bundled " +
+      "operator skills (switchroom-architecture / cli / health / install / manage " +
+      "/ status), auto-symlinked into the agent's .claude/skills/ on scaffold and " +
+      "reconcile. Fleet agents (assistant role) get no operator skills; reconcile " +
+      "actively retracts them if the role flips back. See docs/skills.md for the model.",
+    ),
   topic_id: z
     .number()
     .optional()

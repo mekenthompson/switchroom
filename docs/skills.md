@@ -20,9 +20,23 @@ Different populations answer different questions:
 - "What does a *developer* working on switchroom need?" → bundled developer skills (read in dev contexts, not auto-injected into fleet agents)
 - "What does *this user's* fleet need beyond the defaults?" → user-managed personal skills
 
-## ⚠️ Known issue: `switchroom-*` skills auto-install into every agent
+## Foreman opt-in for bundled `switchroom-*` skills
 
-`installSwitchroomSkills()` blindly symlinks every `<repo>/skills/switchroom-*/` directory into every agent's `.claude/skills/`. The current set is:
+The 6 bundled `switchroom-*` operator skills are role-gated — only agents with `role: "foreman"` in their config get them auto-symlinked into `.claude/skills/`. Default `assistant` role (the implicit default for fleet agents) gets none of them.
+
+```yaml
+agents:
+  clerk:
+    topic_name: "General"
+    # role omitted → assistant → no operator skills auto-installed
+  foreman:
+    topic_name: "Fleet manager"
+    role: foreman   # → operator skills auto-installed
+```
+
+Reconcile honors role flips both ways: `assistant → foreman` installs the symlinks, `foreman → assistant` retracts them (only switchroom-installed symlinks; never real dirs the operator placed manually).
+
+The 6 bundled operator skills:
 
 - `switchroom-architecture` — explains how switchroom works internally
 - `switchroom-cli` — runs CLI operations
@@ -31,9 +45,7 @@ Different populations answer different questions:
 - `switchroom-manage` — manage the fleet
 - `switchroom-status` — show running agents
 
-These are operator/foreman skills — they make sense for an agent that *manages other agents* (e.g. a foreman bot, a developer agent) but not for a fleet agent like `clerk` doing user-facing tasks. A fleet agent never needs to call `switchroom-install` or `switchroom-manage`, so injecting them adds cognitive overhead per turn for no benefit.
-
-**Tracking issue:** the auto-install logic should be opt-in (e.g. via `agent.role: "foreman"` or `defaults.skills_auto: ["switchroom-*"]`). Until that lands, every fleet agent carries the operator skills as dead weight.
+A fleet agent like `clerk` doing user-facing tasks never needs to call `switchroom-install` or `switchroom-manage`, so the assistant default keeps their tool list focused. A foreman bot or developer agent (`role: foreman`) gets the operator surface for free.
 
 ## What gets bundled vs what doesn't
 
@@ -41,12 +53,12 @@ Current `<repo>/skills/` inventory:
 
 | Skill | Population | Notes |
 |---|---|---|
-| `switchroom-architecture` | fleet (auto) | Operator skill — see issue above |
-| `switchroom-cli` | fleet (auto) | Operator skill — see issue above |
-| `switchroom-health` | fleet (auto) | Operator skill — see issue above |
-| `switchroom-install` | fleet (auto) | Operator skill — see issue above |
-| `switchroom-manage` | fleet (auto) | Operator skill — see issue above |
-| `switchroom-status` | fleet (auto) | Operator skill — see issue above |
+| `switchroom-architecture` | foreman-only (auto when `role: foreman`) | Operator skill |
+| `switchroom-cli` | foreman-only (auto when `role: foreman`) | Operator skill |
+| `switchroom-health` | foreman-only (auto when `role: foreman`) | Operator skill |
+| `switchroom-install` | foreman-only (auto when `role: foreman`) | Operator skill |
+| `switchroom-manage` | foreman-only (auto when `role: foreman`) | Operator skill |
+| `switchroom-status` | foreman-only (auto when `role: foreman`) | Operator skill |
 | `humanizer` | developer (opt-in) | Strips AI-writing patterns from replies; opt in via `defaults.skills` |
 | `humanizer-calibrate` | developer (opt-in) | Builds a personal voice template; companion to `humanizer` |
 | `buildkite-*` (8 skills) | developer (opt-in) | Switchroom CI work; not for fleet agents |
@@ -87,9 +99,15 @@ For a switchroom-bundled developer skill (everyone working on switchroom benefit
 1. Create the skill directory at `<repo>/skills/<name>/SKILL.md`
 2. Open a PR
 
-For a switchroom-bundled fleet skill (auto-installed everywhere):
+For a switchroom-bundled foreman skill (auto-installed when `role: foreman`):
 
-1. **Don't.** Use the per-user model instead — auto-install for fleet agents is a known anti-pattern (see issue above) and adding more entries to it makes the problem worse. Open an issue to discuss before adding.
+1. Create the skill directory at `<repo>/skills/switchroom-<name>/SKILL.md`
+2. Document it in the table above
+3. Open a PR
+
+For a switchroom-bundled fleet-default skill (every agent regardless of role):
+
+1. **Don't auto-install.** Add it as a developer-pool skill instead and let operators opt in via `defaults.skills`. Auto-injecting into every agent's tool list adds cognitive overhead per turn for users who'll never call it. The `role: foreman` opt-in is the right escape hatch for the operator-skill case.
 
 ## Related code
 

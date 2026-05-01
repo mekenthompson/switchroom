@@ -380,3 +380,98 @@ Re-implement Claude's agent loop with full SDK control. Switchroom explicitly ch
 5. **Capture this investigation in `HARNESS.md`** as a worked example of the "validate assumptions against the upstream surface" pattern.
 
 The validation finding that Claude Code DOES support per-token streaming changes the long-term architecture conversation. Whether to act on it now is a strategic question, not a tactical one.
+
+---
+
+## 11. Spike results — 2026-05-01
+
+Spike executed against the 8 acceptance items in §5. Each test was a real
+shell invocation against `claude` 2.1.126 with shell-captured output.
+Findings supersede earlier theory.
+
+### 11.1 Pass/fail summary
+
+| # | Item | Result | Notes |
+|---|---|---|---|
+| 1 | Spawn-and-converse | ✅ PASS | Multi-turn over stdin works; init event lists tools+MCP servers correctly |
+| 2 | Per-token preview | ✅ PASS | 200-word reply: 21 deltas at ~3/sec, ~50 chars/delta. With 600ms throttle = ~1-2 edits/sec, well under Telegram's 30/sec hard cap |
+| 3 | Tool-call finalize coordination | ✅ PASS | `content_block_start.event.content_block.type` distinguishes text/thinking/tool_use blocks → bridge can stream the right content |
+| 4 | Sub-agents (Task) | ✅ PASS | `parent_tool_use_id` correlates sub-agent events to their parent dispatch; full event lifecycle observable |
+| 5 | Hooks fire and emit events | ✅ PASS | `--include-hook-events` produces `system/hook_started` + `system/hook_response` with full stdout/stderr/exit. Richer than today's IPC-only path |
+| 6 | **Permission prompts** | ❌ **HARD BLOCKER** | `--print --permission-mode default` auto-denies tools requiring permission. NO event in stream surfaces the request. The `notifications/claude/channel/permission_request` side-channel does NOT fire when running in `--print` mode, even with `--dangerously-load-development-channels` set |
+| 7 | `--resume <session_id>` | ✅ PASS | Conversation context survives across `claude --print` invocations. Tested: set "favourite color is teal" in turn 1, killed session, restarted with `--resume`, model recalled "teal" correctly |
+| 8 | OAuth flow | ⚠ DEFERRED | Likely requires keeping classic mode for the auth flow itself. Not blocking the architectural decision but adds operational complexity |
+
+**6 of 7 testable items pass. 1 hard blocker (#6).**
+
+### 11.2 Spike #6 — the permission blocker in detail
+
+Test setup: `claude --print --verbose --output-format=stream-json --input-format=stream-json --include-partial-messages --include-hook-events --dangerously-load-development-channels server:switchroom-telegram --permission-mode default` with a prompt asking the model to write a file via the Write tool.
+
+Result:
+```
+permission_denials: [{
+  "tool_name": "Write",
+  "tool_use_id": "toolu_...",
+  "tool_input": {"file_path": "...", "content": "hello spike"}
+}]
+
+tool_result.is_error: true
+tool_result.content: "Claude requested permissions to write to ...,
+  but you haven't granted it yet."
+```
+
+The Write tool was auto-denied. There was NO event in the stream that:
+- Asked for user approval
+- Allowed the bridge to route the request to Telegram
+- Took an answer back to grant permission
+
+The existing switchroom Telegram inline-keyboard permission flow at `server.ts:1192-1228` depends on the `notifications/claude/channel/permission_request` MCP notification. **That notification doesn't fire in `--print` mode** — even when `--dangerously-load-development-channels` is set. The denial happens upstream of the channel notification, so there's no way to surface the prompt to the user.
+
+### 11.3 What this means for Path C
+
+The blocker is real but not necessarily fatal. Three response strategies, in order of practical viability:
+
+**Strategy A — `--permission-mode bypassPermissions` for daemon-mode agents**
+- Simplest: agents in daemon mode skip all permission checks.
+- Acceptable if all agents run on a trusted single-user host and tools are limited to a known-safe set (Telegram MCP, Hindsight MCP, Read/Grep/Glob).
+- Real safety regression for agents that might use Bash/Edit/Write with broad access. Today's interactive Telegram approval flow stops the model from accidentally `rm -rf` or sending stupid emails; bypassPermissions removes that gate.
+- For switchroom's chat-class agents (clerk, klanker, gymbro, finn — mostly use MCP tools, rarely Bash/Edit) this is probably fine.
+- For development-y agents that legitimately edit code or run arbitrary commands, this is a meaningful loss.
+
+**Strategy B — pre-approve every needed tool in `settings.json`**
+- `permissions.allow` array can pre-approve tool patterns: `["Read", "Grep", "Bash(git status)", ...]`
+- Agent never asks the user because everything is pre-approved.
+- High maintenance burden — every new tool/command needs to be added explicitly.
+- Defeats the dynamic-approval benefit but preserves "no surprise approvals" safety.
+
+**Strategy C — file an upstream feature request to Anthropic**
+- Ask Claude Code to emit `permission_request` as a stream event in `--print` mode that an external tool (the bridge) can answer via stdin.
+- This is the architecturally correct fix. Other tools using `--print --output-format=stream-json` (the agent SDK pattern) would benefit too.
+- Realistic timeline: weeks-to-months, with non-zero risk of "won't ship."
+- Recommended regardless of which path switchroom takes locally.
+
+### 11.4 Updated verdict on Path C
+
+**Pre-spike confidence**: 70% reliable, conditional on 3 unknowns clearing.
+**Post-spike confidence**: ~85% for chat-class agents in `bypassPermissions` mode. ~50% for general-purpose agents without an upstream change.
+
+The remaining items (sub-agents, --resume, hooks) all came in cleaner than expected. Hooks in particular are a meaningful upgrade — `system/hook_started` + `system/hook_response` events expose the lifecycle on the wire, replacing the file-based IPC patterns with first-class stream observability.
+
+But the permission-prompt blocker is a real architectural cost. Path C's quality depends on which of A/B/C in §11.3 the team accepts.
+
+### 11.5 Revised recommendation (post-spike)
+
+1. **Ship Path A (heartbeat placeholder) immediately** — unchanged from §10.
+2. **Defer Path C migration** until either:
+   - Anthropic adds permission events to stream-json (Strategy C in §11.3), OR
+   - Switchroom commits to `bypassPermissions` mode for chat-class agents and accepts the safety tradeoff.
+3. **Update the architectural risk register** — the design doc previously listed permission prompts as MEDIUM risk requiring spike validation. Spike confirms it's HIGH risk requiring an explicit policy decision before commitment.
+
+The spike was worth running: it converted a HIGH-risk unknown into a HIGH-risk known, which is exactly what spikes are for. Path C remains feasible but the quality bar is now lower than originally projected, and the chat-class-only scope is more honest than "all agents."
+
+### 11.6 What's been actively retired by this validation
+
+- The PTY-tail / V1Extractor approach is now confirmed as the wrong architectural direction (it predates the per-token streaming surface that already exists).
+- The "session-tail can become a streaming source" idea is also retired — verified by inspecting the on-disk JSONL: it contains `assistant`/`user`/`system` events but no `stream_event` lines, regardless of `--include-partial-messages` flag at invocation.
+- The middle-ground "heartbeat + tool labels via session-tail" hybrid is the WORST option (paying maintenance cost for moderate UX). Either pure heartbeat (no extractor) or commit to Path C.

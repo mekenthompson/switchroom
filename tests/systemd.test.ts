@@ -63,6 +63,16 @@ describe("generateUnit", () => {
     expect(unit).toContain("Wants=network-online.target");
   });
 
+  // Regression test for #472 finding #20: pre-fix the agent unit had no
+  // ordering relative to the vault-broker. On reboot the agent would race
+  // the broker, fail to read vault env vars, and boot without bot tokens.
+  it("orders against switchroom-vault-broker.service so agent boots after broker (#472 #20)", () => {
+    const unit = generateUnit("test", "/tmp/test");
+    expect(unit).toContain("After=");
+    expect(unit).toMatch(/After=.*switchroom-vault-broker\.service/);
+    expect(unit).toMatch(/Wants=.*switchroom-vault-broker\.service/);
+  });
+
   it("configures restart on failure", () => {
     const unit = generateUnit("test", "/tmp/test");
     expect(unit).toContain("Restart=on-failure");

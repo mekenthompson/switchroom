@@ -11,9 +11,8 @@ import { loadTopicState } from "../telegram/state.js";
 import { createVault, openVault, setStringSecret } from "../vault/vault.js";
 import {
   applyAutoUnlock,
-  detectSystemdCreds,
+  autoUnlockSupported,
   encryptCredential,
-  EncryptCancelledError,
   EncryptFailedError,
 } from "./vault-auto-unlock.js";
 import { promptPassphrase } from "./vault-broker.js";
@@ -926,13 +925,9 @@ async function stepAutoUnlock(
     console.log(chalk.gray("  Skipping in non-interactive mode."));
     return;
   }
-  if (process.platform !== "linux") {
-    console.log(chalk.gray("  Skipping (auto-unlock requires Linux + systemd-creds)."));
-    return;
-  }
 
-  if (!detectSystemdCreds()) {
-    console.log(chalk.gray("  Skipping (systemd-creds not on PATH)."));
+  if (!autoUnlockSupported()) {
+    console.log(chalk.gray("  Skipping (no /etc/machine-id on this host)."));
     return;
   }
 
@@ -944,7 +939,7 @@ async function stepAutoUnlock(
 
   const credPathRaw =
     config.vault?.broker?.autoUnlockCredentialPath ??
-    "~/.config/credstore.encrypted/vault-passphrase";
+    "~/.config/switchroom/auto-unlock.bin";
   const credPath = resolvePath(credPathRaw);
   if (config.vault?.broker?.autoUnlock === true && existsSync(credPath)) {
     console.log(chalk.green(`  ${STEP_DONE} Already configured (${credPath})`));
@@ -952,16 +947,14 @@ async function stepAutoUnlock(
   }
 
   console.log(chalk.gray("  Without this, vault must be unlocked manually after every reboot."));
+  console.log(chalk.gray("  Encrypted with a key derived from this machine's id — disk theft is safe; the same user on this box is not."));
   const enable = await askYesNo("  Enable vault auto-unlock at boot?", true);
   if (!enable) {
     console.log(chalk.gray("  Skipped. Run later with: switchroom vault broker enable-auto-unlock"));
     return;
   }
 
-  // Re-prompt with masked input. The wizard uses plain `ask()` for the
-  // vault passphrase elsewhere, but we deliberately use the masked path
-  // here because we're handing the value to systemd-creds, not echoing
-  // it back to the user.
+  // Masked passphrase prompt — handing it to AES-GCM, not echoing.
   let passphrase: string;
   try {
     passphrase = await promptPassphrase();
@@ -983,22 +976,17 @@ async function stepAutoUnlock(
       return;
     }
 
-    let scope: string;
     try {
-      scope = await encryptCredential(passphrase, credPath);
+      encryptCredential(passphrase, credPath);
     } catch (err) {
-      if (err instanceof EncryptCancelledError) {
-        console.log(chalk.gray("  Skipped (user declined sudo)."));
-        return;
-      }
       if (err instanceof EncryptFailedError) {
-        console.log(chalk.yellow("  Could not encrypt credential. Continuing setup."));
+        console.log(chalk.yellow(`  Could not write auto-unlock blob: ${err.message}`));
         console.log(chalk.gray("  Retry later with: switchroom vault broker enable-auto-unlock"));
         return;
       }
       throw err;
     }
-    console.log(chalk.green(`  ${STEP_DONE} Encrypted credential (scope: ${scope})`));
+    console.log(chalk.green(`  ${STEP_DONE} Auto-unlock blob written to ${credPath}`));
   } finally {
     passphrase = "";
   }

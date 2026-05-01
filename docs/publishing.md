@@ -17,10 +17,22 @@ Inside any Claude Code session:
 ```
 
 The first command registers this GitHub repo as a marketplace named `switchroom`.
-The second installs the `switchroom` plugin from that marketplace. Six skills
-(`switchroom-install`, `switchroom-status`, `switchroom-cli`, `switchroom-health`,
-`switchroom-manage`, `switchroom-architecture`) become available
-under the `switchroom:` namespace.
+The second installs the `switchroom` plugin from that marketplace. Four slash
+commands and the existing skills become available under the `switchroom:`
+namespace:
+
+- `/switchroom:setup` — Phase 0 on-ramp. Bootstraps a fresh box from
+  zero to a paired Telegram agent in one walk-through (deps, `switchroom
+  setup` wizard, first agent start). See
+  [#84](https://github.com/switchroom/switchroom/issues/84).
+- `/switchroom:start [agent]` — start one agent or reconcile and start
+  the whole fleet.
+- `/switchroom:stop [agent]` — stop one agent without uninstalling.
+- `/switchroom:status` — `switchroom agent list` plus fleet health.
+
+Skills also bind to the same namespace: `switchroom-install`,
+`switchroom-status`, `switchroom-cli`, `switchroom-health`,
+`switchroom-manage`, `switchroom-architecture`.
 
 To pull updates later:
 
@@ -76,6 +88,7 @@ were moved. The only new artifacts are:
 
 - `.claude-plugin/marketplace.json`
 - `.claude-plugin/plugin.json`
+- `commands/*.md` (slash commands under `/switchroom:`)
 - `docs/publishing.md` (this file)
 
 Reference: <https://docs.claude.com/en/docs/claude-code/plugin-marketplaces>

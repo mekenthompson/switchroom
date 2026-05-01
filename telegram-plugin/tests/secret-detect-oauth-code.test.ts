@@ -195,29 +195,35 @@ describe('pendingReauthFlows intercept — deleteMessage sequencing (Blocker 1)'
     'utf8',
   )
 
-  it('calls bot.api.deleteMessage inside the pendingReauthFlows intercept before setMessageReaction', () => {
-    // Locate the pendingReauthFlows intercept block
+  it('redacts the OAuth code message inside the pendingReauthFlows intercept', () => {
+    // Locate the pendingReauthFlows intercept block. Was previously
+    // checked by greppinng for `bot.api.deleteMessage(...)` and
+    // `setMessageReaction(...)` literals, but #488 consolidated all 6
+    // auth-code paste paths through `redactAuthCodeMessage`. The pin
+    // is now: the intercept block must call the helper.
     const interceptIdx = src.indexOf('// Auth-code intercept')
     expect(interceptIdx).toBeGreaterThan(0)
 
-    // Find the reaction (🔑) that marks the end of a successful intercept
-    const reactionIdx = src.indexOf("emoji: '🔑'", interceptIdx)
-    expect(reactionIdx).toBeGreaterThan(0)
-
-    // deleteMessage must appear between the intercept start and the 🔑 reaction
-    const interceptBlock = src.slice(interceptIdx, reactionIdx)
-    expect(interceptBlock).toMatch(/bot\.api\.deleteMessage\(chat_id, msgId\)/)
+    // Find the end of this intercept block — the next blank line after
+    // the redaction call. Bounds the window so we don't accidentally
+    // match a downstream auth-code path's redaction.
+    const window = src.slice(interceptIdx, interceptIdx + 2000)
+    expect(window).toMatch(/redactAuthCodeMessage\(bot\.api,\s*chat_id,\s*msgId\)/)
   })
 
-  it('deleteMessage appears BEFORE setMessageReaction in the pendingReauthFlows path', () => {
+  it('redaction lands AFTER the success/error reply renders', () => {
+    // Sequencing pin: the user-visible reply (success or error) must
+    // be queued before the redaction so the user sees the auth result
+    // even if their original message disappears mid-render. Same
+    // ordering the helper preserves — fire-and-forget redaction
+    // happens after `await switchroomReply(...)`.
     const interceptIdx = src.indexOf('// Auth-code intercept')
-    // Within a reasonable window of the intercept block, deleteMessage must precede the 🔑 reaction
     const window = src.slice(interceptIdx, interceptIdx + 2000)
-    const deleteIdx = window.indexOf('bot.api.deleteMessage(chat_id, msgId)')
-    const reactionIdx = window.indexOf("emoji: '🔑'")
-    expect(deleteIdx).toBeGreaterThan(0)
-    expect(reactionIdx).toBeGreaterThan(0)
-    expect(deleteIdx).toBeLessThan(reactionIdx)
+    const replyIdx = window.indexOf('switchroomReply(ctx,')
+    const redactIdx = window.indexOf('redactAuthCodeMessage(')
+    expect(replyIdx).toBeGreaterThan(0)
+    expect(redactIdx).toBeGreaterThan(0)
+    expect(replyIdx).toBeLessThan(redactIdx)
   })
 })
 

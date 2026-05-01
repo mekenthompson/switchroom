@@ -385,6 +385,7 @@ import { sweepActivePins, sweepBotAuthoredPins } from './active-pins-sweep.js'
 import { logPinEvent, classifyPinError, errorMessage } from './pin-event-log.js'
 import { validateStringArray } from './gateway/access-validator.js'
 import { decideDmCommandGate } from './dm-command-gate.js'
+import { redactAuthCodeMessage } from './auth-code-redact.js'
 
 /**
  * One-shot carry-over from the session-end summarizer: a short topic
@@ -4303,6 +4304,8 @@ bot.command('auth', async ctx => {
     }
     await runSwitchroomCommand(ctx, ['auth', 'code', name, code], `auth code ${name}`);
     pendingReauthFlows.delete(String(ctx.chat!.id));
+    // Redact the OAuth code from chat history (#488).
+    redactAuthCodeMessage(bot.api, String(ctx.chat!.id), ctx.message?.message_id ?? null)
     return;
   }
 
@@ -4376,6 +4379,8 @@ bot.command('reauth', async ctx => {
   if (raw.startsWith('http') || looksLikeAuthCode(raw)) {
     await runSwitchroomCommand(ctx, ['auth', 'code', name, raw], `auth code ${name}`);
     pendingReauthFlows.delete(chatId);
+    // Redact the OAuth code from chat history (#488).
+    redactAuthCodeMessage(bot.api, chatId, ctx.message?.message_id ?? null)
     return;
   }
 
@@ -5929,11 +5934,10 @@ async function handleInbound(
         const detail = stripAnsi(error.stderr?.trim() || error.message || 'unknown error')
         await switchroomReply(ctx, `<b>auth code failed:</b>\n${preBlock(formatSwitchroomOutput(detail))}`, { html: true })
       }
-      if (msgId != null) {
-        void bot.api.setMessageReaction(chat_id, msgId, [
-          { type: 'emoji', emoji: '🔑' as ReactionTypeEmoji['emoji'] },
-        ]).catch(() => {})
-      }
+      // Redact the OAuth code paste from chat history (#488). Single-
+      // use code, but plaintext OAuth tokens in chat history are still
+      // poor hygiene. The helper handles delete + 🔑 reaction silently.
+      redactAuthCodeMessage(bot.api, chat_id, msgId ?? null)
       return
     }
     // Expired — clean up and fall through to normal handling

@@ -29,6 +29,11 @@ import type { SetupFlowState } from '../foreman/setup-state.js'
 
 const CALLER = '12345678'
 
+// #190: setup-flow now needs the operator's profile list. Tests that don't
+// care about the profile validation just pass `default` so the asked-profile
+// step accepts any input that maps to one of these.
+const PROFILES = ['default', 'coding', 'health-coach', 'executive-assistant']
+
 function makeState(overrides: Partial<SetupFlowState> = {}): SetupFlowState {
   return {
     chatId: 'chat1',
@@ -37,12 +42,34 @@ function makeState(overrides: Partial<SetupFlowState> = {}): SetupFlowState {
     persona: null,
     model: null,
     emoji: null,
+    profile: null,
     botToken: null,
     allowedUserId: null,
+    authSessionName: null,
+    loginUrl: null,
     startedAt: 1000,
     updatedAt: 1000,
     ...overrides,
   }
+}
+
+/**
+ * Test helper — wraps handleSetupText with a default profiles list so the
+ * 30+ existing call sites don't need to be rewritten one-by-one. Tests that
+ * specifically exercise the asked-profile validation pass their own
+ * profiles via the `opts` argument.
+ */
+function call(
+  state: SetupFlowState | null,
+  text: string,
+  opts: { callerId?: string; profiles?: string[] } = {},
+) {
+  return handleSetupText({
+    state,
+    text,
+    callerId: opts.callerId ?? CALLER,
+    profiles: opts.profiles ?? PROFILES,
+  })
 }
 
 // ─── isValidSlug ─────────────────────────────────────────────────────────
@@ -223,19 +250,72 @@ describe('handleSetupText: asked-model', () => {
 
 // ─── handleSetupText: step asked-emoji ───────────────────────────────────
 
-describe('handleSetupText: asked-emoji', () => {
-  it('advances to ask-bot-token with skip', () => {
+describe('handleSetupText: asked-emoji (#190 — now transitions to ask-profile)', () => {
+  it('advances to ask-profile with skip (no emoji)', () => {
     const state = makeState({ step: 'asked-emoji', slug: 'gymbro', persona: 'Gym Bro', model: 'sonnet' })
-    const action = handleSetupText({ state, text: 'skip', callerId: CALLER })
-    expect(action.kind).toBe('ask-bot-token')
-    if (action.kind === 'ask-bot-token') expect(action.emoji).toBeNull()
+    const action = call(state, 'skip')
+    expect(action.kind).toBe('ask-profile')
+    if (action.kind === 'ask-profile') {
+      expect(action.emoji).toBeNull()
+      expect(action.profiles).toEqual(PROFILES)
+    }
   })
 
-  it('advances to ask-bot-token with emoji', () => {
+  it('advances to ask-profile carrying the emoji', () => {
     const state = makeState({ step: 'asked-emoji', slug: 'gymbro', persona: 'Gym Bro', model: null })
-    const action = handleSetupText({ state, text: '🏋️', callerId: CALLER })
+    const action = call(state, '🏋️')
+    expect(action.kind).toBe('ask-profile')
+    if (action.kind === 'ask-profile') expect(action.emoji).toBe('🏋️')
+  })
+})
+
+// ─── handleSetupText: step asked-profile (#190) ──────────────────────────
+
+describe('handleSetupText: asked-profile (#190)', () => {
+  function profileState(): SetupFlowState {
+    return makeState({
+      step: 'asked-profile',
+      slug: 'gymbro',
+      persona: 'Gym Bro',
+      model: 'sonnet',
+      emoji: '🏋️',
+    })
+  }
+
+  it('advances to ask-bot-token when profile is in the live list', () => {
+    const action = call(profileState(), 'health-coach')
     expect(action.kind).toBe('ask-bot-token')
-    if (action.kind === 'ask-bot-token') expect(action.emoji).toBe('🏋️')
+    if (action.kind === 'ask-bot-token') {
+      expect(action.profile).toBe('health-coach')
+      expect(action.slug).toBe('gymbro')
+      expect(action.emoji).toBe('🏋️')
+    }
+  })
+
+  it('returns error stayInStep when profile is unknown', () => {
+    const action = call(profileState(), 'nonexistent')
+    expect(action.kind).toBe('error')
+    if (action.kind === 'error') {
+      expect(action.stayInStep).toBe(true)
+      expect(action.message).toContain('nonexistent')
+    }
+  })
+
+  it('lists valid profiles in error message', () => {
+    const action = call(profileState(), 'bogus')
+    if (action.kind === 'error') {
+      for (const p of PROFILES) expect(action.message).toContain(p)
+    }
+  })
+
+  it('cancels when slug or persona missing', () => {
+    const action = call(makeState({ step: 'asked-profile' }), 'default')
+    expect(action.kind).toBe('cancel')
+  })
+
+  it('respects a different profiles list per call', () => {
+    const action = call(profileState(), 'tiny-bundle', { profiles: ['tiny-bundle'] })
+    expect(action.kind).toBe('ask-bot-token')
   })
 })
 
@@ -279,36 +359,90 @@ describe('handleSetupText: asked-bot-token', () => {
 
 // ─── handleSetupText: step confirming-allowlist ───────────────────────────
 
-describe('handleSetupText: confirming-allowlist', () => {
+describe('handleSetupText: confirming-allowlist (#189 — now transitions to call-create-agent)', () => {
   const baseState = makeState({
     step: 'confirming-allowlist',
     slug: 'gymbro',
     persona: 'Gym Bro',
     model: null,
     emoji: null,
+    profile: 'default',
     botToken: '1234567890:AAHxxxxxxxxxxxxxxxxxxxxxxx',
   })
 
-  it('advances to call-reconcile on "yes"', () => {
-    const action = handleSetupText({ state: baseState, text: 'yes', callerId: CALLER })
-    expect(action.kind).toBe('call-reconcile')
-    if (action.kind === 'call-reconcile') {
+  it('advances to call-create-agent on "yes"', () => {
+    const action = call(baseState, 'yes')
+    expect(action.kind).toBe('call-create-agent')
+    if (action.kind === 'call-create-agent') {
       expect(action.allowedUserId).toBe(CALLER)
       expect(action.slug).toBe('gymbro')
       expect(action.persona).toBe('Gym Bro')
+      expect(action.profile).toBe('default')
     }
   })
 
-  it('advances to call-reconcile on "y"', () => {
-    const action = handleSetupText({ state: baseState, text: 'y', callerId: CALLER })
-    expect(action.kind).toBe('call-reconcile')
-    if (action.kind === 'call-reconcile') expect(action.allowedUserId).toBe(CALLER)
+  it('advances to call-create-agent on "y"', () => {
+    const action = call(baseState, 'y')
+    expect(action.kind).toBe('call-create-agent')
+    if (action.kind === 'call-create-agent') expect(action.allowedUserId).toBe(CALLER)
   })
 
   it('uses custom user_id when not "yes"', () => {
-    const action = handleSetupText({ state: baseState, text: '99999999', callerId: CALLER })
-    expect(action.kind).toBe('call-reconcile')
-    if (action.kind === 'call-reconcile') expect(action.allowedUserId).toBe('99999999')
+    const action = call(baseState, '99999999')
+    expect(action.kind).toBe('call-create-agent')
+    if (action.kind === 'call-create-agent') expect(action.allowedUserId).toBe('99999999')
+  })
+
+  it('falls back to "default" profile for legacy in-flight flows where profile is null', () => {
+    // Simulates a flow that started before the #190 schema migration —
+    // SQLite returns NULL for the new `profile` column, the wizard
+    // shouldn't break.
+    const legacy = makeState({
+      step: 'confirming-allowlist',
+      slug: 'oldgymbro',
+      persona: 'Old Gym',
+      botToken: '1234567890:AAHxxxxxxxxxxxxxxxxxxxxxxx',
+      profile: null,
+    })
+    const action = call(legacy, 'yes')
+    expect(action.kind).toBe('call-create-agent')
+    if (action.kind === 'call-create-agent') expect(action.profile).toBe('default')
+  })
+})
+
+// ─── handleSetupText: step asked-oauth-code (#189) ───────────────────────
+
+describe('handleSetupText: asked-oauth-code (#189)', () => {
+  function oauthState(): SetupFlowState {
+    return makeState({
+      step: 'asked-oauth-code',
+      slug: 'gymbro',
+      persona: 'Gym Bro',
+      profile: 'default',
+      botToken: '1234567890:AAHxxxxxxxxxxxxxxxxxxxxxxx',
+      authSessionName: 'gymbro-foreman',
+      loginUrl: 'https://example.com/login',
+    })
+  }
+
+  it('advances to call-complete-creation with a valid-shape code', () => {
+    const action = call(oauthState(), 'a1b2c3d4e5')
+    expect(action.kind).toBe('call-complete-creation')
+    if (action.kind === 'call-complete-creation') {
+      expect(action.slug).toBe('gymbro')
+      expect(action.code).toBe('a1b2c3d4e5')
+    }
+  })
+
+  it('returns error stayInStep on too-short code', () => {
+    const action = call(oauthState(), 'abc')
+    expect(action.kind).toBe('error')
+    if (action.kind === 'error') expect(action.stayInStep).toBe(true)
+  })
+
+  it('cancels when slug missing (corrupt state)', () => {
+    const action = call(makeState({ step: 'asked-oauth-code' }), 'a1b2c3d4e5')
+    expect(action.kind).toBe('cancel')
   })
 })
 

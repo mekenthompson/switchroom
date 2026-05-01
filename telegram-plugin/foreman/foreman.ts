@@ -622,7 +622,10 @@ async function handleSetupFlowText(
   setupState: NonNullable<ReturnType<typeof getSetupState>>,
 ): Promise<void> {
   const callerId = String(ctx.from?.id ?? '')
-  const action = handleSetupText({ state: setupState, text, callerId })
+  // #190: pass live profiles into the wizard so the asked-profile step can
+  // validate against the operator's actual profile set.
+  const profiles = listAvailableProfiles()
+  const action = handleSetupText({ state: setupState, text, callerId, profiles })
 
   switch (action.kind) {
     // ── Slug step ──────────────────────────────────────────────────────────
@@ -632,7 +635,7 @@ async function handleSetupFlowText(
       await switchroomReply(ctx, [
         `Slug: <code>${escapeHtmlForTg(action.slug)}</code>`,
         '',
-        'Step 2/5: What persona name should this agent have?',
+        'Step 2/6: What persona name should this agent have?',
         '<i>e.g. <code>Gym Bro</code> — displayed in greetings</i>',
       ].join('\n'), { html: true })
       return
@@ -649,7 +652,7 @@ async function handleSetupFlowText(
       await switchroomReply(ctx, [
         `Persona: <b>${escapeHtmlForTg(action.persona)}</b>`,
         '',
-        'Step 3/5: Which Claude model should this agent use?',
+        'Step 3/6: Which Claude model should this agent use?',
         'Options: <code>sonnet</code>, <code>opus</code>, <code>haiku</code>, or a full model ID.',
         'Type <code>skip</code> to use the profile default.',
       ].join('\n'), { html: true })
@@ -669,27 +672,45 @@ async function handleSetupFlowText(
       await switchroomReply(ctx, [
         modelNote,
         '',
-        'Step 4/5: What emoji should represent this agent\'s Telegram topic?',
+        'Step 4/6: What emoji should represent this agent\'s Telegram topic?',
         'Type <code>skip</code> to use the default.',
       ].join('\n'), { html: true })
       return
     }
 
-    // ── Emoji step ─────────────────────────────────────────────────────────
-    case 'ask-bot-token': {
+    // ── Emoji step → Profile selector (#190) ───────────────────────────────
+    case 'ask-profile': {
       const updated = advanceSetupState(setupState, {
-        step: 'asked-bot-token',
+        step: 'asked-profile',
         emoji: action.emoji,
       })
       setSetupState(updated)
       const emojiNote = action.emoji
         ? `Emoji: ${action.emoji}`
         : 'Emoji: <i>default</i>'
-      // TODO(#188): BotFather auto-flow — currently user creates bot manually
       await switchroomReply(ctx, [
         emojiNote,
         '',
-        'Step 5/5: Paste the BotFather token for the new agent\'s bot.',
+        `Step 5/6: Choose a profile for this agent.`,
+        `Available: ${action.profiles.map(p => `<code>${escapeHtmlForTg(p)}</code>`).join(', ')}`,
+        '',
+        '<i>The profile sets the agent\'s base persona, system prompt, and skill bundle. Pick <code>default</code> if unsure.</i>',
+      ].join('\n'), { html: true })
+      return
+    }
+
+    // ── Profile step ───────────────────────────────────────────────────────
+    case 'ask-bot-token': {
+      const updated = advanceSetupState(setupState, {
+        step: 'asked-bot-token',
+        profile: action.profile,
+      })
+      setSetupState(updated)
+      // TODO(#188): BotFather auto-flow — currently user creates bot manually
+      await switchroomReply(ctx, [
+        `Profile: <code>${escapeHtmlForTg(action.profile)}</code>`,
+        '',
+        'Step 6/6: Paste the BotFather token for the new agent\'s bot.',
         '',
         '<b>To create a bot:</b>',
         '1. Open @BotFather in Telegram',
@@ -720,9 +741,22 @@ async function handleSetupFlowText(
       return
     }
 
-    // ── Allowlist confirmation step → provision agent ──────────────────────
-    case 'call-reconcile': {
-      const { slug, persona, model, emoji, botToken, allowedUserId } = action
+    // ── Allowlist confirmation step → provision agent (#189: split path) ──
+    //
+    // Pre-fix this was a single 'call-reconcile' that ran createAgent inline
+    // and told the user to run `switchroom auth code` from a terminal. Per
+    // #189 + #190, the flow now splits into three coordinated steps:
+    //
+    //   call-create-agent   → run createAgent (returns loginUrl)
+    //   ask-oauth-code      → render the URL prompt; user pastes back
+    //   call-complete-creation → run completeCreation + start the agent
+    //
+    // Mirrors the create-flow's existing call-create-agent/asked-oauth-code/
+    // call-complete-creation triad. The two flows have parallel state
+    // machines and parallel orchestrator handlers.
+    case 'call-create-agent': {
+      const { slug, persona, model, emoji, profile, botToken, allowedUserId } = action
+      void model; void emoji; void allowedUserId // captured in state earlier; createAgent reads from yaml
       const updated = advanceSetupState(setupState, {
         step: 'reconciling',
         allowedUserId,
@@ -749,14 +783,6 @@ async function handleSetupFlowText(
       const botUsername = botInfo?.username ?? null
       await switchroomReply(ctx, `Token OK (@${escapeHtmlForTg(botUsername ?? '?')}). Provisioning agent <b>${escapeHtmlForTg(slug)}</b>…`, { html: true })
 
-      // Use 'default' profile — skills/profile selection is deferred
-      // TODO(#178): Skills selector — currently uses 'default' profile always
-      const profile = 'default'
-
-      // Build model override: if user picked a model, set it in persona config
-      // after scaffolding. For now we pass it via a comment; the scaffold uses
-      // profile defaults. Full model override is handled post-scaffold.
-      // TODO(#189): OAuth code paste step — currently shows manual terminal instruction
       try {
         const result = await createAgent({
           name: slug,
@@ -765,33 +791,36 @@ async function handleSetupFlowText(
           rollbackOnFail: true,
         })
 
-        // Mark flow done
-        const doneState = advanceSetupState(updated, { step: 'done' })
-        setSetupState(doneState)
-        clearSetupState(chatId)
-
-        const oauthLines = result.loginUrl
-          ? [
+        if (result.loginUrl) {
+          // #189: in-wizard OAuth path. Stash the auth session + URL on the
+          // wizard state and ask the user to paste the code in chat.
+          const oauthState = advanceSetupState(updated, {
+            step: 'asked-oauth-code',
+            authSessionName: result.sessionName,
+            loginUrl: result.loginUrl,
+          })
+          setSetupState(oauthState)
+          const kb = new InlineKeyboard().url('Open OAuth URL', result.loginUrl)
+          await ctx.reply(
+            [
+              `<b>${escapeHtmlForTg(persona)}</b> (@${escapeHtmlForTg(botUsername ?? slug)}) is scaffolded!`,
               '',
-              '<b>Complete OAuth:</b>',
-              `<a href="${result.loginUrl}">Open this URL to log in</a>`,
-              `Then run: <code>switchroom auth code ${escapeHtmlForTg(slug)}</code>`,
-            ]
-          : [
-              '',
-              // TODO(#189): OAuth code paste step — currently shows manual terminal instruction
-              '<b>Complete OAuth from terminal:</b>',
-              `<code>switchroom auth code ${escapeHtmlForTg(slug)}</code>`,
-            ]
-
-        // Skills can be added later
-        // TODO(#190): Skills selector — currently shows placeholder message
-        await switchroomReply(ctx, [
-          `<b>${escapeHtmlForTg(persona)}</b> (@${escapeHtmlForTg(botUsername ?? slug)}) is scaffolded!`,
-          ...oauthLines,
-          '',
-          '<i>Skills can be added later via yaml or future /skills command.</i>',
-        ].join('\n'), { html: true })
+              '<b>Step 6 of 6 — OAuth:</b>',
+              'Open the URL below, log in to Claude, then paste the code back here.',
+            ].join('\n'),
+            { parse_mode: 'HTML', reply_markup: kb },
+          )
+        } else {
+          // No loginUrl returned — agent doesn't need OAuth (rare). Mark done.
+          const doneState = advanceSetupState(updated, { step: 'done' })
+          setSetupState(doneState)
+          clearSetupState(chatId)
+          await switchroomReply(ctx, [
+            `<b>${escapeHtmlForTg(persona)}</b> (@${escapeHtmlForTg(botUsername ?? slug)}) is scaffolded and ready!`,
+            '',
+            '<i>Skills can be added later via yaml or future /skills command.</i>',
+          ].join('\n'), { html: true })
+        }
       } catch (err) {
         // Rollback happened inside createAgent — reset to bot-token step
         const updatedBack = advanceSetupState(updated, { step: 'asked-bot-token' })
@@ -800,6 +829,71 @@ async function handleSetupFlowText(
           `<b>Provisioning failed:</b> ${escapeHtmlForTg((err as Error).message)}`,
           '',
           'To retry, paste a bot token again. Or type <code>cancel</code> to abort.',
+        ].join('\n'), { html: true })
+      }
+      return
+    }
+
+    // ── ask-oauth-code is currently dispatched only by call-create-agent
+    //    above (which goes straight to the InlineKeyboard render before
+    //    setting state). The handler below covers any future path that
+    //    emits it as a discrete action — currently dead-code-style
+    //    safety, but keeping the case keeps the union check exhaustive.
+    case 'ask-oauth-code': {
+      const updated = advanceSetupState(setupState, {
+        step: 'asked-oauth-code',
+        loginUrl: action.loginUrl,
+      })
+      setSetupState(updated)
+      const promptLines = action.loginUrl
+        ? ['Open this URL to log in, then paste the code back here:']
+        : ['Auth session started. Paste the OAuth code back here:']
+      if (action.loginUrl) {
+        const kb = new InlineKeyboard().url('Open OAuth URL', action.loginUrl)
+        await ctx.reply(promptLines.join('\n'), { reply_markup: kb })
+      } else {
+        await switchroomReply(ctx, promptLines.join('\n'), { html: false })
+      }
+      return
+    }
+
+    // ── OAuth-code paste step → run completeCreation + start the agent ────
+    case 'call-complete-creation': {
+      const { slug, persona, code } = action
+      await switchroomReply(ctx, 'Submitting OAuth code…', { html: false })
+      try {
+        const result = await completeCreation(slug, code)
+        if (result.outcome.kind === 'success' && result.started) {
+          const doneState = advanceSetupState(setupState, { step: 'done' })
+          setSetupState(doneState)
+          clearSetupState(chatId)
+          await switchroomReply(ctx, [
+            `<b>${escapeHtmlForTg(persona)}</b> is online! DM its bot to say hi.`,
+            '',
+            '<i>Skills can be added later via yaml or future /skills command.</i>',
+          ].join('\n'), { html: true })
+        } else if (result.outcome.kind === 'success') {
+          const doneState = advanceSetupState(setupState, { step: 'done' })
+          setSetupState(doneState)
+          clearSetupState(chatId)
+          await switchroomReply(ctx, [
+            `Auth succeeded but agent start failed.`,
+            '',
+            `Try: <code>switchroom agent start ${escapeHtmlForTg(slug)}</code>`,
+          ].join('\n'), { html: true })
+        } else {
+          // Bad code — stay in asked-oauth-code so the user can paste again.
+          await switchroomReply(
+            ctx,
+            `Code rejected (${result.outcome.kind}). Paste the code again, or type <code>cancel</code> to abort:`,
+            { html: true },
+          )
+        }
+      } catch (err) {
+        await switchroomReply(ctx, [
+          `<b>completeCreation failed:</b> ${escapeHtmlForTg((err as Error).message)}`,
+          '',
+          'Type <code>cancel</code> to abort, or paste the code again to retry:',
         ].join('\n'), { html: true })
       }
       return

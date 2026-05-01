@@ -25,8 +25,8 @@
  * deployment.
  */
 
-import { resolve } from "node:path";
-import { existsSync } from "node:fs";
+import { resolve, join } from "node:path";
+import { existsSync, readdirSync, rmSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createAgent, completeCreation } from "./create-orchestrator.js";
 import { writeAccessJson } from "../setup/onboarding.js";
@@ -35,14 +35,30 @@ import {
   runBotFatherWalkthrough,
   type BotFatherWalkthroughOpts,
 } from "../setup/botfather-walkthrough.js";
+import {
+  runProfilePicker,
+  type ProfilePickerOpts,
+} from "../setup/profile-picker.js";
 
 export type AgentTopology = "dm" | "forum";
 
 export interface AddAgentOpts {
   /** Agent slug (e.g. "ziggy"). */
   name: string;
-  /** Profile to extend from (e.g. "health-coach"). */
-  profile: string;
+  /**
+   * Profile to extend from (e.g. "health-coach"). Optional — when
+   * omitted the wizard runs the interactive profile picker (#190),
+   * which requires a `readLine`. Supplying a profile up-front skips
+   * the picker and validates the name against listAvailableProfiles().
+   */
+  profile?: string;
+  /**
+   * Optional skill-set selector for the chosen profile's bundled
+   * skills/* directories. One of "all" (default), "none", or a
+   * comma-separated subset of skill names. When omitted alongside an
+   * interactive profile pick, the picker prompts for a selection.
+   */
+  skills?: string;
   /**
    * BotFather token for the new agent's bot. Optional — when omitted the
    * wizard runs the BotFather walkthrough (#188) to guide the operator
@@ -102,6 +118,16 @@ export interface AddAgentOpts {
     bot: { username: string };
   }>;
   /**
+   * Test seam — overrides `runProfilePicker` so unit tests can exercise
+   * the wiring without touching the real profiles/ directory. Receives
+   * the same opts object the orchestrator builds internally.
+   */
+  runProfilePicker?: (opts: ProfilePickerOpts) => Promise<{
+    profile: string;
+    skills: string[];
+    allSkills?: string[];
+  }>;
+  /**
    * Optional override of the pairing poller. Tests inject a fake; the
    * wizard otherwise calls pollForDmStart from telegram-api.
    */
@@ -125,6 +151,10 @@ export interface AddAgentResult {
   agentDir: string;
   /** User ID that ended up in allowFrom (paired or supplied). */
   userId: string;
+  /** Profile the agent was scaffolded from (resolved by the picker). */
+  profile: string;
+  /** Bundled skills retained from the profile's skills/* dir. */
+  skills: string[];
   /** True iff every preflight check passed. */
   preflightOk: boolean;
   /** Per-check status for the final preflight. */
@@ -184,21 +214,44 @@ export async function addAgent(opts: AddAgentOpts): Promise<AddAgentResult> {
   const resolvedBotToken = wt.token;
   log(`[1/6] Bot token validated for @${wt.bot.username}`);
 
-  // ── Step 1b: profile/skill picker (#190) — stub ──────────────────────────
-  // TODO(#190): replace the --profile flag with an interactive picker that
-  // ports skills + persona files (SOUL.md, IDENTITY.md, USER.md) from a
-  // chosen template.
+  // ── Step 1b: profile / skill picker (#190) ───────────────────────────────
+  // Either validate the profile the operator already picked (--profile flag)
+  // or run the interactive picker. Same shape as the BotFather walkthrough:
+  // fast-path when the flag is supplied, interactive otherwise.
+  const pickerRunner = opts.runProfilePicker ?? runProfilePicker;
+  const pick = await pickerRunner({
+    existingProfile: opts.profile,
+    existingSkills: opts.skills,
+    readLine: opts.readLine,
+    log,
+  });
+  const resolvedProfile = pick.profile;
+  const resolvedSkills = pick.skills;
+  log(
+    `[1/6] Profile "${resolvedProfile}" selected ` +
+      `(skills: ${resolvedSkills.length === 0 ? "(none)" : resolvedSkills.join(", ")})`,
+  );
 
-  log(`\n[1/6] Scaffolding agent "${opts.name}" (profile=${opts.profile}, topology=${opts.topology})`);
+  log(`\n[1/6] Scaffolding agent "${opts.name}" (profile=${resolvedProfile}, topology=${opts.topology})`);
 
   // ── Step 2: scaffold + auth session ──────────────────────────────────────
   const created = await createAgent({
     name: opts.name,
-    profile: opts.profile,
+    profile: resolvedProfile,
     telegramBotToken: resolvedBotToken,
     configPath: opts.configPath,
     rollbackOnFail: true,
   });
+
+  // ── Step 2b: prune bundled skills the operator dropped ───────────────────
+  // copyProfileSkills (inside scaffold) copies the entire profile skills/
+  // tree. If the picker narrowed the set, remove the subdirs that weren't
+  // selected. Idempotent — silently skips when .claude/skills is absent.
+  const pickAllSkills = pick.allSkills ?? resolvedSkills;
+  const removed = pruneBundledSkills(created.agentDir, resolvedSkills, pickAllSkills);
+  if (removed.length > 0) {
+    log(`      Dropped ${removed.length} bundled skill(s): ${removed.join(", ")}`);
+  }
 
   log(`[2/6] Auth session started: ${created.sessionName}`);
   if (created.loginUrl) {
@@ -289,7 +342,14 @@ export async function addAgent(opts: AddAgentOpts): Promise<AddAgentResult> {
     log(`      [${mark}] ${k}: ${v.detail}`);
   }
 
-  return { agentDir, userId, preflightOk: ok, preflight };
+  return {
+    agentDir,
+    userId,
+    profile: resolvedProfile,
+    skills: resolvedSkills,
+    preflightOk: ok,
+    preflight,
+  };
 }
 
 // ─── Final preflight ──────────────────────────────────────────────────────────
@@ -525,6 +585,54 @@ export function runFinalPreflight(inputs: PreflightInputs): PreflightReport {
     mcpServersConfigured: mcp,
     vaultBotTokenManaged: vaultMgd,
   };
+}
+
+/**
+ * Drop bundled-skill subdirs that the picker excluded. The scaffold
+ * step always copies the full profile skills/ tree — this prunes after
+ * the fact based on the picker's resolved subset. Returns the names of
+ * directories that were removed (for logging).
+ *
+ * `scope` is the full set of bundled skill names from the profile (as
+ * reported by the picker's allSkills). We only consider entries in
+ * scope as candidates for removal — global skill symlinks and other
+ * files that happen to live alongside under .claude/skills/ are left
+ * untouched.
+ *
+ * Exported for tests. Skips silently when .claude/skills doesn't exist
+ * (profile shipped no skills, or scaffold mocked out).
+ */
+export function pruneBundledSkills(
+  agentDir: string,
+  keep: string[],
+  scope: string[],
+): string[] {
+  const skillsDir = resolve(agentDir, ".claude", "skills");
+  if (!existsSync(skillsDir)) {
+    return [];
+  }
+  const keepSet = new Set(keep);
+  const scopeSet = new Set(scope);
+  const removed: string[] = [];
+  for (const entry of scopeSet) {
+    if (keepSet.has(entry)) continue;
+    const entryPath = join(skillsDir, entry);
+    if (!existsSync(entryPath)) continue;
+    let isDir = false;
+    try {
+      isDir = statSync(entryPath).isDirectory();
+    } catch {
+      continue;
+    }
+    if (!isDir) continue;
+    try {
+      rmSync(entryPath, { recursive: true, force: true });
+      removed.push(entry);
+    } catch {
+      // best-effort — surface via log but don't fail the wizard
+    }
+  }
+  return removed;
 }
 
 function defaultIsUnitActive(unitName: string): boolean {

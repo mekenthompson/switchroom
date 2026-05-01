@@ -332,6 +332,36 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
       const credPath = getAutoUnlockCredPath(parentOpts.config);
       const vaultPath = getVaultPath(parentOpts.config);
 
+      // Pre-flight: on systemd <256, encrypt-as-user uses the host credential
+      // keystore at /var/lib/systemd/credential.secret. On fresh Ubuntu 24.04
+      // boxes that file doesn't exist yet (lazily created, only by root), so
+      // we'd otherwise fail late with an opaque "Permission denied". Surface
+      // the fix up front — before prompting for a passphrase we can't use.
+      const HOST_SECRET = "/var/lib/systemd/credential.secret";
+      if (!systemdCredsSupportsUser && !existsSync(HOST_SECRET)) {
+        console.error(
+          "systemd-creds cannot encrypt as your user on this system.\n" +
+          "\n" +
+          "  Cause: systemd <256 (e.g. Ubuntu 24.04 ships 255) lacks --user\n" +
+          `  support, and ${HOST_SECRET}\n` +
+          "  doesn't exist yet — only root can create it.\n" +
+          "\n" +
+          "  Fix (one-time, with sudo):\n" +
+          `    sudo systemd-creds encrypt --name=vault-passphrase - ${credPath}\n` +
+          "    # paste the vault passphrase, then Ctrl-D\n" +
+          `    sudo chown $USER:$USER ${credPath}\n` +
+          `    chmod 600 ${credPath}\n` +
+          "\n" +
+          "  Then continue with:\n" +
+          "    1. Set vault.broker.autoUnlock: true in switchroom.yaml\n" +
+          "    2. switchroom reconcile\n" +
+          "    3. systemctl --user restart switchroom-vault-broker.service\n" +
+          "\n" +
+          "  Or upgrade to systemd >=256 for native --user support.",
+        );
+        process.exit(1);
+      }
+
       // Prompt + verify BEFORE writing anything. We must not encrypt a typo.
       let passphrase: string;
       try {
@@ -368,7 +398,18 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
             stdio: ["pipe", "inherit", "inherit"],
           });
         } catch (err) {
-          console.error(`systemd-creds encrypt failed: ${err instanceof Error ? err.message : String(err)}`);
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(`systemd-creds encrypt failed: ${msg}`);
+          if (!systemdCredsSupportsUser) {
+            console.error(
+              "\n" +
+              "  On systemd <256 this can also fail when the host credential\n" +
+              "  keystore exists but isn't readable by your user. Try the sudo\n" +
+              "  workaround:\n" +
+              `    sudo systemd-creds encrypt --name=vault-passphrase - ${credPath}\n` +
+              `    sudo chown $USER:$USER ${credPath} && chmod 600 ${credPath}`,
+            );
+          }
           process.exit(1);
         }
       } finally {

@@ -59,15 +59,24 @@ describe('gateway heartbeat — start/cancel structural pairing', () => {
     const deleteCallCount = (codeOnly.match(/preAllocatedDrafts\.delete\s*\(/g) ?? []).length
 
     expect(cancelCallCount).toBeGreaterThanOrEqual(deleteCallCount)
-    expect(cancelCallCount - deleteCallCount).toBeLessThanOrEqual(2)
-    // Sanity: there ARE delete sites today (3 of them).
-    expect(deleteCallCount).toBeGreaterThanOrEqual(3)
+    expect(cancelCallCount - deleteCallCount).toBeLessThanOrEqual(3)
+    // Sanity: there ARE delete sites today. After #472 #9 introduced the
+    // consume-mark pattern, the count dropped from 3 to 2 (turn_end orphan +
+    // catch-path); two former delete sites now mark `consumed = true`
+    // instead, paired with cancel.
+    expect(deleteCallCount).toBeGreaterThanOrEqual(2)
   })
 
-  it('every preAllocatedDrafts.delete is followed by cancelPlaceholderHeartbeat within 200 chars', () => {
+  it('every preAllocatedDrafts.delete is followed by cancelPlaceholderHeartbeat within 300 chars (success/turn-end paths only)', () => {
     // Stronger pin: not just count match, but proximity. The cancel
     // must be on the next line or a couple lines later — not buried
     // 50 lines away in a different function.
+    //
+    // Exception: the pre-alloc API .catch() path deletes the entry on
+    // sendMessageDraft failure. Heartbeat hasn't been STARTED on the
+    // error path (start fires only inside the .then()), so there's
+    // nothing to cancel — pairing it would be a no-op. The marker
+    // string `pre-allocate draft failed` identifies this site.
     const deleteIdxs: number[] = []
     const re = /preAllocatedDrafts\.delete\s*\(/g
     let match: RegExpExecArray | null
@@ -76,7 +85,9 @@ describe('gateway heartbeat — start/cancel structural pairing', () => {
     }
     expect(deleteIdxs.length).toBeGreaterThan(0)
     for (const idx of deleteIdxs) {
-      const window = codeOnly.slice(idx, idx + 300)
+      const window = codeOnly.slice(idx, idx + 400)
+      const isCatchSite = /pre-allocate draft failed/.test(window)
+      if (isCatchSite) continue
       expect(window).toMatch(/cancelPlaceholderHeartbeat\s*\(/)
     }
   })
@@ -84,10 +95,14 @@ describe('gateway heartbeat — start/cancel structural pairing', () => {
   it('startPlaceholderHeartbeat is called inside the pre-alloc success branch', () => {
     // Sequencing: the start call must be inside the
     // `void sendMessageDraftFn!(...).then(...)` block — i.e. fires
-    // only on successful pre-alloc, never on the error path.
-    const successBlock = codeOnly.indexOf('preAllocatedDrafts.set(chat_id, { draftId, allocatedAt')
+    // only on successful pre-alloc, never on the error path. Anchor on
+    // the success-branch's success log line which is unique to that
+    // branch in the gateway code (#472 #8 changed the entry-set pattern
+    // to a synchronous pre-seed before the API call, so the old
+    // `.set(...)` anchor no longer marks the success branch).
+    const successBlock = codeOnly.indexOf('pre-allocate draft ok chatId=')
     expect(successBlock).toBeGreaterThan(0)
-    const window = codeOnly.slice(successBlock, successBlock + 600)
+    const window = codeOnly.slice(successBlock, successBlock + 800)
     expect(window).toMatch(/startPlaceholderHeartbeat\s*\(/)
   })
 

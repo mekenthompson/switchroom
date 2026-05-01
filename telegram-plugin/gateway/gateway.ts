@@ -734,6 +734,23 @@ const progressUpdateTurnCount = new Map<string, number>()
 interface PreAllocatedDraft {
   draftId: number
   allocatedAt: number
+  /**
+   * True between allocateDraftId() and the sendMessageDraft API resolving.
+   * Lets handleUpdatePlaceholder accept edits that arrive during the
+   * 200-800ms gap, instead of silently no-oping (closes #472 finding #8).
+   * The edit will land after the initial draft post hits TG's server —
+   * order-of-arrival is preserved per draftId.
+   */
+  apiPending?: boolean
+  /**
+   * True once executeReply / executeStreamReply has taken the draft. The
+   * entry is left in the map (rather than deleted) so handleUpdatePlaceholder
+   * can distinguish "no draft was ever pre-allocated" from "draft was
+   * consumed by reply" — the second case must NOT race-edit (#472 finding
+   * #9). turn_end and shutdown both skip the empty-text clear when consumed
+   * (the consumer already cleared) and just delete the map entry.
+   */
+  consumed?: boolean
 }
 const preAllocatedDrafts = new Map<string, PreAllocatedDraft>()
 
@@ -1928,8 +1945,16 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
   // as the only visible bot message for the turn.
   if (sendMessageDraftFn != null) {
     const preAllocated = preAllocatedDrafts.get(chat_id)
-    if (preAllocated != null) {
-      preAllocatedDrafts.delete(chat_id)
+    if (preAllocated != null && !preAllocated.consumed) {
+      // #472 finding #9 — mark consumed BEFORE the API clear so a
+      // hook update_placeholder racing with this consume bails out
+      // (handleUpdatePlaceholder rejects consumed entries). Pre-fix the
+      // delete + concurrent IPC could leave a "📚 recalling" edit landing
+      // AFTER our empty-text clear, so the placeholder text reappeared
+      // alongside the just-sent reply. Leaving the entry in the map
+      // (with consumed=true) gives turn_end / shutdown a way to skip the
+      // redundant clear in the consumed case.
+      preAllocated.consumed = true
       cancelPlaceholderHeartbeat(chat_id)  // Path A heartbeat: stop ticking once the draft is consumed
       // Best-effort: a clear failure (rate limit, expired draft) is
       // harmless — the orphan-cleanup path on turn_end is still wired
@@ -2132,9 +2157,18 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
   // the draft-stream so the existing placeholder is edited in place rather
   // than a fresh draft being allocated and visibly flickering. Forum topics
   // never have a pre-alloc entry (gateway skips them).
+  // Closes #472 finding #9 — same shape as executeReply's consume site:
+  // mark the entry consumed (don't delete) so a hook update_placeholder
+  // racing with this consume bails. handleStreamReply takes the draftId
+  // and edits it directly via the streaming-reply handoff; turn_end
+  // performs the actual map cleanup for both the consumed and abandoned
+  // cases.
   const preAllocated = streamIsPrivate ? preAllocatedDrafts.get(streamChatId) : undefined
-  if (preAllocated != null) {
-    preAllocatedDrafts.delete(streamChatId)
+  if (preAllocated != null && !preAllocated.consumed) {
+    // #472 #9 — mark consumed (handleUpdatePlaceholder bails on consumed).
+    // Don't delete yet — turn_end's orphan cleanup distinguishes consumed
+    // from abandoned and skips the redundant clear in the consumed case.
+    preAllocated.consumed = true
     cancelPlaceholderHeartbeat(streamChatId)  // Path A heartbeat: stop ticking — stream_reply now owns the draft
   }
 
@@ -3112,11 +3146,19 @@ function handleSessionEvent(ev: SessionEvent): void {
       // current Bot API exposes no deleteMessageDraft, but sendMessageDraft
       // with empty text effectively clears the placeholder (same trick the
       // draft-stream uses on finalize). Best-effort: failures are silent.
+      //
+      // Skip the empty-text API call when the entry is already consumed —
+      // executeReply / executeStreamReply already cleared the draft as
+      // part of their handoff. Calling it again is a redundant API round
+      // trip and produces a "not modified" log line. Always delete the
+      // map entry so the next turn starts clean.
       const orphanDraft = preAllocatedDrafts.get(chatId)
       if (orphanDraft != null) {
         preAllocatedDrafts.delete(chatId)
-        cancelPlaceholderHeartbeat(chatId)  // Path A heartbeat: stop ticking — turn ended without consuming
-        if (sendMessageDraftFn != null) {
+        cancelPlaceholderHeartbeat(chatId)  // Path A heartbeat: stop ticking — turn ended
+        // #472 #9 — skip the redundant empty-text clear if the entry was
+        // already consumed by a reply path; that path owns the draft.
+        if (sendMessageDraftFn != null && !orphanDraft.consumed) {
           void sendMessageDraftFn(chatId, orphanDraft.draftId, '').catch(() => {
             /* best-effort cleanup */
           })
@@ -3928,13 +3970,42 @@ async function handleInbound(
     )
     if (decision.allocate) {
       const draftId = allocateDraftId()
+      // Closes #472 finding #8 — synchronously seed the map BEFORE the
+      // API call so update_placeholder IPC arriving in the 200-800ms gap
+      // finds the entry and can queue an edit. Pre-fix the .then() set
+      // landed after the API returned, and any hook IPC arriving in that
+      // gap silently no-op'd against an empty map (the
+      // 🔵-thinking-stuck-for-the-whole-turn UX).
+      //
+      // apiPending is informational for tests and observers — readers
+      // (handleUpdatePlaceholder, the consume sites) treat the entry as
+      // valid the moment it lands. Telegram's server serializes ops by
+      // draftId, so an edit racing the initial post is sequenced safely
+      // on the server side.
+      preAllocatedDrafts.set(chat_id, {
+        draftId,
+        allocatedAt: Date.now(),
+        apiPending: true,
+      })
       // Best-effort, non-blocking: any failure (transport down, API not
-      // available, group rejects sendMessageDraft) falls through to
-      // today's behavior — the existing .catch already silently logs.
+      // available, group rejects sendMessageDraft) removes the entry so
+      // subsequent reads don't queue edits against a non-existent draft.
       void sendMessageDraftFn!(chat_id, draftId, PRE_ALLOC_PLACEHOLDER_TEXT)
         .then(() => {
-          const allocatedAt = Date.now()
-          preAllocatedDrafts.set(chat_id, { draftId, allocatedAt })
+          // Clear the pending flag in place — the entry was pre-seeded
+          // synchronously above (#472 #8). If it was consumed in the
+          // gap by a fast reply, leave the consumed marker untouched.
+          // The entry may also have been replaced by a newer allocation
+          // (very rare): the draftId guard catches that.
+          const cur = preAllocatedDrafts.get(chat_id)
+          let allocatedAt: number
+          if (cur != null && cur.draftId === draftId) {
+            cur.apiPending = false
+            allocatedAt = cur.allocatedAt
+          } else {
+            // Entry vanished or replaced — start heartbeat with `now`.
+            allocatedAt = Date.now()
+          }
           process.stderr.write(`telegram gateway: pre-allocate draft ok chatId=${chat_id} draftId=${draftId}\n`)
           // Start the heartbeat (Path A §3 minimum) — keeps the
           // placeholder text moving so the chat doesn't appear
@@ -3946,6 +4017,13 @@ async function handleInbound(
           startPlaceholderHeartbeat(chat_id, draftId, allocatedAt)
         })
         .catch((err) => {
+          // Entry-by-draftId guard: don't delete if a NEWER allocation
+          // already replaced ours (rare but possible if the user sends
+          // two messages in close succession and the first failed).
+          const cur = preAllocatedDrafts.get(chat_id)
+          if (cur != null && cur.draftId === draftId) {
+            preAllocatedDrafts.delete(chat_id)
+          }
           process.stderr.write(
             `telegram gateway: pre-allocate draft failed chatId=${chat_id}: ${
               err instanceof Error ? err.message : String(err)
@@ -7316,6 +7394,24 @@ async function shutdown(signal: string): Promise<void> {
   if (orphanedReplyTimeoutId != null) {
     clearTimeout(orphanedReplyTimeoutId)
     orphanedReplyTimeoutId = null
+  }
+
+  // Closes #472 finding #10 — clear any pre-allocated drafts before exit.
+  // Without this, SIGTERM mid-turn leaves the user with a stuck "🔵
+  // thinking" placeholder visible forever (Telegram has no
+  // deleteMessageDraft, and the next gateway boot can't recover these
+  // entries since they live in process memory). Mirrors the pattern in
+  // turn_end's orphan-cleanup branch above. Best-effort: failures during
+  // shutdown are silent.
+  if (sendMessageDraftFn != null && preAllocatedDrafts.size > 0) {
+    process.stderr.write(`telegram gateway: shutdown.preallocated_draft_cleanup count=${preAllocatedDrafts.size}\n`)
+    for (const [chatId, draft] of preAllocatedDrafts.entries()) {
+      if (draft.consumed) continue
+      void sendMessageDraftFn(chatId, draft.draftId, '').catch(() => {
+        /* best-effort during shutdown */
+      })
+    }
+    preAllocatedDrafts.clear()
   }
 
   // Notify bridges so they can mark themselves disconnected.

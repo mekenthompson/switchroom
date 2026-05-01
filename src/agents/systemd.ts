@@ -46,6 +46,17 @@ export function generateUnit(
 
   const afterDeps = ["network-online.target"];
   if (useAutoaccept) afterDeps.push(`${unitName(gatewayUnitName ?? GATEWAY_UNIT_NAME)}.service`);
+  // Closes #472 finding #20 — system reboot races the agent service
+  // against the vault-broker unit. Without explicit ordering the agent
+  // boots before the broker is ready, vault env vars are empty, bot
+  // tokens absent, and the MCP server fails to connect. The cron-timer
+  // unit at this same file already pulls in this dep; mirror it for the
+  // main agent unit. Wants= is a soft dep so the agent can still boot
+  // if the broker is intentionally not running on this host. Appended
+  // last so the existing After= prefix substring assertions in tests
+  // (and any operator scripts that grep the unit) keep matching.
+  afterDeps.push("switchroom-vault-broker.service");
+  const wantsDeps = ["network-online.target", "switchroom-vault-broker.service"];
 
   // TZ= makes subprocess `date`, `Date.now()`-formatted strings, and
   // anything else that reads the env see the right zone — cheap insurance
@@ -66,7 +77,7 @@ export function generateUnit(
   return `[Unit]
 Description=switchroom agent: ${name}
 After=${afterDeps.join(" ")}
-Wants=network-online.target
+Wants=${wantsDeps.join(" ")}
 StartLimitBurst=5
 StartLimitIntervalSec=120
 

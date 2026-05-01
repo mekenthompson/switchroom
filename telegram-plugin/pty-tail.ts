@@ -83,6 +83,36 @@ export interface MessageRegionExtractor {
   extract(terminal: Terminal): string | null
 }
 
+// ─── Debug knob ──────────────────────────────────────────────────────────
+//
+// Set SWITCHROOM_PTY_DEBUG=1 to dump the bottom of the terminal buffer to
+// stderr whenever V1Extractor returns null. Used to diagnose extractor
+// misses when Claude Code changes its TUI rendering (e.g. when channels
+// mode shows MCP tool calls in a different shape than legacy mode).
+//
+// Off by default — when unset there is zero overhead beyond an env-var
+// check. When on, dumps are throttled to once per 2s per process so we
+// don't flood stderr while the extractor scans every ~150ms.
+const PTY_DEBUG = process.env.SWITCHROOM_PTY_DEBUG === '1'
+let lastDebugDumpAt = 0
+const DEBUG_DUMP_THROTTLE_MS = 2000
+const DEBUG_DUMP_LINES = 25
+
+function debugDumpBufferOnMiss(buf: { length: number; getLine: (i: number) => { translateToString: (trim: boolean) => string } | undefined }): void {
+  if (!PTY_DEBUG) return
+  const now = Date.now()
+  if (now - lastDebugDumpAt < DEBUG_DUMP_THROTTLE_MS) return
+  lastDebugDumpAt = now
+  const start = Math.max(0, buf.length - DEBUG_DUMP_LINES)
+  const lines: string[] = []
+  for (let i = start; i < buf.length; i++) {
+    const t = buf.getLine(i)?.translateToString(true) ?? ''
+    if (t.trim() === '') continue
+    lines.push(`L${i}: ${t}`)
+  }
+  process.stderr.write(`pty-tail: V1Extractor miss — bottom ${lines.length} non-empty lines:\n${lines.join('\n')}\n---end pty miss dump---\n`)
+}
+
 /**
  * v1 extractor for Claude Code 2.1.x.
  *
@@ -126,7 +156,10 @@ export class V1Extractor implements MessageRegionExtractor {
         break
       }
     }
-    if (startLine < 0) return null
+    if (startLine < 0) {
+      debugDumpBufferOnMiss(buf)
+      return null
+    }
 
     // Concatenate the start line + continuation lines into one logical
     // string. Continuation lines from Ink for tool params are indented

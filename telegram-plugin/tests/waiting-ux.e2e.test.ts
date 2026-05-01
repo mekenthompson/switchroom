@@ -28,8 +28,6 @@ const INBOUND_MSG = 100
 
 beforeEach(() => {
   vi.useFakeTimers()
-  // Pin the clock to a recognisable epoch so ts deltas are easy to read.
-  vi.setSystemTime(new Date('2026-05-01T00:00:00.000Z'))
 })
 
 afterEach(() => {

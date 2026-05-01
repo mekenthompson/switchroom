@@ -142,7 +142,6 @@ function makeHarness(overrides: { ctx?: Partial<FirstPaintCtx> } = {}): Harness 
 
 beforeEach(() => {
   vi.useFakeTimers()
-  vi.setSystemTime(new Date('2026-05-01T00:00:00.000Z'))
 })
 
 afterEach(() => {

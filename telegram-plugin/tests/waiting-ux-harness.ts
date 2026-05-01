@@ -343,7 +343,16 @@ export function createWaitingUxHarness(opts: CreateHarnessOpts = {}): HarnessHan
   const clock: HarnessClock = {
     now: () => Date.now(),
     advance: async (ms) => {
-      await vi.advanceTimersByTimeAsync(ms)
+      // vi.advanceTimersByTimeAsync isn't implemented by Bun's vitest shim,
+      // so fall back to the sync variant + microtask flush. Same semantics
+      // for these tests; lets the harness run under both vitest and `bun test`.
+      const viAny = vi as { advanceTimersByTimeAsync?: (ms: number) => Promise<void> }
+      if (typeof viAny.advanceTimersByTimeAsync === 'function') {
+        await viAny.advanceTimersByTimeAsync(ms)
+        return
+      }
+      vi.advanceTimersByTime(ms)
+      for (let i = 0; i < 5; i++) await Promise.resolve()
     },
   }
 

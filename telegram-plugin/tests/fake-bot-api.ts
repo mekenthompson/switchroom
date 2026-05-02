@@ -504,6 +504,12 @@ export function createFakeBotApi(opts: CreateFakeBotApiOpts = {}): FakeBot {
       resolve = res
       reject = rej
     })
+    // Defensive: attach a catch handler at construction so a queued-
+    // but-never-matched hold rejected by reset() doesn't surface as an
+    // unhandled-rejection (which vitest treats as a test-suite error).
+    // Once a real call awaits the gate via applyEntryGates, that
+    // awaiter takes ownership of the rejection.
+    gate.catch(() => {})
     let triggered = false
     const entry: HoldQueueEntry = {
       method,

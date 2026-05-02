@@ -161,7 +161,16 @@ export function normalizeForDedup(text: string): string {
   return text
     .replace(/<\/?[a-zA-Z][^>]*>/g, '')      // HTML tags
     .replace(/&[a-zA-Z]+;|&#\d+;/g, ' ')     // HTML entities → space
-    .replace(/(\*\*|__|`)+/g, '')            // markdown bold/italic/code markers
+    .replace(/(\*\*|__|`)+/g, '')            // markdown bold/code markers
+    // Single-asterisk and single-underscore italic markers. `markdownToHtml`
+    // (format.ts:~285) converts `*italic*` to `<i>italic</i>` — so when
+    // turn-flush HTML-renders and a replay sends raw markdown, the two
+    // renderings need to converge here. Without this, dedup misses and
+    // the user sees duplicate italic content. The lookarounds mirror
+    // markdownToHtml's italic regex so we strip the same set the renderer
+    // would have converted (avoids stripping `1 * 2` arithmetic, etc.).
+    .replace(/(?<!\*)\*(?!\*)([^*\n]+?)(?<!\*)\*(?!\*)/g, '$1')
+    .replace(/(?<![\w_])_(?!_)([^_\n]+?)_(?![\w_])/g, '$1')
     .replace(/^[#>\-*+]\s+/gm, '')           // markdown line prefixes
     .replace(/\s+/g, ' ')
     .trim()

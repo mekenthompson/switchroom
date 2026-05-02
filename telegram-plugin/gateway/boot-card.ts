@@ -140,27 +140,38 @@ export interface BootCardSkipDecision {
 /**
  * Decide whether to skip posting the boot card based on gateway state.
  *
- * The boot path runs first (in the gateway IIFE) and sets activeBootCard
- * on success. The bridge-reconnect path runs later when the agent
- * registers; without this guard it posts a duplicate card.
+ * Two emit sites contend on every gateway lifetime:
  *
- * Boot path: never skip — it's the primary post site.
- * Bridge-reconnect: skip if a card is in-flight OR was already posted
- * this lifetime. The in-flight check closes the race against an
- * unresolved sendMessage await (issue #489).
+ *   - `boot`: the gateway IIFE startup path (long: probes session
+ *     marker, clean-shutdown marker, restart marker, etc).
+ *   - `bridge-reconnect`: fires when the agent's IPC client connects
+ *     to the gateway socket.
+ *
+ * Earlier versions of this gate special-cased `boot` as "primary"
+ * and let it post unconditionally. Empirically that assumption is
+ * wrong: when the agent process boots faster than the gateway IIFE
+ * reaches its emit, bridge-reconnect runs first, posts its card,
+ * and then boot fires its own card too — both with reason=graceful
+ * within ~100ms (observed in finn 2026-05-02: msgId 673 + 674
+ * with both `posted` log lines on consecutive lines).
+ *
+ * The fix is first-write-wins: whichever site fires first claims
+ * `bootCardPending` synchronously, posts the card, and releases.
+ * The other site sees pending or active and defers. Both sites'
+ * chat resolution is identical (same restart-marker / clean-shutdown
+ * / session-marker pipeline), so it doesn't matter which one wins.
  */
 export function shouldSkipDuplicateBootCard(
   gate: BootCardGate,
   site: BootCardSite,
 ): BootCardSkipDecision {
-  if (site === 'boot') return { skip: false }
   if (gate.bootCardPending) {
-    return { skip: true, reason: 'in-flight-on-boot-path' }
+    return { skip: true, reason: `in-flight-other-site site=${site}` }
   }
   if (gate.activeBootCard != null) {
     return {
       skip: true,
-      reason: `already-posted-msgId=${gate.activeBootCard.messageId}`,
+      reason: `already-posted-msgId=${gate.activeBootCard.messageId} site=${site}`,
     }
   }
   return { skip: false }

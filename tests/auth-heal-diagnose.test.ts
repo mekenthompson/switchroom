@@ -46,7 +46,14 @@ describe("diagnoseAuthState", () => {
       code: "credentials_missing",
       severity: "error",
     });
-    expect(r.findings[0].summary).toMatch(/never been authenticated/);
+    // Summary is the user-facing string surfaced in the Telegram
+    // boot-self-test issue card. It must point users at the inline
+    // /auth dashboard — the agent's chat is the only surface a
+    // Telegram-only user has, so a "switchroom auth reauth"
+    // terminal command is wrong place. See reference/principles.md
+    // "docs test."
+    expect(r.findings[0].summary).toMatch(/\/auth/);
+    expect(r.findings[0].summary).toMatch(/this chat/);
     expect(r.recommendation.join("\n")).toContain("switchroom auth reauth");
   });
 
@@ -58,7 +65,7 @@ describe("diagnoseAuthState", () => {
       code: "credentials_missing",
       severity: "warn",
     });
-    expect(r.findings[0].summary).toMatch(/legacy|absent.*oauth-token/i);
+    expect(r.findings[0].summary).toMatch(/\/auth/);
   });
 
   it("flags malformed JSON as error/credentials_malformed", () => {
@@ -88,6 +95,7 @@ describe("diagnoseAuthState", () => {
     const expired = r.findings.find((f) => f.code === "token_expired");
     expect(expired).toBeDefined();
     expect(expired!.summary).toMatch(/expired \d+d ago/);
+    expect(expired!.summary).toMatch(/\/auth/);
   });
 
   it("flags missing refreshToken as warn/refresh_token_missing", () => {

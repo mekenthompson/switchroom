@@ -102,11 +102,18 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
   const hasCreds = existsSync(credsPath);
   const hasOauthToken = existsSync(oauthTokenPath);
 
+  // Summary text is the user-facing string surfaced in the boot-self-test
+  // issue card on Telegram. It must be ACTIONABLE without docs — see
+  // reference/principles.md "docs test." The technical fingerprint is
+  // preserved in `code` for forensics; `summary` tells the user what to
+  // do. Send /auth in the agent's chat to open the inline auth dashboard
+  // (telegram-plugin/auth-dashboard.ts), which has Reauth / Add / Use
+  // buttons — no terminal needed.
   if (!hasCreds && !hasOauthToken) {
     findings.push({
       code: "credentials_missing",
       severity: "error",
-      summary: "no .credentials.json AND no .oauth-token - agent has never been authenticated",
+      summary: "needs first-time login — send /auth in this chat to start the flow",
     });
   } else if (!hasCreds) {
     // .oauth-token alone is the legacy state — works for in-process
@@ -115,7 +122,7 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
     findings.push({
       code: "credentials_missing",
       severity: "warn",
-      summary: ".credentials.json absent (only .oauth-token present); claude can't self-refresh",
+      summary: "send /auth in this chat to refresh credentials (hooks need them)",
     });
   } else {
     let parsed:
@@ -127,7 +134,7 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
       findings.push({
         code: "credentials_malformed",
         severity: "error",
-        summary: ".credentials.json is not valid JSON - file corrupted",
+        summary: "credentials file corrupted — send /auth in this chat to reset",
       });
     }
     if (parsed) {
@@ -136,7 +143,7 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
         findings.push({
           code: "credentials_malformed",
           severity: "error",
-          summary: ".credentials.json missing claudeAiOauth.accessToken - file corrupted",
+          summary: "credentials file corrupted — send /auth in this chat to reset",
         });
       } else {
         // Token shape OK; check expiry.
@@ -149,14 +156,14 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
             findings.push({
               code: "credentials_malformed",
               severity: "warn",
-              summary: ".credentials.json claudeAiOauth.expiresAt is non-finite",
+              summary: "credentials file has invalid expiry — send /auth in this chat to reset",
             });
           } else if (expiresAt < Date.now()) {
             const days = Math.floor((Date.now() - expiresAt) / 86_400_000);
             findings.push({
               code: "token_expired",
               severity: "error",
-              summary: `access token expired ${days}d ago`,
+              summary: `login expired ${days}d ago — send /auth in this chat to refresh`,
             });
           }
         } else if (expiresAt !== undefined) {
@@ -166,7 +173,7 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
           findings.push({
             code: "credentials_malformed",
             severity: "warn",
-            summary: ".credentials.json claudeAiOauth.expiresAt is missing or non-numeric",
+            summary: "credentials file has invalid expiry — send /auth in this chat to reset",
           });
         }
         // Refresh token: warn if missing.
@@ -174,7 +181,7 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
           findings.push({
             code: "refresh_token_missing",
             severity: "warn",
-            summary: "no refreshToken - claude can't self-refresh; will break when access token expires",
+            summary: "send /auth in this chat to renew credentials before they expire",
           });
         }
       }

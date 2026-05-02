@@ -133,7 +133,11 @@ for code in "${ALL_CODES[@]}"; do
       detail="$detail
 $recommendation"
     fi
-    record "$code" "$severity" "$AGENT_NAME $summary" "$detail"
+    # Don't prepend agent name — the issue-card header already
+    # renders `<emoji> <agent> · N issues`, so duplicating the
+    # name in every row is redundant and steals row width from
+    # the actionable summary text.
+    record "$code" "$severity" "$summary" "$detail"
   fi
 done
 

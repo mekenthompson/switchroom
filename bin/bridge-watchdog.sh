@@ -77,6 +77,24 @@ set -euo pipefail
 # legitimate single-tool turn (a long Bash compile maybe) but tight
 # enough to catch Stop-hook deadlocks before the user notices.
 : "${TURN_HANG_SECS:=300}"
+# Forward-progress liveness window. The gateway only bumps
+# `turn-active.json` mtime on PARENT-stream tool_use events; when the
+# parent dispatches a Task() to a sub-agent, the marker goes stale
+# even while real work is happening. The bridge can also flap
+# (transient socket close, MCP plugin restart) while a sub-agent
+# keeps working. Before any restart path acts, probe the agent's
+# `.claude/projects/**/*.jsonl` AND `.claude/tasks/**/*.json` files:
+# if EITHER was modified within JSONL_LIVENESS_SECS, the agent is
+# making forward progress and the restart is a false positive.
+#
+# Two independent fingerprints means a wedged agent has to be silent
+# on BOTH to be killed — much stronger evidence than a single signal.
+# 60s matches the in-flight detector's "recent" semantics in
+# src/agents/in-flight.ts (30s window + 60s tick spread).
+#
+# (Name kept as JSONL_LIVENESS_SECS for back-compat with operators
+# who already set it via env; the value gates both fingerprints.)
+: "${JSONL_LIVENESS_SECS:=60}"
 
 # Per-agent watchdog state lives under /run/user/$UID/switchroom-watchdog/
 # (tmpfs, cleared on logout — correct: we don't want stale silence markers
@@ -87,6 +105,211 @@ UID_VAL="${UID:-$(id -u)}"
 mkdir -p "$WATCHDOG_STATE_DIR" 2>/dev/null || true
 
 now_epoch() { date +%s; }
+
+# Unified logging — every decision goes to journalctl with the
+# `switchroom-watchdog` tag AND to the unit's own stdout (which is
+# also captured by journal via StandardOutput=journal). Use level tags
+# (`detect`, `restart`, `skip`, `error`) so `journalctl -t
+# switchroom-watchdog | grep '\[restart\]'` is a clean audit trail of
+# every action this watchdog took.
+wd_log() {
+  local level="$1"
+  shift
+  local msg="$*"
+  logger -t switchroom-watchdog "[$level] $msg" 2>/dev/null || true
+  # Stdout (not stderr) matches the prior `echo` lines so existing
+  # systemd journal capture (StandardOutput=journal) and the test
+  # harness that reads stdout from execFileSync both see the line.
+  echo "$(date -Iseconds) watchdog [$level] $msg"
+}
+
+# Returns 0 (true) iff the agent shows ANY of two independent
+# forward-progress fingerprints within the last `$2` seconds:
+#
+#   1. `.claude/projects/**/*.jsonl` — Claude Code appends to these
+#      transcripts on every event (model output, tool_use, sub-agent
+#      activity). Fresh mtime ⇒ the model or a sub-agent is alive.
+#   2. `.claude/tasks/<session>/*.json` — TodoWrite / Task-tool state
+#      files. Updated independently of the transcript stream when the
+#      agent is iterating on a task list. Catches the case where the
+#      transcript momentarily quiets (large model thinking pause)
+#      while the agent is still progressing through todos.
+#
+# OR semantics: a wedged agent has to be silent on BOTH to be
+# declared dead. Two uncorrelated fingerprints make false positives
+# (kill while still working) much rarer than a single signal.
+#
+# `find -mmin` minimum granularity is minutes; round up to be
+# conservative (better to defer a restart by an extra minute than to
+# kill a live sub-agent). Both probes are bounded — quit on first
+# match — so this stays O(1)-ish even on busy projects.
+agent_has_recent_progress() {
+  local agent_name="$1"
+  local within_secs="$2"
+  local agent_root="${HOME}/.switchroom/agents/${agent_name}/.claude"
+  [[ -d "$agent_root" ]] || return 1
+  local mmin=$(( (within_secs + 59) / 60 ))
+  [[ "$mmin" -lt 1 ]] && mmin=1
+
+  # Signal 1: transcript JSONL writes (parent or sub-agent).
+  local hit
+  hit=$(find "${agent_root}/projects" -name '*.jsonl' -mmin "-${mmin}" -print -quit 2>/dev/null)
+  [[ -n "$hit" ]] && return 0
+
+  # Signal 2: TodoWrite/Task state JSON updates.
+  hit=$(find "${agent_root}/tasks" -name '*.json' -mmin "-${mmin}" -print -quit 2>/dev/null)
+  [[ -n "$hit" ]] && return 0
+
+  return 1
+}
+
+# ─── Forensic observation helpers ──────────────────────────────────────
+# Composed at every restart/detect/skip log line so `journalctl -t
+# switchroom-watchdog` carries enough context to reconstruct WHY any
+# action was taken without re-deriving from kernel/process state
+# after the fact (which is impossible — the process is gone after a
+# restart). Each helper is best-effort, returns a compact key=value
+# fragment, and never fails the script.
+
+# Resolve the most-interesting PID in the agent's systemd cgroup —
+# i.e., the actual `claude` process, not the start.sh / `script -qfc`
+# PTY wrappers that systemd reports as MainPID. Strategy:
+#
+#   1. Look up the unit's cgroup path via systemctl.
+#   2. Read `/sys/fs/cgroup/<cgroup>/cgroup.procs` for the full list.
+#   3. Pick the PID with the largest RSS — claude is reliably the
+#      memory-heaviest member of the cgroup (start.sh: ~2MB, script:
+#      ~1MB, claude: hundreds of MB to multiple GB).
+#
+# Falls back to MainPID if the cgroup walk fails (rare — only when
+# cgroup v2 isn't mounted at /sys/fs/cgroup or systemd reports an
+# unusual unit layout). Returns 0 when nothing resolvable.
+agent_main_pid() {
+  local name="$1"
+  local unit="switchroom-${name}.service"
+  local cgroup
+  cgroup=$(systemctl --user show "$unit" -p ControlGroup --value 2>/dev/null)
+  if [[ -n "$cgroup" && -r "/sys/fs/cgroup${cgroup}/cgroup.procs" ]]; then
+    # Pick the PID whose RSS (in KB) is largest. ps -o rss= prints
+    # just the rss column; pair with -p PID-list to score them.
+    local pids
+    pids=$(tr '\n' ' ' < "/sys/fs/cgroup${cgroup}/cgroup.procs" 2>/dev/null)
+    if [[ -n "$pids" ]]; then
+      local heaviest
+      heaviest=$(ps -o pid=,rss= -p $pids 2>/dev/null \
+        | awk 'BEGIN{best_pid=0; best_rss=0} {if ($2+0 > best_rss) {best_rss=$2+0; best_pid=$1+0}} END{print best_pid}')
+      if [[ "${heaviest:-0}" -gt 0 ]]; then
+        echo "$heaviest"
+        return 0
+      fi
+    fi
+  fi
+  systemctl --user show "$unit" -p MainPID --value 2>/dev/null || echo 0
+}
+
+# Process-state snapshot: state letter (R running, S sleeping, D
+# uninterruptible sleep — usually I/O wait or kernel stuck, Z zombie,
+# T stopped), CPU%, RSS in MB. State `D` for >30s is the smoking-gun
+# signature of a genuinely wedged process (the original #116 hangs).
+# Reads /proc/<pid>/stat for the state letter (field 3) and uses
+# `ps -o` for CPU/RSS — both cheap and free of GNU/BSD portability
+# pitfalls on Linux.
+agent_proc_snapshot() {
+  local pid="$1"
+  if [[ -z "$pid" || "$pid" == "0" ]]; then
+    echo "pid=0 state=missing"
+    return 0
+  fi
+  if [[ ! -r "/proc/${pid}/stat" ]]; then
+    echo "pid=${pid} state=gone"
+    return 0
+  fi
+  # /proc/<pid>/stat field 3 is the state letter. The comm field
+  # (field 2) is parenthesized and may contain spaces — strip it
+  # before splitting so awk indexing is reliable.
+  local stat_state
+  stat_state=$(awk '{
+    line=$0;
+    sub(/.*\) /, "", line);
+    split(line, a, " ");
+    print a[1];
+  }' "/proc/${pid}/stat" 2>/dev/null || echo "?")
+  local cpu rss
+  read -r cpu rss < <(ps -o pcpu=,rss= -p "$pid" 2>/dev/null | awk '{print $1, $2}')
+  cpu="${cpu:-?}"
+  rss="${rss:-0}"
+  local rss_mb=$(( rss / 1024 ))
+  echo "pid=${pid} state=${stat_state} cpu=${cpu}% rss_mb=${rss_mb}"
+}
+
+# Per-fingerprint freshness summary. Reports the age (in seconds) of
+# the newest JSONL transcript and tasks-state file under the agent's
+# `.claude/` tree. A wedged process shows both ages climbing past the
+# threshold; a working sub-agent shows at least one stays small.
+agent_progress_snapshot() {
+  local name="$1"
+  local agent_root="${HOME}/.switchroom/agents/${name}/.claude"
+  if [[ ! -d "$agent_root" ]]; then
+    echo "jsonl_age=- tasks_age=-"
+    return 0
+  fi
+  local now
+  now=$(now_epoch)
+  # Newest JSONL mtime (may be empty if no project history yet).
+  local newest_jsonl_mtime
+  newest_jsonl_mtime=$(find "${agent_root}/projects" -name '*.jsonl' \
+    -printf '%T@\n' 2>/dev/null | awk 'BEGIN{m=0} {if ($1+0 > m) m=$1+0} END{print int(m)}')
+  local newest_tasks_mtime
+  newest_tasks_mtime=$(find "${agent_root}/tasks" -name '*.json' \
+    -printf '%T@\n' 2>/dev/null | awk 'BEGIN{m=0} {if ($1+0 > m) m=$1+0} END{print int(m)}')
+  local jsonl_age="-"
+  local tasks_age="-"
+  if [[ "${newest_jsonl_mtime:-0}" -gt 0 ]]; then
+    jsonl_age=$(( now - newest_jsonl_mtime ))s
+  fi
+  if [[ "${newest_tasks_mtime:-0}" -gt 0 ]]; then
+    tasks_age=$(( now - newest_tasks_mtime ))s
+  fi
+  echo "jsonl_age=${jsonl_age} tasks_age=${tasks_age}"
+}
+
+# Compose the full forensic observation line: process state + the
+# two progress fingerprints. Embedded in every action log message so
+# the journal entry is self-contained — operators don't need to
+# re-run probes after the fact (which would be useless if the
+# process has been restarted in the meantime).
+agent_observation() {
+  local name="$1"
+  local pid
+  pid=$(agent_main_pid "$name")
+  local proc progress
+  proc=$(agent_proc_snapshot "$pid")
+  progress=$(agent_progress_snapshot "$name")
+  echo "${proc} ${progress}"
+}
+
+# Stamp a clean-shutdown.json marker into the agent's telegram state
+# dir BEFORE issuing a restart, so the next greeting card can render
+# "Restarted  <reason>". Mirrors the inline jq/printf logic that lived
+# in the bridge-disconnect path; pulled into a function so every
+# restart path stamps consistently. Best-effort: never fails.
+stamp_restart_reason() {
+  local marker="$1"
+  local reason="$2"
+  local ts_ms
+  ts_ms=$(( $(date +%s) * 1000 ))
+  local tmp="${marker}.tmp-$$"
+  if command -v jq >/dev/null 2>&1; then
+    jq -n --argjson ts "$ts_ms" --arg reason "$reason" \
+      '{ts: $ts, signal: "SIGTERM", reason: $reason}' > "$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$marker" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+  else
+    local esc_reason
+    esc_reason=$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    printf '{"ts":%s,"signal":"SIGTERM","reason":"%s"}' "$ts_ms" "$esc_reason" > "$tmp" 2>/dev/null \
+      && mv -f "$tmp" "$marker" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+  fi
+}
 
 # Discover active gateway units. systemd's list-units output includes only
 # currently-loaded units; we filter to the switchroom-*-gateway.service
@@ -117,7 +340,7 @@ for gateway_svc in "${gateway_services[@]}"; do
     systemctl --user show "$gateway_svc" -p WorkingDirectory --value 2>/dev/null
   )"
   if [[ -z "$gateway_state_dir" ]]; then
-    echo "$(date -Iseconds) watchdog: ${agent} gateway has no WorkingDirectory; skipping"
+    wd_log error "agent=${agent} gateway has no WorkingDirectory; skipping"
     continue
   fi
   gateway_log="${gateway_state_dir}/gateway.log"
@@ -151,12 +374,12 @@ for gateway_svc in "${gateway_services[@]}"; do
     # — that needs operator intervention, not a restart loop.
     state="$(systemctl --user show "$agent_svc" -p ActiveState --value 2>/dev/null)"
     if [[ "$state" == "failed" ]]; then
-      echo "$(date -Iseconds) watchdog: ${agent_svc} is failed state; skipping (needs operator reset-failed)"
+      wd_log skip "agent=${agent} reason=service-failed decision=needs-operator-reset state=${state} $(agent_progress_snapshot "$agent") (unit in failed state; needs operator reset-failed)"
       continue
     fi
-    echo "$(date -Iseconds) watchdog: ${agent} agent service is inactive (${state}); starting ${agent_svc}"
+    wd_log restart "agent=${agent} reason=service-inactive state=${state} action=start $(agent_progress_snapshot "$agent") (agent service is inactive)"
     systemctl --user start "$agent_svc" || {
-      echo "$(date -Iseconds) watchdog: ${agent_svc} start failed"
+      wd_log error "agent=${agent} systemctl start failed"
     }
     continue
   fi
@@ -227,7 +450,7 @@ for gateway_svc in "${gateway_services[@]}"; do
       liveness_age=$(( $(now_epoch) - liveness_mtime ))
       if (( liveness_age < LIVENESS_GRACE_SECS )); then
         bridge_healthy=true
-        echo "$(date -Iseconds) watchdog: ${agent} bridge socket disconnected but liveness file is fresh (${liveness_age}s ago); bridge process alive, skipping restart"
+        wd_log skip "agent=${agent} reason=bridge-socket-flap decision=liveness-file-fresh liveness_age=${liveness_age}s threshold=${LIVENESS_GRACE_SECS}s $(agent_observation "$agent") (liveness file is fresh)"
       fi
     fi
   fi
@@ -261,7 +484,21 @@ for gateway_svc in "${gateway_services[@]}"; do
     continue
   fi
 
-  echo "$(date -Iseconds) watchdog: ${agent} bridge has been disconnected for ${disc_duration}s (>= ${DISCONNECT_GRACE_SECS}s), restarting ${agent_svc}"
+  # Progress gate — same defence as turn-hang/journal-silence. A
+  # bridge can flap (MCP plugin crash, transient socket close)
+  # while a sub-agent is still doing real work. Without this gate
+  # the bridge-disconnect path would kill any in-flight sub-agent
+  # whenever the bridge had a bad minute. Skip the restart if any
+  # forward-progress fingerprint is fresh and just keep the
+  # disconnect marker around — next tick will re-evaluate.
+  observation=$(agent_observation "$agent")
+  if agent_has_recent_progress "$agent" "$JSONL_LIVENESS_SECS"; then
+    wd_log skip "agent=${agent} reason=bridge-disconnect disc_duration=${disc_duration}s threshold=${DISCONNECT_GRACE_SECS}s decision=defer-progress-fresh ${observation}"
+    continue
+  fi
+
+  wd_log detect "agent=${agent} reason=bridge-disconnect disc_duration=${disc_duration}s threshold=${DISCONNECT_GRACE_SECS}s ${observation}"
+  wd_log restart "agent=${agent} reason=bridge-disconnect disc_duration=${disc_duration}s threshold=${DISCONNECT_GRACE_SECS}s ${observation}"
   # Clear the marker so post-restart we don't immediately re-trip on
   # the still-old tail. The uptime grace will cover the startup window
   # anyway, but removing the marker keeps state clean.
@@ -270,27 +507,34 @@ for gateway_svc in "${gateway_services[@]}"; do
   # "Restarted  watchdog: bridge disconnected for ${disc_duration}s".
   # The gateway's own SIGTERM handler writes `clean-shutdown.json` on
   # shutdown too — but its marker carries no `reason`, so the greeting
-  # omits the row. Pre-seeding here wins the race: we write it BEFORE
-  # issuing systemctl restart so it's on disk by the time the new
-  # processes boot. Best-effort: if jq is unavailable fall back to a
-  # printf-shaped JSON literal.
-  _clean_marker="${gateway_state_dir}/clean-shutdown.json"
-  _ts_ms=$(( $(date +%s) * 1000 ))
-  _reason="watchdog: bridge disconnected for ${disc_duration}s"
-  _tmp="${_clean_marker}.tmp-$$"
-  if command -v jq >/dev/null 2>&1; then
-    jq -n --argjson ts "$_ts_ms" --arg reason "$_reason" \
-      '{ts: $ts, signal: "SIGTERM", reason: $reason}' > "$_tmp" 2>/dev/null \
-      && mv -f "$_tmp" "$_clean_marker" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
-  else
-    # Escape backslashes and double-quotes in the reason for safe JSON embedding.
-    _esc_reason=$(printf '%s' "$_reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    printf '{"ts":%s,"signal":"SIGTERM","reason":"%s"}' "$_ts_ms" "$_esc_reason" > "$_tmp" 2>/dev/null \
-      && mv -f "$_tmp" "$_clean_marker" 2>/dev/null || rm -f "$_tmp" 2>/dev/null || true
+  # omits the row.
+  stamp_restart_reason \
+    "${gateway_state_dir}/clean-shutdown.json" \
+    "watchdog: bridge disconnected for ${disc_duration}s"
+  # Route through `switchroom agent restart` (not raw systemctl) for
+  # parity with the turn-hang and journal-silence paths: the CLI's
+  # in-flight guard is one more belt-and-suspenders check, and config
+  # reconciliation runs on every lifecycle transition per the project
+  # contract. Falls back to systemctl if the CLI isn't on PATH.
+  switchroom_cli=""
+  for candidate in "${HOME}/.bun/bin/switchroom" "${HOME}/.local/bin/switchroom"; do
+    if [[ -x "$candidate" ]]; then
+      switchroom_cli="$candidate"
+      break
+    fi
+  done
+  if [[ -z "$switchroom_cli" ]] && command -v switchroom >/dev/null 2>&1; then
+    switchroom_cli="$(command -v switchroom)"
   fi
-  systemctl --user restart "$agent_svc" || {
-    echo "$(date -Iseconds) watchdog: ${agent_svc} restart failed"
-  }
+  if [[ -n "$switchroom_cli" ]]; then
+    "$switchroom_cli" agent restart "$agent" || {
+      wd_log error "agent=${agent} switchroom agent restart failed; falling back to systemctl --user restart"
+      systemctl --user restart "$agent_svc" || true
+    }
+  else
+    wd_log error "agent=${agent} switchroom CLI not on PATH; using systemctl restart fallback"
+    systemctl --user restart "$agent_svc" || true
+  fi
 done
 
 # ─── Journal-silence check ───────────────────────────────────────────────────
@@ -358,8 +602,25 @@ for agent_svc in "${agent_services[@]}"; do
     if [[ "$turn_mtime" -gt 0 ]]; then
       turn_age=$(( $(now_epoch) - turn_mtime ))
       if [[ "$turn_age" -ge "$TURN_HANG_SECS" ]]; then
-        logger -t switchroom-watchdog "agent ${agent}: turn-active marker stale (${turn_age}s >= ${TURN_HANG_SECS}s); restarting via switchroom agent restart (#412)"
-        echo "$(date -Iseconds) watchdog: ${agent} wedged mid-turn (${turn_age}s), restarting"
+        # Progress gate — sub-agent activity does NOT bump the
+        # parent's turn-active marker, so a stale marker plus fresh
+        # JSONL writes means a sub-agent (or the main turn) is doing
+        # real work and a restart would kill it mid-flight. This was
+        # the dominant false-positive path observed in the journal
+        # 2026-05-02 (finn/klanker restarted while sub-agents had
+        # `last activity: 0s ago` per the in-flight detector).
+        observation=$(agent_observation "$agent")
+        if agent_has_recent_progress "$agent" "$JSONL_LIVENESS_SECS"; then
+          wd_log skip "agent=${agent} reason=turn-hang turn_age=${turn_age}s threshold=${TURN_HANG_SECS}s decision=defer-progress-fresh ${observation}"
+          continue
+        fi
+        wd_log detect "agent=${agent} reason=turn-hang turn_age=${turn_age}s threshold=${TURN_HANG_SECS}s ${observation} (no progress fingerprints within ${JSONL_LIVENESS_SECS}s — wedged mid-turn)"
+        # Stamp the reason BEFORE the restart so the next greeting
+        # card renders "Restarted  watchdog: …".
+        stamp_restart_reason \
+          "${agent_state_dir}/clean-shutdown.json" \
+          "watchdog: turn-active marker stale ${turn_age}s with no JSONL activity"
+        wd_log restart "agent=${agent} reason=turn-hang turn_age=${turn_age}s threshold=${TURN_HANG_SECS}s ${observation}"
         # Resolve the switchroom CLI (same belt-and-suspenders as below)
         switchroom_cli=""
         for candidate in "${HOME}/.bun/bin/switchroom" "${HOME}/.local/bin/switchroom"; do
@@ -373,10 +634,11 @@ for agent_svc in "${agent_services[@]}"; do
         fi
         if [[ -n "$switchroom_cli" ]]; then
           "$switchroom_cli" agent restart "$agent" || {
-            logger -t switchroom-watchdog "agent ${agent}: switchroom agent restart failed; falling back to systemctl"
+            wd_log error "agent=${agent} switchroom agent restart failed; falling back to systemctl --user restart"
             systemctl --user restart "$agent_svc" || true
           }
         else
+          wd_log error "agent=${agent} switchroom CLI not on PATH; using systemctl restart fallback"
           systemctl --user restart "$agent_svc" || true
         fi
         # Restarted — skip remaining checks for this agent this tick.
@@ -446,7 +708,7 @@ for agent_svc in "${agent_services[@]}"; do
   else
     echo "$now" > "$silence_marker"
     silence_since="$now"
-    logger -t switchroom-watchdog "agent ${agent}: journal silent for ${journal_age}s; recording silence marker (will restart after ${JOURNAL_SILENCE_HARD_SECS}s of sustained silence)"
+    wd_log detect "agent=${agent} reason=journal-silence journal_age=${journal_age}s threshold=${JOURNAL_SILENCE_SECS}s decision=record-silence-marker $(agent_observation "$agent") (will restart after ${JOURNAL_SILENCE_HARD_SECS}s of sustained silence)"
     continue
   fi
 
@@ -456,11 +718,27 @@ for agent_svc in "${agent_services[@]}"; do
     continue
   fi
 
+  # Progress gate — same defence as the turn-hang path. A silent
+  # agent journal can co-exist with a busy sub-agent (the parent's
+  # stdout goes quiet while the sub-agent runs). If JSONL or tasks
+  # writes are happening, real work is in progress; don't restart.
+  observation=$(agent_observation "$agent")
+  if agent_has_recent_progress "$agent" "$JSONL_LIVENESS_SECS"; then
+    wd_log skip "agent=${agent} reason=journal-silence journal_age=${journal_age}s silence_duration=${silence_duration}s threshold=${JOURNAL_SILENCE_HARD_SECS}s decision=defer-progress-fresh ${observation}"
+    rm -f "$silence_marker" 2>/dev/null || true
+    continue
+  fi
+
   # The agent has been journal-silent for >= JOURNAL_SILENCE_HARD_SECS
-  # AND has cleared the uptime grace. This matches the production hang
-  # pattern (issue #116). Restart via the switchroom CLI.
-  logger -t switchroom-watchdog "agent ${agent}: journal silent for ${journal_age}s (marker age ${silence_duration}s >= ${JOURNAL_SILENCE_HARD_SECS}s); restarting via switchroom agent restart"
-  echo "$(date -Iseconds) watchdog: ${agent} journal silent for ${journal_age}s, restarting"
+  # AND has cleared the uptime grace AND has no progress fingerprints.
+  # This matches the production hang pattern (issue #116). Restart
+  # via the switchroom CLI.
+  wd_log detect "agent=${agent} reason=journal-silence journal_age=${journal_age}s silence_duration=${silence_duration}s threshold=${JOURNAL_SILENCE_HARD_SECS}s ${observation} (no progress fingerprints — wedged)"
+  agent_state_dir="${HOME}/.switchroom/agents/${agent}/telegram"
+  stamp_restart_reason \
+    "${agent_state_dir}/clean-shutdown.json" \
+    "watchdog: journal silent for ${journal_age}s with no progress activity"
+  wd_log restart "agent=${agent} reason=journal-silence journal_age=${journal_age}s silence_duration=${silence_duration}s threshold=${JOURNAL_SILENCE_HARD_SECS}s ${observation}"
   rm -f "$silence_marker" 2>/dev/null || true
 
   # Use `switchroom agent restart` (not raw systemctl) — the project
@@ -486,13 +764,13 @@ for agent_svc in "${agent_services[@]}"; do
 
   if [[ -n "$switchroom_cli" ]]; then
     "$switchroom_cli" agent restart "$agent" || {
-      logger -t switchroom-watchdog "agent ${agent}: switchroom agent restart failed; falling back to systemctl"
+      wd_log error "agent=${agent} switchroom agent restart failed; falling back to systemctl --user restart"
       systemctl --user restart "$agent_svc" || true
     }
   else
     # Fallback: if the switchroom CLI isn't on PATH (unusual), use systemctl
     # directly and log the degraded path.
-    logger -t switchroom-watchdog "agent ${agent}: switchroom CLI not on PATH; using systemctl restart as fallback"
+    wd_log error "agent=${agent} switchroom CLI not on PATH; using systemctl restart fallback"
     systemctl --user restart "$agent_svc" || true
   fi
 done

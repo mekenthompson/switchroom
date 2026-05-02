@@ -2165,6 +2165,23 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
     } catch { /* best-effort signal */ }
     // #203: fresh sendMessage from reply tool is a user-visible signal.
     signalTracker.noteSignal(statusKey(chat_id, threadId), Date.now())
+    // PR #602 follow-up: fire the terminal 👍 here so plain `reply`-only
+    // turns get the same delivery-confirmed reaction as stream_reply
+    // (Bug Z). Pre-follow-up, the dedup-suppress branch in the gateway
+    // turn_end handler was the sole 👍 emitter for reply-tool-only
+    // turns; removing its setDone call (Bug D) left those turns with no
+    // 👍 at all. Mirror the stream_reply contract: only fire after at
+    // least one sendMessage has resolved successfully (sentIds.length>0
+    // guarantees this), so the emoji means "the reply landed in
+    // Telegram", not "the reply tool was invoked". The reply tool has
+    // no lane concept — every reply is the user-visible answer — so no
+    // lane gate is needed (unlike stream_reply where named lanes are
+    // internal driver emits).
+    try {
+      endStatusReaction(chat_id, threadId, 'done')
+    } catch (err) {
+      process.stderr.write(`telegram gateway: reply: endStatusReaction hook threw: ${err}\n`)
+    }
   }
 
   process.stderr.write(`telegram channel: reply: finalized chatId=${chat_id} messageIds=[${sentIds.join(',')}] chunks=${chunks.length}\n`)
@@ -3380,13 +3397,12 @@ function handleSessionEvent(ev: SessionEvent): void {
                 // delivery from a 500ms-lagged read of local history rather
                 // than from the actual API confirmation. Letting Bug Z's
                 // post-finalize callback own the 👍 transition keeps the
-                // emoji tied to true delivery. Note: for the legacy `reply`
-                // tool path (which does not yet wire endStatusReaction),
-                // this leaves the controller in a non-terminal intermediate
-                // state until purgeReactionTracking removes it — meaning no
-                // 👍 will render on plain `reply` turns whose only outbound
-                // came from the reply tool. Tracked separately; the spec
-                // for this PR explicitly scopes Bug Z to stream_reply only.
+                // emoji tied to true delivery. The plain `reply` tool path
+                // (PR #602 follow-up) now also fires endStatusReaction
+                // directly from executeReply after sendMessage resolves,
+                // mirroring this contract — so reply-only turns transition
+                // to terminal 👍 in their own success path rather than
+                // relying on this dedup heuristic.
                 purgeReactionTracking(statusKey(backstopChatId, backstopThreadId))
                 return
               }

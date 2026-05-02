@@ -121,17 +121,33 @@ No side effects. Safe to run at any time.
 
 Surface the resolved effective config for a specific agent. Use for "how is X configured", "what tools does X have", or cascade-resolution questions.
 
-### Step 1 — Find the config
+### Step 1 — Pick the right inspector
+
+For a high-level view (model, profile, topic, status, uptime):
 
 ```bash
 switchroom agent list --json
 ```
 
-This returns per-agent `name`, `model`, `extends`, `topic_name`, `topic_emoji`, `status`, `uptime`. For the full merged config (including tools, soul, memory, hooks, skills), inspect the scaffolded files:
+For the full merged settings file (tools, hooks, MCP servers):
 
 ```bash
 cat ~/.switchroom/agents/<name>/.claude/settings.json
 ```
+
+For the **exact prompt + system message** an agent sends Claude on its next turn:
+
+```bash
+switchroom debug turn <name>
+```
+
+For the rendered workspace bootstrap block (CLAUDE.md, SOUL.md, skills wiring):
+
+```bash
+switchroom workspace render <name>
+```
+
+`debug turn` and `workspace render` are the authoritative answers when the user asks "why is X behaving this way" or "what is X actually being told".
 
 ### Step 2 — Explain the cascade
 

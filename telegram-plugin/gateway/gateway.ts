@@ -48,27 +48,11 @@ import {
   deriveTelegraphTitle,
   type TelegraphAccount,
 } from '../telegraph.js'
-import { decideShouldPreAlloc, PRE_ALLOC_PLACEHOLDER_TEXT } from '../pre-alloc-decision.js'
-import { sendForumTopicPlaceholder, clearForumTopicPlaceholder } from '../forum-topic-placeholder.js'
-import { handleUpdatePlaceholder } from '../update-placeholder-handler.js'
 import { createInboundCoalescer, inboundCoalesceKey } from './inbound-coalesce.js'
-import {
-  startHeartbeat as startPlaceholderHeartbeatImpl,
-  DEFAULT_INTERVAL_MS as HEARTBEAT_DEFAULT_INTERVAL_MS,
-  DEFAULT_MAX_DURATION_MS as HEARTBEAT_DEFAULT_MAX_DURATION_MS,
-  type HeartbeatHandle,
-} from '../placeholder-heartbeat.js'
-import {
-  PHASES,
-  toolUseToPhase,
-  recallTextToPhase,
-  type Phase,
-} from '../placeholder-phase.js'
 import { StatusReactionController } from '../status-reactions.js'
 import { isTelegramReplyTool, isTelegramSurfaceTool } from '../tool-names.js'
 import { createTypingWrapper } from '../typing-wrap.js'
 import { type DraftStreamHandle } from '../draft-stream.js'
-import { allocateDraftId } from '../draft-transport.js'
 import { handlePtyPartialPure, type PtyHandlerState } from '../pty-partial-handler.js'
 import { handleStreamReply } from '../stream-reply-handler.js'
 import { createChatLock } from '../chat-lock.js'
@@ -208,7 +192,6 @@ import type {
   HeartbeatMessage,
   ScheduleRestartMessage,
   OperatorEventForward,
-  UpdatePlaceholderMessage,
   PtyPartialForward,
   InboundMessage,
 } from './ipc-protocol.js'
@@ -783,154 +766,12 @@ const lastPtyPreviewByChat = new Map<string, string>()
 const progressUpdateLastSent = new Map<string, number>()
 const progressUpdateTurnCount = new Map<string, number>()
 
-// Issue #416 — pre-allocated stream_reply draft id, populated on inbound DM
-// receipt so the user sees a placeholder draft within ~1 s. Consumed by the
-// agent's first stream_reply call (which uses this draftId instead of
-// allocating a fresh one). Cleared on turn_end if the agent never called
-// stream_reply. DM-only: keyed by chatId since DMs don't have threads.
-interface PreAllocatedDraft {
-  draftId: number
-  allocatedAt: number
-  /**
-   * True between allocateDraftId() and the sendMessageDraft API resolving.
-   * Lets handleUpdatePlaceholder accept edits that arrive during the
-   * 200-800ms gap, instead of silently no-oping (closes #472 finding #8).
-   * The edit will land after the initial draft post hits TG's server —
-   * order-of-arrival is preserved per draftId.
-   */
-  apiPending?: boolean
-  /**
-   * True once executeReply / executeStreamReply has taken the draft. The
-   * entry is left in the map (rather than deleted) so handleUpdatePlaceholder
-   * can distinguish "no draft was ever pre-allocated" from "draft was
-   * consumed by reply" — the second case must NOT race-edit (#472 finding
-   * #9). turn_end and shutdown both skip the empty-text clear when consumed
-   * (the consumer already cleared) and just delete the map entry.
-   */
-  consumed?: boolean
-}
-const preAllocatedDrafts = new Map<string, PreAllocatedDraft>()
-
-// Heartbeat lifecycle (Path A §3 minimum). One handle per active
-// pre-alloc draft. Started at pre-alloc success; cancelled at every
-// preAllocatedDrafts.delete() call site. See
-// telegram-plugin/docs/heartbeat-placeholder-design.md and
-// tests/gateway-heartbeat-call-sites.test.ts (which pins the
-// start-cancel pairing structurally).
-const placeholderHeartbeats = new Map<string, HeartbeatHandle>()
-
-/** Tick interval for the heartbeat. Override via env (rollback path
- * documented in design §10.1). 0 = disabled, agent reverts to today's
- * static placeholder behaviour. */
-const HEARTBEAT_INTERVAL_MS = (() => {
-  const env = process.env.SWITCHROOM_TG_PLACEHOLDER_HEARTBEAT_MS
-  if (env != null) {
-    const parsed = Number(env)
-    if (Number.isFinite(parsed) && parsed >= 0) return parsed
-  }
-  return HEARTBEAT_DEFAULT_INTERVAL_MS
-})()
-
-/** Start a heartbeat for a freshly pre-allocated placeholder. Idempotent —
- * if one is already running for this chat, the prior is cancelled first. */
-function startPlaceholderHeartbeat(chat_id: string, draftId: number, startedAt: number): void {
-  // Defensive: cancel any prior heartbeat for this chat. Shouldn't
-  // happen because pre-alloc only fires when no prior draft exists,
-  // but a half-cleaned state from a crash recovery shouldn't leak.
-  cancelPlaceholderHeartbeat(chat_id)
-  if (sendMessageDraftFn == null) return  // No draft API → no heartbeat
-  const handle = startPlaceholderHeartbeatImpl(chat_id, draftId, startedAt, {
-    sendMessageDraft: sendMessageDraftFn,
-    isPlaceholderActive: (cid) => preAllocatedDrafts.has(cid),
-    // §4 enrichment: read the current phase label. null falls back
-    // to the heartbeat module's DEFAULT_HEARTBEAT_LABEL ("🔵 thinking").
-    getCurrentLabel: (cid) => currentPhase.get(cid)?.label ?? null,
-    intervalMs: HEARTBEAT_INTERVAL_MS,
-    maxDurationMs: HEARTBEAT_DEFAULT_MAX_DURATION_MS,
-    log: (msg) => process.stderr.write(`${msg}\n`),
-  })
-  placeholderHeartbeats.set(chat_id, handle)
-}
-
-/** Cancel any heartbeat running for this chat. Called at every
- * preAllocatedDrafts.delete() site. Idempotent — safe to call when
- * no heartbeat exists. */
-function cancelPlaceholderHeartbeat(chat_id: string): void {
-  const handle = placeholderHeartbeats.get(chat_id)
-  if (handle == null) return
-  handle.cancel()
-  placeholderHeartbeats.delete(chat_id)
-}
-
-// ─── Phase enrichment (Path A §4) ──────────────────────────────────
-// User-facing phase labels for the placeholder. The heartbeat reads
-// the current phase from `currentPhase`; subscribers (recall.py via
-// update_placeholder, session-tail tool_use events, auto-ack timer)
-// write to it. See telegram-plugin/docs/heartbeat-phases-design.md.
-const currentPhase = new Map<string, Phase>()
-// `writing_reply` is sticky once set — protects the user-perceived
-// "✍️ Writing your reply" from being overridden by mid-reply tool
-// calls. Cleared at the same lifecycle points as preAllocatedDrafts.
-const writingReplyStarted = new Set<string>()
-// Auto-ack timers — fire at T+1s if no other phase has been set,
-// guarantees "🔵 Got your message…" appears for non-Hindsight agents.
-const autoAckTimers = new Map<string, ReturnType<typeof setTimeout>>()
-
-const AUTO_ACK_DELAY_MS = 1000
-
-/** Set the current phase for a chat. Honours the writing_reply sticky
- * rule — once the model has started writing, subsequent tool calls
- * don't change the user-visible phase. Returns true if the phase
- * actually changed (for diagnostic logging). */
-function setCurrentPhase(chat_id: string, phase: Phase): boolean {
-  // Sticky: once writing_reply is set, hold it for the rest of the turn
-  if (writingReplyStarted.has(chat_id) && phase.kind !== 'writing_reply') {
-    return false
-  }
-  if (phase.kind === 'writing_reply') {
-    writingReplyStarted.add(chat_id)
-  }
-  const prior = currentPhase.get(chat_id)
-  if (prior?.kind === phase.kind) return false  // no-op
-  currentPhase.set(chat_id, phase)
-  process.stderr.write(`telegram gateway: phase chatId=${chat_id} → ${phase.kind} ("${phase.label}")\n`)
-  return true
-}
-
-/** Schedule the auto-ack timer. Fires at T+1s; sets `acknowledged`
- * phase ONLY if no other phase has been set yet (recall.py would
- * have set `recalling` before then for Hindsight agents). */
-function scheduleAutoAck(chat_id: string): void {
-  // Defensive: cancel any prior timer for this chat.
-  cancelAutoAck(chat_id)
-  const timer = setTimeout(() => {
-    autoAckTimers.delete(chat_id)
-    if (currentPhase.has(chat_id)) {
-      // Something else already set the phase (recall.py / tool_use) —
-      // skip the auto-ack, the more-specific phase wins.
-      return
-    }
-    setCurrentPhase(chat_id, PHASES.acknowledged)
-  }, AUTO_ACK_DELAY_MS)
-  autoAckTimers.set(chat_id, timer)
-}
-
-/** Cancel the auto-ack timer for a chat. Called alongside
- * cancelPlaceholderHeartbeat at every preAllocatedDrafts.delete() site. */
-function cancelAutoAck(chat_id: string): void {
-  const timer = autoAckTimers.get(chat_id)
-  if (timer == null) return
-  clearTimeout(timer)
-  autoAckTimers.delete(chat_id)
-}
-
-/** Clear all per-chat phase state. Called alongside
- * cancelPlaceholderHeartbeat at every preAllocatedDrafts.delete() site. */
-function clearPhaseState(chat_id: string): void {
-  cancelAutoAck(chat_id)
-  currentPhase.delete(chat_id)
-  writingReplyStarted.delete(chat_id)
-}
+// Pre-allocated placeholder drafts (issue #416) and the associated
+// heartbeat / phase enrichment were removed in #553 PR 5. Real-text +
+// 👀 status reaction (#568) + sendChatAction('typing') indicator
+// (#585) replace the visual gap that the placeholder used to fill.
+// recall.py's update_placeholder IPC calls now no-op cleanly because
+// the gateway no longer registers an onUpdatePlaceholder handler.
 
 let currentSessionChatId: string | null = null
 let currentTurnStartedAt = 0
@@ -1905,34 +1746,12 @@ const ipcServer: IpcServer = createIpcServer({
     })
   },
 
-  onUpdatePlaceholder(_client: IpcClient, msg: UpdatePlaceholderMessage) {
-    // Path A §4: if the text matches a known recall.py transition,
-    // update the phase map so the heartbeat keeps rendering the
-    // right label on subsequent ticks. Unknown text falls through
-    // to the direct-edit path (preserves backward-compat for any
-    // future caller that uses a custom literal label).
-    const phase = recallTextToPhase(msg.text)
-    if (phase != null) {
-      setCurrentPhase(msg.chatId, phase)
-    }
-
-    // Decision + side effect extracted to ../update-placeholder-handler
-    // so the contract is testable without booting the gateway. See
-    // update-placeholder-handler.ts and tests/update-placeholder-handler.e2e.test.ts.
-    // The direct edit happens regardless — gives immediate visibility
-    // (sub-second) while the phase map keeps subsequent heartbeat ticks
-    // in sync with the latest label.
-    handleUpdatePlaceholder(
-      { msg, sendMessageDraftFn, preAllocatedDrafts },
-      (result) => {
-        if (result.kind === 'edit-failed') {
-          process.stderr.write(
-            `telegram gateway: update_placeholder edit failed chatId=${result.chatId}: ${result.error.message}\n`,
-          )
-        }
-      },
-    )
-  },
+  // onUpdatePlaceholder handler removed in #553 PR 5 — fake placeholder
+  // text (`🔵 thinking`, `📚 recalling memories`, `💭 thinking`) is no
+  // longer emitted. recall.py's update_placeholder IPC calls become
+  // benign no-ops: the IPC client validates the wire shape but no
+  // server-side handler is registered, so the message is silently
+  // ignored at dispatch.
 
   /**
    * Forwarded PTY-tail partial: the latest extracted assistant-reply
@@ -2172,40 +1991,10 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
     lastPtyPreviewByChat.delete(replySKey)
   }
 
-  // Consume the pre-alloc placeholder draft synchronously, so the user
-  // sees one clean transition (placeholder → final reply) instead of
-  // the legacy three-step UX (placeholder → reply appears as new
-  // message → placeholder vanishes 2s later on turn_end).
-  //
-  // Pre-alloc fires only on DM inbounds (forum topics are skipped),
-  // and only when sendMessageDraft is available. When present, clear
-  // the draft text to '' which removes the WIP message client-side
-  // immediately. The fresh sendMessage that follows below then lands
-  // as the only visible bot message for the turn.
-  if (sendMessageDraftFn != null) {
-    const preAllocated = preAllocatedDrafts.get(chat_id)
-    if (preAllocated != null && !preAllocated.consumed) {
-      // #472 finding #9 — mark consumed BEFORE the API clear so a
-      // hook update_placeholder racing with this consume bails out
-      // (handleUpdatePlaceholder rejects consumed entries). Pre-fix the
-      // delete + concurrent IPC could leave a "📚 recalling" edit landing
-      // AFTER our empty-text clear, so the placeholder text reappeared
-      // alongside the just-sent reply. Leaving the entry in the map
-      // (with consumed=true) gives turn_end / shutdown a way to skip the
-      // redundant clear in the consumed case.
-      preAllocated.consumed = true
-      cancelPlaceholderHeartbeat(chat_id)  // Path A heartbeat: stop ticking once the draft is consumed
-      clearPhaseState(chat_id)              // Path A §4: drop phase + auto-ack state for next turn
-      // Best-effort: a clear failure (rate limit, expired draft) is
-      // harmless — the orphan-cleanup path on turn_end is still wired
-      // and will retry. Don't await: the subsequent sendMessage is
-      // the user-visible work and we shouldn't gate it on a draft
-      // bookkeeping call.
-      void sendMessageDraftFn(chat_id, preAllocated.draftId, '').catch(() => {
-        /* best-effort */
-      })
-    }
-  }
+  // Pre-alloc placeholder consumption removed in #553 PR 5 — the
+  // gateway no longer pre-allocates a draft on inbound, so reply tools
+  // simply render fresh. The 👀 reaction (#568) and typing indicator
+  // (#585) provide the visual gap that the placeholder used to fill.
 
   const deleteStalePreview = async (id: number): Promise<void> => {
     try {
@@ -2392,26 +2181,10 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
   const streamChatId = args.chat_id as string
   const streamIsPrivate = isDmChatId(streamChatId)
   const streamIsForumTopic = args.message_thread_id != null && args.message_thread_id !== ''
-  // Issue #416: consume any pre-allocated draft for this DM. The gateway
-  // populates this map on inbound; the first stream_reply hands it off to
-  // the draft-stream so the existing placeholder is edited in place rather
-  // than a fresh draft being allocated and visibly flickering. Forum topics
-  // never have a pre-alloc entry (gateway skips them).
-  // Closes #472 finding #9 — same shape as executeReply's consume site:
-  // mark the entry consumed (don't delete) so a hook update_placeholder
-  // racing with this consume bails. handleStreamReply takes the draftId
-  // and edits it directly via the streaming-reply handoff; turn_end
-  // performs the actual map cleanup for both the consumed and abandoned
-  // cases.
-  const preAllocated = streamIsPrivate ? preAllocatedDrafts.get(streamChatId) : undefined
-  if (preAllocated != null && !preAllocated.consumed) {
-    // #472 #9 — mark consumed (handleUpdatePlaceholder bails on consumed).
-    // Don't delete yet — turn_end's orphan cleanup distinguishes consumed
-    // from abandoned and skips the redundant clear in the consumed case.
-    preAllocated.consumed = true
-    cancelPlaceholderHeartbeat(streamChatId)  // Path A heartbeat: stop ticking — stream_reply now owns the draft
-    clearPhaseState(streamChatId)              // Path A §4: drop phase + auto-ack state
-  }
+  // Pre-allocated draft handoff removed in #553 PR 5 — draft-stream
+  // now allocates a fresh draft id on its first send. The pre-alloc
+  // path has been retired along with the placeholder text it was
+  // designed to overwrite cleanly.
 
   // #271 (URL-button half): validate inline_keyboard for stream_reply.
   // Only attached on done=true so buttons land on the final answer
@@ -2459,7 +2232,6 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
       isPrivateChat: streamIsPrivate,
       isForumTopic: streamIsForumTopic,
       ...(sendMessageDraftFn != null ? { sendMessageDraft: sendMessageDraftFn } : {}),
-      ...(preAllocated != null ? { preAllocatedDraftId: preAllocated.draftId } : {}),
       // Issue #310: deliver the outbound count bump BEFORE forceCompleteTurn
       // so the terminal render sees outboundDeliveredCount > 0. The handler
       // calls this dep in that order internally.
@@ -3264,16 +3036,8 @@ function handleSessionEvent(ev: SessionEvent): void {
       touchTurnActiveMarker(STATE_DIR)
       const ctrl = activeStatusReactions.get(statusKey(currentSessionChatId, currentSessionThreadId))
       const name = ev.toolName
-      // Path A §4: map the tool to a user-facing phase. Bash splits
-      // into checking (read-only) vs working (everything else); other
-      // tools follow the static lookup. Unknown tools / cosmetic tools
-      // (react, send_typing, etc.) return null → no phase change. The
-      // sticky writing_reply rule means once the model has started
-      // replying, mid-reply tool calls don't flip the phase back.
-      const phase = toolUseToPhase(name, ev.input)
-      if (phase != null) {
-        setCurrentPhase(currentSessionChatId, phase)
-      }
+      // Phase tracking removed in #553 PR 5 — phases only fed the
+      // placeholder-heartbeat label, which has been retired.
       if (isTelegramReplyTool(name)) {
         currentTurnReplyCalled = true
         if (orphanedReplyTimeoutId != null) {
@@ -3400,24 +3164,9 @@ function handleSessionEvent(ev: SessionEvent): void {
       // Drain any still-pending tool dispatch typing entries — covers
       // transcript truncation or a Claude Code crash mid-tool.
       typingWrapper.drainAll()
-      // Issue #479 forum-topic case: clear the regular-message
-      // placeholder we sent on inbound (only present when this turn
-      // landed in a forum topic — no-op otherwise). Best-effort fire-
-      // and-forget; the placeholder map self-clears whether or not
-      // deleteMessage succeeds.
-      if (currentSessionChatId != null && currentSessionThreadId != null) {
-        void clearForumTopicPlaceholder(
-          {
-            sendMessage: (cid, text, opts) =>
-              bot.api.sendMessage(cid, text, opts as Parameters<typeof bot.api.sendMessage>[2]) as Promise<{
-                message_id: number
-              }>,
-            deleteMessage: (cid, mid) => bot.api.deleteMessage(cid, mid),
-          },
-          currentSessionChatId,
-          currentSessionThreadId,
-        )
-      }
+      // Forum-topic placeholder cleanup removed in #553 PR 5 — the
+      // forum-topic placeholder send is also gone, so there is
+      // nothing to clear at turn_end.
       if (orphanedReplyTimeoutId != null) {
         clearTimeout(orphanedReplyTimeoutId)
         orphanedReplyTimeoutId = null
@@ -3686,29 +3435,9 @@ function handleSessionEvent(ev: SessionEvent): void {
       pendingPtyPartial = null
       closeActivityLane(chatId, threadId)
       closeProgressLane(chatId, threadId)
-      // Issue #416 — clean up an unconsumed pre-allocated draft. Telegram's
-      // current Bot API exposes no deleteMessageDraft, but sendMessageDraft
-      // with empty text effectively clears the placeholder (same trick the
-      // draft-stream uses on finalize). Best-effort: failures are silent.
-      //
-      // Skip the empty-text API call when the entry is already consumed —
-      // executeReply / executeStreamReply already cleared the draft as
-      // part of their handoff. Calling it again is a redundant API round
-      // trip and produces a "not modified" log line. Always delete the
-      // map entry so the next turn starts clean.
-      const orphanDraft = preAllocatedDrafts.get(chatId)
-      if (orphanDraft != null) {
-        preAllocatedDrafts.delete(chatId)
-        cancelPlaceholderHeartbeat(chatId)  // Path A heartbeat: stop ticking — turn ended
-        clearPhaseState(chatId)              // Path A §4: drop phase + auto-ack state
-        // #472 #9 — skip the redundant empty-text clear if the entry was
-        // already consumed by a reply path; that path owns the draft.
-        if (sendMessageDraftFn != null && !orphanDraft.consumed) {
-          void sendMessageDraftFn(chatId, orphanDraft.draftId, '').catch(() => {
-            /* best-effort cleanup */
-          })
-        }
-      }
+      // Pre-allocated draft orphan-cleanup removed in #553 PR 5 — the
+      // gateway no longer pre-allocates drafts on inbound, so there
+      // is nothing to clean up at turn_end.
       // Stage 3b: stamp turn-end in the registry as endedVia='stop' (clean
       // turn_end emit). The kill paths (schedule_restart / SIGTERM) handle
       // the 'restart' / 'sigterm' cases separately in 3c.
@@ -4597,140 +4326,10 @@ async function handleInbound(
       process.stderr.write(`telegram gateway: progress-card startTurn failed: ${(err as Error).message}\n`)
     }
 
-    // Issue #416 — pre-allocate a sendMessageDraft for instant visual feedback
-    // in DMs. The agent's first stream_reply consumes this draft id instead
-    // of allocating a new one, so the user sees a placeholder draft within
-    // ~1 s. Only fires for fresh DM turns; if the agent finishes the turn
-    // without calling stream_reply, turn_end clears the orphan.
-    //
-    // Placeholder content is meaningful ('🔵 thinking') rather than '…'
-    // so the user sees a real "I'm working" signal, not three dots that
-    // could read as "still loading the message." No trailing ellipsis —
-    // sendMessageDraft already animates a "typing" indicator on the
-    // user's client, so a `…` after the word is redundant visual noise.
-    // Hooks can refine the placeholder text mid-turn via the
-    // `update_placeholder` IPC message.
-    // #479 fix: drop the DM-only gate so non-forum group chats also get
-    // the 🔵 thinking… placeholder within ~1s. Pre-fix the placeholder UX
-    // was locked to DMs even though sendMessageDraft works in groups —
-    // exactly the population (groups, including the standard switchroom
-    // forum-topic layout) that reported "feels dead until the status
-    // card appears." Forum topics still excluded via the messageThreadId
-    // guard because sendMessageDraft doesn't accept message_thread_id;
-    // forum-topic placeholder needs a separate path (out of scope here).
-    const decision = decideShouldPreAlloc({
-      sendMessageDraftAvailable: sendMessageDraftFn != null,
-      messageThreadId,
-      alreadyHasDraft: preAllocatedDrafts.has(chat_id),
-    })
-    // Operator-friendly diagnostic: log every decision (skip + allocate)
-    // and the success branch of the API call. Was previously silent on
-    // success — only failures logged via .catch — which made "is
-    // pre-alloc firing at all?" impossible to verify post-deploy
-    // without instrumenting the code. Cheap (one stderr line per
-    // inbound message); the placeholder UX is load-bearing enough
-    // that this trace is worth keeping.
-    process.stderr.write(
-      `telegram gateway: pre-alloc decision chatId=${chat_id} threadId=${messageThreadId ?? 'none'} → ${decision.allocate ? 'allocate' : `skip:${decision.reason}`}\n`,
-    )
-    // Issue #479 forum-topic case: when pre-alloc skips because the
-    // inbound is in a forum topic (sendMessageDraft can't target
-    // message_thread_id), substitute a regular sendMessage placeholder
-    // tracked in `forum-topic-placeholder.ts` for cleanup at turn_end.
-    // Best-effort, never blocks the turn — if the API errors, the user
-    // simply doesn't get a placeholder (same as pre-#479 behaviour).
-    if (
-      !decision.allocate &&
-      decision.reason === 'forum-topic' &&
-      messageThreadId != null &&
-      messageThreadId !== ''
-    ) {
-      void sendForumTopicPlaceholder(
-        {
-          sendMessage: (cid, text, opts) =>
-            bot.api.sendMessage(cid, text, opts as Parameters<typeof bot.api.sendMessage>[2]) as Promise<{
-              message_id: number
-            }>,
-          deleteMessage: (cid, mid) => bot.api.deleteMessage(cid, mid),
-        },
-        chat_id,
-        messageThreadId,
-      ).then((mid) => {
-        if (mid != null) {
-          process.stderr.write(
-            `telegram gateway: forum-topic placeholder sent chatId=${chat_id} threadId=${messageThreadId} msgId=${mid}\n`,
-          )
-        }
-      })
-    }
-    if (decision.allocate) {
-      const draftId = allocateDraftId()
-      // Closes #472 finding #8 — synchronously seed the map BEFORE the
-      // API call so update_placeholder IPC arriving in the 200-800ms gap
-      // finds the entry and can queue an edit. Pre-fix the .then() set
-      // landed after the API returned, and any hook IPC arriving in that
-      // gap silently no-op'd against an empty map (the
-      // 🔵-thinking-stuck-for-the-whole-turn UX).
-      //
-      // apiPending is informational for tests and observers — readers
-      // (handleUpdatePlaceholder, the consume sites) treat the entry as
-      // valid the moment it lands. Telegram's server serializes ops by
-      // draftId, so an edit racing the initial post is sequenced safely
-      // on the server side.
-      preAllocatedDrafts.set(chat_id, {
-        draftId,
-        allocatedAt: Date.now(),
-        apiPending: true,
-      })
-      // Best-effort, non-blocking: any failure (transport down, API not
-      // available, group rejects sendMessageDraft) removes the entry so
-      // subsequent reads don't queue edits against a non-existent draft.
-      void sendMessageDraftFn!(chat_id, draftId, PRE_ALLOC_PLACEHOLDER_TEXT)
-        .then(() => {
-          // Clear the pending flag in place — the entry was pre-seeded
-          // synchronously above (#472 #8). If it was consumed in the
-          // gap by a fast reply, leave the consumed marker untouched.
-          // The entry may also have been replaced by a newer allocation
-          // (very rare): the draftId guard catches that.
-          const cur = preAllocatedDrafts.get(chat_id)
-          let allocatedAt: number
-          if (cur != null && cur.draftId === draftId) {
-            cur.apiPending = false
-            allocatedAt = cur.allocatedAt
-          } else {
-            // Entry vanished or replaced — start heartbeat with `now`.
-            allocatedAt = Date.now()
-          }
-          process.stderr.write(`telegram gateway: pre-allocate draft ok chatId=${chat_id} draftId=${draftId}\n`)
-          // Start the heartbeat (Path A §3 minimum) — keeps the
-          // placeholder text moving so the chat doesn't appear
-          // frozen during the model's TTFT window. See
-          // telegram-plugin/docs/heartbeat-placeholder-design.md.
-          // Must be paired with cancelPlaceholderHeartbeat() at every
-          // preAllocatedDrafts.delete() site (pinned by
-          // tests/gateway-heartbeat-call-sites.test.ts).
-          startPlaceholderHeartbeat(chat_id, draftId, allocatedAt)
-          // Schedule the auto-ack timer (Path A §4) — fires at T+1s
-          // with the "🔵 Got your message…" phase IF nothing else has
-          // set the phase by then (recall.py → recalling phase wins
-          // for Hindsight agents). See heartbeat-phases-design.md §5.
-          scheduleAutoAck(chat_id)
-        })
-        .catch((err) => {
-          // Entry-by-draftId guard: don't delete if a NEWER allocation
-          // already replaced ours (rare but possible if the user sends
-          // two messages in close succession and the first failed).
-          const cur = preAllocatedDrafts.get(chat_id)
-          if (cur != null && cur.draftId === draftId) {
-            preAllocatedDrafts.delete(chat_id)
-          }
-          process.stderr.write(
-            `telegram gateway: pre-allocate draft failed chatId=${chat_id}: ${
-              err instanceof Error ? err.message : String(err)
-            }\n`,
-          )
-        })
-    }
+    // Pre-allocated draft + forum-topic placeholder send removed in
+    // #553 PR 5. The 👀 status reaction (#568) and
+    // sendChatAction('typing') indicator (#585) now bridge the
+    // ~1s gap between inbound and the agent's first real text.
   }
 
   const imagePath = downloadImage ? await downloadImage() : undefined
@@ -8327,23 +7926,9 @@ async function shutdown(signal: string): Promise<void> {
     orphanedReplyTimeoutId = null
   }
 
-  // Closes #472 finding #10 — clear any pre-allocated drafts before exit.
-  // Without this, SIGTERM mid-turn leaves the user with a stuck "🔵
-  // thinking" placeholder visible forever (Telegram has no
-  // deleteMessageDraft, and the next gateway boot can't recover these
-  // entries since they live in process memory). Mirrors the pattern in
-  // turn_end's orphan-cleanup branch above. Best-effort: failures during
-  // shutdown are silent.
-  if (sendMessageDraftFn != null && preAllocatedDrafts.size > 0) {
-    process.stderr.write(`telegram gateway: shutdown.preallocated_draft_cleanup count=${preAllocatedDrafts.size}\n`)
-    for (const [chatId, draft] of preAllocatedDrafts.entries()) {
-      if (draft.consumed) continue
-      void sendMessageDraftFn(chatId, draft.draftId, '').catch(() => {
-        /* best-effort during shutdown */
-      })
-    }
-    preAllocatedDrafts.clear()
-  }
+  // Pre-allocated draft shutdown cleanup removed in #553 PR 5 — the
+  // gateway no longer pre-allocates drafts on inbound, so there is
+  // nothing to clear at SIGTERM time.
 
   // Notify bridges so they can mark themselves disconnected.
   ipcServer.broadcast({ type: 'status', status: 'gateway_shutting_down' })

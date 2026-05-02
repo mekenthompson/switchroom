@@ -84,12 +84,6 @@ export default defineConfig({
       // test:bun. Without this exclude, the cross-package vitest pass on
       // tests-core fails to resolve `bun:test` and the build goes red.
       "**/telegram-plugin/tests/secret-guard-pretool.test.ts",
-      // forum-topic-placeholder.test.ts uses bun:test — excluded here,
-      // run via test:bun.
-      "**/telegram-plugin/tests/forum-topic-placeholder.test.ts",
-      // update-placeholder-handler.test.ts uses bun:test — excluded here,
-      // run via test:bun.
-      "**/telegram-plugin/tests/update-placeholder-handler.test.ts",
       // ask-user.test.ts uses bun:test (#574 ask_user MCP tool) —
       // excluded here, run via test:bun.
       "**/telegram-plugin/tests/ask-user.test.ts",

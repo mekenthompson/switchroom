@@ -11,7 +11,6 @@ import type {
   SessionEventForward,
   ToolCallMessage,
   ToolCallResult,
-  UpdatePlaceholderMessage,
 } from "./ipc-protocol.js";
 
 export interface IpcServerOptions {
@@ -24,7 +23,6 @@ export interface IpcServerOptions {
   onHeartbeat: (client: IpcClient, msg: HeartbeatMessage) => void;
   onScheduleRestart: (client: IpcClient, msg: ScheduleRestartMessage) => void;
   onOperatorEvent?: (client: IpcClient, msg: OperatorEventForward) => void;
-  onUpdatePlaceholder?: (client: IpcClient, msg: UpdatePlaceholderMessage) => void;
   /**
    * Forwarded PTY-tail partial — the latest extracted reply text from
    * Claude Code's TUI rendering. Optional: gateways without streaming
@@ -147,18 +145,6 @@ export function validateClientMessage(msg: unknown): msg is ClientToGateway {
         && typeof m.detail === "string"
         && (m.detail as string).length <= OPERATOR_EVENT_DETAIL_MAX
         && typeof m.chatId === "string";
-    case "update_placeholder":
-      // chatId: non-empty string, restricted to safe characters so a
-      // rogue process can't inject arbitrary payloads via the chat id
-      // (Telegram chat ids are numeric, possibly leading minus).
-      // text: non-empty, capped — the gateway slices to 200 chars
-      // again on its side, but reject anything obviously oversized
-      // here to keep the buffer + log bounded.
-      return typeof m.chatId === "string"
-        && /^-?\d{1,32}$/.test(m.chatId as string)
-        && typeof m.text === "string"
-        && (m.text as string).length > 0
-        && (m.text as string).length <= 500;
     case "pty_partial":
       // Extracted reply text from PTY-tail. May be empty (the extractor
       // returns empty strings for "no text yet" snapshots — gateway
@@ -183,7 +169,6 @@ export function createIpcServer(options: IpcServerOptions): IpcServer {
     onHeartbeat,
     onScheduleRestart,
     onOperatorEvent,
-    onUpdatePlaceholder,
     onPtyPartial,
     log = () => {},
     heartbeatTimeoutMs = 30_000,
@@ -261,9 +246,6 @@ export function createIpcServer(options: IpcServerOptions): IpcServer {
         break;
       case "operator_event":
         if (onOperatorEvent) onOperatorEvent(client, msg as OperatorEventForward);
-        break;
-      case "update_placeholder":
-        if (onUpdatePlaceholder) onUpdatePlaceholder(client, msg as UpdatePlaceholderMessage);
         break;
       case "pty_partial":
         if (onPtyPartial) onPtyPartial(client, msg as PtyPartialForward);

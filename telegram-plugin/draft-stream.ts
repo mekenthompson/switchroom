@@ -111,17 +111,6 @@ export interface DraftStreamConfig {
    * so the draft can be cleared on finalize.
    */
   chatId?: string
-  /**
-   * Optional pre-allocated draft id (issue #416). When set, the stream uses
-   * this id for its first send instead of calling `allocateDraftId()`. Used
-   * by the gateway to consume a placeholder draft created on inbound DM
-   * receipt, so the agent's first stream_reply edits the existing visual
-   * draft rather than spawning a new one.
-   *
-   * Ignored when draft transport is not active (no `sendMessageDraft`, or
-   * `previewTransport: 'message'`, or `auto` transport in a non-DM chat).
-   */
-  preAllocatedDraftId?: number
   /** Optional logger for debugging. Receives one string per event. */
   log?: (msg: string) => void
   /** Optional warning logger. Used for transport fallback notices. */
@@ -196,12 +185,8 @@ export function createDraftStream(
 
   // Use draft transport only if we have the API
   let usesDraftTransport = prefersDraft && draftApi != null
-  // Issue #416: prefer a pre-allocated draft id when provided. Skips the
-  // shared counter bump and reuses the placeholder draft the gateway already
-  // populated on inbound, so the user's input area doesn't briefly show two
-  // overlapping drafts.
   let draftId: number | undefined = usesDraftTransport
-    ? (config.preAllocatedDraftId ?? allocateDraftId())
+    ? allocateDraftId()
     : undefined
 
   if (prefersDraft && !usesDraftTransport) {

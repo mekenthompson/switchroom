@@ -27,13 +27,26 @@ vi.mock("./create-orchestrator.js", () => ({
 }));
 
 vi.mock("../setup/onboarding.js", () => ({
-  writeAccessJson: vi.fn((agentDir: string, userId: string) => {
+  writeAccessJson: vi.fn((
+    agentDir: string,
+    userId: string,
+    forumChatId?: string,
+    topicId?: number,
+  ) => {
     const fs = require("node:fs") as typeof import("node:fs");
     const dir = join(agentDir, "telegram");
     fs.mkdirSync(dir, { recursive: true });
+    const groups: Record<string, unknown> = {};
+    if (forumChatId) {
+      groups[forumChatId] = {
+        requireMention: false,
+        allowFrom: [],
+        ...(topicId !== undefined ? { topicId } : {}),
+      };
+    }
     fs.writeFileSync(
       join(dir, "access.json"),
-      JSON.stringify({ allowFrom: [userId], groups: {} }, null, 2) + "\n",
+      JSON.stringify({ allowFrom: [userId], groups }, null, 2) + "\n",
     );
   }),
 }));
@@ -66,6 +79,7 @@ vi.mock("../setup/telegram-api.js", () => ({
 import { addAgent, runFinalPreflight, pruneBundledSkills } from "./add-orchestrator.js";
 import { createAgent, completeCreation } from "./create-orchestrator.js";
 import { runProfilePicker } from "../setup/profile-picker.js";
+import { writeAccessJson } from "../setup/onboarding.js";
 
 // Default BotFather walkthrough stub — every addAgent test injects this so
 // the orchestrator never reaches the real validateBotToken (no network).
@@ -785,5 +799,149 @@ describe("pruneBundledSkills", () => {
     expect(pruneBundledSkills(root, [], [])).toEqual([]);
     const { existsSync } = require("node:fs") as typeof import("node:fs");
     expect(existsSync(join(root, ".claude", "skills", "humanizer"))).toBe(true);
+  });
+});
+
+describe("addAgent — forum topology (#543 acceptance)", () => {
+  it("forum mode without forumChatId throws before scaffolding", async () => {
+    const runBotFather = fakeBotFather();
+    await expect(
+      addAgent({
+        name: "bot",
+        profile: "general",
+        botToken: "fake:token",
+        topology: "forum",
+        runBotFather,
+        readOAuthCode: async () => "browser-code",
+        skipStart: true,
+      }),
+    ).rejects.toThrow(/forum requires --forum-chat-id/);
+    // Should fail before any scaffolding work happens.
+    expect(createAgent).not.toHaveBeenCalled();
+  });
+
+  it("forum happy path writes access.json with the supplied forum-chat-id and topic-id", async () => {
+    const { agentDir } = setupAgentDir();
+    writeFileSync(
+      join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
+      "[Unit]\nExecStart=expect autoaccept\n",
+    );
+    (createAgent as any).mockResolvedValue({
+      sessionName: "auth-1",
+      agentDir,
+      loginUrl: undefined,
+    });
+    (completeCreation as any).mockResolvedValue({
+      outcome: { kind: "success" },
+      started: true,
+      instructions: [],
+    });
+
+    const result = await addAgent({
+      name: "bot",
+      profile: "general",
+      botToken: "fake:token",
+      topology: "forum",
+      forumChatId: "-1001234567890",
+      forumTopicId: 42,
+      allowFromUserId: "777",
+      runBotFather: fakeBotFather(),
+      readOAuthCode: async () => "browser-code",
+      isUnitActive: vi.fn().mockReturnValue(true),
+    });
+
+    expect(result.userId).toBe("777");
+    expect(writeAccessJson).toHaveBeenCalledWith(
+      agentDir,
+      "777",
+      "-1001234567890",
+      42,
+    );
+    // The mock captured the right shape — verify it on disk too.
+    const fs = require("node:fs") as typeof import("node:fs");
+    const access = JSON.parse(
+      fs.readFileSync(join(agentDir, "telegram", "access.json"), "utf-8"),
+    );
+    expect(access.allowFrom).toEqual(["777"]);
+    expect(access.groups["-1001234567890"]).toBeDefined();
+    expect(access.groups["-1001234567890"].topicId).toBe(42);
+  });
+
+  it("forum mode without topic-id still writes a group entry", async () => {
+    const { agentDir } = setupAgentDir();
+    writeFileSync(
+      join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
+      "[Unit]\nExecStart=expect autoaccept\n",
+    );
+    (createAgent as any).mockResolvedValue({
+      sessionName: "auth-1",
+      agentDir,
+      loginUrl: undefined,
+    });
+    (completeCreation as any).mockResolvedValue({
+      outcome: { kind: "success" },
+      started: true,
+      instructions: [],
+    });
+
+    await addAgent({
+      name: "bot",
+      profile: "general",
+      botToken: "fake:token",
+      topology: "forum",
+      forumChatId: "-1009999999999",
+      allowFromUserId: "888",
+      runBotFather: fakeBotFather(),
+      readOAuthCode: async () => "browser-code",
+      isUnitActive: vi.fn().mockReturnValue(true),
+    });
+
+    expect(writeAccessJson).toHaveBeenCalledWith(
+      agentDir,
+      "888",
+      "-1009999999999",
+      undefined,
+    );
+  });
+
+  it("DM mode ignores forumChatId / forumTopicId if accidentally passed", async () => {
+    const { agentDir } = setupAgentDir();
+    writeFileSync(
+      join(process.env.HOME!, ".config/systemd/user/switchroom-bot.service"),
+      "[Unit]\nExecStart=expect autoaccept\n",
+    );
+    (createAgent as any).mockResolvedValue({
+      sessionName: "auth-1",
+      agentDir,
+      loginUrl: undefined,
+    });
+    (completeCreation as any).mockResolvedValue({
+      outcome: { kind: "success" },
+      started: true,
+      instructions: [],
+    });
+
+    await addAgent({
+      name: "bot",
+      profile: "general",
+      botToken: "fake:token",
+      topology: "dm",
+      // Operator misuse: forum flags passed alongside topology=dm. The
+      // orchestrator silently drops them rather than throwing — the CLI
+      // surfaces a warning at the boundary.
+      forumChatId: "-100should-be-ignored",
+      forumTopicId: 99,
+      allowFromUserId: "555",
+      runBotFather: fakeBotFather(),
+      readOAuthCode: async () => "browser-code",
+      isUnitActive: vi.fn().mockReturnValue(true),
+    });
+
+    expect(writeAccessJson).toHaveBeenCalledWith(
+      agentDir,
+      "555",
+      "",
+      undefined,
+    );
   });
 });

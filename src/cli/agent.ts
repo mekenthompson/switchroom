@@ -1896,16 +1896,17 @@ export function registerAgentCommand(program: Command): void {
 
   // switchroom agent add <name>
   //
-  // Workstream 1 of epic #543 — n+1 bot wizard. Single verb that takes a
-  // new bot from zero to running, paired, with persona seeded. Wraps
+  // n+1 bot wizard (epic #543). Single verb takes a new bot from zero
+  // to running, paired, persona seeded, with no hand-edits. Wraps
   // bootstrap (createAgent + completeCreation) and adds:
-  //   - topology selection (--topology dm|forum)
-  //   - DM pairing block (poll Telegram for /start, auto-write access.json)
-  //   - final preflight loud-fail (autoaccept, token, systemd, access.json)
+  //   - BotFather walkthrough (or validate an existing --bot-token)
+  //   - profile + skill picker (or validate --profile / --skills)
+  //   - topology selection (dm | forum, with --forum-chat-id)
+  //   - pairing block (poll Telegram for /start, auto-write access.json)
+  //   - final preflight loud-fail (autoaccept, token, systemd, MCP, vault)
   //
-  // BotFather automation (#188) and profile/skill picker (#190) are stubbed
-  // — supply --profile and --bot-token from the existing setup until those
-  // ship.
+  // See src/agents/add-orchestrator.ts for the orchestration. All five
+  // workstreams of #543 are now wired here.
   agent
     .command("add <name>")
     .description(
@@ -1921,8 +1922,16 @@ export function registerAgentCommand(program: Command): void {
     )
     .option(
       "--topology <topology>",
-      "Channel topology: 'dm' (default) or 'forum' (forum support deferred — see #190)",
+      "Channel topology: 'dm' (default — pair the bot to a single user via /start) or 'forum' (route inbound messages from a Telegram supergroup forum topic; requires --forum-chat-id).",
       "dm",
+    )
+    .option(
+      "--forum-chat-id <id>",
+      "Telegram supergroup chat ID (negative integer) for forum topology. Required when --topology forum. Forward a message from the group to @userinfobot to find it.",
+    )
+    .option(
+      "--topic-id <id>",
+      "Telegram message-thread (topic) ID inside the forum chat. Optional; scopes the agent's group policy to a single forum topic. Only meaningful with --topology forum.",
     )
     .option(
       "--bot-token <token>",
@@ -1951,6 +1960,8 @@ export function registerAgentCommand(program: Command): void {
           profile?: string;
           skills?: string;
           topology: string;
+          forumChatId?: string;
+          topicId?: string;
           botToken?: string;
           botUsername?: string;
           loose?: boolean;
@@ -1973,13 +1984,30 @@ export function registerAgentCommand(program: Command): void {
           process.exit(1);
         }
         const topology = opts.topology as AgentTopology;
-        if (topology === "forum") {
-          console.warn(
-            chalk.yellow(
-              "Note: --topology forum is accepted but the forum-pairing UX is deferred to #190. " +
-                "Falling back to DM access.json shape (a placeholder allowFrom for the forum chat).",
+        if (topology === "forum" && !opts.forumChatId) {
+          console.error(
+            chalk.red(
+              "Error: --topology forum requires --forum-chat-id <id>. " +
+                "Forward a message from the supergroup to @userinfobot to find the chat ID.",
             ),
           );
+          process.exit(1);
+        }
+        if (topology === "dm" && (opts.forumChatId || opts.topicId)) {
+          console.warn(
+            chalk.yellow(
+              "Warning: --forum-chat-id / --topic-id are ignored when --topology=dm.",
+            ),
+          );
+        }
+
+        let forumTopicId: number | undefined;
+        if (opts.topicId !== undefined) {
+          forumTopicId = Number.parseInt(opts.topicId, 10);
+          if (!Number.isFinite(forumTopicId) || forumTopicId < 0) {
+            console.error(chalk.red(`Invalid --topic-id: "${opts.topicId}". Must be a non-negative integer.`));
+            process.exit(1);
+          }
         }
 
         const pairTimeoutMs = opts.pairTimeoutMs
@@ -2028,6 +2056,8 @@ export function registerAgentCommand(program: Command): void {
             botUsername: opts.botUsername,
             loose: opts.loose,
             topology,
+            forumChatId: opts.forumChatId,
+            forumTopicId,
             allowFromUserId: opts.allowFrom,
             pairTimeoutMs,
             configPath,

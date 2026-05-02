@@ -1,28 +1,30 @@
 /**
- * Workstream 1 of epic #543 — `switchroom agent add` n+1 bot wizard.
+ * `switchroom agent add` n+1 bot wizard — closes epic #543.
  *
- * Layers on top of `createAgent` / `completeCreation` (Phase 2 orchestrator)
- * to collapse the n+1 bot creation flow into a single CLI verb. Adds:
- *   - topology selection (dm | forum) — currently both write the same
- *     access.json shape but the topology argument is captured for forward
- *     compatibility with the forum-pairing flow (see #190).
- *   - DM pairing block — after auth completes the wizard polls Telegram
- *     for a `/start` DM from the new bot, then auto-writes
- *     telegram/access.json with the captured user_id. No second
- *     `switchroom setup` run required.
- *   - Final preflight loud-fail — autoaccept wrapper, bot token present,
- *     systemd unit running, access.json populated, MCP servers configured,
- *     and bot token managed via vault reference (workstream 3 of #543,
- *     closes #364 / #424 silent-failure modes). Each failed check produces
- *     an actionable error message rather than silent breakage.
+ * Single CLI verb that takes a new agent from "I want a bot for X" to
+ * "X is online, paired, with persona seeded" with zero hand-edits to
+ * switchroom.yaml, access.json, vault, or systemd. Steps:
  *
- * BotFather automation (#188) and the profile/skill picker (#190) are out
- * of scope for this workstream — both are stubbed with TODO markers
- * referencing those issues.
+ *   1. BotFather walkthrough (or validate a pre-supplied --bot-token).
+ *      Asserts the bot's username matches the agent slug. (#552 / WS2)
+ *   2. Profile + skill picker (or validate --profile / --skills). The
+ *      picker copies bundled skills from profiles/<name>/skills into
+ *      the agent's .claude/skills/ tree. (#554 / WS4)
+ *   3. createAgent — scaffold (CLAUDE.md, SOUL.md, IDENTITY.md, USER.md,
+ *      MEMORY.md), systemd unit, MCP servers, and switchroom.yaml entry.
+ *   4. OAuth code relay — terminal stdin or test seam.
+ *   5. completeCreation — submit code, start the agent.
+ *   6. Pairing block — for DM topology, polls Telegram for the
+ *      operator's first /start DM then auto-writes telegram/access.json.
+ *      For forum topology (--forum-chat-id required), still uses the
+ *      DM /start to capture allowFrom but adds a forum group entry.
+ *   7. Final preflight loud-fail — autoaccept wrapper, vault token
+ *      reference, systemd active, access.json populated, MCP servers
+ *      configured. (#551 / WS3)
  *
  * The pairing step is skippable via `allowFromUserId` — useful for
- * non-interactive tests and for re-running against an already-paired
- * deployment.
+ * non-interactive tests and redeploys against an already-paired
+ * operator.
  */
 
 import { resolve, join } from "node:path";
@@ -84,8 +86,29 @@ export interface AddAgentOpts {
    * "paste the token" loop.
    */
   readLine?: (prompt: string) => Promise<string>;
-  /** Topology — "dm" today; "forum" reserved for #190 forum-pairing UX. */
+  /**
+   * Channel topology. "dm" pairs the bot to a single user via /start;
+   * "forum" routes inbound messages from a Telegram supergroup forum
+   * topic. Forum mode requires `forumChatId` (and optionally
+   * `forumTopicId`) — supplied by the operator since the wizard can't
+   * yet auto-create a forum group.
+   */
   topology: AgentTopology;
+  /**
+   * Forum chat ID — required when topology is "forum". The chat ID of
+   * the supergroup that this bot will receive messages from. Supergroup
+   * IDs are negative ("-100…"); the wizard does not validate the sign
+   * but does require the value to be non-empty in forum mode. Ignored
+   * when topology is "dm".
+   */
+  forumChatId?: string;
+  /**
+   * Optional Telegram message-thread (topic) ID inside the forum chat.
+   * When set, persisted into access.json so the gateway can scope the
+   * agent's group policy to a single topic. Ignored when topology is
+   * "dm".
+   */
+  forumTopicId?: number;
   /**
    * Optional: skip the DM pairing block and write access.json with this
    * user ID directly. Useful for test runs and for redeploys against an
@@ -181,13 +204,16 @@ const DEFAULT_PAIR_TIMEOUT_MS = 5 * 60 * 1000;
  * Run the n+1 bot wizard end-to-end.
  *
  * Sequencing:
- *   1. (stub) BotFather automation — see #188.
+ *   1. BotFather walkthrough (or validate --bot-token) — captures and
+ *      verifies the agent's bot token, asserts username/slug match.
+ *   1b. Profile + skill picker (or validate --profile / --skills).
  *   2. createAgent — scaffold + systemd + auth session.
  *   3. readOAuthCode — caller relays the OAuth dance (terminal stdin or
  *      a future foreman bot).
  *   4. completeCreation — submit code + start the agent.
  *   5. Pairing block — pollForDmStart unless allowFromUserId is given.
- *      Writes telegram/access.json with the captured user_id.
+ *      Writes telegram/access.json with the captured user_id and (for
+ *      forum topology) the supplied forum-chat-id / topic-id.
  *   6. Final preflight — autoaccept wrapper, vault token, systemd active,
  *      access.json populated.
  */
@@ -196,6 +222,18 @@ export async function addAgent(opts: AddAgentOpts): Promise<AddAgentResult> {
   const pairTimeout = opts.pairTimeoutMs ?? DEFAULT_PAIR_TIMEOUT_MS;
   const pollPair = opts.pollForPair ?? pollForDmStart;
   const isActive = opts.isUnitActive ?? defaultIsUnitActive;
+
+  // Forum mode requires the operator to supply the supergroup chat-id
+  // up-front. Auto-creating forum groups via Bot API isn't supported,
+  // and falling back to DM shape (the pre-WS5 behaviour) is the silent-
+  // failure mode #543 explicitly wants to retire.
+  if (opts.topology === "forum" && !opts.forumChatId) {
+    throw new Error(
+      "topology=forum requires --forum-chat-id <id>. " +
+        "Find your forum supergroup ID by forwarding a message from it to @userinfobot, " +
+        "or run `switchroom topics list` once the bot is in the group.",
+    );
+  }
 
   // ── Step 1: BotFather walkthrough (#188) ─────────────────────────────────
   // Either validate the token the operator already has, or guide them
@@ -310,14 +348,23 @@ export async function addAgent(opts: AddAgentOpts): Promise<AddAgentResult> {
   }
 
   // ── Step 5b: write access.json ───────────────────────────────────────────
-  // Topology is captured for forward-compat — today both shapes use the
-  // same allowFrom + groups skeleton (writeAccessJson). The forum-chat-id
-  // is left as a placeholder; #190's profile/picker will fill the actual
-  // forum chat once the topology=forum branch grows real semantics.
+  // DM mode: only the per-user `allowFrom` matters; the `groups` block is
+  // written with an empty key and ignored by the gateway.
+  // Forum mode: the operator supplied --forum-chat-id, which becomes the
+  // group key, and (optionally) --topic-id which scopes the policy to a
+  // single forum topic.
   const agentDir = created.agentDir;
-  const forumChatId = ""; // forum support deferred — see #190
-  writeAccessJson(agentDir, userId, forumChatId);
-  log(`[5/6] Wrote access.json with allowFrom=[${userId}]`);
+  const forumChatId = opts.topology === "forum" ? (opts.forumChatId ?? "") : "";
+  const forumTopicId = opts.topology === "forum" ? opts.forumTopicId : undefined;
+  writeAccessJson(agentDir, userId, forumChatId, forumTopicId);
+  log(
+    `[5/6] Wrote access.json (allowFrom=[${userId}]` +
+      (opts.topology === "forum"
+        ? `, forum_chat_id=${forumChatId}` +
+          (forumTopicId !== undefined ? `, topic_id=${forumTopicId}` : "")
+        : "") +
+      `)`,
+  );
 
   // ── Step 6: final preflight — loud-fail per check ────────────────────────
   log(`[6/6] Running final preflight…`);

@@ -41,6 +41,13 @@ import {
   type GifSendArgs,
 } from '../sticker-aliases.js'
 import { transcribeViaWhisper } from '../voice-transcribe.js'
+import {
+  createTelegraphAccount,
+  createTelegraphPage,
+  markdownToTelegraphNodes,
+  deriveTelegraphTitle,
+  type TelegraphAccount,
+} from '../telegraph.js'
 import { decideShouldPreAlloc, PRE_ALLOC_PLACEHOLDER_TEXT } from '../pre-alloc-decision.js'
 import { sendForumTopicPlaceholder, clearForumTopicPlaceholder } from '../forum-topic-placeholder.js'
 import { handleUpdatePlaceholder } from '../update-placeholder-handler.js'
@@ -530,6 +537,16 @@ type Access = {
     enabled?: boolean
     provider?: 'openai'
     language?: string
+  }
+  /** Telegraph long-reply publishing (#579). When enabled, replies
+   *  above `threshold` chars publish to Telegraph and the agent's
+   *  reply becomes a single message linking to the Telegraph URL
+   *  (rendered via Telegram's native Instant View). Off by default. */
+  telegraph?: {
+    enabled?: boolean
+    threshold?: number
+    short_name?: string
+    author_name?: string
   }
 }
 
@@ -2040,7 +2057,7 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
   if (!chat_id) throw new Error('reply: chat_id is required')
   const rawText = args.text as string | undefined
   if (rawText == null || rawText === '') throw new Error('reply: text is required and cannot be empty')
-  const text = repairEscapedWhitespace(rawText)
+  let text = repairEscapedWhitespace(rawText)
   process.stderr.write(`telegram channel: reply: invoked chatId=${chat_id} charCount=${text.length} preview=${JSON.stringify(text.slice(0, 80))}\n`)
   const files = (args.files as string[] | undefined) ?? []
   const quoteOptIn = args.quote !== false
@@ -2053,6 +2070,29 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
   const disableLinkPreview = args.disable_web_page_preview != null
     ? Boolean(args.disable_web_page_preview)
     : (access.disableLinkPreview ?? true)
+
+  // Telegraph publish (#579). When the reply text is long enough AND
+  // the agent has telegraph enabled in access.json, publish to
+  // Telegraph + replace the local text with a single-message link.
+  // Telegram renders the link as a native Instant View card.
+  // Failure paths fall through to normal HTML chunking, so a flaky
+  // Telegraph backend never breaks the reply path.
+  const tg = access.telegraph
+  const tgThreshold = tg?.threshold ?? 3000
+  if (tg?.enabled && files.length === 0 && text.length > tgThreshold) {
+    const agentSlug = process.env.SWITCHROOM_AGENT_NAME ?? 'switchroom-agent'
+    const shortName = tg.short_name ?? agentSlug
+    const url = await publishToTelegraph(text, shortName, tg.author_name)
+    if (url != null) {
+      const title = deriveTelegraphTitle(text)
+      // Replace the local text with a one-line link. The first line
+      // is the chosen title (so the user sees the topic at a glance);
+      // the second line is the URL Telegram will Instant-View.
+      text = `<b>${title.replace(/[<>&]/g, (c) => c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&amp;')}</b>\n${url}`
+    }
+    // url null → fall through and chunk; the user still gets the
+    // long reply, just split across messages.
+  }
 
   let parseMode: 'HTML' | 'MarkdownV2' | undefined
   let effectiveText: string
@@ -2819,6 +2859,68 @@ async function executeSendGif(rawArgs: Record<string, unknown>): Promise<unknown
       }),
     }],
   }
+}
+
+/**
+ * Telegraph publishing helper (#579). Lazy-creates a Telegraph
+ * account on first use and caches the access_token at
+ * `<STATE_DIR>/telegraph-account.json`. Returns the published URL
+ * on success or null on any failure (caller falls back to normal
+ * chunked HTML sending).
+ *
+ * Caller must already have decided that publishing is desired
+ * (text > threshold AND telegraph.enabled). This function is the
+ * I/O wrapper around the pure helpers in telegraph.ts.
+ */
+async function publishToTelegraph(
+  text: string,
+  shortName: string,
+  authorName: string | undefined,
+): Promise<string | null> {
+  const accountPath = join(STATE_DIR, 'telegraph-account.json')
+  let account: TelegraphAccount | null = null
+  try {
+    if (existsSync(accountPath)) {
+      const raw = readFileSync(accountPath, 'utf-8')
+      const parsed = JSON.parse(raw) as Partial<TelegraphAccount>
+      if (parsed.shortName && parsed.accessToken) {
+        account = parsed as TelegraphAccount
+      }
+    }
+  } catch (err) {
+    process.stderr.write(`telegram gateway: telegraph cache read failed: ${(err as Error).message}\n`)
+  }
+
+  if (account == null) {
+    const created = await createTelegraphAccount({ shortName, authorName })
+    if (!created.ok) {
+      process.stderr.write(`telegram gateway: telegraph createAccount failed: ${created.reason}\n`)
+      return null
+    }
+    account = created.value
+    try {
+      mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+      writeFileSync(accountPath, JSON.stringify(account, null, 2), { mode: 0o600 })
+    } catch (err) {
+      process.stderr.write(`telegram gateway: telegraph cache write failed: ${(err as Error).message}\n`)
+      // proceed — we have the token in memory for this turn at least
+    }
+  }
+
+  const title = deriveTelegraphTitle(text)
+  const content = markdownToTelegraphNodes(text)
+  const page = await createTelegraphPage({
+    accessToken: account.accessToken,
+    title,
+    content,
+    authorName,
+  })
+  if (!page.ok) {
+    process.stderr.write(`telegram gateway: telegraph createPage failed: ${page.reason}\n`)
+    return null
+  }
+  process.stderr.write(`telegram gateway: telegraph published url=${page.value.url} title=${JSON.stringify(title)} chars=${text.length}\n`)
+  return page.value.url
 }
 
 async function executeReact(args: Record<string, unknown>): Promise<unknown> {

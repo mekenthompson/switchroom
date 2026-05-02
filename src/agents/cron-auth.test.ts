@@ -26,7 +26,7 @@ describe("buildCronScript: OAuth-only auth", () => {
       SAMPLE_AGENT_DIR, SAMPLE_PROMPT, SAMPLE_MODEL, SAMPLE_CHAT, undefined,
     );
     const unsetIdx = script.indexOf("unset ANTHROPIC_API_KEY");
-    const claudeIdx = script.indexOf("exec claude -p");
+    const claudeIdx = script.search(/^claude -p /m);
     expect(unsetIdx).toBeGreaterThan(-1);
     expect(claudeIdx).toBeGreaterThan(-1);
     expect(unsetIdx).toBeLessThan(claudeIdx);
@@ -75,7 +75,7 @@ describe("buildCronScript: OAuth-only auth", () => {
     );
     const cdIdx = script.indexOf(`cd '${SAMPLE_AGENT_DIR}'`);
     const oauthIdx = script.indexOf("export CLAUDE_CODE_OAUTH_TOKEN");
-    const claudeIdx = script.indexOf("exec claude -p");
+    const claudeIdx = script.search(/^claude -p /m);
     expect(cdIdx).toBeGreaterThan(-1);
     expect(cdIdx).toBeLessThan(oauthIdx);
     expect(oauthIdx).toBeLessThan(claudeIdx);

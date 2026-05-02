@@ -57,6 +57,21 @@ describe('parseModeBalanced — pure helper', () => {
   it('content inside `inline` code is exempt', () => {
     expect(parseModeBalanced('look at `*` and `_` markers')).toBeNull()
   })
+
+  it('escapes are stripped BEFORE inline code is recognized', () => {
+    // Found via the escapeMarkdownV2 cross-check: an unclosed fence
+    // in user prose ("half ```fenced") gets escaped to
+    // "half \`\`\`fenced" — three escape sequences. If the validator
+    // strips inline code first, it mis-pairs the escaped backticks
+    // and flags a phantom "unbalanced backtick." Fixed by ordering
+    // escape-strip before block/inline-strip.
+    //
+    // fails when: parseModeBalanced reverts to stripping code spans
+    // before escape sequences.
+    expect(parseModeBalanced('half \\`\\`\\`fenced')).toBeNull()
+    expect(parseModeBalanced('three \\`\\`\\` backticks')).toBeNull()
+    expect(parseModeBalanced('\\`single escaped\\`')).toBeNull()
+  })
 })
 
 describe('createFakeBotApi({ validateParseMode })', () => {

@@ -589,12 +589,17 @@ export function installFakeBotResetHook(bot: FakeBot): void {
  * collapsed first (their inner content is exempt from emphasis rules).
  */
 export function parseModeBalanced(text: string): string | null {
+  // Strip backslash-escaped chars FIRST. Production's escapeMarkdownV2
+  // emits `\X` for any special X. If the inline-code regex ran first
+  // it could mis-pair adjacent escape sequences (e.g. `\`\`\``,
+  // produced from an unclosed fence in user prose, would have its
+  // first two escaped backticks treated as an inline-code span and
+  // leave the third backtick dangling — a false positive).
+  const stripped1 = text.replace(/\\[*_`\[\]()~>#+\-=|{}.!\\]/g, '')
   // Strip code blocks (```...```) — content inside is verbatim.
-  const stripped = text.replace(/```[\s\S]*?```/g, '')
+  const stripped2 = stripped1.replace(/```[\s\S]*?```/g, '')
   // Strip inline code (`...`) — also verbatim.
-  const stripped2 = stripped.replace(/`[^`\n]*`/g, '')
-  // Strip backslash-escaped chars.
-  const stripped3 = stripped2.replace(/\\[*_`\[\]()~>#+\-=|{}.!\\]/g, '')
+  const stripped3 = stripped2.replace(/`[^`\n]*`/g, '')
 
   const counts: Record<string, number> = { '*': 0, _: 0 }
   let bracketDepth = 0

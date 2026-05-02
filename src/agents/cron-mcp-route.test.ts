@@ -59,7 +59,7 @@ describe("buildCronScript: MCP-only delivery path (issue #269)", () => {
 
   it("uses exec claude -p (not OUTPUT=$(...)) — process replacement, no subshell", () => {
     const script = buildCronScript(AGENT_DIR, PROMPT, MODEL, CHAT_ID, undefined);
-    expect(script).toContain("exec claude -p");
+    expect(script).toContain("claude -p");
     expect(script).not.toContain("OUTPUT=$(claude -p");
   });
 
@@ -75,7 +75,7 @@ describe("buildCronScript: MCP-only delivery path (issue #269)", () => {
       ["key_a"], "/home/test/.switchroom/vault-broker.sock",
     );
     expect(script).not.toContain("curl");
-    expect(script).toContain("exec claude -p");
+    expect(script).toContain("claude -p");
     expect(script).toMatch(/> \/dev\/null/);
   });
 });

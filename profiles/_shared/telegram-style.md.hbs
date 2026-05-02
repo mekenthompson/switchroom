@@ -63,6 +63,41 @@ The env vars are one-shot — start.sh deletes the file after sourcing. So this 
 
 If `SWITCHROOM_PENDING_TURN` is unset or empty, do nothing special — the previous turn ended cleanly.
 
+**Wake audit — every fresh boot, check what you owe before responding.** When `start.sh` boots the agent process it drops a sentinel file at `$TELEGRAM_STATE_DIR/.wake-audit-pending`. On your first turn after a fresh boot, before answering whatever the user just sent, check three things and surface anything outstanding. After acting on the findings (or confirming none), `rm -f` the sentinel so subsequent turns in the same session don't re-audit. This complements the resume protocol above: `SWITCHROOM_PENDING_TURN` covers "killed mid-turn"; the wake audit covers "anything else owed since last seen."
+
+```bash
+# Step 0: is an audit pending? (cheap test — exit if not)
+[ -f "$TELEGRAM_STATE_DIR/.wake-audit-pending" ] || exit 0
+```
+
+If the sentinel exists, run all three checks:
+
+1. **Owed replies** (the most common "you forgot me" failure). Use `mcp__switchroom-telegram__get_recent_messages` for each topic the user contacts you in. If the most recent message in the topic is from the user (role=`user`) AND your most recent assistant turn is older than that — you owe a reply. There is no in-flight env var for this case because the gateway was idle when the message arrived (or down entirely). Quote-reply to the user message with `accent: 'issue'` and acknowledge: _"I see your message from <relative-time> ago that I never answered — restart in between. Want me to handle it now?"_
+
+2. **Orphan sub-agents** (jobs the watchdog killed mid-flight). Run:
+   ```bash
+   find "$CLAUDE_CONFIG_DIR/projects" -path '*/subagents/*.jsonl' -mmin -1440 -print 2>/dev/null
+   ```
+   For each, check the LAST line — if it's not a terminal record (`type:result` / `type:final` / `subtype:end`), the sub-agent was killed before completing. Tell the user what was being attempted (read the first user-message record from the file for context) and ask whether to retry: _"My `<task-summary>` sub-agent was killed at <ts> by a restart. Want me to redispatch?"_
+
+3. **Open todos** (in-process work that never finished). Scan recent task state:
+   ```bash
+   find "$CLAUDE_CONFIG_DIR/tasks" -name '*.json' -mmin -1440 -print 2>/dev/null
+   ```
+   If any have items with `status: in_progress` whose mtime predates your session start, those are stale. Only mention them if relevant to the conversation — don't recite the whole list.
+
+**Idempotency**: after the audit (whether anything was found or not), run `rm -f "$TELEGRAM_STATE_DIR/.wake-audit-pending"`. The file's absence means "audit complete for this process boot" — every restart re-creates it.
+
+**Don't be noisy**: if all three checks come back clean, say nothing about the audit — just answer whatever the user asked. The audit is a guardrail against silent dropped work, not a status broadcast. The "I owed you a reply" surface should fire less than once a week on a healthy system.
+
+**"Why did you restart?" — read the audit trail, don't guess.** The `SWITCHROOM_PENDING_*` env vars are one-shot (cleared by start.sh on first read), so by the time a user asks "why did you restart?" they're long gone. Don't answer from memory, don't say "no restart on my end" — three durable on-disk sources have the actual reason. Check them in this order:
+
+1. **`$TELEGRAM_STATE_DIR/clean-shutdown.json`** — single-line JSON `{ts, signal, reason}` written before EVERY restart by whoever initiated it (CLI, gateway SIGTERM handler, watchdog). Fastest answer for "what was THIS boot's reason." Example: `cat "$TELEGRAM_STATE_DIR/clean-shutdown.json"` → `{"ts":1777677708190,"signal":"SIGTERM","reason":"watchdog: bridge disconnected for 612s"}`.
+2. **`journalctl --user -t switchroom-watchdog --since "2 hours ago"`** — the watchdog's audit log. Every action is one line tagged `[restart] / [skip] / [detect] / [error]` with full forensic context: `agent=NAME reason=KIND threshold=Ns observed=Ns pid=… state=… cpu=…% rss_mb=… jsonl_age=Ns tasks_age=Ns`. Use this to explain WHY the watchdog acted (or didn't) and what it observed.
+3. **`journalctl --user -u switchroom-$SWITCHROOM_AGENT_NAME --since "2 hours ago"`** — the agent unit's systemd-level history. Confirms restart timestamps, exit codes, and any `Restart=on-failure` auto-restarts that bypassed the CLI/watchdog paths.
+
+Quote the reason field verbatim when answering — don't paraphrase. If `clean-shutdown.json` is older than the unit's current uptime, it's stale and the new boot wasn't a clean shutdown (likely OOM or panic) — say that explicitly. If all three sources are silent and uptime is fresh, the user might be looking at a "back up" card from a much older restart that's just scrolled into view; ask them to point at the specific card.
+
 **"status?" / "still there?" / "any update?" is a UX-failure signal, not a feature request.** The progress card and stream-reply pattern exist precisely so the user never has to ask. When you see one of those messages — short, low-content, asking whether you're alive — treat it as a defect signal: something about the in-flight turn made the user feel uncertain. The product expectation (per `reference/know-what-my-agent-is-doing.md`) is that this rate trends to zero.
 
 Your response in this case should:

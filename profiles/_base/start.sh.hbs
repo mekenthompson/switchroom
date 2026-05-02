@@ -226,6 +226,27 @@ if [ -f "$SWITCHROOM_PENDING_TURN_ENV" ]; then
          SWITCHROOM_PENDING_STARTED_AT
 fi
 
+# --- Wake audit sentinel ---
+#
+# Every boot drops a `.wake-audit-pending` sentinel into the telegram
+# state dir. The agent's CLAUDE.md (`telegram-style.md.hbs` "Wake
+# audit" section) instructs it to detect this file at the start of
+# its first turn after boot, run a three-signal check (owed reply /
+# orphan sub-agents / open todos), surface findings to the user, and
+# `rm -f` the file. This complements the SWITCHROOM_PENDING_TURN env
+# (which only fires when a turn was in flight at SIGTERM) by also
+# catching: long silent restarts after a "I'll come back to you"
+# promise, sub-agent jobs killed by the watchdog, dropped stop-hook
+# state, and any user message that landed while the gateway was down.
+#
+# Sentinel-file approach (rather than env var) keeps the signal
+# durable across the entire process lifetime: even if the agent
+# defers the audit by N turns, the file remains until handled. start.sh
+# can't track first-turn vs subsequent-turn boundaries, but the agent
+# can — `rm -f` after the first audit makes it idempotent.
+mkdir -p "$TELEGRAM_STATE_DIR" 2>/dev/null || true
+: > "$TELEGRAM_STATE_DIR/.wake-audit-pending" 2>/dev/null || true
+
 {{#if handoffEnabled}}
 # --- Session handoff briefing ---
 # On a normal shutdown the Stop hook writes .handoff.md (compact

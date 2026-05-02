@@ -79,7 +79,7 @@ Plus `bot.use()` middleware in both for shared authorization gating.
 
 The split was started to enable a **gateway process model**:
 
-- `gateway.ts` runs as a long-lived daemon, owns the Telegram polling loop and shared resources (IPC server, MCP-side state, the `preAllocatedDrafts` map, etc.)
+- `gateway.ts` runs as a long-lived daemon, owns the Telegram polling loop and shared resources (IPC server, MCP-side state, etc.)
 - Per-agent processes (claude CLI runs) communicate with the gateway over a unix socket
 - This decouples agent restarts from Telegram polling — restarting `clerk` doesn't drop in-flight inbounds for `klanker`
 

@@ -100,9 +100,9 @@ do not gate CI yet.
 | 2   | Kill instant-draft placeholder; preserve early-ack 👀                | Class A no-placeholder, Class B no-placeholder      | shipped  |
 | 3   | First-answer-text deadline implementation; tighten <Ns numbers       | Class A/B/C answer-text-deadline assertions         | shipped  |
 | 4   | Card-gate rewrite to `(>=60s) OR (sub-agent appeared)`               | Class B no-card; Class C card-gate tests            | shipped  |
-| 5   | Remove `🔵 thinking` / `📚 recalling memories` / `💭 thinking` strings; sub-agent header = list length | Remaining no-placeholder + sub-agent count tests    | pending  |
+| 5   | Remove `🔵 thinking` / `📚 recalling memories` / `💭 thinking` strings; sub-agent header = list length | Remaining no-placeholder + sub-agent count tests    | shipped  |
 
-**PR 4 status (this PR):** ships the card-gate rewrite. Defaults change
+**PR 4 status:** shipped the card-gate rewrite. Defaults change
 from `initialDelayMs=30_000, promoteAfterMs=5_000, promoteOnParentToolCount=3`
 to `initialDelayMs=60_000, promoteAfterMs=0 (disabled), promoteOnParentToolCount=0
 (disabled)`. The Class B "no card rendered" and Class C "card renders on
@@ -110,6 +110,18 @@ sub-agent" / "card renders after 60s" tests are un-skipped. F3's late-card
 symptom (long single-tool turn shows no card) is now intentional spec
 behaviour rather than a bug — see `real-gateway-f3-late-card.test.ts`
 header for the reframe.
+
+**PR 5 status (this PR):** ships the placeholder-text removal. The
+pre-allocated draft path, the `update_placeholder` IPC handler, the
+placeholder heartbeat (`placeholder-heartbeat.ts`), the phase enrichment
+(`placeholder-phase.ts`), the `forum-topic-placeholder.ts` substitute,
+and all associated state in `gateway.ts` are deleted. recall.py's
+`update_placeholder` IPC calls now no-op cleanly because the gateway
+no longer registers an `onUpdatePlaceholder` handler — the IPC client
+emits a fire-and-forget JSON line, and the gateway dispatch silently
+ignores the unknown message type. Hindsight (`vendor/hindsight-memory/`)
+is untouched. The Class A/B/C no-placeholder assertions and the Class C
+sub-agent-header-equals-list-length assertion are un-skipped.
 
 ## Failure-mode history (F1–F4, fixed in earlier #553 PRs)
 

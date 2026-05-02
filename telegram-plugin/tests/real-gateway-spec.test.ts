@@ -202,11 +202,10 @@ describe('v2 spec — PR 4: card gate (>=60s) OR (sub-agent appeared)', () => {
 
 // ─── Class A — instant (<2s, NO tools) ───────────────────────────────────
 //
-// TODO(#553-PR-2): un-skip after instant-draft placeholder removal +
-// early-ack 👀 lands. TODO(#553-PR-5): the no-placeholder assertion
-// only goes fully green once the placeholder strings are deleted from
-// the production code paths.
-describe.skip('v2 spec — Class A (instant, <2s, no tools)', () => {
+// Un-skipped in #553 PR 5 — the no-placeholder assertions go green
+// after PR 5 deletes the production code that emitted placeholder
+// strings.
+describe('v2 spec — Class A (instant, <2s, no tools)', () => {
   it('emits NO placeholder text edits at any point', async () => {
     const h = createRealGatewayHarness({ gapMs: 0 })
     h.inbound({ chatId: CHAT, messageId: INBOUND_MSG, text: 'hi' })
@@ -294,13 +293,11 @@ describe.skip('v2 spec — Class A (instant, <2s, no tools)', () => {
 
 // ─── Class B — short (2–60s, tools, no sub-agents) ───────────────────────
 //
-// TODO(#553-PR-2): un-skip the no-placeholder + answer-text bits.
-// PR 4 (shipped): the "no progress card" assertion is exercised by the
-// PR-4-specific describe block above; the skipped variant here remains
-// pending PR 5 cleanup of the rest of the block.
-// TODO(#553-PR-5): ladder integrity is final-state RED only after PR 5
-// removes the placeholder fallback that currently masks the regression.
-describe.skip('v2 spec — Class B (short, 2–60s, tools, no sub-agents)', () => {
+// Un-skipped in #553 PR 5. The no-placeholder + ladder-integrity
+// assertions go green once the placeholder code is deleted (PR 5);
+// no-card and answer-text-deadline assertions were already covered
+// by the PR-3 / PR-4 describe blocks above.
+describe('v2 spec — Class B (short, 2–60s, tools, no sub-agents)', () => {
   it('emits NO placeholder text edits', async () => {
     const h = createRealGatewayHarness({ gapMs: 0 })
     h.inbound({ chatId: CHAT, messageId: INBOUND_MSG, text: 'do a thing' })
@@ -394,11 +391,10 @@ describe.skip('v2 spec — Class B (short, 2–60s, tools, no sub-agents)', () =
 
 // ─── Class C — long-running (>60s OR sub-agents/background workers) ───────
 //
-// PR 4 (shipped): card-gate tests are exercised by the PR-4-specific
-// describe block above; the skipped variants here remain pending PR 5
-// (no-placeholder, sub-agent count) cleanup.
-// TODO(#553-PR-5): un-skip the no-placeholder + sub-agent count tests.
-describe.skip('v2 spec — Class C (long-running OR sub-agents)', () => {
+// Un-skipped in #553 PR 5. No-placeholder assertions go green via the
+// PR-5 deletion of placeholder code; sub-agent header == list length
+// goes green via the PR-2 sub-agent count fix (#580).
+describe('v2 spec — Class C (long-running OR sub-agents)', () => {
   it('progress card appears when a sub-agent dispatches (regardless of elapsed time)', async () => {
     const h = createRealGatewayHarness({ gapMs: 0 })
     h.inbound({ chatId: CHAT, messageId: INBOUND_MSG, text: 'spawn a worker' })
@@ -486,9 +482,10 @@ describe.skip('v2 spec — Class C (long-running OR sub-agents)', () => {
   })
 
   it('sub-agent header count equals rendered-list-length (no drift)', async () => {
-    // The card header summarises "N workers"; the rendered bullet list
-    // should have exactly N entries. Pre-fix, the two diverge on rapid
-    // start/end events.
+    // The card header summarises sub-agent counts (`🤖 Sub-agents ·
+    // 🔄 N`); the rendered per-agent expandable list should have
+    // exactly N entries when all are running. Pre-fix (#580), the
+    // two diverged on rapid start events.
     const h = createRealGatewayHarness({ gapMs: 0 })
     h.inbound({ chatId: CHAT, messageId: INBOUND_MSG, text: 'spawn three' })
     h.feedSessionEvent({ kind: 'enqueue', chatId: CHAT, messageId: '1', threadId: null, rawContent: 'spawn three' })
@@ -505,12 +502,14 @@ describe.skip('v2 spec — Class C (long-running OR sub-agents)', () => {
     )
     expect(cardEdits.length, 'no card render captured').toBeGreaterThan(0)
     const last = cardEdits[cardEdits.length - 1].payload ?? ''
-    // Match a "N workers" / "N sub-agents" header and the bullet list.
-    const headerMatch = last.match(/(\d+)\s+(?:workers?|sub[- ]?agents?)/i)
-    expect(headerMatch, 'card payload missing worker-count header').not.toBeNull()
+    // The summary header is `🤖 Sub-agents · 🔄 N` (running count).
+    // Per-agent rows render as `<blockquote expandable>...</blockquote>`
+    // — one per sub-agent.
+    const headerMatch = last.match(/🔄\s*(\d+)/)
+    expect(headerMatch, 'card payload missing running-count header').not.toBeNull()
     const headerCount = Number(headerMatch?.[1] ?? -1)
-    const bulletCount = (last.match(/^[•\-*]\s/gm) ?? []).length
-    expect(headerCount).toBe(bulletCount)
+    const blockCount = (last.match(/<blockquote\s+expandable>/gi) ?? []).length
+    expect(headerCount).toBe(blockCount)
 
     h.feedSessionEvent({ kind: 'sub_agent_turn_end', agentId: 'a1' })
     h.feedSessionEvent({ kind: 'sub_agent_turn_end', agentId: 'a2' })

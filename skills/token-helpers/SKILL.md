@@ -1,6 +1,6 @@
 ---
 name: token-helpers
-description: Refresh OAuth access tokens for Google Calendar and Microsoft Graph. Use when another skill needs a fresh access token (calendar sync, Graph API calls) and only has a refresh token on hand. Shared utility consumed by skills like garmin, doctor-appointments, and compass.
+description: Refresh OAuth access tokens for Google Calendar and Microsoft Graph from refresh tokens stored in the switchroom vault. Library skill — invoked by other skills that need a short-lived access token to call calendar or Graph APIs, not directly by the user.
 allowed-tools: Bash(switchroom vault *), Bash(./scripts/*)
 ---
 
@@ -8,7 +8,7 @@ allowed-tools: Bash(switchroom vault *), Bash(./scripts/*)
 
 Shared shell scripts that exchange a long-lived OAuth refresh token for a short-lived access token and persist the new access token back to the Switchroom vault.
 
-This is a library skill — other skills call into it rather than the user invoking it directly. It replaces the OpenClaw `google-cal-token` and `ms-graph-token` skills, consolidated here so a single refresh pipeline covers both providers.
+This is a library skill — other skills call into it rather than the user invoking it directly. A single refresh pipeline covers both Google and Microsoft providers.
 
 ## When to use
 

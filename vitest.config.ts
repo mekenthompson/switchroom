@@ -103,6 +103,9 @@ export default defineConfig({
       // Bun.connect to a real Unix socket (#553 hotfix) — excluded
       // here, run via test:bun.
       "**/telegram-plugin/tests/gateway-update-placeholder-dispatch.test.ts",
+      // recent-outbound-dedup.test.ts uses bun:test (#546 dup fix) —
+      // excluded here, run via test:bun.
+      "**/telegram-plugin/tests/recent-outbound-dedup.test.ts",
     ],
     coverage: {
       provider: "v8",

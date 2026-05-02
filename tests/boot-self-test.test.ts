@@ -145,7 +145,11 @@ describe("boot-self-test.sh", () => {
     const missing = issues.find((i) => i.code === "credentials_missing");
     expect(missing).toBeDefined();
     expect(missing!.severity).toBe("error");
-    expect(missing!.summary).toContain("no .credentials.json");
+    // Telegram-first summary (rewritten in #557): the user-facing string is
+    // an action prompt routing to the inline /auth dashboard. Technical
+    // fingerprint stays in `code`.
+    expect(missing!.summary).toMatch(/\/auth/);
+    expect(missing!.summary).toMatch(/this chat/);
   });
 
   it("records auth.token_expired when expiresAt is in the past", { timeout: 15_000 }, () => {

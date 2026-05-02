@@ -109,9 +109,12 @@ describe("scaffoldAgent — persona (Phase 2)", () => {
     const claudeMd = readFileSync(join(result.agentDir, "CLAUDE.md"), "utf-8");
 
     // CLAUDE.md should be significantly smaller without persona block.
-    // Cap raised from 12000 → 16000: the template grew with vault, hindsight,
-    // sub-agent delegation, and Telegram interaction guidance added in v0.3-v0.4.
+    // Cap raised from 12000 → 16000 for vault/hindsight/sub-agent/Telegram
+    // additions in v0.3-v0.4; raised again 16000 → 24000 for the lifecycle
+    // additions in #557 (wake-audit + restart-visibility sections in
+    // telegram-style.md.hbs, both load-bearing — agent needs them to
+    // answer "why did you restart?" and audit owed replies on wake).
     // The doc is load-bearing — trimming risks cutting useful guidance.
-    expect(claudeMd.length).toBeLessThan(16000); // generous cap; target is lean but not 3KB
+    expect(claudeMd.length).toBeLessThan(24000); // generous cap; target is lean but not 3KB
   });
 });

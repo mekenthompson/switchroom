@@ -784,6 +784,29 @@ export const AgentSchema = z.object({
       "API key read from ~/.switchroom/openai-api-key (mode 0600). Off by " +
       "default — opt-in per agent."
     ),
+  telegraph: z
+    .object({
+      enabled: z.boolean().optional().describe("Master switch for Telegraph Instant View publishing."),
+      threshold: z.number().int().positive().optional().describe(
+        "Char count above which a reply is published to Telegraph instead of " +
+        "HTML-chunked into multiple Telegram messages. Default 3000 (≈3 chunks).",
+      ),
+      short_name: z.string().optional().describe(
+        "Telegraph account display name. Defaults to the agent's slug. Used at " +
+        "first-publish to lazily create the account; cached thereafter.",
+      ),
+      author_name: z.string().optional().describe(
+        "Telegraph article byline. Defaults to soul.name when set.",
+      ),
+    })
+    .optional()
+    .describe(
+      "Long-reply publishing via Telegraph (#579). When enabled, replies " +
+      "above the threshold publish as a Telegraph article rendered in " +
+      "Telegram via native Instant View. Off by default — content " +
+      "residency is real for some personas (lawyer, health-coach with PHI). " +
+      "Opt-in per agent."
+    ),
   soul: AgentSoulSchema,
   tools: AgentToolsSchema,
   memory: AgentMemorySchema,

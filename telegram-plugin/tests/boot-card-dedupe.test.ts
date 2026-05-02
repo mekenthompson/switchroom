@@ -12,17 +12,32 @@ import { describe, it, expect } from 'bun:test'
 import { shouldSkipDuplicateBootCard } from '../gateway/boot-card.js'
 
 describe('shouldSkipDuplicateBootCard — boot path', () => {
-  it('never skips on the boot path, even when a card is already active', () => {
-    // Edge case: stale activeBootCard from a previous lifetime should not
-    // affect the boot path (it ran first; if anything's set, that's a bug).
+  it('skips on the boot path when bridge-reconnect already posted a card', () => {
+    // First-write-wins: when the agent's IPC client connects faster
+    // than the gateway IIFE reaches its emit, bridge-reconnect runs
+    // first and sets activeBootCard. The boot path must defer.
+    // Regression for finn 2026-05-02 duplicate (msgId 673 + 674)
+    // — both posted within ~100ms because the boot path was
+    // unconditionally allowed past the gate.
     const decision = shouldSkipDuplicateBootCard(
       { activeBootCard: { messageId: 42 } },
       'boot',
     )
-    expect(decision.skip).toBe(false)
+    expect(decision.skip).toBe(true)
+    expect(decision.reason).toMatch(/msgId.*42/)
+    expect(decision.reason).toMatch(/site=boot/)
   })
 
-  it('does not skip on the boot path with no active card', () => {
+  it('skips on the boot path when bridge-reconnect emit is in-flight', () => {
+    const decision = shouldSkipDuplicateBootCard(
+      { activeBootCard: null, bootCardPending: true },
+      'boot',
+    )
+    expect(decision.skip).toBe(true)
+    expect(decision.reason).toMatch(/in-flight/i)
+  })
+
+  it('does not skip on the boot path with no active card and no pending emit', () => {
     const decision = shouldSkipDuplicateBootCard({ activeBootCard: null }, 'boot')
     expect(decision.skip).toBe(false)
   })
@@ -65,6 +80,19 @@ describe('shouldSkipDuplicateBootCard — reason format', () => {
     expect(decision.skip).toBe(false)
     expect(decision.reason).toBeUndefined()
   })
+
+  it('reason carries the site label so dedupe-source is greppable in logs', () => {
+    const fromBoot = shouldSkipDuplicateBootCard(
+      { activeBootCard: { messageId: 1 } },
+      'boot',
+    )
+    expect(fromBoot.reason).toMatch(/site=boot/)
+    const fromReconnect = shouldSkipDuplicateBootCard(
+      { activeBootCard: { messageId: 1 } },
+      'bridge-reconnect',
+    )
+    expect(fromReconnect.reason).toMatch(/site=bridge-reconnect/)
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -102,14 +130,16 @@ describe('shouldSkipDuplicateBootCard — in-flight (race window, #489)', () => 
     expect(decision.reason).toBeDefined()
   })
 
-  it('does not skip boot path even when something else is in-flight', () => {
-    // The boot path is the primary site — it's the only thing that should
-    // ever set bootCardPending=true in the first place. Defensive check.
+  it('skips boot path when bridge-reconnect emit is in-flight (first-write-wins)', () => {
+    // The boot path is no longer "primary" — empirical evidence
+    // (finn 2026-05-02) shows bridge-reconnect can fire first when
+    // the agent IPC-connects before the gateway IIFE reaches its
+    // emit. Both sites consult the gate symmetrically.
     const decision = shouldSkipDuplicateBootCard(
       { activeBootCard: null, bootCardPending: true },
       'boot',
     )
-    expect(decision.skip).toBe(false)
+    expect(decision.skip).toBe(true)
   })
 
   it('treats undefined bootCardPending as "not pending" for backward compat', () => {

@@ -126,6 +126,85 @@ describe("bridge-watchdog.sh — static regression guards", () => {
     expect(script).toMatch(/ActiveEnterTimestamp/);
     expect(script).toMatch(/UPTIME_GRACE_SECS/);
   });
+
+  it("gates ALL three restart paths on a multi-signal progress probe", () => {
+    // 2026-05-02 incident: TURN_HANG_SECS=300 fired on long sub-agent
+    // runs because the parent's tool_use stream goes silent while a
+    // Task() sub-agent does its work. The CLI's mid-turn guard caught
+    // some, but on subsequent ticks the marker stayed stale and
+    // eventually a restart slipped through, killing the sub-agent.
+    //
+    // Fix: every restart path (bridge-disconnect, turn-hang,
+    // journal-silence) consults `agent_has_recent_progress` which
+    // ORs over TWO independent fingerprints (transcript JSONL +
+    // tasks JSON). Two uncorrelated signals mean a wedged agent has
+    // to be silent on both before we kill it.
+    expect(script).toMatch(/JSONL_LIVENESS_SECS:=/);
+    expect(script).toMatch(/agent_has_recent_progress\(\)/);
+
+    // Both fingerprints must be probed inside the helper.
+    expect(script).toMatch(/\.claude\/projects.*-name '\*\.jsonl'/s);
+    expect(script).toMatch(/\.claude\/tasks.*-name '\*\.json'/s);
+
+    // All three restart paths must call the helper before acting.
+    // Count the call-sites: should be exactly 3 (bridge-disconnect,
+    // turn-hang, journal-silence).
+    const calls = script.match(/agent_has_recent_progress "/g) ?? [];
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("emits forensic context (process state + progress fingerprints) on every action log", () => {
+    // Operator forensics: after a restart the process is gone and
+    // its state is unrecoverable. Every [restart] / [detect] /
+    // [skip] line must carry the moment-of-decision snapshot so the
+    // journal alone is enough to reconstruct WHY the action fired.
+    // Snapshot includes: pid, /proc/<pid>/stat state letter, CPU%,
+    // RSS, JSONL-age, tasks-age.
+    expect(script).toMatch(/agent_main_pid\(\)/);
+    expect(script).toMatch(/agent_proc_snapshot\(\)/);
+    expect(script).toMatch(/agent_progress_snapshot\(\)/);
+    expect(script).toMatch(/agent_observation\(\)/);
+    // Reads the process-state letter from /proc/<pid>/stat (field 3).
+    expect(script).toMatch(/\/proc\/\$\{pid\}\/stat/);
+    // Every action log carries `agent=NAME reason=… <observation>`.
+    expect(script).toMatch(/wd_log restart .* \$\{observation\}/);
+    expect(script).toMatch(/wd_log detect .* \$\{observation\}/);
+  });
+
+  it("bridge-disconnect routes through `switchroom agent restart` (not raw systemctl)", () => {
+    // Detector B parity fix: previously the bridge-disconnect path
+    // went straight to `systemctl --user restart`, bypassing the
+    // CLI's in-flight guard and config reconciliation. Now it
+    // matches turn-hang and journal-silence: try the CLI first,
+    // fall back to systemctl only when the CLI isn't installed.
+    // Specifically, the script should resolve a `switchroom_cli`
+    // path inside the bridge-disconnect block (not just inside the
+    // journal-silence block at the bottom of the file).
+    const bridgeBlock = script.split("# ─── Journal-silence check")[0];
+    expect(bridgeBlock).toMatch(/switchroom_cli=/);
+    expect(bridgeBlock).toMatch(/"\$switchroom_cli" agent restart "\$agent"/);
+  });
+
+  it("logs every decision via `logger -t switchroom-watchdog` with a level tag", () => {
+    // Operator visibility: `journalctl -t switchroom-watchdog` should
+    // show one tagged line per action. Levels: detect (signal observed),
+    // restart (action taken), skip (action declined), error (failure).
+    expect(script).toMatch(/wd_log\(\)/);
+    expect(script).toMatch(/logger -t switchroom-watchdog/);
+    expect(script).toMatch(/wd_log restart "agent=/);
+    expect(script).toMatch(/wd_log skip "agent=/);
+    expect(script).toMatch(/wd_log detect "agent=/);
+  });
+
+  it("stamps clean-shutdown.json with the watchdog reason on EVERY restart path", () => {
+    // The bridge-disconnect path stamped a reason; the turn-hang and
+    // journal-silence paths did not, so greeting cards on those
+    // restarts silently dropped the "Restarted  <reason>" row.
+    // Pulled the stamping into a helper called from all three paths.
+    expect(script).toMatch(/stamp_restart_reason\(\)/);
+    expect(script).toMatch(/stamp_restart_reason \\?\s*"\$\{gateway_state_dir\}\/clean-shutdown\.json"/);
+    expect(script).toMatch(/stamp_restart_reason \\?\s*"\$\{agent_state_dir\}\/clean-shutdown\.json"/);
+  });
 });
 
 // ---------------------------------------------------------------

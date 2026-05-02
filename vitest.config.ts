@@ -99,6 +99,10 @@ export default defineConfig({
       // telegraph.test.ts uses bun:test (#579 Telegraph Instant View) —
       // excluded here, run via test:bun.
       "**/telegram-plugin/tests/telegraph.test.ts",
+      // gateway-update-placeholder-dispatch.test.ts uses bun:test +
+      // Bun.connect to a real Unix socket (#553 hotfix) — excluded
+      // here, run via test:bun.
+      "**/telegram-plugin/tests/gateway-update-placeholder-dispatch.test.ts",
       // recent-outbound-dedup.test.ts uses bun:test (#546 dup fix) —
       // excluded here, run via test:bun.
       "**/telegram-plugin/tests/recent-outbound-dedup.test.ts",

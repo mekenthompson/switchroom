@@ -1,6 +1,6 @@
 ---
 name: switchroom-status
-description: Shows which switchroom agents are running right now, their uptime, and current state. Use when the user asks 'what agents are running', 'show agent info', 'show me uptime', 'list all switchroom agents', 'are my agents OK', agent status, agent overview, or wants a snapshot of all running agents.
+description: List running switchroom agents with their uptime, model, and per-agent state. Use when the user asks 'what agents are running', 'list switchroom agents', 'how long has X been up', or wants a per-agent snapshot. Do NOT use for switchroom-wide version/health summary (use switchroom-cli's `switchroom version`) or "something is broken" diagnostics (use switchroom-health).
 ---
 
 # Agent Status
@@ -66,4 +66,4 @@ coach — stopped
 3 of 3 agents configured, 2 running.
 ```
 
-If the user wants more detail on a specific agent, suggest `switchroom agent logs <name>` or ask them to use the `switchroom-logs` skill.
+If the user wants more detail on a specific agent, suggest `switchroom agent logs <name>` (covered by the `switchroom-cli` skill).

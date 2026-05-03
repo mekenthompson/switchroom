@@ -775,6 +775,13 @@ if (!STATIC) setInterval(checkApprovals, 5000).unref()
 const chatThreadMap = new Map<string, number>()
 const activeStatusReactions = new Map<string, StatusReactionController>()
 const activeReactionMsgIds = new Map<string, { chatId: string; messageId: number }>()
+
+// #546 — outbound content-dedup window. PR #599 introduced the four read
+// sites (`outboundDedup.check` / `.record` in executeReply, executeStreamReply,
+// turn-flush) but the declaration was lost in a merge somewhere — every reply
+// path threw `outboundDedup is not defined` at runtime, blocking ALL outbound
+// from the agent. Restore the module-level singleton here.
+const outboundDedup = new OutboundDedupCache()
 /**
  * Per-chat cache of `available_reactions` from `getChat`. Populated lazily —
  * the FIRST message in a chat creates a controller without the filter (null

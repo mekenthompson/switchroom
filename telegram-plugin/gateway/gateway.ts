@@ -3455,6 +3455,21 @@ function handleSessionEvent(ev: SessionEvent): void {
                 )
               }
             },
+            // #646 — wire the shared outboundDedup into the answer-stream
+            // materialize path so it participates in the same dedup window
+            // as turn-flush and reply/stream_reply. The closured chatId /
+            // threadId are snapshotted at stream-creation time and are
+            // stable for the lifetime of the turn.
+            checkDedup: (text: string) => {
+              const cid = currentSessionChatId
+              if (cid == null) return false
+              return outboundDedup.check(cid, currentSessionThreadId, text, Date.now()) != null
+            },
+            recordDedup: (text: string) => {
+              const cid = currentSessionChatId
+              if (cid == null) return
+              outboundDedup.record(cid, currentSessionThreadId, text, Date.now())
+            },
           })
         }
         // #549 fix: route the chunk through the preamble suppressor

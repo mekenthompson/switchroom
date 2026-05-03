@@ -117,8 +117,24 @@ export interface AnswerStreamConfig {
    */
   onMetric?: (ev:
     | { kind: 'answer_lane_update'; chatId: string; messageId: number | undefined; charCount: number; transport: 'draft' | 'message' | 'edit' }
-    | { kind: 'answer_lane_materialized'; chatId: string; messageId: number | undefined }
+    | { kind: 'answer_lane_materialized'; chatId: string; messageId: number | undefined; suppressed?: boolean }
   ) => void
+
+  /**
+   * #646 — dedup hooks. Injected by the gateway so answer-stream materialize
+   * participates in the same dedup window as turn-flush and reply/stream_reply.
+   *
+   * checkDedup(text): returns true if the text was already sent recently for
+   *   this chat (caller already knows chatId/threadId via closure). When true,
+   *   materialize skips the send and returns undefined.
+   *
+   * recordDedup(text): called after a successful materialize send so subsequent
+   *   turn-flush or reply tool calls with the same content get suppressed.
+   *
+   * Both callbacks are optional — when absent, the old behaviour is preserved.
+   */
+  checkDedup?: (text: string) => boolean
+  recordDedup?: (text: string) => void
 }
 
 export interface AnswerStreamHandle {
@@ -176,6 +192,8 @@ export function createAnswerStream(config: AnswerStreamConfig): AnswerStreamHand
     log,
     warn,
     onMetric,
+    checkDedup,
+    recordDedup,
   } = config
 
   const effectiveThrottle = Math.max(250, throttleMs)
@@ -431,6 +449,19 @@ export function createAnswerStream(config: AnswerStreamConfig): AnswerStreamHand
         return undefined
       }
 
+      // #646 — dedup check: was this content already sent via turn-flush
+      // (or another path) within the dedup TTL? If so, skip the send to
+      // avoid a duplicate push notification. We still emit the metric
+      // (with suppressed=true) so observability tooling can track the
+      // rate of suppressed materializations.
+      if (checkDedup != null && checkDedup(textToSend)) {
+        log?.(
+          `telegram gateway: answer-stream: materialize-dedup-suppressed chatId=${chatId} — turn-flush already sent this content`,
+        )
+        onMetric?.({ kind: 'answer_lane_materialized', chatId, messageId: undefined, suppressed: true })
+        return undefined
+      }
+
       // Always send a fresh message for push notification
       const sendParams: Parameters<typeof sendMessage>[2] = {
         parse_mode: 'HTML',
@@ -447,6 +478,11 @@ export function createAnswerStream(config: AnswerStreamConfig): AnswerStreamHand
         if (typeof sentId === 'number' && Number.isFinite(sentId)) {
           streamMsgId = sentId
           log?.(`answer-stream: materialized (id=${sentId})`)
+          // #646 — record in dedup cache so a late-arriving turn-flush
+          // (or a second materialize on reconnect) with identical content
+          // gets suppressed. Mirrors the record call in gateway.ts
+          // turn-flush at line ~3795.
+          recordDedup?.(textToSend)
           onMetric?.({ kind: 'answer_lane_materialized', chatId, messageId: streamMsgId })
           return sentId
         }

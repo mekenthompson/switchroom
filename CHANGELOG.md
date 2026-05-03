@@ -2,6 +2,38 @@
 
 ## [Unreleased]
 
+## v0.6.0 — 2026-05-03
+
+### Added
+
+- **`/auth share <label>` — one-shot account-add + fleet-wide enable
+  (#634).** Collapses the two-step "register account, then enable on
+  every agent" flow into a single command. CLI: `switchroom auth share
+  <label> [--from-agent <name>]`; Telegram: `/auth share <label>
+  [--from-agent <name>]`. Auto-defaults `--from-agent` when only one
+  agent is configured (the fresh-install case). Auto-restarts every
+  affected agent so claude picks up the freshly fanned-out
+  credentials. Refuses with a hint when the account already exists
+  (*"use 'switchroom auth enable <label> all' instead"*).
+
+- **`all` keyword for `auth enable` / `auth disable` (#634).**
+  Operators don't have to enumerate the fleet:
+  - `switchroom auth enable <label> all` — wire the account to every
+    claude-enabled agent in `switchroom.yaml`.
+  - `switchroom auth disable <label> all` — unwire from every agent.
+  - Telegram surfaces the same shape: `/auth enable <label> all`.
+
+  Edge case: a literal agent named `all` in `switchroom.yaml` triggers
+  a stderr warning and the keyword still wins; rename the agent to
+  disambiguate.
+
+### Why
+
+Closes the ergonomic gap from `share-auth-across-the-fleet.md` JTBD.
+PR #621 delivered the underlying account-as-unit capability, but the
+common case ("one Pro subscription drives my whole fleet") still
+required two commands plus N agent names. The new verbs make it one
+command, mobile-native.
 
 ## v0.5.2 — 2026-05-03
 

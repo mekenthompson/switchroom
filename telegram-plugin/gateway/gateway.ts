@@ -6413,6 +6413,15 @@ bot.command('auth', async ctx => {
     return
   }
 
+  if (intent.kind === 'account-rename') {
+    // /auth account rename <old> <new> — atomic dir rename + YAML
+    // rewrite of every agents.<name>.auth.accounts list. No agent
+    // restart required: per-agent credentials.json content is
+    // unchanged (only the source-of-truth label moved).
+    await runSwitchroomCommand(ctx, intent.cliArgs, intent.label)
+    return
+  }
+
   if (intent.kind === 'enable') {
     // /auth enable <label> [agents...|all] — wires the account to those agents
     // (defaults to the current agent), then restarts each so claude picks

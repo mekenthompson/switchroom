@@ -313,6 +313,44 @@ slot crosses the exhaustion threshold (~99.5% utilisation) the plugin:
 A per-slot cooldown prevents fallback-loop storms if two polls race.
 Source: `telegram-plugin/auto-fallback.ts`, `src/auth/accounts.ts`.
 
+### Switchroom-managed token refresh (`auth refresh-tick`)
+
+Anthropic's OAuth access tokens are short-lived (typically 8 hours). Pre-#429
+the only thing that rotated them was the agent's own `claude` process noticing
+expiry mid-turn — which fails for stop-hook subprocesses (where claude code
+strips `CLAUDE_CODE_OAUTH_TOKEN` from env) and for agents that haven't received
+a turn in 24h+. The result was silent 401s on the next inbound message.
+
+`switchroom auth refresh-tick` rotates tokens proactively. Iterate every
+agent, check `<agentDir>/.claude/.credentials.json`, and POST to Anthropic's
+OAuth refresh endpoint when the access token's remaining lifetime is below
+the threshold (default 1h) AND a `refreshToken` is present. The new token
+is atomically rewritten into both `.credentials.json` and the active slot's
+`.oauth-token` (so start.sh and the legacy mirror see it).
+
+```bash
+switchroom auth refresh-tick                       # default 1h threshold, prose output
+switchroom auth refresh-tick --json                # structured summary for logs
+switchroom auth refresh-tick --threshold-ms 7200000  # custom threshold (2h here)
+```
+
+The tick is idempotent and safe to run as often as you like — when nothing
+needs refreshing it makes no network calls and writes no files. Wire it to
+an existing systemd timer or cron line:
+
+```
+# crontab — every 15 minutes
+*/15 * * * * switchroom auth refresh-tick --json >> ~/.switchroom/refresh.log 2>&1
+```
+
+Outcomes per agent: `refreshed`, `skipped-fresh`, `skipped-no-refresh-token`
+(boot-self-test will already be prompting the user to re-auth in chat),
+`skipped-no-credentials`, `skipped-malformed`, `failed`. Process exits
+non-zero only when every refresh attempt failed AND nothing was already
+fresh — partial failures stay visible without taking the timer down.
+
+Source: `src/auth/token-refresh.ts`.
+
 ## Escape Hatches
 
 For Claude Code settings switchroom doesn't wrap:

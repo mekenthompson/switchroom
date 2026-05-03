@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+
+## v0.6.4 — 2026-05-03
+
+### Added
+
+- **`dm_only?: boolean` agent flag (#644).** Marks an agent as a
+  DM-only bot — has its own bot_token and lives exclusively in a
+  private chat with the operator. Suppresses scaffolding's default
+  behavior of inheriting the global `telegram.forum_chat_id` into the
+  agent's `access.json` `groups` entry. Without this opt-out, the
+  boot probe sweeps a chat the bot isn't a member of and emits a
+  noisy `boot-probe-failed: 400 Bad Request: chat not found` warning
+  every restart (plus a misleading user-facing notification).
+  `topic_name` is still schema-required but unused — set it to a
+  display label like 'DM' for `/switchroom status` output.
+
+### Migration
+
+Set `dm_only: true` on each DM-only agent in switchroom.yaml. Next
+reconcile rewrites the agent's access.json without the bad group
+entry. Existing access.json files keep their stale group entry until
+reconcile fires — operators can manually edit `~/.switchroom/agents/
+<name>/telegram/access.json` to drop the `groups` block for immediate
+effect.
 ## v0.6.3 — 2026-05-03
 
 ### Fixed

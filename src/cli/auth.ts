@@ -16,6 +16,11 @@ import {
   removeAccount,
   startAuthSession,
 } from "../auth/manager.js";
+import {
+  refreshAllAgents,
+  REFRESH_THRESHOLD_MS,
+  type RefreshOutcome,
+} from "../auth/token-refresh.js";
 import { getAgentStatus, restartAgent } from "../agents/lifecycle.js";
 import { withConfigError, getConfig } from "./helpers.js";
 
@@ -46,6 +51,42 @@ function requireKnownAgent(config: ReturnType<typeof getConfig>, name: string): 
       )
     );
     process.exit(1);
+  }
+}
+
+function formatOutcomeTag(o: RefreshOutcome): string {
+  switch (o.kind) {
+    case "refreshed":
+      return chalk.green("[refreshed]");
+    case "skipped-fresh":
+      return chalk.dim("[fresh]    ");
+    case "skipped-no-refresh-token":
+      return chalk.yellow("[no-rtoken]");
+    case "skipped-no-credentials":
+      return chalk.dim("[no-creds] ");
+    case "skipped-malformed":
+      return chalk.yellow("[malformed]");
+    case "failed":
+      return chalk.red("[failed]   ");
+  }
+}
+
+function formatOutcomeNote(o: RefreshOutcome): string {
+  switch (o.kind) {
+    case "refreshed":
+      return `expires ${new Date(o.newExpiresAt).toISOString()}`;
+    case "skipped-fresh": {
+      const mins = Math.round(o.remainingMs / 60_000);
+      return `still ${mins}m remaining`;
+    }
+    case "skipped-no-refresh-token":
+      return "no refreshToken — user must /auth in chat";
+    case "skipped-no-credentials":
+      return ".credentials.json missing (oauth-token-only is fine)";
+    case "skipped-malformed":
+      return o.reason;
+    case "failed":
+      return o.error;
   }
 }
 
@@ -398,6 +439,79 @@ export function registerAuthCommand(program: Command): void {
           process.exit(2);
         }
       })
+    );
+
+  // switchroom auth refresh-tick [--threshold-ms N] [--json]
+  //
+  // The watchdog-side half of #429 Phase 1.1. Iterates every agent and
+  // proactively rotates `.credentials.json` when the access token is
+  // within `--threshold-ms` of expiry AND a refreshToken is present.
+  // Idempotent — when nothing needs refreshing this is a pure read.
+  //
+  // Designed to be invoked by an external scheduler (cron / a systemd
+  // timer / an existing watchdog tick) every few minutes. Keeps the
+  // shell side minimal and makes the refresh behaviour fully testable
+  // via the underlying `refreshAllAgents` function.
+  //
+  // Outcomes per agent are surfaced as a JSON summary (--json) or a
+  // one-line-per-agent prose summary. Process exit code is 0 unless
+  // EVERY refresh attempt failed — partial failures are visible in the
+  // summary but don't fail the tick (so a single broken agent doesn't
+  // tear down the operator's monitoring).
+  auth
+    .command("refresh-tick")
+    .description(
+      "Refresh OAuth access tokens that are about to expire (run from cron / a systemd timer)",
+    )
+    .option(
+      "--threshold-ms <ms>",
+      `Refresh tokens whose remaining lifetime is below this many ms (default: ${REFRESH_THRESHOLD_MS})`,
+    )
+    .option("--json", "Emit a structured JSON summary instead of prose", false)
+    .action(
+      withConfigError(async (opts: { thresholdMs?: string; json?: boolean }) => {
+        const config = getConfig(program);
+        const thresholdMs = opts.thresholdMs
+          ? parseInt(opts.thresholdMs, 10)
+          : REFRESH_THRESHOLD_MS;
+        if (!Number.isFinite(thresholdMs) || thresholdMs < 0) {
+          console.error(chalk.red(`Invalid --threshold-ms: ${opts.thresholdMs}`));
+          process.exit(2);
+        }
+
+        const summary = await refreshAllAgents(config, { thresholdMs });
+
+        if (opts.json) {
+          console.log(JSON.stringify(summary, null, 2));
+        } else {
+          console.log();
+          for (const o of summary.outcomes) {
+            const tag = formatOutcomeTag(o);
+            const note = formatOutcomeNote(o);
+            console.log(`  ${tag} ${o.agent ?? "?"}${note ? `  — ${note}` : ""}`);
+          }
+          console.log();
+          const c = summary.counts;
+          console.log(
+            chalk.dim(
+              `  refreshed=${c.refreshed} fresh=${c["skipped-fresh"]} no-refresh-token=${c["skipped-no-refresh-token"]} no-credentials=${c["skipped-no-credentials"]} malformed=${c["skipped-malformed"]} failed=${c.failed}`,
+            ),
+          );
+          console.log();
+        }
+
+        // Exit non-zero only if there's no positive outcome AND there
+        // are failures — i.e. the tick produced no successful refresh
+        // and at least one outright error. A tick where everything was
+        // already fresh exits 0 (the common steady state).
+        if (
+          summary.counts.failed > 0 &&
+          summary.counts.refreshed === 0 &&
+          summary.counts["skipped-fresh"] === 0
+        ) {
+          process.exit(2);
+        }
+      }),
     );
 
   // switchroom auth refresh <name> (back-compat alias)

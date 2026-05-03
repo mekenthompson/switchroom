@@ -325,6 +325,7 @@ switchroom auth code <agent> <browser-code>       # Paste the code back from the
 switchroom auth cancel <agent>                    # Abandon a pending login
 switchroom auth reauth <agent> [--slot <s>]       # Fresh OAuth, replace existing token
 switchroom auth refresh <agent>                   # Alias for reauth (back-compat)
+switchroom auth refresh-tick [--threshold-ms N]   # Daemon: rotate tokens nearing expiry (cron/timer)
 
 switchroom auth add <agent> [--slot <name>]       # Add another account to the fallback pool
 switchroom auth use <agent> <slot>                # Switch the active slot

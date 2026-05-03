@@ -2,19 +2,167 @@
 
 ## [Unreleased]
 
+## v0.5.0 — 2026-05-03
+
+### Added
+
+- **Per-agent pinned status cards (foundations + integration).** Each
+  active sub-agent now optionally gets its own pinned Telegram card
+  driven by a CLI-style status row (`{glyph} {verb} · {elapsed} ·
+  ↓{tokens} · thought {thinking}`) and a ◼/◻/✔ TodoWrite-driven task
+  block. Off by default — opt in with
+  `PROGRESS_CARD_PER_AGENT_PINS=1`. Pin manager keys on `(turnKey,
+  agentId)` composite; new `subagent-card.ts` registry handles
+  per-card lifecycle (lazy spawn on first content event, two-pass
+  k-of-n labeling, multi-card coalesce, finalize on
+  `sub_agent_turn_end`). When the flag is on the parent card's
+  `<blockquote expandable>` sub-agent block is suppressed (#624,
+  #627).
+- **One OAuth per Anthropic account** (#621) — accounts are now
+  first-class: a single `claude setup-token` per account covers every
+  agent, sub-agent, hook, summarizer, and cron. New
+  `src/auth/account-store.ts` + `src/auth/account-refresh.ts` own
+  storage, refresh, and quota state at the account level. New
+  `auth-accounts` CLI verbs: add, list, label, route. Telegram
+  `/auth` router updated to surface accounts.
+- **Switchroom-managed token refresh loop** (#612, #429) — switchroom
+  now refreshes OAuth tokens on a daemon timer instead of relying on
+  Claude Code's per-process refresh. Quota state, refresh failure,
+  and account drift are observable from the gateway.
+- **Telegram voice-in + webhook verbs** (#619, #587, #586, #578,
+  #577) — `switchroom telegram voice-in` enables Whisper
+  transcription on inbound voice messages. `switchroom telegram
+  webhook` adds HMAC + Bearer-authenticated webhook ingest for
+  external systems.
+- **Inline keyboard buttons on `reply` / `stream_reply`** (#616,
+  #271) — agents can attach inline buttons to outbound messages;
+  callbacks route as ordinary inbound steers.
+- **Granular `send_typing` chat actions** (#617, #273) — replaces the
+  single typing indicator with per-action `record_voice`,
+  `upload_photo`, `find_location`, etc.
+- **`ask_user` MCP tool with inline-keyboard answers** (#581, #574) —
+  agents can prompt the user inline; reply lands as steer.
+- **`!`-prefix interrupt marker** (#583, #575) — messages starting
+  with `!` are recognised as interrupts even mid-turn.
+- **Telegraph Instant View for long replies** (#588, #579) — replies
+  over Telegram's 4096-char limit auto-publish to Telegraph and link
+  back from the chat.
+- **`send_sticker` / `send_gif` MCP tools + animation inbound**
+  (#584, #576).
+- **Forum topology support** (#606, epic #543) — `agent add` now
+  understands forum topics; per-topic routing and pin scoping land
+  cleanly.
+- **Cascade-aware Telegram features** (#604, #596) — Telegram
+  feature config now flows through the standard
+  defaults→profile→agent cascade.
+- **`switchroom telegram` CLI verb** (#605, #597 phase 1) — single
+  entry point for telegram subcommands; replaces fragmented prior
+  surface.
+- **Opt-in `sendMessageDraft` transport for the pinned card** (#618,
+  #354) — `PROGRESS_CARD_DRAFT_TRANSPORT=1` enables continuous
+  bouncing-dots animation between explicit tool_use events. Spike
+  pending operator validation.
+- **Idle/active topic footer**, **interrupted-turn resume protocol**,
+  **incremental answer streaming** — see v0.4.0 entries (no
+  regressions in this release).
+- **TodoWrite reducer + render template foundations** (#624) —
+  parent and per-sub-agent task slices on `ProgressCardState`;
+  `renderAgentCard`, `projectAgentSlice`, `glyphForTick` exposed as
+  pure functions ready for the per-agent card path and reusable for
+  future render surfaces.
+- **Stateful test harness upgrades** (#607) — catches reaction /
+  dedup / lifecycle bug classes that the prior unit tests missed.
+- **IPC + bridge lifecycle coverage** (#603) — new tests reproduce
+  Bug A/B/C/D regression class.
+- **Real-gateway harness scaffolding** (#567, #553 Phase 3) +
+  **waiting-UX v2 spec** (#582, #553 PR 1).
+
+### Changed
+
+- **Card gate** (#590, #553 PR 4) — progress card now appears at
+  `(elapsed >= 60s) OR (any sub-agent appeared)` rather than after
+  N parent tool calls. Tools alone never trigger the card.
+- **Faster real-text path** (#585, #553 PR 3) — replies reach the
+  user with less coalescing latency.
+- **Eliminated fake placeholder text** (#553 PR 5) — the gateway no
+  longer inserts synthetic "loading…" strings; placeholders are
+  message-level.
+- **Stable sub-agent identity** (#615, #378) — sub-agent display
+  description now uses a stable fallback chain
+  (description → subagentType → first prompt → 'sub-agent') rather
+  than letting first emitted text flip the title mid-turn.
+- **Sub-agent count must equal rendered row count** (#580) —
+  expandable rows and the count badge can no longer drift.
+- **Skill descriptions consolidated** — stale cross-references and
+  loose descriptions cleaned up across all bundled skills (#593,
+  #598).
+
+### Fixed
+
+- **`outboundDedup` ReferenceError class** (#625, #599, #546) —
+  every outbound reply was hitting `ReferenceError` on the dedup
+  check; declared the variable + added a lint guard for the bug
+  class.
+- **Restart-storm windows** (#608) — closes four paths where the
+  watchdog could waste Claude quota by restarting an agent that was
+  already running fine.
+- **Watchdog: foreground sub-agent activity refreshes parent
+  turn-active marker** (#610, #501) — long-running foreground
+  sub-agent calls no longer trip the parent watchdog.
+- **👍 reaction fires on real delivery, not turn_end** (#602, Bug
+  D + Z) — the thumbs-up that signals "your message landed" now
+  reflects actual delivery instead of just the turn boundary.
+- **Time-based first-emit promotion** (#570, #553 F3) — single- or
+  two-tool turns that take 5–30s now cross the promotion threshold
+  and surface a card.
+- **Reaction flush before terminal emoji** (#569, #553 F1) and
+  **`👀` on raw arrival** (#568, #553 F2).
+- **Preamble dedup + chat-allowed-reactions filter** (#609, #549,
+  #542).
+- **Premature `👍` from disconnect flush** (#600, #553 hotfix).
+- **Wake-audit conversation-aware dedup** (#601, #553 follow-up).
+- **`chat not found` 400s now log-only, not shutdown** (#564) — a
+  single deleted chat can no longer take down the gateway.
+- **Auth code redaction failure logging** (#561, #562) — auth
+  redaction now reports on its own failures.
+- **Graceful model-down UX** (#611, #394) — when the model
+  endpoint is down, the gateway suggests `/authfallback` / `/auth`
+  / `/usage` rather than a bare error.
+- **Progress-card row cleanup** (#615, #378) — redundant rows
+  removed; identity stabilized.
+
 ### Removed
-- **`switchroom-mcp/` management server (#235).** The 4 tools it exposed
-  (`switchroom_memory_search`, `switchroom_memory_stats`,
-  `workspace_memory_search`, `workspace_memory_get`) had zero production
-  callers — every active code path used Hindsight's MCP
-  (`mcp__hindsight__*`) directly, plus Claude Code's built-in `Read` /
-  `Grep` for workspace files. The server was spawning a child process per
-  agent at boot for no observable benefit. New agents no longer get the
-  entry; reconcile actively retracts it from existing agents'
-  `settings.json` and strips `mcp__switchroom__*` from
-  `permissions.allow`. **Migration:** run `switchroom agent reconcile <name>`
-  for each existing agent (or just restart — Claude Code tolerates a
-  missing MCP server with a silent log line).
+
+- **`switchroom-mcp/` management server (#235).** The 4 tools it
+  exposed (`switchroom_memory_search`, `switchroom_memory_stats`,
+  `workspace_memory_search`, `workspace_memory_get`) had zero
+  production callers — every active code path used Hindsight's MCP
+  (`mcp__hindsight__*`) directly, plus Claude Code's built-in
+  `Read` / `Grep` for workspace files. The server was spawning a
+  child process per agent at boot for no observable benefit. New
+  agents no longer get the entry; reconcile actively retracts it
+  from existing agents' `settings.json` and strips
+  `mcp__switchroom__*` from `permissions.allow`. **Migration:** run
+  `switchroom agent reconcile <name>` for each existing agent (or
+  just restart — Claude Code tolerates a missing MCP server with a
+  silent log line).
+- **Dead `preAllocatedDraftId` parameter** (#595) — leftover from
+  an abandoned approach in #553; no callers.
+
+### Operator notes
+
+- **Soft rollout flags introduced this release** (all default off):
+  - `PROGRESS_CARD_PER_AGENT_PINS=1` — per-agent pinned cards
+    (this release).
+  - `PROGRESS_CARD_DRAFT_TRANSPORT=1` — bouncing-dots draft
+    transport for the pinned card (#354 spike).
+  - `PROGRESS_CARD_MULTI_AGENT=0` — explicitly disable the
+    multi-agent expandable section in the parent card. Default
+    behaviour is to auto-activate when sub-agents are present.
+- **Migration on update:** existing agents continue to work
+  unchanged. To pick up the auth refactor (#621), run
+  `switchroom auth accounts add <label>` once per Anthropic
+  account, then `switchroom agent reconcile <name>` per agent.
 
 ## v0.4.0 — 2026-04-29
 

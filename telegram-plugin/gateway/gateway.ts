@@ -168,6 +168,7 @@ import {
 } from '../active-reactions.js'
 import { sweepActiveReactions } from '../active-reactions-sweep.js'
 import { flushOnAgentDisconnect } from './disconnect-flush.js'
+import { PreambleSuppressor } from './preamble-suppressor.js'
 import { fetchQuota, formatQuotaBlock } from '../quota-check.js'
 import {
   evaluateFallbackTrigger,
@@ -770,6 +771,24 @@ if (!STATIC) setInterval(checkApprovals, 5000).unref()
 const chatThreadMap = new Map<string, number>()
 const activeStatusReactions = new Map<string, StatusReactionController>()
 const activeReactionMsgIds = new Map<string, { chatId: string; messageId: number }>()
+/**
+ * Per-chat cache of `available_reactions` from `getChat`. Populated lazily —
+ * the FIRST message in a chat creates a controller without the filter (null
+ * = "try all whitelisted variants"); a fire-and-forget probe populates the
+ * cache for subsequent messages. Closes #542: when a chat restricts
+ * reactions (common in supergroups), Telegram silently rejects intermediate
+ * emoji like 🤔 / 👨‍💻 / ⚡ with 400 REACTION_INVALID, the controller's
+ * catch logs and continues, and only 👍 lands. With this cache wired in,
+ * StatusReactionController.resolveEmoji() falls through to a permitted
+ * variant instead of letting the call fail silently.
+ *
+ * `null` means "no filter / first probe in flight". `Set<string>` means
+ * "Telegram returned the explicit list". Empty Set means the chat allows
+ * NO reactions (rare; controller's last-resort branch will return null
+ * and emits become no-ops, which is correct).
+ */
+const chatAvailableReactions = new Map<string, Set<string> | null>()
+const chatProbesInFlight = new Set<string>()
 const activeTurnStartedAt = new Map<string, number>()
 const pendingRestarts = new Map<string, number>()  // agentName -> timestamp when restart was requested
 const activeDraftStreams = new Map<string, DraftStreamHandle>()
@@ -816,6 +835,25 @@ let currentTurnToolCallCount = 0
 let activeAnswerStream: AnswerStreamHandle | null = null
 let currentTurnIsDm = false
 let currentTurnGatewayReceiveAt = 0
+
+// #549 fix — preamble suppression for the answer-stream path.
+//
+// Background: assistant text emitted before a tool_use is "preamble"
+// (think-out-loud guidance about what's about to happen). The
+// progress-card driver consumes preamble as a narrative row for the
+// upcoming tool. Independently, the answer-stream path was sending the
+// same text to chat as a standalone message — user saw it twice (#549).
+//
+// The buffering policy lives in `preamble-suppressor.ts` so it can be
+// unit-tested without spinning the whole gateway. The suppressor's
+// `emitAnswer` callback is what bridges back to `activeAnswerStream` —
+// when text is promoted from "pending" to "answer text", we update the
+// stream with the cumulative answer-only payload (excluding preamble).
+const preambleSuppressor = new PreambleSuppressor({
+  emitAnswer: (cumulative) => {
+    if (activeAnswerStream != null) activeAnswerStream.update(cumulative)
+  },
+})
 
 /**
  * Telegram chat-id convention: positive ids are private chats (DM with a
@@ -911,6 +949,58 @@ function endStatusReaction(chatId: string, threadId: number | undefined, outcome
 function resolveThreadId(chat_id: string, explicit?: string | number | null): number | undefined {
   if (explicit != null) return Number(explicit)
   return chatThreadMap.get(chat_id)
+}
+
+/**
+ * Background probe that populates `chatAvailableReactions` for `chatId`
+ * via `getChat`. Fire-and-forget — never blocks the caller. Coalesces
+ * concurrent probes via `chatProbesInFlight`. Failure (rate limit, no
+ * permission, network) leaves the cache empty so subsequent messages
+ * fall back to the "no filter" path (current production behavior).
+ *
+ * Closes #542 — see chatAvailableReactions block comment for rationale.
+ */
+function probeAvailableReactions(chatId: string): void {
+  if (chatAvailableReactions.has(chatId)) return
+  if (chatProbesInFlight.has(chatId)) return
+  chatProbesInFlight.add(chatId)
+  void (async () => {
+    try {
+      const chat = await bot.api.getChat(chatId)
+      // Telegram convention: `available_reactions` undefined ⇒ "all
+      // emoji reactions allowed" (no filter). Explicit array ⇒ this
+      // exact set is permitted; everything else is rejected.
+      //
+      // Cache `null` for the "no filter" case. The controller also
+      // treats null as "no filter" — both meanings converge to the
+      // same call site behaviour, which is intentional. `has(chatId)`
+      // distinguishes "probed and got null" from "never probed" so
+      // we don't re-probe forever.
+      const reactions = chat.available_reactions
+      if (reactions == null) {
+        chatAvailableReactions.set(chatId, null)
+      } else {
+        const allowed = new Set<string>()
+        for (const r of reactions) {
+          if (r.type === 'emoji') allowed.add(r.emoji)
+          // ReactionTypeCustomEmoji and ReactionTypePaid are skipped —
+          // the StatusReactionController only emits standard emoji.
+        }
+        chatAvailableReactions.set(chatId, allowed)
+        process.stderr.write(
+          `telegram gateway: probed available_reactions chatId=${chatId} count=${allowed.size}\n`,
+        )
+      }
+    } catch (err) {
+      // Don't poison the cache on transient failure — leave the entry
+      // unset so the next message retries.
+      process.stderr.write(
+        `telegram gateway: available_reactions probe failed chatId=${chatId} ${(err as Error).message}\n`,
+      )
+    } finally {
+      chatProbesInFlight.delete(chatId)
+    }
+  })()
 }
 
 // ─── Handoff continuity ───────────────────────────────────────────────────
@@ -3140,6 +3230,8 @@ function handleSessionEvent(ev: SessionEvent): void {
         currentTurnLastAssistantMsgId = null
         currentTurnLastAssistantDone = false
         currentTurnToolCallCount = 0
+        // #549 fix — fresh turn, reset preamble-suppression state.
+        preambleSuppressor.reset()
         // Stage 3b: stamp turn-start in the registry. turn_key is
         // chat:thread:startTs — unique per turn, distinct from the
         // progress-card-driver's per-chat sequence number (these are two
@@ -3210,6 +3302,15 @@ function handleSessionEvent(ev: SessionEvent): void {
       // failure mode #116 originally tracked) emit no more tool_use
       // events, so the marker mtime stops advancing → watchdog acts.
       touchTurnActiveMarker(STATE_DIR)
+      // #549 fix: a tool_use immediately following text events makes
+      // those texts "preamble" — the progress card already captured
+      // them as a narrative for this tool. Drop the pending answer-
+      // stream buffer so the same text doesn't also land in chat as a
+      // standalone message. Telegram-surface tools (reply / stream_reply)
+      // are EXCEPTIONS: their text IS the answer, so we flush instead
+      // of dropping. The answer-stream's own dedup handles overlap
+      // with the reply tool's payload.
+      preambleSuppressor.onTool({ isReplyTool: isTelegramSurfaceTool(ev.toolName) })
       const ctrl = activeStatusReactions.get(statusKey(currentSessionChatId, currentSessionThreadId))
       const name = ev.toolName
       // Phase tracking removed in #553 PR 5 — phases only fed the
@@ -3285,7 +3386,13 @@ function handleSessionEvent(ev: SessionEvent): void {
             },
           })
         }
-        activeAnswerStream.update(currentTurnCapturedText.join(''))
+        // #549 fix: route the chunk through the preamble suppressor
+        // instead of immediately updating the answer stream. If a
+        // tool_use arrives within the buffer window, the suppressor
+        // drops the chunk (the card owns it). Otherwise it flushes as
+        // answer text. `currentTurnCapturedText` is unchanged — it
+        // remains the safety-net source for turn-flush prose recovery.
+        preambleSuppressor.onText(ev.text)
       }
       resetOrphanedReplyTimeout()
 
@@ -3319,6 +3426,8 @@ function handleSessionEvent(ev: SessionEvent): void {
         currentSessionThreadId = undefined
         currentTurnReplyCalled = false
         currentTurnCapturedText = []
+        // #549 fix — context-exhaustion teardown also resets preamble state.
+        preambleSuppressor.reset()
       }
       return
     }
@@ -3347,6 +3456,13 @@ function handleSessionEvent(ev: SessionEvent): void {
         clearTimeout(orphanedReplyTimeoutId)
         orphanedReplyTimeoutId = null
       }
+      // #549 fix — flush any pending preamble BEFORE activeAnswerStream is
+      // nulled below. Text emitted immediately before turn_end (no tool
+      // followed) is the answer; the suppressor's emitAnswer callback
+      // would no-op against a nulled stream, silently dropping the text
+      // (regression for short no-tool replies). Order matters here: this
+      // call must come before the materialize/null block.
+      preambleSuppressor.flushNow()
       // Issue #195: materialize the answer-lane stream as a fresh
       // sendMessage so the user's device gets a push notification on
       // turn completion (edits don't fire pushes).
@@ -3522,6 +3638,8 @@ function handleSessionEvent(ev: SessionEvent): void {
         currentSessionThreadId = undefined
         currentTurnReplyCalled = false
         currentTurnCapturedText = []
+        // #549 fix — silent-marker teardown drops any pending preamble.
+        preambleSuppressor.dropNow()
         return
       }
 
@@ -3535,6 +3653,10 @@ function handleSessionEvent(ev: SessionEvent): void {
         currentSessionThreadId = undefined
         currentTurnReplyCalled = false
         currentTurnCapturedText = []
+        // #549 fix — turn-flush takes ownership of the captured-text
+        // backup; reset the preamble buffer (its content is already in
+        // currentTurnCapturedText, which turn-flush is about to send).
+        preambleSuppressor.dropNow()
 
         void (async () => {
           await new Promise<void>(resolve => setTimeout(resolve, 500))
@@ -3687,6 +3809,9 @@ function handleSessionEvent(ev: SessionEvent): void {
       currentTurnLastAssistantMsgId = null
       currentTurnLastAssistantDone = false
       currentTurnToolCallCount = 0
+      // #549 fix — preamble flush already happened at the TOP of this
+      // turn_end handler (before activeAnswerStream is nulled). See
+      // comment near line 3431.
       return
     }
   }
@@ -4483,13 +4608,22 @@ async function handleInbound(
         }
         suppressPtyPreview.delete(sKey)
 
+        // #542 fix: pass the cached chat-level allowed-reactions filter
+        // so the controller's resolveEmoji can fall through to a permitted
+        // variant instead of attempting an emoji Telegram will reject.
+        // First message in a chat sees `null` (cache miss) — kicks off
+        // the probe for next time.
+        const allowedReactions = chatAvailableReactions.get(chat_id) ?? null
+        if (!chatAvailableReactions.has(chat_id)) {
+          probeAvailableReactions(chat_id)
+        }
         const ctrl = new StatusReactionController(async (emoji) => {
           await bot.api.setMessageReaction(chat_id, msgId, [
             { type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] },
           ])
           // #203: every status-reaction transition is a user-visible signal.
           signalTracker.noteSignal(key, Date.now())
-        })
+        }, allowedReactions)
         activeStatusReactions.set(key, ctrl)
         activeReactionMsgIds.set(key, { chatId: chat_id, messageId: msgId })
         activeTurnStartedAt.set(key, Date.now())

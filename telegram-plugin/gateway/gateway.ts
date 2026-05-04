@@ -6416,15 +6416,6 @@ bot.command('auth', async ctx => {
     return
   }
 
-  if (intent.kind === 'account-rename') {
-    // /auth account rename <old> <new> — atomic dir rename + YAML
-    // rewrite of every agents.<name>.auth.accounts list. No agent
-    // restart required: per-agent credentials.json content is
-    // unchanged (only the source-of-truth label moved).
-    await runSwitchroomCommand(ctx, intent.cliArgs, intent.label)
-    return
-  }
-
   if (intent.kind === 'enable') {
     // /auth enable <label> [agents...|all] — wires the account to those agents
     // (defaults to the current agent), then restarts each so claude picks
@@ -7569,7 +7560,6 @@ async function handleAuthDashboardCallback(ctx: Context): Promise<void> {
     case 'account-view': {
       // Drill into the per-account sub-view. Fetch current account state
       // so the sub-view reflects live health, then edit-in-place.
-      await ctx.answerCallbackQuery().catch(() => {})
       const state = fetchDashboardState(action.agent)
       const acc = state?.accounts?.find((a) => a.label === action.label)
       if (!acc || !state) {
@@ -7577,6 +7567,7 @@ async function handleAuthDashboardCallback(ctx: Context): Promise<void> {
         await sendAuthDashboard(ctx, action.agent, { edit: true })
         return
       }
+      await ctx.answerCallbackQuery().catch(() => {})
       const text = buildAccountSubViewText(action.agent, acc)
       const keyboard = buildAccountSubViewKeyboard(action.agent, action.label)
       try {
@@ -7604,11 +7595,25 @@ async function handleAuthDashboardCallback(ctx: Context): Promise<void> {
     case 'account-rm-confirm': {
       await ctx.answerCallbackQuery({ text: `Removing ${action.label}…` }).catch(() => {})
       try { assertSafeAgentName(action.agent) } catch { return }
-      await runSwitchroomCommand(
-        ctx,
-        ['auth', 'account', 'rm', action.label],
-        `auth account rm ${action.label}`,
-      )
+      // Run the CLI directly so we can detect failure and early-return
+      // before refreshing the dashboard. On error, switchroomReply posts
+      // the failure details; we must NOT also fire sendAuthDashboard or
+      // the user gets both an error message and a dashboard refresh as
+      // if the removal succeeded.
+      const label = `auth account rm ${action.label}`
+      try {
+        const output = stripAnsi(switchroomExec(['auth', 'account', 'rm', action.label]))
+        const formatted = formatSwitchroomOutput(output)
+        if (formatted) { await switchroomReply(ctx, preBlock(formatted), { html: true }) }
+        else { await switchroomReply(ctx, `${label}: done (no output)`) }
+      } catch (err: unknown) {
+        const error = err as { status?: number; stderr?: string; message?: string }
+        if (error.message?.includes('ENOENT')) { await switchroomReply(ctx, 'switchroom CLI not found.', { html: true }); return }
+        if (error.message?.includes('ETIMEDOUT') || error.message?.includes('timed out')) { await switchroomReply(ctx, `${label}: timed out`); return }
+        const detail = stripAnsi(error.stderr?.trim() || error.message || 'unknown error')
+        await switchroomReply(ctx, `<b>${escapeHtmlForTg(label)} failed:</b>\n${preBlock(formatSwitchroomOutput(detail))}`, { html: true })
+        return
+      }
       await sendAuthDashboard(ctx, action.agent, { edit: true })
       return
     }

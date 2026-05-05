@@ -552,87 +552,12 @@ export const TelegramChannelSchema = z
       .optional()
       .describe(
         "Per-source rate limit for the webhook ingest path (#714). " +
-        "Off by default — when this key is absent the handler skips " +
-        "rate-limit checks entirely. Opt in by setting `rpm` to an " +
-        "integer requests-per-minute (token bucket per (agent, source); " +
-        "burst equal to rpm). When enabled, exceeding the limit returns " +
-        "429 with Retry-After header; first throttle event per " +
-        "(agent, source) per 60s window is written to " +
+        "Token-bucket per (agent, source). Default: 60 requests/minute, " +
+        "burst 60. Shape: { rpm: 60 } — integer requests-per-minute. " +
+        "Beyond cap: 429 with Retry-After header; first throttle event " +
+        "per (agent, source) per 60s window is written to " +
         "<agent>/telegram/issues.jsonl. " +
         "Cascades from defaults.channels.telegram.webhook_rate_limit.",
-      ),
-    webhook_dispatch: z
-      .object({
-        github: z
-          .array(
-            z.object({
-              description: z.string().optional().describe(
-                "Human-readable description of what this rule does.",
-              ),
-              match: z.object({
-                event: z.string().describe(
-                  "GitHub event name (e.g. 'pull_request', 'push'). Required.",
-                ),
-                actions: z.array(z.string()).optional().describe(
-                  "Allowed action values (e.g. ['opened', 'synchronize']). " +
-                  "If absent, all actions match.",
-                ),
-                labels_any: z.array(z.string()).optional().describe(
-                  "At least one of these labels must be present on the PR/issue.",
-                ),
-                labels_all: z.array(z.string()).optional().describe(
-                  "All of these labels must be present on the PR/issue.",
-                ),
-                exclude_authors: z.array(z.string()).optional().describe(
-                  "If the PR/issue author login is in this list, skip dispatch.",
-                ),
-              }).describe("Static matcher constraints. All fields optional except 'event'."),
-              prompt: z.string().describe(
-                "Prompt template for the claude -p invocation. " +
-                "Supports {{field}} interpolation: repo, number, title, " +
-                "html_url, author, labels, action, event.",
-              ),
-              cooldown: z.string().optional().describe(
-                "Cooldown duration before the same (repo, number, rule) " +
-                "combination can fire again. Duration string: '5m', '1h', " +
-                "'30s'. Defaults to no cooldown.",
-              ),
-              quiet_hours: z
-                .object({
-                  start: z.number().int().min(0).max(23).describe(
-                    "Hour (0-23) when quiet period starts (inclusive).",
-                  ),
-                  end: z.number().int().min(0).max(23).describe(
-                    "Hour (0-23) when quiet period ends (exclusive).",
-                  ),
-                  tz: z.string().optional().describe(
-                    "IANA timezone string (e.g. 'Australia/Melbourne'). Defaults to UTC.",
-                  ),
-                })
-                .optional()
-                .describe(
-                  "When the current wall clock is inside this window, dispatch is " +
-                  "skipped entirely (events still land in webhook-events.jsonl). " +
-                  "Wraps midnight when start > end (e.g. start=22, end=8).",
-                ),
-              model: z.string().optional().describe(
-                "Model for the dispatched claude -p invocation. " +
-                "Defaults to claude-sonnet-4-6.",
-              ),
-            }),
-          )
-          .optional()
-          .describe("Dispatch rules for GitHub webhook events."),
-      })
-      .optional()
-      .describe(
-        "Webhook dispatch rules (#715). After an event is verified and " +
-        "recorded to webhook-events.jsonl, each rule is evaluated against " +
-        "the event. On a match, a fresh `claude -p` process is spawned " +
-        "against this agent. Supports static matchers (event/action/label/" +
-        "author), {{field}} prompt templates, per-rule cooldown, and " +
-        "quiet hours. Only the 'github' source is supported for dispatch. " +
-        "Cascades from defaults.channels.telegram.webhook_dispatch.",
       ),
   })
   .optional();
@@ -692,105 +617,6 @@ export const ChannelsSchema = z
  * beats a 600KB zone bundle we'd never refresh.
  */
 const TIMEZONE_REGEX = /^UTC$|^[A-Z][A-Za-z0-9_+-]+(\/[A-Z][A-Za-z0-9_+-]+){1,2}$/;
-
-// One-shot deprecation warning for legacy `experimental.tmux_supervisor`.
-// Module-level boolean so a noisy fleet config doesn't spam stderr per agent.
-let _tmuxSupervisorDeprecationWarned = false;
-
-/**
- * `experimental.*` per-agent feature flags. As of #725 PR-1 the tmux
- * supervisor is the default; this schema preserves the legacy
- * `tmux_supervisor` key for one release for backward compatibility and
- * normalises everything to a single forward-looking `legacy_pty` boolean
- * via a Zod transform. Downstream consumers should read `legacy_pty`
- * only — `tmux_supervisor` is deleted from the parsed output.
- *
- * Migration semantics (transform):
- *   - `legacy_pty` set                       → use it as-is, drop tmux_supervisor.
- *   - `tmux_supervisor: false` (and no legacy_pty)
- *                                            → `legacy_pty = true`  (one-time warn).
- *   - `tmux_supervisor: true`  (and no legacy_pty)
- *                                            → `legacy_pty = false` (one-time warn).
- *   - neither set                            → `legacy_pty = false` (default).
- */
-export const ExperimentalSchema = z
-  .object({
-    legacy_pty: z
-      .boolean()
-      .optional()
-      .describe(
-        "Opt out of the default tmux supervisor; kept for hosts without " +
-        "tmux available, or as a rollback knob during stabilisation. " +
-        "When true, the systemd unit reverts to the legacy `script -qfc` " +
-        "PTY wrapper. Default false — tmux is the production default as " +
-        "of #725 PR-1.",
-      ),
-    tmux_supervisor: z
-      .boolean()
-      .optional()
-      .describe(
-        "DEPRECATED. Use `legacy_pty` (inverted) instead. Kept parseable " +
-        "for one release so existing configs don't break. " +
-        "`tmux_supervisor: false` migrates to `legacy_pty: true`; " +
-        "`tmux_supervisor: true` migrates to `legacy_pty: false`. A " +
-        "one-time deprecation warning is emitted to stderr per process.",
-      ),
-    legacy_autoaccept_expect: z
-      .boolean()
-      .optional()
-      .describe(
-        "Use the legacy `expect`-based autoaccept wrapper for first-run " +
-        "TUI prompts (theme picker, MCP trust, dev-channels). Default " +
-        "false (new TS pane-poller introduced in #725 PR-4). Set true to " +
-        "roll back during stabilisation; this rollback knob is kept for " +
-        "one release.",
-      ),
-  })
-  .optional()
-  .transform((val) => {
-    if (val === undefined) return undefined;
-    const { legacy_pty, tmux_supervisor, ...rest } = val;
-    let resolvedLegacy: boolean;
-    if (legacy_pty !== undefined) {
-      resolvedLegacy = legacy_pty;
-    } else if (tmux_supervisor === false) {
-      if (!_tmuxSupervisorDeprecationWarned) {
-        _tmuxSupervisorDeprecationWarned = true;
-        console.warn(
-          "[switchroom] DEPRECATED: experimental.tmux_supervisor is " +
-          "replaced by experimental.legacy_pty (inverted). " +
-          "`tmux_supervisor: false` → set `legacy_pty: true` instead. " +
-          "Compatibility shim will be removed next release.",
-        );
-      }
-      resolvedLegacy = true;
-    } else if (tmux_supervisor === true) {
-      if (!_tmuxSupervisorDeprecationWarned) {
-        _tmuxSupervisorDeprecationWarned = true;
-        console.warn(
-          "[switchroom] DEPRECATED: experimental.tmux_supervisor is " +
-          "now the default; remove the flag. " +
-          "`tmux_supervisor: true` → omit (or set `legacy_pty: false`). " +
-          "Compatibility shim will be removed next release.",
-        );
-      }
-      resolvedLegacy = false;
-    } else {
-      resolvedLegacy = false;
-    }
-    return { ...rest, legacy_pty: resolvedLegacy };
-  })
-  .describe(
-    "Per-agent feature flags for unstable / canary behaviour. Each " +
-    "field is a boolean opt-in; the default for every flag is the " +
-    "current production behaviour. Flags graduate out of `experimental` " +
-    "once they're known-stable across the fleet.",
-  );
-
-/** Test-only — reset the one-shot deprecation warning gate. */
-export function _resetTmuxSupervisorDeprecationGate(): void {
-  _tmuxSupervisorDeprecationWarned = false;
-}
 
 const profileFields = {
   extends: z.string().optional(),
@@ -1269,7 +1095,6 @@ export const AgentSchema = z.object({
       "claim_worktree accepts the alias as the repo argument. " +
       "Absolute paths may always be passed regardless of this list.",
     ),
-  experimental: ExperimentalSchema,
   repos: z
     .record(
       z.string().regex(

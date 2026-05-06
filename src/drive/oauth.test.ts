@@ -13,6 +13,8 @@ import {
   buildOobAuthUrl,
   exchangeOobCode,
   revokeRefreshToken,
+  runLoopbackOAuth,
+  buildLoopbackAuthUrl,
 } from "./oauth.js";
 
 const cfg = {
@@ -54,8 +56,22 @@ describe("selectInitialTier", () => {
     ).toBe("device_code");
   });
 
-  it("picks device_code on laptops with display (still simpler than loopback)", () => {
-    expect(selectInitialTier({ DISPLAY: ":0" })).toBe("device_code");
+  it("picks desktop_loopback on laptops with display + browser opener", () => {
+    expect(
+      selectInitialTier({
+        DISPLAY: ":0",
+        SWITCHROOM_DRIVE_HAS_BROWSER_OPENER: "1",
+      } as never),
+    ).toBe("desktop_loopback");
+  });
+
+  it("picks device_code on display-host with no browser opener", () => {
+    expect(
+      selectInitialTier({
+        DISPLAY: ":0",
+        SWITCHROOM_DRIVE_HAS_BROWSER_OPENER: "0",
+      } as never),
+    ).toBe("device_code");
   });
 
   it("honours SWITCHROOM_DRIVE_OAUTH_TIER override", () => {
@@ -244,5 +260,151 @@ describe("revokeRefreshToken", () => {
     const r = await revokeRefreshToken("rt", fakeFetch);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.detail).toContain("ECONNREFUSED");
+  });
+});
+
+describe("desktop-loopback flow", () => {
+  it("buildLoopbackAuthUrl includes redirect_uri, state, code response_type", () => {
+    const url = buildLoopbackAuthUrl(cfg, "http://127.0.0.1:54321", "abc123");
+    expect(url).toContain("redirect_uri=http%3A%2F%2F127.0.0.1%3A54321");
+    expect(url).toContain("state=abc123");
+    expect(url).toContain("response_type=code");
+    expect(url).toContain("access_type=offline");
+  });
+
+  it("happy path: simulates Google redirect with valid state and exchanges code", async () => {
+    const fakeFetch = mock(async (_url: string, init?: RequestInit) => {
+      const body = String(init?.body ?? "");
+      expect(body).toContain("grant_type=authorization_code");
+      expect(body).toContain("code=auth-code-xyz");
+      expect(body).toContain("redirect_uri=http");
+      return new Response(
+        JSON.stringify({
+          access_token: "at-loop",
+          refresh_token: "rt-loop",
+          expires_in: 3600,
+          token_type: "Bearer",
+        }),
+        { status: 200 },
+      );
+    }) as unknown as typeof fetch;
+
+    let capturedAuthUrl = "";
+    const promise = runLoopbackOAuth(cfg, {
+      fetchImpl: fakeFetch,
+      openImpl: async (url) => {
+        capturedAuthUrl = url;
+        // Simulate the browser hitting our local server.
+        // Defer slightly so the listen() callback registers state.
+        setTimeout(() => {
+          const u = new URL(url);
+          const redirectUri = u.searchParams.get("redirect_uri")!;
+          const state = u.searchParams.get("state")!;
+          const cb = `${redirectUri}/?code=auth-code-xyz&state=${state}`;
+          fetch(cb).catch(() => {
+            /* response body not needed */
+          });
+        }, 5);
+        return true;
+      },
+      timeoutMs: 5000,
+    });
+
+    const tok = await promise;
+    expect(tok.access_token).toBe("at-loop");
+    expect(tok.refresh_token).toBe("rt-loop");
+    expect(capturedAuthUrl).toContain("state=");
+  });
+
+  it("rejects callback with mismatched state and never exchanges", async () => {
+    const fakeFetch = mock(async () => {
+      throw new Error("token endpoint must not be hit on state mismatch");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      runLoopbackOAuth(cfg, {
+        fetchImpl: fakeFetch,
+        openImpl: async (url) => {
+          const u = new URL(url);
+          const redirectUri = u.searchParams.get("redirect_uri")!;
+          setTimeout(() => {
+            const cb = `${redirectUri}/?code=c&state=WRONG`;
+            fetch(cb).catch(() => undefined);
+          }, 5);
+          return true;
+        },
+        timeoutMs: 5000,
+      }),
+    ).rejects.toThrow(/state parameter mismatch/i);
+  });
+
+  it("times out cleanly when no callback arrives", async () => {
+    const fakeFetch = mock(async () => {
+      throw new Error("must not exchange on timeout");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      runLoopbackOAuth(cfg, {
+        fetchImpl: fakeFetch,
+        openImpl: async () => true, // never trigger callback
+        timeoutMs: 50,
+      }),
+    ).rejects.toThrow(/timed out/i);
+  });
+
+  it("closes the ephemeral server after success (port becomes reusable)", async () => {
+    const fakeFetch = mock(async () =>
+      new Response(
+        JSON.stringify({ access_token: "at", expires_in: 3600, token_type: "Bearer" }),
+        { status: 200 },
+      ),
+    ) as unknown as typeof fetch;
+
+    let capturedRedirect = "";
+    await runLoopbackOAuth(cfg, {
+      fetchImpl: fakeFetch,
+      openImpl: async (url) => {
+        const u = new URL(url);
+        capturedRedirect = u.searchParams.get("redirect_uri")!;
+        const state = u.searchParams.get("state")!;
+        setTimeout(() => {
+          fetch(`${capturedRedirect}/?code=c&state=${state}`).catch(() => undefined);
+        }, 5);
+        return true;
+      },
+      timeoutMs: 5000,
+    });
+
+    // Server should be closed; a fresh connect attempt should be refused.
+    const port = Number(new URL(capturedRedirect).port);
+    let connRefused = false;
+    try {
+      await fetch(`http://127.0.0.1:${port}/`);
+    } catch {
+      connRefused = true;
+    }
+    expect(connRefused).toBe(true);
+  });
+
+  it("closes the ephemeral server after timeout (no leaked listener)", async () => {
+    const fakeFetch = mock(async () => new Response("{}", { status: 500 })) as unknown as typeof fetch;
+    let capturedRedirect = "";
+    await runLoopbackOAuth(cfg, {
+      fetchImpl: fakeFetch,
+      openImpl: async (url) => {
+        capturedRedirect = new URL(url).searchParams.get("redirect_uri")!;
+        return true;
+      },
+      timeoutMs: 50,
+    }).catch(() => undefined);
+
+    const port = Number(new URL(capturedRedirect).port);
+    let connRefused = false;
+    try {
+      await fetch(`http://127.0.0.1:${port}/`);
+    } catch {
+      connRefused = true;
+    }
+    expect(connRefused).toBe(true);
   });
 });

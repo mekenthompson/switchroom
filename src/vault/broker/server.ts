@@ -52,6 +52,15 @@ import { createAuditLogger, callerFromPeer, type AuditLogger } from "./audit-log
 import { Database } from "bun:sqlite";
 import { mintGrant, validateGrant, revokeGrant, listGrants, migrateGrantsSchema } from "../grants.js";
 import { openGrantsDb } from "../grants-db.js";
+import {
+  requestApproval as kernelRequestApproval,
+  lookupDecision as kernelLookupDecision,
+  consumeNonce as kernelConsumeNonce,
+  revokeDecision as kernelRevokeDecision,
+  listDecisions as kernelListDecisions,
+  recordDecision as kernelRecordDecision,
+  getNonce as kernelGetNonce,
+} from "../approvals/kernel.js";
 
 const PID_FILE_DEFAULT = "~/.switchroom/vault-broker.pid";
 
@@ -774,6 +783,27 @@ export class VaultBroker {
       return;
     }
 
+    // ── Approval kernel ops (RFC B) — handled BEFORE grant-mgmt ACL ─────────
+    //
+    // Placement note: handling these here (rather than after grant-mgmt)
+    // keeps the discriminated union narrow in the grant-mgmt block, so
+    // `req.op` can be assigned to `AuditOp` without a string literal that
+    // doesn't exist in that enum. The ACL semantics also differ — approval
+    // ops are callable from any agent (request/lookup) plus the gateway
+    // (consume/revoke/list); the cron-cannot-manage-grants rule does not
+    // apply.
+    if (
+      req.op === "approval_request" ||
+      req.op === "approval_lookup" ||
+      req.op === "approval_consume" ||
+      req.op === "approval_revoke" ||
+      req.op === "approval_list" ||
+      req.op === "approval_record"
+    ) {
+      await this._handleApprovalOp(socket, req);
+      return;
+    }
+
     // ── Grant management ops ─────────────────────────────────────────────────
     //
     // #225 review-fix: gate mint_grant / list_grants / revoke_grant on the
@@ -964,12 +994,164 @@ export class VaultBroker {
       return;
     }
 
+    // (approval ops are dispatched earlier — see _handleApprovalOp)
+
     // Exhaustive check — should not reach here
     socket.write(
       encodeResponse(
         errorResponse("BAD_REQUEST", `Unknown op: ${(req as { op: string }).op}`),
       ),
     );
+  }
+
+  /**
+   * Approval-kernel op dispatcher (RFC B). Handled in its own method so
+   * the discriminated-union narrowing in `_handleRequest` stays clean —
+   * the legacy AuditOp enum doesn't include the apv:* op names, and we
+   * don't want to widen it (audit-log.ts is the vault audit log, not the
+   * approval audit; the kernel writes its own approval_audit table).
+   */
+  private async _handleApprovalOp(
+    socket: net.Socket,
+    req: import("./protocol.js").BrokerRequest,
+  ): Promise<void> {
+    try {
+      if (req.op === "approval_request") {
+        const result = kernelRequestApproval(this.grantsDb, {
+          agent: req.agent,
+          surface: req.surface,
+          scope: req.scope,
+          action_grammar: req.action_grammar,
+          approver_set: req.approver_set,
+          why: req.why,
+          ttl_ms: req.ttl_ms,
+        });
+        socket.write(
+          encodeResponse({
+            ok: true,
+            request_id: result.request_id,
+            expires_at: result.expires_at,
+          }),
+        );
+        return;
+      }
+      if (req.op === "approval_lookup") {
+        const r = kernelLookupDecision(this.grantsDb, {
+          agent: req.agent,
+          surface: req.surface,
+          scope: req.scope,
+          action_grammar: req.action_grammar,
+          current_approver_set: req.current_approver_set,
+        });
+        const decision =
+          r.status === "granted" || r.status === "denied"
+            ? {
+                id: r.decision.id,
+                agent: r.decision.agent,
+                surface: r.decision.surface,
+                scope: r.decision.scope,
+                action_grammar: r.decision.action_grammar,
+                granted: r.decision.granted,
+                approver_set: r.decision.approver_set,
+                granted_at: r.decision.granted_at,
+                expires_at: r.decision.expires_at,
+                revoked_at: r.decision.revoked_at,
+              }
+            : null;
+        socket.write(encodeResponse({ ok: true, status: r.status, decision }));
+        return;
+      }
+      if (req.op === "approval_consume") {
+        const nonce = kernelConsumeNonce(this.grantsDb, req.request_id);
+        if (nonce === null) {
+          socket.write(encodeResponse({ ok: true, consumed: false }));
+          return;
+        }
+        socket.write(
+          encodeResponse({
+            ok: true,
+            consumed: true,
+            agent: nonce.agent,
+            surface: nonce.surface,
+            scope: nonce.scope,
+            action_grammar: nonce.action_grammar,
+            why: nonce.why,
+          }),
+        );
+        return;
+      }
+      if (req.op === "approval_revoke") {
+        const revoked = kernelRevokeDecision(
+          this.grantsDb,
+          req.decision_id,
+          req.actor,
+          req.reason,
+        );
+        socket.write(encodeResponse({ ok: true, revoked }));
+        return;
+      }
+      if (req.op === "approval_record") {
+        // Record a user decision against a previously-consumed nonce. The
+        // gateway's tap handler calls this AFTER approval_consume returned
+        // consumed=true. Idempotency guard: if approval_consume returns
+        // consumed=true exactly once, only one approval_record will fire
+        // per request_id under sane gateway code.
+        const nonce = kernelGetNonce(this.grantsDb, req.request_id);
+        if (nonce === null) {
+          socket.write(encodeResponse(errorResponse("BAD_REQUEST", "unknown request_id")));
+          return;
+        }
+        if (nonce.consumed_at === null) {
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "BAD_REQUEST",
+                "nonce must be consumed before recording — call approval_consume first",
+              ),
+            ),
+          );
+          return;
+        }
+        const decision_id = kernelRecordDecision(this.grantsDb, {
+          nonce,
+          granted: req.granted,
+          approver_set: req.approver_set,
+          approver_user_id: req.approver_user_id,
+          ttl_ms: req.ttl_ms ?? undefined,
+        });
+        socket.write(encodeResponse({ ok: true, decision_id }));
+        return;
+      }
+      if (req.op === "approval_list") {
+        const decisions = kernelListDecisions(this.grantsDb, { agent: req.agent });
+        const meta = decisions.map((d) => ({
+          id: d.id,
+          agent: d.agent,
+          surface: d.surface,
+          scope: d.scope,
+          action_grammar: d.action_grammar,
+          granted: d.granted,
+          approver_set: d.approver_set,
+          granted_at: d.granted_at,
+          expires_at: d.expires_at,
+          revoked_at: d.revoked_at,
+        }));
+        socket.write(encodeResponse({ ok: true, decisions: meta }));
+        return;
+      }
+      // Should not reach here — caller must have already discriminated.
+      socket.write(
+        encodeResponse(
+          errorResponse(
+            "BAD_REQUEST",
+            `Unknown approval op: ${(req as { op: string }).op}`,
+          ),
+        ),
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      socket.write(encodeResponse(errorResponse("INTERNAL", msg)));
+    }
   }
 
   private _handleUnlockConnection(socket: net.Socket): void {

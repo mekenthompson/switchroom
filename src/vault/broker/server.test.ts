@@ -141,10 +141,14 @@ describe("VaultBroker server", () => {
   it("status: returns unlocked=true with correct keyCount", async () => {
     const resp = await rpc(socketPath, { v: 1, op: "status" });
     expect(resp.ok).toBe(true);
-    if (resp.ok && "status" in resp) {
-      expect(resp.status.unlocked).toBe(true);
-      expect(resp.status.keyCount).toBe(Object.keys(TEST_SECRETS).length);
-      expect(resp.status.uptimeSec).toBeGreaterThanOrEqual(0);
+    // RFC B widened the response union (apv: ops also have a `status` key
+    // typed as a string). Narrow explicitly to the broker-status object
+    // shape so the original assertions still type-check.
+    if (resp.ok && "status" in resp && typeof resp.status === "object") {
+      const s = resp.status as { unlocked: boolean; keyCount: number; uptimeSec: number };
+      expect(s.unlocked).toBe(true);
+      expect(s.keyCount).toBe(Object.keys(TEST_SECRETS).length);
+      expect(s.uptimeSec).toBeGreaterThanOrEqual(0);
     }
   });
 
@@ -203,9 +207,14 @@ describe("VaultBroker server", () => {
 
     // Status should report locked
     const statusResp = await rpc(socketPath, { v: 1, op: "status" });
-    if (statusResp.ok && "status" in statusResp) {
-      expect(statusResp.status.unlocked).toBe(false);
-      expect(statusResp.status.keyCount).toBe(0);
+    if (
+      statusResp.ok &&
+      "status" in statusResp &&
+      typeof statusResp.status === "object"
+    ) {
+      const s = statusResp.status as { unlocked: boolean; keyCount: number };
+      expect(s.unlocked).toBe(false);
+      expect(s.keyCount).toBe(0);
     }
   });
 

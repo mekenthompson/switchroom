@@ -219,8 +219,13 @@ export function readSystemdUnit(pid: number): string | null {
 
       if (!lastSegment) continue;
 
-      // Must match the switchroom cron unit naming convention
-      if (/^switchroom-[a-zA-Z0-9_-]+-cron-\d+\.service$/.test(lastSegment)) {
+      // RFC B §4.1: broaden to match BOTH cron units AND long-running agent
+      // units (e.g. switchroom-klanker.service). The previous regex only
+      // matched cron and silently locked long-running agents out of the
+      // broker. The cross-check via verifySystemdUnit (~50 lines below) is
+      // what actually defends against a same-uid attacker spoofing the
+      // cgroup name; this regex just narrows to switchroom-* units.
+      if (/^switchroom-[a-zA-Z0-9_-]+(-cron-\d+)?\.service$/.test(lastSegment)) {
         return lastSegment;
       }
     }

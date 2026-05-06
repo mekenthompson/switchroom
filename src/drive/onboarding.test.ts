@@ -1,15 +1,16 @@
 /**
- * Onboarding card structure tests (RFC C §5).
+ * Onboarding card structure tests (RFC C §5, kernel-client v2).
  */
 
 import { describe, expect, it } from "bun:test";
 import { buildOnboardingCard, buildReconnectCard } from "./onboarding.js";
 
 describe("buildOnboardingCard", () => {
-  it("surface is mcp:gdrive (not 'system' — onboarding is per-MCP)", () => {
+  it("uses agent_unit + onboard action per RFC B v2 kernel client", () => {
     const c = buildOnboardingCard("klanker");
-    expect(c.surface).toBe("mcp:gdrive");
-    expect(c.agent).toBe("klanker");
+    expect(c.agent_unit).toBe("klanker");
+    expect(c.scope).toBe("system:onboarding:gdrive");
+    expect(c.action).toBe("onboard");
   });
 
   it("first option is the recommended Allow-my-Drive read grant (default per §5)", () => {
@@ -40,10 +41,11 @@ describe("buildOnboardingCard", () => {
 });
 
 describe("buildReconnectCard", () => {
-  it("surface is system (per RFC §4.2)", () => {
+  it("uses system:reconnect:gdrive scope + reconnect_drive action (per RFC §4.2)", () => {
     const c = buildReconnectCard("klanker");
-    expect(c.surface).toBe("system");
-    expect(c.action_grammar).toBe("reconnect_drive");
+    expect(c.scope).toBe("system:reconnect:gdrive");
+    expect(c.action).toBe("reconnect_drive");
+    expect(c.agent_unit).toBe("klanker");
   });
 
   it("includes Reconnect + Disconnect-permanently buttons", () => {

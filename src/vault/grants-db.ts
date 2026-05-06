@@ -14,6 +14,7 @@ import * as path from "node:path";
 import * as fs from "node:fs";
 import { Database } from "bun:sqlite";
 import { migrateGrantsSchema } from "./grants.js";
+import { migrateApprovalSchema } from "./approvals/schema.js";
 
 export const DEFAULT_GRANTS_DB_PATH = path.join(
   os.homedir(),
@@ -49,8 +50,11 @@ export function openGrantsDb(dbPath = DEFAULT_GRANTS_DB_PATH): Database {
   db.run("PRAGMA journal_mode=WAL");
   db.run("PRAGMA foreign_keys=ON");
 
-  // Idempotent schema migration
+  // Idempotent schema migration — vault grants (existing) + approval kernel
+  // (RFC B §5). Both live in vault-grants.db; the kernel reuses this DB
+  // handle rather than standing up a parallel file.
   migrateGrantsSchema(db);
+  migrateApprovalSchema(db);
 
   return db;
 }

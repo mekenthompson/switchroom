@@ -5910,6 +5910,17 @@ function buildAgentMetadata(agentName: string): AgentMetadata {
   }
 }
 
+// RFC B §9: register /approvals list|revoke against the approval kernel.
+// The kernel's IPC client (`src/vault/approvals/client.ts`) round-trips
+// through the vault broker — same socket, no new daemon. The isApprover
+// gate reuses the existing dmCommandGate / allowFrom pattern.
+{
+  const { registerApprovalsCommands } = await import('./approvals-commands.js')
+  registerApprovalsCommands(bot, {
+    isApprover: ctx => dmCommandGate(ctx) !== null,
+  })
+}
+
 bot.command('start', async ctx => {
   // dmCommandGate (#894 backport): silent drop on disabled or
   // non-allowlisted senders so the bot doesn't leak its existence.
@@ -8312,6 +8323,16 @@ bot.on('callback_query:data', async ctx => {
   // existing CLI invocations plus dashboard refresh.
   if (data.startsWith('auth:')) {
     await handleAuthDashboardCallback(ctx)
+    return
+  }
+
+  // RFC B §6.1: apv:<request_id>:<choice>[:<param>] — approval kernel taps.
+  // Routed through the generic kernel handler so any surface that uses
+  // buildApprovalCard inherits consume → record → confirmation UX without
+  // each surface re-implementing it.
+  if (data.startsWith('apv:')) {
+    const { handleApprovalCallback } = await import('./approval-callback.js')
+    await handleApprovalCallback(ctx, data)
     return
   }
 

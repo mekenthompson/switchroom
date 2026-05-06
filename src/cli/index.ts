@@ -22,6 +22,7 @@ import { registerDepsCommand } from "./deps.js";
 import { registerWorkspaceCommand } from "./workspace.js";
 import { registerDebugCommand } from "./debug.js";
 import { registerWorktreeCommand } from "./worktree.js";
+import { registerDriveCommand } from "./drive.js";
 import { captureEvent, installGlobalErrorHandlers } from "../analytics/posthog.js";
 
 installGlobalErrorHandlers();
@@ -67,3 +68,4 @@ registerDepsCommand(program);
 registerWorkspaceCommand(program);
 registerDebugCommand(program);
 registerWorktreeCommand(program);
+registerDriveCommand(program);

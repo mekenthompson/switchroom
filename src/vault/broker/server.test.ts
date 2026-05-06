@@ -141,10 +141,13 @@ describe("VaultBroker server", () => {
   it("status: returns unlocked=true with correct keyCount", async () => {
     const resp = await rpc(socketPath, { v: 1, op: "status" });
     expect(resp.ok).toBe(true);
+    // RFC B's approval_lookup uses `state`, not `status`, so there's no
+    // collision with BrokerStatus on this union — narrow on `"status" in resp`.
     if (resp.ok && "status" in resp) {
-      expect(resp.status.unlocked).toBe(true);
-      expect(resp.status.keyCount).toBe(Object.keys(TEST_SECRETS).length);
-      expect(resp.status.uptimeSec).toBeGreaterThanOrEqual(0);
+      const s = resp.status;
+      expect(s.unlocked).toBe(true);
+      expect(s.keyCount).toBe(Object.keys(TEST_SECRETS).length);
+      expect(s.uptimeSec).toBeGreaterThanOrEqual(0);
     }
   });
 
@@ -204,8 +207,9 @@ describe("VaultBroker server", () => {
     // Status should report locked
     const statusResp = await rpc(socketPath, { v: 1, op: "status" });
     if (statusResp.ok && "status" in statusResp) {
-      expect(statusResp.status.unlocked).toBe(false);
-      expect(statusResp.status.keyCount).toBe(0);
+      const s = statusResp.status;
+      expect(s.unlocked).toBe(false);
+      expect(s.keyCount).toBe(0);
     }
   });
 

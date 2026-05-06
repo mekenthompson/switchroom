@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "clerk-ai",
+      "name": "switchroom",
       "dependencies": {
         "@grammyjs/runner": "^2.0.3",
         "@modelcontextprotocol/sdk": "^1.0.0",

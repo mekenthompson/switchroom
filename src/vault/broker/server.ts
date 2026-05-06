@@ -60,6 +60,10 @@ import {
   listDecisions as kernelListDecisions,
   recordDecision as kernelRecordDecision,
   getNonce as kernelGetNonce,
+  countPendingNonces,
+  computeRetryAfterMs,
+  MAX_PENDING_PER_AGENT,
+  MAX_PENDING_GLOBAL,
 } from "../approvals/kernel.js";
 
 const PID_FILE_DEFAULT = "~/.switchroom/vault-broker.pid";
@@ -1017,11 +1021,28 @@ export class VaultBroker {
   ): Promise<void> {
     try {
       if (req.op === "approval_request") {
+        // RFC §10 rate caps: per-agent max 2 concurrent pending, global max 32.
+        const counts = countPendingNonces(this.grantsDb);
+        const perAgentN = counts.perAgent.get(req.agent_unit) ?? 0;
+        if (perAgentN >= MAX_PENDING_PER_AGENT || counts.global >= MAX_PENDING_GLOBAL) {
+          const retry_after_ms = computeRetryAfterMs(
+            this.grantsDb,
+            perAgentN >= MAX_PENDING_PER_AGENT ? req.agent_unit : null,
+          );
+          socket.write(
+            encodeResponse({
+              ok: true,
+              kind: "approval_request",
+              state: "rate_limited",
+              retry_after_ms,
+            }),
+          );
+          return;
+        }
         const result = kernelRequestApproval(this.grantsDb, {
-          agent: req.agent,
-          surface: req.surface,
+          agent_unit: req.agent_unit,
           scope: req.scope,
-          action_grammar: req.action_grammar,
+          action: req.action,
           approver_set: req.approver_set,
           why: req.why,
           ttl_ms: req.ttl_ms,
@@ -1029,6 +1050,8 @@ export class VaultBroker {
         socket.write(
           encodeResponse({
             ok: true,
+            kind: "approval_request",
+            state: "pending",
             request_id: result.request_id,
             expires_at: result.expires_at,
           }),
@@ -1037,28 +1060,28 @@ export class VaultBroker {
       }
       if (req.op === "approval_lookup") {
         const r = kernelLookupDecision(this.grantsDb, {
-          agent: req.agent,
-          surface: req.surface,
+          agent_unit: req.agent_unit,
           scope: req.scope,
-          action_grammar: req.action_grammar,
+          action: req.action,
           current_approver_set: req.current_approver_set,
         });
         const decision =
-          r.status === "granted" || r.status === "denied"
+          r.state === "granted" || r.state === "denied"
             ? {
                 id: r.decision.id,
-                agent: r.decision.agent,
-                surface: r.decision.surface,
+                agent_unit: r.decision.agent_unit,
                 scope: r.decision.scope,
-                action_grammar: r.decision.action_grammar,
-                granted: r.decision.granted,
-                approver_set: r.decision.approver_set,
+                action: r.decision.action,
+                decision: r.decision.decision,
                 granted_at: r.decision.granted_at,
-                expires_at: r.decision.expires_at,
+                granted_by_user_id: r.decision.granted_by_user_id,
+                ttl_expires_at: r.decision.ttl_expires_at,
+                last_used_at: r.decision.last_used_at,
                 revoked_at: r.decision.revoked_at,
+                revoke_reason: r.decision.revoke_reason,
               }
             : null;
-        socket.write(encodeResponse({ ok: true, status: r.status, decision }));
+        socket.write(encodeResponse({ ok: true, state: r.state, decision }));
         return;
       }
       if (req.op === "approval_consume") {
@@ -1071,10 +1094,9 @@ export class VaultBroker {
           encodeResponse({
             ok: true,
             consumed: true,
-            agent: nonce.agent,
-            surface: nonce.surface,
+            agent_unit: nonce.agent_unit,
             scope: nonce.scope,
-            action_grammar: nonce.action_grammar,
+            action: nonce.action,
             why: nonce.why,
           }),
         );
@@ -1091,11 +1113,6 @@ export class VaultBroker {
         return;
       }
       if (req.op === "approval_record") {
-        // Record a user decision against a previously-consumed nonce. The
-        // gateway's tap handler calls this AFTER approval_consume returned
-        // consumed=true. Idempotency guard: if approval_consume returns
-        // consumed=true exactly once, only one approval_record will fire
-        // per request_id under sane gateway code.
         const nonce = kernelGetNonce(this.grantsDb, req.request_id);
         if (nonce === null) {
           socket.write(encodeResponse(errorResponse("BAD_REQUEST", "unknown request_id")));
@@ -1114,27 +1131,28 @@ export class VaultBroker {
         }
         const decision_id = kernelRecordDecision(this.grantsDb, {
           nonce,
-          granted: req.granted,
+          decision: req.decision,
           approver_set: req.approver_set,
-          approver_user_id: req.approver_user_id,
+          granted_by_user_id: req.granted_by_user_id,
           ttl_ms: req.ttl_ms ?? undefined,
         });
         socket.write(encodeResponse({ ok: true, decision_id }));
         return;
       }
       if (req.op === "approval_list") {
-        const decisions = kernelListDecisions(this.grantsDb, { agent: req.agent });
+        const decisions = kernelListDecisions(this.grantsDb, { agent_unit: req.agent_unit });
         const meta = decisions.map((d) => ({
           id: d.id,
-          agent: d.agent,
-          surface: d.surface,
+          agent_unit: d.agent_unit,
           scope: d.scope,
-          action_grammar: d.action_grammar,
-          granted: d.granted,
-          approver_set: d.approver_set,
+          action: d.action,
+          decision: d.decision,
           granted_at: d.granted_at,
-          expires_at: d.expires_at,
+          granted_by_user_id: d.granted_by_user_id,
+          ttl_expires_at: d.ttl_expires_at,
+          last_used_at: d.last_used_at,
           revoked_at: d.revoked_at,
+          revoke_reason: d.revoke_reason,
         }));
         socket.write(encodeResponse({ ok: true, decisions: meta }));
         return;

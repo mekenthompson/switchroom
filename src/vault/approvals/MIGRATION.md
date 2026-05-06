@@ -14,7 +14,7 @@ What's intentionally still on the legacy paths:
 the dispatcher around `:6944`.
 
 **Plan:** Replace the bespoke `vd:unlock:<deferKey>` callback with an
-`apv:<request_id>:once` callback minted via `approvalRequest({surface: 'secret', scope: 'secret:<key>', action_grammar: 'unlock'})`.
+`apv:<request_id>:once` callback minted via `approvalRequest({agent_unit, scope: 'secret:<key>', action: 'unlock'})`.
 The inline-passphrase capture step (the user types their vault passphrase
 in reply to the card) must survive: handle it inside the `apv:once` tap
 handler, then call `approvalConsume` only after the passphrase has been
@@ -70,10 +70,9 @@ import { buildApprovalCard, parseApprovalCallback }
 
 // 1. Open a request (returns 8-hex request_id)
 const req = await approvalRequest({
-  agent: 'klanker',
-  surface: 'secret',
+  agent_unit: 'switchroom-klanker.service',
   scope: 'secret:OPENAI_API_KEY',
-  action_grammar: 'read',
+  action: 'read',
   approver_set: access.allowFrom,
   why: 'Calling OpenAI to summarize a doc',
 })

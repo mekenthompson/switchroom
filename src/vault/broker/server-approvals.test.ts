@@ -1,9 +1,6 @@
 /**
  * Tests for VaultBroker approval-kernel ops (RFC B §4 — folded into the
  * broker rather than a parallel daemon).
- *
- * Round-trips real Unix-socket IPC. Secrets pre-loaded; grants DB is
- * in-memory; non-Linux gate set so peercred bypass is in effect.
  */
 
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
@@ -50,16 +47,10 @@ async function rpc(
       if (idx !== -1) {
         const line = buffer.slice(0, idx);
         client.destroy();
-        try {
-          resolve(decodeResponse(line));
-        } catch (e) {
-          reject(e);
-        }
+        try { resolve(decodeResponse(line)); } catch (e) { reject(e); }
       }
     });
-    client.on("connect", () => {
-      client.write(encodeRequest(req));
-    });
+    client.on("connect", () => { client.write(encodeRequest(req)); });
   });
 }
 
@@ -93,40 +84,30 @@ describe("VaultBroker: approval-kernel ops", () => {
   });
 
   it("approval_request → approval_consume → approval_lookup full grant flow", async () => {
-    // 1) Open the request
     const r1 = await rpc(socketPath, {
-      v: 1,
-      op: "approval_request",
-      agent: "klanker",
-      surface: "secret",
-      scope: "secret:OPENAI",
-      action_grammar: "read",
-      approver_set: ["U1"],
-      why: "OpenAI API call",
+      v: 1, op: "approval_request",
+      agent_unit: "switchroom-klanker.service",
+      scope: "secret:OPENAI", action: "read",
+      approver_set: ["U1"], why: "OpenAI API call",
     });
     expect(r1.ok).toBe(true);
-    if (!(r1.ok && "request_id" in r1)) throw new Error("bad shape");
+    if (!(r1.ok && "kind" in r1 && r1.kind === "approval_request")) throw new Error("bad shape");
+    if (r1.state !== "pending") throw new Error(`unexpected state ${r1.state}`);
     const reqId = r1.request_id;
     expect(reqId).toMatch(/^[0-9a-f]{8}$/);
 
-    // 2) Lookup before tap → no_decision
     const r2 = await rpc(socketPath, {
-      v: 1,
-      op: "approval_lookup",
-      agent: "klanker",
-      surface: "secret",
-      scope: "secret:OPENAI",
-      action_grammar: "read",
+      v: 1, op: "approval_lookup",
+      agent_unit: "switchroom-klanker.service",
+      scope: "secret:OPENAI", action: "read",
       current_approver_set: ["U1"],
     });
     expect(r2.ok).toBe(true);
-    if (r2.ok && "status" in r2) expect(r2.status).toBe("no_decision");
+    // No `typeof` workaround needed — lookup uses `state`, not `status`.
+    if (r2.ok && "state" in r2) expect(r2.state).toBe("no_decision");
 
-    // 3) Consume nonce (gateway has shown the card and user tapped)
     const r3 = await rpc(socketPath, {
-      v: 1,
-      op: "approval_consume",
-      request_id: reqId,
+      v: 1, op: "approval_consume", request_id: reqId,
     });
     expect(r3.ok).toBe(true);
     if (r3.ok && "consumed" in r3) {
@@ -134,56 +115,92 @@ describe("VaultBroker: approval-kernel ops", () => {
       expect(r3.scope).toBe("secret:OPENAI");
     }
 
-    // 4) Second consume of same nonce → consumed=false (single-use enforcement)
     const r3b = await rpc(socketPath, {
-      v: 1,
-      op: "approval_consume",
-      request_id: reqId,
+      v: 1, op: "approval_consume", request_id: reqId,
     });
     if (r3b.ok && "consumed" in r3b) expect(r3b.consumed).toBe(false);
   });
 
-  it("approval_revoke and approval_list", async () => {
-    // Seed a granted decision directly in the DB (the IPC path for
-    // record-decision lives in-process inside the gateway tap handler;
-    // here we just verify that revoke + list see the row).
-    const id = "uuid-1";
-    grantsDb.run(
-      `INSERT INTO approval_decisions
-         (id, agent, surface, scope, action_grammar, granted,
-          approver_set, approver_set_canonical, granted_at,
-          expires_at, revoked_at, decision_id_chain_prev)
-       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, NULL, NULL, NULL)`,
-      [
-        id,
-        "klanker",
-        "secret",
-        "secret:X",
-        "read",
-        JSON.stringify(["U1"]),
-        JSON.stringify(["U1"]),
-        Date.now(),
-      ],
-    );
+  it("approval_record + approval_revoke + approval_list (with new RFC columns)", async () => {
+    const reqRes = await rpc(socketPath, {
+      v: 1, op: "approval_request",
+      agent_unit: "u", scope: "secret:X", action: "read",
+      approver_set: ["U1"],
+    });
+    if (!(reqRes.ok && "kind" in reqRes && reqRes.kind === "approval_request")) throw new Error("bad");
+    if (reqRes.state !== "pending") throw new Error("not pending");
+    const reqId = reqRes.request_id;
+    await rpc(socketPath, { v: 1, op: "approval_consume", request_id: reqId });
+    const recRes = await rpc(socketPath, {
+      v: 1, op: "approval_record",
+      request_id: reqId, decision: "allow_always",
+      approver_set: ["U1"], granted_by_user_id: 42,
+    });
+    if (!(recRes.ok && "decision_id" in recRes)) throw new Error("bad");
+    const id = recRes.decision_id;
 
     const list = await rpc(socketPath, { v: 1, op: "approval_list" });
     expect(list.ok).toBe(true);
     if (list.ok && "decisions" in list) {
       expect(list.decisions.length).toBe(1);
-      expect(list.decisions[0]?.id).toBe(id);
+      const d = list.decisions[0]!;
+      expect(d.id).toBe(id);
+      expect(d.decision).toBe("allow_always");
+      expect(d.granted_by_user_id).toBe(42);
+      expect(d.agent_unit).toBe("u");
     }
 
     const rev = await rpc(socketPath, {
-      v: 1,
-      op: "approval_revoke",
-      decision_id: id,
-      actor: "U1",
-      reason: "no longer needed",
+      v: 1, op: "approval_revoke",
+      decision_id: id, actor: "U1", reason: "no longer needed",
     });
-    expect(rev.ok).toBe(true);
     if (rev.ok && "revoked" in rev) expect(rev.revoked).toBe(true);
 
     const list2 = await rpc(socketPath, { v: 1, op: "approval_list" });
     if (list2.ok && "decisions" in list2) expect(list2.decisions.length).toBe(0);
+  });
+
+  // ── RFC §10: rate caps ────────────────────────────────────────────────────
+
+  it("per-agent cap of 2 → third concurrent request returns rate_limited", async () => {
+    const a = "switchroom-klanker.service";
+    const r1 = await rpc(socketPath, {
+      v: 1, op: "approval_request", agent_unit: a, scope: "s1", action: "read", approver_set: ["1"],
+    });
+    const r2 = await rpc(socketPath, {
+      v: 1, op: "approval_request", agent_unit: a, scope: "s2", action: "read", approver_set: ["1"],
+    });
+    const r3 = await rpc(socketPath, {
+      v: 1, op: "approval_request", agent_unit: a, scope: "s3", action: "read", approver_set: ["1"],
+    });
+    const k = (r: BrokerResponse) =>
+      r.ok && "kind" in r && r.kind === "approval_request" ? r : null;
+    const k1 = k(r1), k2 = k(r2), k3 = k(r3);
+    if (!k1 || !k2 || !k3) throw new Error("bad shape");
+    expect(k1.state).toBe("pending");
+    expect(k2.state).toBe("pending");
+    expect(k3.state).toBe("rate_limited");
+    if (k3.state === "rate_limited") {
+      expect(k3.retry_after_ms).toBeGreaterThan(0);
+    }
+  });
+
+  it("global cap of 32 → 33rd request across many agents returns rate_limited", async () => {
+    // Issue 32 from distinct agents so per-agent cap never trips.
+    for (let i = 0; i < 32; i++) {
+      const r = await rpc(socketPath, {
+        v: 1, op: "approval_request",
+        agent_unit: `a${i}`, scope: `s${i}`, action: "read", approver_set: ["1"],
+      });
+      if (!(r.ok && "kind" in r && r.kind === "approval_request") || r.state !== "pending") {
+        throw new Error(`request ${i} unexpected: ${JSON.stringify(r)}`);
+      }
+    }
+    const r33 = await rpc(socketPath, {
+      v: 1, op: "approval_request",
+      agent_unit: "a32", scope: "s32", action: "read", approver_set: ["1"],
+    });
+    if (!(r33.ok && "kind" in r33 && r33.kind === "approval_request")) throw new Error("bad shape");
+    expect(r33.state).toBe("rate_limited");
   });
 });

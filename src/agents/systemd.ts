@@ -36,13 +36,86 @@ export function generateUnit(
   useAutoaccept = false,
   gatewayUnitName?: string,
   timezone?: string,
+  legacyPty = false,
+  legacyAutoacceptExpect = false,
 ): string {
   const logFile = resolve(agentDir, "service.log");
   const autoacceptExp = resolve(import.meta.dirname, "../../bin/autoaccept.exp");
+  // Resolve the autoaccept-poll entrypoint preferring the bundled .js.
+  // Published npm packages ship dist/ only (no src/), so .js is the only
+  // available file in production; in dev (`bun bin/switchroom.ts` from a
+  // source checkout) only .ts exists until the first build. Probe both
+  // and use whichever is on disk so dev and published installs both work.
+  const autoacceptPollCandidates = [
+    resolve(import.meta.dirname, "../cli/autoaccept-poll.js"),
+    resolve(import.meta.dirname, "../cli/autoaccept-poll.ts"),
+  ];
+  const autoacceptPollEntry =
+    autoacceptPollCandidates.find((p) => existsSync(p)) ?? autoacceptPollCandidates[0];
+  const tmuxConfPath = resolve(agentDir, "tmux.conf");
+  const tmuxSocket = `switchroom-${name}`;
 
-  const execStart = useAutoaccept
-    ? `/usr/bin/script -qfc "/usr/bin/expect -f ${autoacceptExp} ${agentDir}/start.sh" ${logFile}`
-    : `/usr/bin/script -qfc "/bin/bash -l ${agentDir}/start.sh" ${logFile}`;
+  // #725 PR-1 — tmux supervisor is the default. Agents opt OUT via
+  // `experimental.legacy_pty: true` to fall back to the historical
+  // `script -qfc` PTY wrapper (kept for hosts without tmux, or as a
+  // rollback knob during stabilisation). See docs/tmux-supervisor-fanout.md.
+  //
+  // Type=forking + Delegate=yes is the systemd contract for tmux:
+  // `tmux new-session -d` daemonises (forks) and we want systemd to leave
+  // the cgroup alone so tmux can manage its own children. KillMode stays
+  // `control-group` so a `systemctl stop` cgroup-kills the whole tree
+  // (matches the legacy script-wrapper behaviour).
+  let execStart: string;
+  let extraStartPost = "";
+  let extraStop = "";
+  let serviceType = "simple";
+  let delegateLine = "";
+
+  if (!legacyPty) {
+    serviceType = "forking";
+    delegateLine = "Delegate=yes\n";
+    // #725 PR-4 — under the tmux supervisor, default to launching claude
+    // directly via `bash -l start.sh` (no expect wrapper). The first-run
+    // TUI prompts are dispatched by the TS pane-poller fired from
+    // ExecStartPost below. Operators can roll back to the legacy expect
+    // wrapper for one release by setting
+    // `experimental.legacy_autoaccept_expect: true`.
+    let inner: string;
+    if (useAutoaccept && legacyAutoacceptExpect) {
+      inner = `expect -f ${autoacceptExp} ${agentDir}/start.sh`;
+    } else {
+      inner = `bash -l ${agentDir}/start.sh`;
+    }
+    execStart = `/usr/bin/tmux -L ${tmuxSocket} -f ${tmuxConfPath} new-session -A -d -s ${name} -x 400 -y 50 '${inner}'`;
+    // pipe-pane proxies the tmux pane's stdout to service.log so existing
+    // log consumers (pty-tail, journald followers) keep working unchanged.
+    extraStartPost = `ExecStartPost=/usr/bin/tmux -L ${tmuxSocket} pipe-pane -o -t ${name} 'cat >> ${logFile}'\n`;
+    // #725 PR-4 — fire the TS autoaccept pane-poller in the background.
+    // ExecStartPost commands run synchronously, so wrap the bun invocation
+    // in `bash -c '... &'` to detach. The poller itself exits cleanly after
+    // ~30s of pane idle (no prompt match), so it doesn't linger past the
+    // first-run window. Soft-fail throughout — the wrapper exits 0 even
+    // if bun is missing or the script throws, keeping the unit healthy.
+    // Skipped when the operator opted into the legacy expect wrapper.
+    if (useAutoaccept && !legacyAutoacceptExpect) {
+      const homeDir = process.env.HOME ?? "/root";
+      const bunBin = resolve(homeDir, ".bun/bin/bun");
+      extraStartPost += `ExecStartPost=/bin/bash -c '${bunBin} ${autoacceptPollEntry} ${name} >> ${logFile} 2>&1 &'\n`;
+    }
+    // Leading `-` on ExecStop tells systemd to ignore non-zero exits from
+    // the kill-session call. Without it, the script→tmux supervisor
+    // transition's first restart logs FAILURE because the OLD unit (still
+    // running script -qfc) has no tmux socket on stop, so kill-session
+    // exits non-zero and the unit is marked failed even though everything
+    // worked. The dash silences that one-shot transition without changing
+    // anything in steady state — kill-session against a real session
+    // succeeds, so the dash is a no-op there.
+    extraStop = `ExecStop=-/usr/bin/tmux -L ${tmuxSocket} kill-session -t ${name}\n`;
+  } else {
+    execStart = useAutoaccept
+      ? `/usr/bin/script -qfc "/usr/bin/expect -f ${autoacceptExp} ${agentDir}/start.sh" ${logFile}`
+      : `/usr/bin/script -qfc "/bin/bash -l ${agentDir}/start.sh" ${logFile}`;
+  }
 
   const afterDeps = ["network-online.target"];
   if (useAutoaccept) afterDeps.push(`${unitName(gatewayUnitName ?? GATEWAY_UNIT_NAME)}.service`);
@@ -82,9 +155,9 @@ StartLimitBurst=5
 StartLimitIntervalSec=120
 
 [Service]
-Type=simple
-ExecStart=${execStart}
-StandardOutput=journal
+Type=${serviceType}
+${delegateLine}ExecStart=${execStart}
+${extraStartPost}${extraStop}StandardOutput=journal
 StandardError=journal
 Restart=on-failure
 RestartSec=5
@@ -122,6 +195,33 @@ ${tzEnv}${shaEnv}
 [Install]
 WantedBy=default.target
 `;
+}
+
+/**
+ * Generate the per-agent tmux.conf used by the #725 Phase 1 supervisor.
+ *
+ * Required settings:
+ *   - default-terminal: tmux 3.x ignores `-e TERM=…` for the pane TERM, so
+ *     this is the only way to pin xterm-256color into the spawned shell.
+ *   - history-limit: 100k lines so `tmux capture-pane -p -S -` returns
+ *     plenty of REPL scrollback when an operator attaches.
+ *   - status off: hide tmux's status bar so attach is visually identical
+ *     to today's `tail -f` UX.
+ *   - remain-on-exit off: when claude exits we want the session to die
+ *     so systemd's Restart=on-failure kicks in (not a stale session).
+ */
+export function generateAgentTmuxConf(): string {
+  return `set -g default-terminal "xterm-256color"
+set -g history-limit 100000
+set -g status off
+set -g remain-on-exit off
+set -g focus-events on
+`;
+}
+
+export function writeAgentTmuxConf(agentDir: string): void {
+  mkdirSync(agentDir, { recursive: true });
+  writeFileSync(resolve(agentDir, "tmux.conf"), generateAgentTmuxConf(), { mode: 0o644 });
 }
 
 export function installUnit(name: string, unitContent: string): void {
@@ -193,7 +293,7 @@ export function resolveGatewayUnitName(
  * /reconcile, etc.).
  *
  * Historically we pointed at `~/.bun/bin/switchroom` (installed by
- * `bun install -g switchroom-ai`). That file has `#!/usr/bin/env node`
+ * `bun install -g switchroom`). That file has `#!/usr/bin/env node`
  * as its shebang, so on bun-only hosts without node on PATH the binary
  * ENOENTs silently and every gateway CLI invocation fails with no
  * Telegram-facing signal (see reference/restart-and-know-what-im-running.md
@@ -241,11 +341,17 @@ function hasNodeOnPath(): boolean {
   }
 }
 
-export function generateGatewayUnit(stateDir: string, agentName: string, adminEnabled = false): string {
+// #725 PR-1 asymmetry: the user-facing flag rename is `tmux_supervisor` →
+// `legacy_pty` (inverted), but the env var name `SWITCHROOM_TMUX_SUPERVISOR`
+// is INTENTIONALLY unchanged. The gateway / boot-probes / boot-card all
+// read that env var to know whether the agent is tmux-driven; renaming
+// would require a synchronized cross-package change. Stamping `=1` when
+// NOT legacy keeps the existing readers correct without code edits.
+export function generateGatewayUnit(stateDir: string, agentName: string, adminEnabled = false, legacyPty = false): string {
   const pluginDir = resolve(import.meta.dirname, "../../telegram-plugin");
   // Prefer the bundled `dist/gateway/gateway.js` (#634 strategic
   // packaging fix) — it has all `src/` cross-imports inlined, so a
-  // fresh `npm i -g switchroom-ai` install runs without needing the
+  // fresh `npm i -g switchroom` install runs without needing the
   // workspace's `src/` tree on disk. Falls back to the .ts source for
   // dev workspaces that haven't built yet (or the rare stale-dist
   // race where `dist/` was wiped without a rebuild). The fallback
@@ -303,7 +409,7 @@ Environment=PATH=${unitPath}
 Environment=SWITCHROOM_CLI_PATH=${switchroomCli}
 Environment=TELEGRAM_STATE_DIR=${stateDir}
 Environment=SWITCHROOM_AGENT_NAME=${agentName}
-${adminEnabled ? `Environment=SWITCHROOM_AGENT_ADMIN=true\n` : ''}
+${adminEnabled ? `Environment=SWITCHROOM_AGENT_ADMIN=true\n` : ''}${!legacyPty ? `Environment=SWITCHROOM_TMUX_SUPERVISOR=1\n` : ''}
 [Install]
 WantedBy=default.target
 `;
@@ -489,8 +595,28 @@ export function installAllUnits(config: SwitchroomConfig): void {
     // `defaults.timezone` being set once for the fleet.
     const resolved = resolveAgentConfig(config.defaults, config.profiles, agent);
     const timezone = resolveTimezone(config, resolved);
+    const legacyPty = resolved.experimental?.legacy_pty === true;
+    const legacyAutoacceptExpect =
+      resolved.experimental?.legacy_autoaccept_expect === true;
 
-    const content = generateUnit(agentName, agentDir, useAutoaccept, gwName, timezone);
+    // tmux is the default supervisor (#725 PR-1) — drop a managed tmux.conf
+    // alongside start.sh unless this agent has opted out via legacy_pty.
+    // tmux 3.x ignores `-e TERM=…` for the pane's TERM under default-terminal
+    // selection — pinning it in conf is the only reliable way to get
+    // xterm-256color into the agent shell.
+    if (!legacyPty) {
+      writeAgentTmuxConf(agentDir);
+    }
+
+    const content = generateUnit(
+      agentName,
+      agentDir,
+      useAutoaccept,
+      gwName,
+      timezone,
+      legacyPty,
+      legacyAutoacceptExpect,
+    );
     installUnit(agentName, content);
     installedAgents.push(unitName(agentName));
 
@@ -500,7 +626,7 @@ export function installAllUnits(config: SwitchroomConfig): void {
       // when the agent is configured with admin:true. The gateway reads this env
       // var to decide whether to intercept slash commands before forwarding to Claude.
       const adminEnabled = resolveAgentConfig(config.defaults, config.profiles, agent).admin === true;
-      const gatewayContent = generateGatewayUnit(stateDir, agentName, adminEnabled);
+      const gatewayContent = generateGatewayUnit(stateDir, agentName, adminEnabled, legacyPty);
       installUnit(gwName, gatewayContent);
       installedAgents.push(unitName(gwName));
     }

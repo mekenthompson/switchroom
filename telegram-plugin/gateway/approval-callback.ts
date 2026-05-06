@@ -1,0 +1,126 @@
+/**
+ * Generic `apv:` callback handler (RFC B §6.1, §8).
+ *
+ * Owns the post-tap state-machine for every approval card, regardless of
+ * which surface (secret/vault/MCP) opened the request:
+ *
+ *   1. Parse the callback_data via parseApprovalCallback.
+ *   2. Round-trip to the broker: approval_consume.
+ *      - If consumed=false (already-tapped, expired, unknown): show a
+ *        toast and edit the card to its post-tap text.
+ *   3. On `deny`: approval_record(granted=false).
+ *      On `once`: approval_record(granted=true, ttl_ms=undefined) — the
+ *        record exists for /approvals revoke targeting; it's harmless if
+ *        the agent only ever calls approval_lookup once.
+ *      On `always`: approval_record(granted=true, ttl_ms=null).
+ *      On `ttl:1h|24h|7d`: approval_record(granted=true, ttl_ms=<n>).
+ *   4. Edit the card text in-place to reflect the decision; remove the
+ *      inline keyboard so the buttons can't be re-tapped.
+ *
+ * The agent that opened the request is responsible for short-polling
+ * approval_lookup (RFC §10) to discover the outcome and proceed.
+ */
+
+import type { Context } from "grammy";
+import { parseApprovalCallback, ttlMsFromToken } from "./approval-card.js";
+import {
+  approvalConsume,
+  approvalRecord,
+} from "../../src/vault/approvals/client.js";
+import type { ApprovalDecisionMode } from "../../src/vault/approvals/schema.js";
+
+export async function handleApprovalCallback(
+  ctx: Context,
+  data: string,
+): Promise<void> {
+  const parsed = parseApprovalCallback(data);
+  if (parsed === null) {
+    await ctx.answerCallbackQuery({ text: "malformed approval callback" });
+    return;
+  }
+
+  const consumed = await approvalConsume(parsed.request_id);
+  if (consumed === null) {
+    await ctx.answerCallbackQuery({ text: "approval kernel unreachable" });
+    return;
+  }
+  if (!consumed.consumed) {
+    // Single-use enforcement: someone already tapped, or the nonce
+    // expired/unknown. Match the RFC §8.1 wording.
+    await ctx.answerCallbackQuery({ text: "this prompt expired" });
+    return;
+  }
+
+  // Compute decision + ttl from the choice variant.
+  let decision: ApprovalDecisionMode;
+  let granted: boolean;
+  let ttl_ms: number | null = null;
+  let displayMode: string;
+  switch (parsed.choice.kind) {
+    case "deny":
+      decision = "deny";
+      granted = false;
+      displayMode = "denied";
+      break;
+    case "once":
+      decision = "allow_once";
+      granted = true;
+      // No expiry — recorded as a one-shot grant; the agent calls
+      // approval_lookup at most once, then proceeds. /approvals revoke
+      // can still target the row by id.
+      displayMode = "granted once";
+      break;
+    case "always":
+      decision = "allow_always";
+      granted = true;
+      displayMode = "granted always";
+      break;
+    case "ttl": {
+      decision = "allow_ttl";
+      granted = true;
+      const ms = ttlMsFromToken(parsed.choice.param);
+      if (ms === null) {
+        await ctx.answerCallbackQuery({ text: "bad ttl token" });
+        return;
+      }
+      ttl_ms = ms;
+      displayMode = `granted for ${parsed.choice.param}`;
+      break;
+    }
+  }
+
+  const granted_by_user_id = ctx.from?.id ?? 0;
+  // Approver set at decision time = the chat that received the card. We
+  // store the singleton for now; the gateway-side approver-set lookup
+  // (drift detection input) will widen this in the per-callsite wire-up
+  // when each surface migrates and starts passing access.allowFrom.
+  const approver_set = [String(granted_by_user_id)];
+
+  const decision_id = await approvalRecord({
+    request_id: parsed.request_id,
+    decision,
+    approver_set,
+    granted_by_user_id,
+    ttl_ms,
+  });
+
+  if (decision_id === null) {
+    await ctx.answerCallbackQuery({ text: "kernel record failed" });
+    return;
+  }
+
+  // Edit the original card to its post-tap state and drop the keyboard.
+  const icon = granted ? "✅" : "🚫";
+  const newBody =
+    `${icon} ${displayMode}` +
+    (granted
+      ? ` · /approvals revoke <code>${decision_id}</code>`
+      : "");
+
+  try {
+    await ctx.editMessageText(newBody, { parse_mode: "HTML", reply_markup: undefined });
+  } catch {
+    // Best-effort: card may have been edited or deleted under us.
+  }
+  await ctx.answerCallbackQuery({ text: granted ? "Approved" : "Denied" });
+}

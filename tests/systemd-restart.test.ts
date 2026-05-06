@@ -26,6 +26,7 @@ import {
   generateTimerServiceUnit,
   generateBrokerUnit,
   generateForemanUnit,
+  generateAgentTmuxConf,
 } from "../src/agents/systemd.js";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -60,8 +61,8 @@ describe("generateUnit — cgroup kill semantics (issue #361)", () => {
     expect(svc).toContain("TimeoutStopSec=15");
   });
 
-  it("preserves ExecStart with script -qfc (PTY must not be removed)", () => {
-    expect(unit).toContain("ExecStart=/usr/bin/script -qfc");
+  it("uses tmux ExecStart by default (#725 PR-1 — was script -qfc)", () => {
+    expect(unit).toContain("ExecStart=/usr/bin/tmux -L switchroom-clerk");
   });
 
   it("preserves Restart=on-failure", () => {
@@ -74,8 +75,10 @@ describe("generateUnit — cgroup kill semantics (issue #361)", () => {
     expect(autoSvc).toContain("KillMode=control-group");
     expect(autoSvc).toContain("SendSIGKILL=yes");
     expect(autoSvc).toContain("TimeoutStopSec=15");
-    // PTY wrapper still present
-    expect(autoUnit).toContain("autoaccept.exp");
+    // #725 PR-4 — autoaccept is now a TS pane-poller fired from
+    // ExecStartPost; the expect wrapper is opt-in only.
+    expect(autoUnit).not.toContain("autoaccept.exp");
+    expect(autoUnit).toContain("autoaccept-poll.ts");
   });
 });
 
@@ -213,31 +216,94 @@ describe("kill directives placement — must be in [Service] not [Unit]", () => 
 //
 // Enable in CI by setting RUN_SYSTEMD_INTEGRATION_TESTS=1.
 
-const runIntegration = process.env.RUN_SYSTEMD_INTEGRATION_TESTS === "1";
+// ─── tmux supervisor (default as of #725 PR-1) ──────────────────────────────
+//
+// tmux is the default supervisor: ExecStart is `tmux ... new-session -A -d`,
+// Type=forking, Delegate=yes, and ExecStop=-/usr/bin/tmux ... kill-session
+// (with a leading dash to silence the FAILURE log on the migration restart).
+// These tests assert the tmux shape is the default and that the legacy PTY
+// path remains reachable behind `experimental.legacy_pty: true`.
 
-describe.skipIf(!runIntegration)(
-  "integration: restart actually changes claude PID (issue #361) [requires RUN_SYSTEMD_INTEGRATION_TESTS=1]",
-  () => {
-    it(
-      "claude PID after restart differs from claude PID before restart",
-      async () => {
-        // This test body intentionally left as a stub.
-        // Full implementation requires:
-        //   1. scaffoldAgent() + installUnit() for a test agent
-        //   2. systemctl --user start switchroom-<agent>.service
-        //   3. pgrep -f "claude.*<agent>" to capture PID
-        //   4. systemctl --user restart switchroom-<agent>.service
-        //   5. pgrep again — assert new PID !== old PID
-        //   6. systemctl --user stop + uninstall cleanup
-        //
-        // Until a full harness is wired up, skip with a descriptive error
-        // so anyone who sets the env var gets a clear signal to implement.
-        throw new Error(
-          "Integration test stub: implement the PID-change assertion described in the comment above. " +
-          "Set RUN_SYSTEMD_INTEGRATION_TESTS=1 to run."
-        );
-      },
-      60_000,
-    );
-  },
-);
+describe("generateUnit — tmux supervisor is the default (#725 PR-1)", () => {
+  it("uses tmux new-session ExecStart by default (no flag)", () => {
+    const unit = generateUnit("clerk", "/tmp/clerk");
+    expect(unit).toContain("/usr/bin/tmux -L switchroom-clerk");
+    expect(unit).toContain("new-session -A -d -s clerk");
+    const execStartLine = unit.split("\n").find((l) => l.startsWith("ExecStart=")) ?? "";
+    expect(execStartLine).not.toContain("/usr/bin/script -qfc");
+  });
+
+  it("default is Type=forking + Delegate=yes", () => {
+    const unit = generateUnit("clerk", "/tmp/clerk");
+    const svc = serviceSection(unit);
+    expect(svc).toContain("Type=forking");
+    expect(svc).toContain("Delegate=yes");
+  });
+
+  it("ExecStop has a leading dash to silence migration FAILURE", () => {
+    const unit = generateUnit("clerk", "/tmp/clerk", false, undefined, undefined, false);
+    expect(unit).toContain("ExecStop=-/usr/bin/tmux");
+    expect(unit).toContain("kill-session -t clerk");
+  });
+
+  it("includes ExecStartPost pipe-pane wiring to service.log", () => {
+    const unit = generateUnit("klanker", "/tmp/klanker");
+    expect(unit).toContain("ExecStartPost=/usr/bin/tmux");
+    expect(unit).toContain("pipe-pane -o -t klanker");
+  });
+
+  it("preserves cgroup-kill semantics under tmux supervisor", () => {
+    const unit = generateUnit("clerk", "/tmp/clerk");
+    const svc = serviceSection(unit);
+    expect(svc).toContain("KillMode=control-group");
+    expect(svc).toContain("SendSIGKILL=yes");
+    expect(svc).toContain("TimeoutStopSec=15");
+  });
+
+  it("identical input produces identical output across re-renders (deterministic)", () => {
+    const u1 = generateUnit("ziggy", "/tmp/ziggy", true, "ziggy-gateway", "Australia/Sydney");
+    const u2 = generateUnit("ziggy", "/tmp/ziggy", true, "ziggy-gateway", "Australia/Sydney");
+    expect(u1).toBe(u2);
+  });
+
+  it("legacy_pty=true falls back to script -qfc", () => {
+    const unit = generateUnit("clerk", "/tmp/clerk", false, undefined, undefined, true);
+    expect(unit).toContain("ExecStart=/usr/bin/script -qfc");
+    expect(unit).not.toContain("ExecStart=/usr/bin/tmux");
+    expect(unit).not.toContain("ExecStop=-/usr/bin/tmux");
+    const svc = serviceSection(unit);
+    expect(svc).toContain("Type=simple");
+    expect(svc).not.toContain("Delegate=yes");
+  });
+});
+
+describe("generateAgentTmuxConf — config regeneration is deterministic (#725)", () => {
+  it("emits xterm-256color, history-limit, status off, remain-on-exit off", () => {
+    const conf = generateAgentTmuxConf();
+    expect(conf).toContain('default-terminal "xterm-256color"');
+    expect(conf).toContain("history-limit 100000");
+    expect(conf).toContain("status off");
+    expect(conf).toContain("remain-on-exit off");
+  });
+
+  it("regenerates byte-identical content across calls (re-render safe)", () => {
+    expect(generateAgentTmuxConf()).toBe(generateAgentTmuxConf());
+  });
+});
+
+describe("generateGatewayUnit — tmux supervisor env propagation (#725 PR-1)", () => {
+  it("stamps SWITCHROOM_TMUX_SUPERVISOR=1 by default (legacy_pty=false)", () => {
+    const unit = generateGatewayUnit("/tmp/clerk/telegram", "clerk", false, false);
+    expect(unit).toContain("Environment=SWITCHROOM_TMUX_SUPERVISOR=1");
+  });
+
+  it("omits SWITCHROOM_TMUX_SUPERVISOR when legacy_pty=true", () => {
+    const unit = generateGatewayUnit("/tmp/clerk/telegram", "clerk", false, true);
+    expect(unit).not.toContain("SWITCHROOM_TMUX_SUPERVISOR");
+  });
+});
+
+// Removed: a long-broken stub gated on RUN_SYSTEMD_INTEGRATION_TESTS=1
+// that threw unconditionally rather than implementing the PID-change
+// assertion. Real systemd-interaction coverage now lives in
+// `tests/cgroup-kill.integration.test.ts`.

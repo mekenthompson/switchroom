@@ -119,7 +119,7 @@ If you already use Claude Code, this is the shortest path. Inside any session:
 curl -fsSL https://get.switchroom.ai | bash
 ```
 
-Bootstraps bun, node 22, the claude CLI, and switchroom-ai. Idempotent. Safe to re-run. Source is [`install.sh`](install.sh) in this repo.
+Bootstraps bun, node 22, the claude CLI, and switchroom. Idempotent. Safe to re-run. Source is [`install.sh`](install.sh) in this repo.
 
 Then:
 
@@ -135,7 +135,7 @@ After the last command you talk to the agent from Telegram. You don't touch the 
 ### Already have node?
 
 ```bash
-npm install -g @anthropic-ai/claude-code switchroom-ai
+npm install -g @anthropic-ai/claude-code switchroom
 switchroom setup
 ```
 

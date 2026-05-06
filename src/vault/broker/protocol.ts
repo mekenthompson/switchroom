@@ -73,6 +73,67 @@ export const LockRequestSchema = z.object({
   op: z.literal("lock"),
 });
 
+// ─── Approval kernel (RFC B) ────────────────────────────────────────────────
+
+export const ApprovalRequestRequestSchema = z.object({
+  v: z.literal(1),
+  op: z.literal("approval_request"),
+  agent_unit: z.string().min(1),
+  scope: z.string().min(1),
+  action: z.string().min(1),
+  approver_set: z.array(z.string()),
+  why: z.string().optional(),
+  ttl_ms: z.number().int().positive().optional(),
+});
+
+export const ApprovalLookupRequestSchema = z.object({
+  v: z.literal(1),
+  op: z.literal("approval_lookup"),
+  agent_unit: z.string().min(1),
+  scope: z.string().min(1),
+  action: z.string().min(1),
+  current_approver_set: z.array(z.string()),
+});
+
+export const ApprovalConsumeRequestSchema = z.object({
+  v: z.literal(1),
+  op: z.literal("approval_consume"),
+  request_id: z.string().regex(/^[0-9a-f]{8}$/),
+});
+
+export const ApprovalRevokeRequestSchema = z.object({
+  v: z.literal(1),
+  op: z.literal("approval_revoke"),
+  decision_id: z.string().min(1),
+  actor: z.string().min(1),
+  reason: z.string().optional(),
+});
+
+export const ApprovalListRequestSchema = z.object({
+  v: z.literal(1),
+  op: z.literal("approval_list"),
+  agent_unit: z.string().optional(),
+});
+
+export const ApprovalDecisionModeSchema = z.enum([
+  "allow_once",
+  "allow_always",
+  "allow_ttl",
+  "deny",
+  "deny_perm",
+]);
+export type ApprovalDecisionMode = z.infer<typeof ApprovalDecisionModeSchema>;
+
+export const ApprovalRecordRequestSchema = z.object({
+  v: z.literal(1),
+  op: z.literal("approval_record"),
+  request_id: z.string().regex(/^[0-9a-f]{8}$/),
+  decision: ApprovalDecisionModeSchema,
+  approver_set: z.array(z.string()),
+  granted_by_user_id: z.number().int(),
+  ttl_ms: z.number().int().positive().nullable().optional(),
+});
+
 export const RequestSchema = z.discriminatedUnion("op", [
   GetRequestSchema,
   ListRequestSchema,
@@ -81,6 +142,12 @@ export const RequestSchema = z.discriminatedUnion("op", [
   MintGrantRequestSchema,
   ListGrantsRequestSchema,
   RevokeGrantRequestSchema,
+  ApprovalRequestRequestSchema,
+  ApprovalLookupRequestSchema,
+  ApprovalConsumeRequestSchema,
+  ApprovalRevokeRequestSchema,
+  ApprovalListRequestSchema,
+  ApprovalRecordRequestSchema,
 ]);
 
 export type GetRequest = z.infer<typeof GetRequestSchema>;
@@ -90,6 +157,12 @@ export type LockRequest = z.infer<typeof LockRequestSchema>;
 export type MintGrantRequest = z.infer<typeof MintGrantRequestSchema>;
 export type ListGrantsRequest = z.infer<typeof ListGrantsRequestSchema>;
 export type RevokeGrantRequest = z.infer<typeof RevokeGrantRequestSchema>;
+export type ApprovalRequestRequest = z.infer<typeof ApprovalRequestRequestSchema>;
+export type ApprovalLookupRequest = z.infer<typeof ApprovalLookupRequestSchema>;
+export type ApprovalConsumeRequest = z.infer<typeof ApprovalConsumeRequestSchema>;
+export type ApprovalRevokeRequest = z.infer<typeof ApprovalRevokeRequestSchema>;
+export type ApprovalListRequest = z.infer<typeof ApprovalListRequestSchema>;
+export type ApprovalRecordRequest = z.infer<typeof ApprovalRecordRequestSchema>;
 export type BrokerRequest = z.infer<typeof RequestSchema>;
 
 // ─── Response schemas ───────────────────────────────────────────────────────
@@ -172,6 +245,92 @@ export const OkRevokeGrantResponseSchema = z.object({
   revoked: z.boolean(),
 });
 
+// ─── Approval kernel responses ──────────────────────────────────────────────
+
+/**
+ * approval_request response. Two shapes — discriminated by the literal in
+ * `state` (NOT `status`, to avoid colliding with the BrokerStatus object on
+ * the OkStatusResponse shape).
+ *
+ * - { state: "pending", request_id, expires_at } — the normal path.
+ * - { state: "rate_limited", retry_after_ms } — RFC §10 caps tripped
+ *   (per-agent max 2 concurrent; global max 32).
+ */
+/**
+ * approval_request response. Carries a `kind: "approval_request"` tag so
+ * the discriminated union at the broker response level can narrow without
+ * the lookup response (`state` field, no `kind`) ever matching here.
+ *
+ * - `state: "pending"` — nonce issued, request_id + expires_at returned.
+ * - `state: "rate_limited"` — RFC §10 caps tripped; retry_after_ms returned.
+ */
+export const OkApprovalRequestResponseSchema = z.discriminatedUnion("state", [
+  z.object({
+    ok: z.literal(true),
+    kind: z.literal("approval_request"),
+    state: z.literal("pending"),
+    request_id: z.string(),
+    expires_at: z.number(),
+  }),
+  z.object({
+    ok: z.literal(true),
+    kind: z.literal("approval_request"),
+    state: z.literal("rate_limited"),
+    retry_after_ms: z.number(),
+  }),
+]);
+
+export const ApprovalDecisionMetaSchema = z.object({
+  id: z.string(),
+  agent_unit: z.string(),
+  scope: z.string(),
+  action: z.string(),
+  decision: ApprovalDecisionModeSchema,
+  granted_at: z.number(),
+  granted_by_user_id: z.number(),
+  ttl_expires_at: z.number().nullable(),
+  last_used_at: z.number().nullable(),
+  revoked_at: z.number().nullable(),
+  revoke_reason: z.string().nullable(),
+});
+export type ApprovalDecisionMeta = z.infer<typeof ApprovalDecisionMetaSchema>;
+
+/**
+ * approval_lookup response. Discriminant is `state` — RFC §10 lifecycle.
+ * Renamed from `status` to avoid colliding with BrokerStatus on the response
+ * union (the latter's `status` is an object; this one's was a string —
+ * narrowing required a `typeof` smell at the call site).
+ */
+export const OkApprovalLookupResponseSchema = z.object({
+  ok: z.literal(true),
+  state: z.enum(["granted", "denied", "pending", "expired", "drift_revoked", "no_decision"]),
+  decision: ApprovalDecisionMetaSchema.nullable().optional(),
+});
+
+export const OkApprovalConsumeResponseSchema = z.object({
+  ok: z.literal(true),
+  consumed: z.boolean(),
+  agent_unit: z.string().optional(),
+  scope: z.string().optional(),
+  action: z.string().optional(),
+  why: z.string().nullable().optional(),
+});
+
+export const OkApprovalRevokeResponseSchema = z.object({
+  ok: z.literal(true),
+  revoked: z.boolean(),
+});
+
+export const OkApprovalListResponseSchema = z.object({
+  ok: z.literal(true),
+  decisions: z.array(ApprovalDecisionMetaSchema),
+});
+
+export const OkApprovalRecordResponseSchema = z.object({
+  ok: z.literal(true),
+  decision_id: z.string(),
+});
+
 export const ErrorResponseSchema = z.object({
   ok: z.literal(false),
   code: ErrorCode,
@@ -186,6 +345,12 @@ export const ResponseSchema = z.union([
   OkMintGrantResponseSchema,
   OkListGrantsResponseSchema,
   OkRevokeGrantResponseSchema,
+  OkApprovalRequestResponseSchema,
+  OkApprovalLookupResponseSchema,
+  OkApprovalConsumeResponseSchema,
+  OkApprovalRevokeResponseSchema,
+  OkApprovalListResponseSchema,
+  OkApprovalRecordResponseSchema,
   ErrorResponseSchema,
 ]);
 
@@ -197,6 +362,12 @@ export type OkMintGrantResponse = z.infer<typeof OkMintGrantResponseSchema>;
 export type OkListGrantsResponse = z.infer<typeof OkListGrantsResponseSchema>;
 export type OkRevokeGrantResponse = z.infer<typeof OkRevokeGrantResponseSchema>;
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;
+export type OkApprovalRequestResponse = z.infer<typeof OkApprovalRequestResponseSchema>;
+export type OkApprovalLookupResponse = z.infer<typeof OkApprovalLookupResponseSchema>;
+export type OkApprovalConsumeResponse = z.infer<typeof OkApprovalConsumeResponseSchema>;
+export type OkApprovalRevokeResponse = z.infer<typeof OkApprovalRevokeResponseSchema>;
+export type OkApprovalListResponse = z.infer<typeof OkApprovalListResponseSchema>;
+export type OkApprovalRecordResponse = z.infer<typeof OkApprovalRecordResponseSchema>;
 export type BrokerResponse = z.infer<typeof ResponseSchema>;
 
 // ─── Encode / decode helpers ────────────────────────────────────────────────

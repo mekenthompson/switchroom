@@ -1,6 +1,65 @@
 # Changelog
 
-## [Unreleased]
+## v0.5.0 — 2026-05-06
+
+Initial release of `switchroom` (npm package renamed from
+`switchroom-ai`). The historical `switchroom-ai` package on npm is
+deprecated — see https://www.npmjs.com/package/switchroom for the new
+home. Version reset to 0.5.0; the 25 prior `switchroom-ai` tags are
+documentation-only and will be cleaned up out-of-band.
+
+This release consolidates the in-flight work from PRs #738 / #740 /
+#742 / #743 / #745 / #747 into a single disciplined first cut on the
+new package name. Substantive changes from prior `switchroom-ai@0.6.14`:
+
+### Changed
+
+- **tmux supervisor is now the default (#725 PR-1)** — `script -qfc`
+  PTY wrapping is replaced by per-agent `tmux new-session` for all
+  agents by default. The user-facing flag rename is
+  `experimental.tmux_supervisor` → `experimental.legacy_pty` (inverted
+  meaning). New default behaviour materialises on the next agent
+  restart (`switchroom systemd reconcile && switchroom agent
+  restart <name>`); units are not auto-restarted by the upgrade. tmux
+  is now a hard prereq (`install.sh` enforces); hosts without tmux
+  must opt agents into legacy via `experimental.legacy_pty: true`.
+  See `docs/tmux-supervisor-fanout.md` for the rollback runbook.
+- **`!` interrupt marker now delivers SIGINT via `tmux send-keys C-c`
+  for tmux-supervised agents (#725 PR-3)**, falling back to
+  `systemctl kill --signal=INT` on send-keys failure. Better signal
+  delivery to runaway tool children.
+- **First-run autoaccept now uses a TS pane-poller instead of `expect`
+  (#725 PR-4)** — the small set of first-run claude TUI prompts (theme
+  picker, MCP trust, dev-channels acknowledgement, API provider) are
+  now dispatched by a `tmux capture-pane` + `tmux send-keys` poller
+  fired from the agent unit's `ExecStartPost=`. Soft-fail throughout;
+  exits cleanly after ~30s of pane idle. The legacy `expect` wrapper
+  (`bin/autoaccept.exp`) is preserved as a one-release rollback knob:
+  set `experimental.legacy_autoaccept_expect: true` per-agent to revert.
+- **`experimental.tmux_supervisor` deprecated** — still parseable for
+  one release with a one-time stderr warning. Migration is automatic.
+
+### Added
+
+- **Watchdog crash-time pane capture (#725 PR-2)** — before triggering
+  any restart (bridge-disconnect, turn-hang, journal-silence), the
+  watchdog now snapshots the agent's tmux pane scrollback to
+  `~/.switchroom/agents/<agent>/crash-reports/<ISO8601>-<reason>.txt`
+  so RCA has the live screen state at the moment of the kill.
+  Retention: 20 most recent files per agent. Size cap: 10 MB per
+  file. See `docs/crash-reports.md`.
+- **Preflight accepts `autoaccept-poll` wiring (#745)** — the
+  `switchroom agent restart` preflight in `src/cli/agent.ts` now
+  accepts either the legacy `expect autoaccept.exp` wrapper or the
+  new `autoaccept-poll` ExecStartPost, and only requires the `expect`
+  binary on PATH when the legacy wrapper is in use.
+
+### Fixed
+
+- **Build now bundles `dist/cli/autoaccept-poll.js` (#747)** — the
+  systemd unit's `ExecStartPost=` references the bundled `.js`
+  artifact; prior internal cuts shipped without it, breaking
+  default-mode units on fresh installs.
 
 ### Added
 
@@ -202,6 +261,23 @@ should install v0.6.14.
   New helper `groupAgentsByPrimaryAccount` unit-tested across 7
   cases. Matters whenever an operator runs a multi-account fleet —
   the bug was invisible on a single-account install.
+
+### Added
+
+- **Webhook ingest hardening (#714)** — two defenses added to
+  `src/web/webhook-handler.ts` before auto-dispatch ships:
+  - **Dedup by `X-GitHub-Delivery`**: per-agent LRU (1000 entries, 24h
+    retention) backed by `~/.switchroom/agents/<agent>/telegram/webhook-dedup.json`.
+    Replay returns 200 `{ok:true,deduped:true}` and skips JSONL append.
+    Generic source has no delivery header — dedup is skipped silently.
+  - **Per-source token-bucket rate limit**: off by default; opt-in via
+    `channels.telegram.webhook_rate_limit.rpm` in switchroom.yaml (set
+    e.g. `rpm: 60` for one request/sec sustained, burst equal to rpm).
+    When enabled, exceeding the limit returns 429 with `Retry-After`.
+    First throttle event per `(agent, source)` per 60s window is written
+    to `<agent>/telegram/issues.jsonl` for Telegram visibility.
+  - `webhook_rate_limit` added to `TelegramChannelSchema` in
+    `src/config/schema.ts`; cascades via the existing channels deep-merge.
 
 ## v0.6.7 — 2026-05-05
 

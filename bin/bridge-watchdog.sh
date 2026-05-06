@@ -311,6 +311,49 @@ stamp_restart_reason() {
   fi
 }
 
+# ─── Crash-time tmux pane capture (#725 PR-2) ──────────────────────────
+#
+# Snapshot the agent's tmux pane scrollback to
+# `<agentDir>/crash-reports/<ISO8601>-<reason>.txt` immediately
+# before a watchdog-triggered restart. Gives RCA tooling the live
+# screen state at the moment of the kill.
+#
+# Mirror of `src/agents/tmux.ts#captureAgentPane`. Same socket
+# convention (`switchroom-<agent>`), same target session
+# (`<agent>`), same output dir, same header. Keep the two paths in
+# sync — RCA tooling reads from one stream regardless of which
+# crash path produced the file.
+#
+# Best-effort: every step is `|| true`-ish so a missing socket /
+# tmux / write failure NEVER blocks the restart. Operator-initiated
+# restarts (`switchroom agent restart <agent>`) do NOT call this —
+# only watchdog-triggered restart paths do, since clean restarts
+# aren't crashes.
+#
+# Retention: 20 newest .txt files; size cap: 10MB per file
+# (post-header bytes; tmux history-limit is 100k lines so worst-case
+# ANSI-heavy panes can spike beyond that).
+capture_pane_before_restart() {
+  local agent="$1"
+  local reason="$2"
+  local agent_dir="${HOME}/.switchroom/agents/${agent}"
+  local socket="switchroom-${agent}"
+  local out_dir="${agent_dir}/crash-reports"
+  local ts
+  ts="$(date -u +%Y-%m-%dT%H-%M-%SZ)"
+  local out="${out_dir}/${ts}-${reason}.txt"
+  mkdir -p "$out_dir" 2>/dev/null || true
+  {
+    printf '# agent: %s\n# reason: %s\n# captured-at: %s\n# tmux-socket: %s\n\n' \
+      "$agent" "$reason" "$ts" "$socket"
+    timeout 5 tmux -L "$socket" capture-pane -p -S - -t "$agent" 2>&1 \
+      | head -c 10485760 \
+      || echo "[capture-pane failed: $?]"
+  } > "$out" 2>/dev/null || true
+  # Retention: keep newest 20 .txt files in the dir.
+  ls -1t "$out_dir"/*.txt 2>/dev/null | tail -n +21 | xargs -r rm -f 2>/dev/null || true
+}
+
 # ─── Restart rate cap ──────────────────────────────────────────────────
 #
 # Belt-and-suspenders for runaway restart loops (#550 follow-up). Even
@@ -576,6 +619,7 @@ for gateway_svc in "${gateway_services[@]}"; do
     continue
   fi
   wd_log restart "agent=${agent} reason=bridge-disconnect disc_duration=${disc_duration}s threshold=${DISCONNECT_GRACE_SECS}s ${observation}"
+  capture_pane_before_restart "$agent" "bridge-disconnect"
   restart_rate_record "$agent"
   # Clear the marker so post-restart we don't immediately re-trip on
   # the still-old tail. The uptime grace will cover the startup window
@@ -614,6 +658,65 @@ for gateway_svc in "${gateway_services[@]}"; do
     systemctl --user restart "$agent_svc" || true
   fi
 done
+
+# ─── Auth refresh tick ───────────────────────────────────────────────────────
+#
+# Wire `switchroom auth refresh-tick` into every watchdog cycle (issue #429
+# Phase 1). The command is idempotent and cheap when tokens are healthy, so
+# it's safe to run once per watchdog tick (≈60s).
+#
+# Two independently-tunable knobs (both default to 600, but for different
+# reasons — coincidence, not coupling):
+#
+#   AUTH_REFRESH_INTERVAL_SECS — how often the watchdog runs the CLI at all.
+#     Gated by a state-file timestamp; the CLI is skipped entirely until this
+#     many seconds have passed since the last run. Default 600s (10 min).
+#
+#   AUTH_REFRESH_THRESHOLD_MS — how close to expiry a token must be before
+#     the CLI actually contacts the OAuth endpoint to refresh it. Passed as
+#     --threshold-ms. Default 600000 ms (10 min). Operators who want earlier
+#     proactive refreshes (e.g. 1800000 ms = 30 min) can raise this without
+#     touching the run cadence, and vice-versa.
+#
+# Disabled by setting WATCHDOG_REFRESH_AUTH=0 (default on).
+: "${WATCHDOG_REFRESH_AUTH:=1}"
+: "${AUTH_REFRESH_INTERVAL_SECS:=600}"
+: "${AUTH_REFRESH_THRESHOLD_MS:=600000}"
+
+if [[ "${WATCHDOG_REFRESH_AUTH}" == "1" ]]; then
+  auth_refresh_marker="${WATCHDOG_STATE_DIR}/.auth-refresh-last"
+  last_refresh=0
+  if [[ -f "$auth_refresh_marker" ]]; then
+    last_refresh="$(cat "$auth_refresh_marker" 2>/dev/null || echo 0)"
+    [[ "$last_refresh" =~ ^[0-9]+$ ]] || last_refresh=0
+  fi
+  now_for_auth="$(now_epoch)"
+  auth_age=$(( now_for_auth - last_refresh ))
+  if [[ "$auth_age" -ge "$AUTH_REFRESH_INTERVAL_SECS" ]]; then
+    # Resolve the switchroom CLI (same pattern as restart paths above).
+    switchroom_cli_auth=""
+    for candidate in "${HOME}/.bun/bin/switchroom" "${HOME}/.local/bin/switchroom"; do
+      if [[ -x "$candidate" ]]; then
+        switchroom_cli_auth="$candidate"
+        break
+      fi
+    done
+    if [[ -z "$switchroom_cli_auth" ]] && command -v switchroom >/dev/null 2>&1; then
+      switchroom_cli_auth="$(command -v switchroom)"
+    fi
+    if [[ -n "$switchroom_cli_auth" ]]; then
+      wd_log detect "auth-refresh age=${auth_age}s threshold=${AUTH_REFRESH_INTERVAL_SECS}s decision=run-refresh-tick"
+      if "$switchroom_cli_auth" auth refresh-tick --threshold-ms "${AUTH_REFRESH_THRESHOLD_MS}" >/dev/null 2>&1; then
+        echo "$now_for_auth" > "$auth_refresh_marker"
+        wd_log skip "auth-refresh decision=tick-complete threshold_ms=${AUTH_REFRESH_THRESHOLD_MS}"
+      else
+        wd_log error "auth-refresh switchroom auth refresh-tick exited non-zero (partial failures are logged by the CLI; state file not updated)"
+      fi
+    else
+      wd_log error "auth-refresh switchroom CLI not on PATH; skipping refresh tick"
+    fi
+  fi
+fi
 
 # ─── Journal-silence check ───────────────────────────────────────────────────
 #
@@ -702,6 +805,7 @@ for agent_svc in "${agent_services[@]}"; do
           "${agent_state_dir}/clean-shutdown.json" \
           "watchdog: turn-active marker stale ${turn_age}s with no JSONL activity"
         wd_log restart "agent=${agent} reason=turn-hang turn_age=${turn_age}s threshold=${TURN_HANG_SECS}s ${observation}"
+        capture_pane_before_restart "$agent" "turn-hang"
         restart_rate_record "$agent"
         # Resolve the switchroom CLI (same belt-and-suspenders as below)
         switchroom_cli=""
@@ -824,6 +928,7 @@ for agent_svc in "${agent_services[@]}"; do
     "${agent_state_dir}/clean-shutdown.json" \
     "watchdog: journal silent for ${journal_age}s with no progress activity"
   wd_log restart "agent=${agent} reason=journal-silence journal_age=${journal_age}s silence_duration=${silence_duration}s threshold=${JOURNAL_SILENCE_HARD_SECS}s ${observation}"
+  capture_pane_before_restart "$agent" "journal-silence"
   restart_rate_record "$agent"
   rm -f "$silence_marker" 2>/dev/null || true
 

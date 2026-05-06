@@ -259,6 +259,11 @@ export const TELEGRAM_MENU_COMMANDS = [
   { command: "version", description: "Show versions + running agent health" },
   // Quick diagnostic
   { command: "logs", description: "Show recent agent logs" },
+  // #725 Phase 2 — inject a Claude Code REPL slash command into the agent's
+  // tmux pane (allowlisted: /cost, /status, /model, /clear, /compact,
+  // /memory, /hooks). Requires the tmux supervisor (the default — refused
+  // when the agent has experimental.legacy_pty=true).
+  { command: "inject", description: "Inject a Claude Code slash command (e.g. /cost)" },
   { command: "doctor", description: "Health check (deps, services, MCP)" },
   { command: "usage", description: "Pro/Max plan quota (5h + 7d windows)" },
   // Vault — secrets + capability grants. /vault is a top-level command
@@ -328,6 +333,7 @@ export function switchroomHelpText(agentName: string): string {
     `<code>/vault grants [agent]</code> — list active capability grants (tap to revoke)`,
     `<code>/doctor</code> — health check (deps, services, MCP)`,
     `<code>/usage</code> — Pro/Max plan quota (5h + 7d windows)`,
+    `<code>/inject &lt;slash&gt;</code> — inject a Claude Code REPL slash command (e.g. <code>/inject /cost</code>; allowlisted)`,
     `<code>/commands</code> — this help`,
     ``,
     `<i>Tip: <code>/update</code> picks up new code; <code>/restart</code> bounces a stuck agent; <code>/version</code> checks what's running.</i>`,

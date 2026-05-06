@@ -466,16 +466,29 @@ describe("readSystemdUnit", () => {
     expect(readSystemdUnit(pid)).toBeNull();
   });
 
-  it("ignores agent names that look like but don't match the convention", () => {
-    const pid = 7777;
+  it("matches long-running agent units (RFC B §4.1)", () => {
+    // The regex was broadened to accept switchroom-<agent>.service
+    // (no -cron-N suffix) so long-running agent units pass the broker's
+    // peercred ACL. verifySystemdUnit still cross-checks against
+    // systemd-user as the real defence; the regex just narrows scope.
+    const pid = 7778;
     vi.mocked(fs.readFileSync).mockImplementation((path: unknown) => {
       if (String(path) === `/proc/${pid}/cgroup`) {
-        // Missing the index digit at the end
-        return `0::/user.slice/user-1000.slice/user@1000.service/app.slice/switchroom-myagent-cron-.service\n`;
+        return `0::/user.slice/user-1000.slice/user@1000.service/app.slice/switchroom-klanker.service\n`;
       }
       throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
     });
+    expect(readSystemdUnit(pid)).toBe("switchroom-klanker.service");
+  });
 
+  it("rejects names without the switchroom- prefix", () => {
+    const pid = 7779;
+    vi.mocked(fs.readFileSync).mockImplementation((path: unknown) => {
+      if (String(path) === `/proc/${pid}/cgroup`) {
+        return `0::/user.slice/user-1000.slice/user@1000.service/app.slice/something-else.service\n`;
+      }
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    });
     expect(readSystemdUnit(pid)).toBeNull();
   });
 });

@@ -49,6 +49,10 @@ import { addAgent, type AgentTopology } from "../agents/add-orchestrator.js";
 import { renameAgent, type HindsightMode } from "../agents/rename-orchestrator.js";
 import { validateBotTokenMatchesAgent } from "../setup/telegram-api.js";
 import { registerAgentPerfCommand } from "./perf.js";
+import {
+  checkVaultPreflightBulk,
+  formatLockedRefusalBulk,
+} from "./agent-vault-preflight.js";
 
 /**
  * Pre-restart preflight check. Verifies the agent's runtime
@@ -170,7 +174,7 @@ function checkSwitchroomBranch(): string | null {
   }
 }
 
-function preflightCheck(
+export function preflightCheck(
   name: string,
   agentDir: string,
   usesDevChannels: boolean,
@@ -194,27 +198,35 @@ function preflightCheck(
       `systemd unit not found at ${unitPath}. Run: switchroom agent create ${name}`,
     );
   } else if (usesDevChannels) {
-    // 3. If using dev channels, the unit MUST use the expect wrapper
+    // 3. If using dev channels, the unit must dispatch the first-run
+    //    TUI prompts somehow — either the legacy `expect` wrapper, or
+    //    the v0.7.0+ `autoaccept-poll.ts` ExecStartPost poller.
     const unitContent = readFileSync(unitPath, "utf-8");
-    if (!unitContent.includes("expect")) {
+    const hasExpect = unitContent.includes("autoaccept.exp");
+    const hasPoller = unitContent.includes("autoaccept-poll");
+    if (!hasExpect && !hasPoller) {
       errors.push(
-        `systemd unit is missing the expect autoaccept wrapper — ` +
-        `dev channels will hang on the confirmation dialog. ` +
-        `Fix: switchroom systemd install (regenerates the unit)`,
+        `systemd unit has no autoaccept handler — dev channels will hang ` +
+        `on the confirmation dialog. Fix: switchroom systemd install ` +
+        `(regenerates the unit)`,
       );
     }
-  }
 
-  // 4. expect binary exists (if needed)
-  if (usesDevChannels) {
-    try {
-      const { execSync: exec } = require("node:child_process");
-      exec("which expect", { stdio: "pipe" });
-    } catch {
-      errors.push(
-        `'expect' binary not found on PATH — required for dev channels. ` +
-        `Install: sudo apt install expect`,
-      );
+    // 4. If the unit uses the legacy expect wrapper, the binary must be
+    //    on PATH. The TS poller path has no extra binary requirement
+    //    beyond tmux (already gated by install.sh).
+    if (hasExpect && !hasPoller) {
+      try {
+        const { execSync: exec } = require("node:child_process");
+        exec("which expect", { stdio: "pipe" });
+      } catch {
+        errors.push(
+          `'expect' binary not found on PATH — required by legacy autoaccept. ` +
+          `Install: sudo apt install expect (or remove ` +
+          `experimental.legacy_autoaccept_expect / legacy_pty to use the ` +
+          `default tmux poller)`,
+        );
+      }
     }
   }
 
@@ -516,11 +528,32 @@ export interface ReconcileAndRestartOpts {
  * and every restart picks them up without the operator having to
  * remember to run `switchroom systemd install`.
  */
-export function regenerateSystemdUnitsForAgent(
+/**
+ * Pure planning function — given resolved config, decide which systemd
+ * units (agent + optional gateway) should exist for an agent and whether
+ * each one's content drifts from disk.
+ *
+ * No fs writes, no daemon-reload. Split out from
+ * `regenerateSystemdUnitsForAgent` so unit tests can drive the decision
+ * logic directly without scribbling on the real ~/.config/systemd/user
+ * dir or shelling out to systemctl. The `readUnit` test seam lets tests
+ * inject canned on-disk content per path.
+ */
+export interface UnitDriftRecord {
+  unitName: string;
+  unitPath: string;
+  desired: string;
+  current: string;
+  drifted: boolean;
+}
+
+export function planAgentSystemdUnits(
   name: string,
   config: SwitchroomConfig,
   agentsDir: string,
-): string[] {
+  readUnit: (path: string) => string = (p) =>
+    existsSync(p) ? readFileSync(p, "utf-8") : "",
+): UnitDriftRecord[] {
   const agentConfig = config.agents[name];
   if (!agentConfig) return [];
 
@@ -530,35 +563,76 @@ export function regenerateSystemdUnitsForAgent(
 
   const resolved = resolveAgentConfig(config.defaults, config.profiles, agentConfig);
   const timezone = resolveTimezone(config, resolved);
+  // Without resolving these flags here, generateUnit() defaulted both to
+  // false, so a legacy_pty:true agent would render the tmux unit on every
+  // reconcile pass — disagreeing with what installAllUnits writes and
+  // ping-ponging the unit file. Mirror what installAllUnits does so the
+  // drift comparison below answers the right question.
+  const legacyPty = resolved.experimental?.legacy_pty === true;
+  const legacyAutoacceptExpect =
+    resolved.experimental?.legacy_autoaccept_expect === true;
 
-  const changed: string[] = [];
+  const records: UnitDriftRecord[] = [];
 
-  const desiredUnit = generateUnit(name, agentDir, useAutoaccept, gwName, timezone);
+  const desiredUnit = generateUnit(
+    name,
+    agentDir,
+    useAutoaccept,
+    gwName,
+    timezone,
+    legacyPty,
+    legacyAutoacceptExpect,
+  );
   const agentUnitPath = unitFilePath(name);
-  const currentUnit = existsSync(agentUnitPath) ? readFileSync(agentUnitPath, "utf-8") : "";
-  if (currentUnit !== desiredUnit) {
-    installUnit(name, desiredUnit);
-    changed.push(agentUnitPath);
-  }
+  const currentUnit = readUnit(agentUnitPath);
+  records.push({
+    unitName: name,
+    unitPath: agentUnitPath,
+    desired: desiredUnit,
+    current: currentUnit,
+    drifted: currentUnit !== desiredUnit,
+  });
 
   if (useAutoaccept && gwName) {
     const stateDir = resolve(agentDir, "telegram");
     const adminEnabled = resolved.admin === true;
-    const desiredGw = generateGatewayUnit(stateDir, name, adminEnabled);
+    // Pass legacyPty so the gateway env (SWITCHROOM_TMUX_SUPERVISOR=1) is
+    // stamped consistently with installAllUnits — without it, drift detection
+    // would falsely flag (or skip) gateway-unit changes whenever legacy_pty
+    // toggled.
+    const desiredGw = generateGatewayUnit(stateDir, name, adminEnabled, legacyPty);
     const gwUnitPath = unitFilePath(gwName);
-    const currentGw = existsSync(gwUnitPath) ? readFileSync(gwUnitPath, "utf-8") : "";
-    if (currentGw !== desiredGw) {
-      installUnit(gwName, desiredGw);
-      changed.push(gwUnitPath);
-    }
+    const currentGw = readUnit(gwUnitPath);
+    records.push({
+      unitName: gwName,
+      unitPath: gwUnitPath,
+      desired: desiredGw,
+      current: currentGw,
+      drifted: currentGw !== desiredGw,
+    });
   }
 
+  return records;
+}
+
+export function regenerateSystemdUnitsForAgent(
+  name: string,
+  config: SwitchroomConfig,
+  agentsDir: string,
+): string[] {
+  const plan = planAgentSystemdUnits(name, config, agentsDir);
+  const changed: string[] = [];
+  for (const rec of plan) {
+    if (rec.drifted) {
+      installUnit(rec.unitName, rec.desired);
+      changed.push(rec.unitPath);
+    }
+  }
   if (changed.length > 0) {
     // Re-read disk so systemd picks up the new ExecStart / Environment /
     // EnvironmentFile directives before the next `restart` fires.
     daemonReload();
   }
-
   return changed;
 }
 
@@ -1089,16 +1163,47 @@ export function registerAgentCommand(program: Command): void {
       "Override --wait timeout in milliseconds (default 300000)"
     )
     .option("--graceful-restart", "Wait for active turn to complete before restarting (via gateway IPC)")
+    .option(
+      "--force-locked",
+      "Restart even when bot_token is a vault: reference and the vault is locked (the agent will fail to reach Telegram until the vault is unlocked)"
+    )
     .action(
       withConfigError(
         async (
           name: string,
-          opts: { force?: boolean; wait?: boolean; waitTimeout?: string; gracefulRestart?: boolean }
+          opts: {
+            force?: boolean;
+            wait?: boolean;
+            waitTimeout?: string;
+            gracefulRestart?: boolean;
+            forceLocked?: boolean;
+          }
         ) => {
           const config = getConfig(program);
           const agentsDir = resolveAgentsDir(config);
           const names =
             name === "all" ? Object.keys(config.agents) : [name];
+
+          // Vault-locked pre-flight. Runs once across all targets so we
+          // don't ping the broker N times. Catches the "vault: bot_token +
+          // locked broker = dead agent" foot-gun BEFORE issuing any
+          // systemctl restart. --force / --force-locked skips.
+          if (!opts.force && !opts.forceLocked) {
+            const targets = names.filter((n) => config.agents[n] != null);
+            if (targets.length > 0) {
+              const result = await checkVaultPreflightBulk(config, targets);
+              if (result.blocked.length > 0) {
+                console.error(chalk.red("\n  " + formatLockedRefusalBulk(result.blocked, result.reachable) + "\n"));
+                process.exit(4);
+              }
+            }
+          } else if (opts.forceLocked) {
+            console.error(
+              chalk.yellow(
+                "  ⚠ --force-locked: skipping vault-locked pre-flight. Agent will hard-fail at startup if vault is still locked.\n"
+              )
+            );
+          }
 
           // #61 defense #1: warn if the switchroom checkout is on a non-main
           // branch. The gateway runs source directly via `bun gateway.ts`
@@ -1275,7 +1380,7 @@ export function registerAgentCommand(program: Command): void {
   // switchroom agent attach <name>
   agent
     .command("attach <name>")
-    .description("Attach to an agent's tmux session")
+    .description("Attach to an agent's REPL (tmux session, when supervisor enabled) or service log")
     .action(
       withConfigError(async (name: string) => {
         const config = getConfig(program);
@@ -1285,9 +1390,91 @@ export function registerAgentCommand(program: Command): void {
           process.exit(1);
         }
 
+        // #725 PR-1 — tmux is the default supervisor; attach drops into
+        // the live REPL via `tmux attach`. Agents that opt out via
+        // `experimental.legacy_pty: true` fall back to `tail -f
+        // service.log`. Read the resolved (cascade-merged) config so
+        // the flag can be set at any layer.
+        const resolved = resolveAgentConfig(config.defaults, config.profiles, config.agents[name]);
+        const tmuxSupervisor = resolved.experimental?.legacy_pty !== true;
+
         // attachAgent must exec (replace process), so this won't return on success
-        attachAgent(name);
+        attachAgent(name, tmuxSupervisor);
       })
+    );
+
+  // switchroom agent send <name> <slashCommand>
+  // #725 Phase 2 — inject a Claude Code REPL slash command into the agent's
+  // tmux pane and print the captured output. Allowlist-only (see inject.ts).
+  agent
+    .command("send <name> <slashCommand>")
+    .description("Inject a Claude Code slash command into the agent's tmux pane (refused if experimental.legacy_pty=true)")
+    .option("--timeout <ms>", "Hard timeout in milliseconds (default 5000)", "5000")
+    .option("--settle <ms>", "Pane-settle window in milliseconds (default 2000)", "2000")
+    .action(
+      withConfigError(async (name: string, slashCommand: string, opts: { timeout: string; settle: string }) => {
+        const config = getConfig(program);
+        if (!config.agents[name]) {
+          console.error(chalk.red(`Agent "${name}" is not defined in switchroom.yaml`));
+          process.exit(1);
+        }
+        const resolved = resolveAgentConfig(config.defaults, config.profiles, config.agents[name]);
+        if (resolved.experimental?.legacy_pty === true) {
+          console.error(
+            chalk.red(
+              `Agent "${name}" is running under the legacy PTY supervisor (experimental.legacy_pty=true).\n` +
+                `inject requires the tmux supervisor (the default). Remove the legacy_pty flag and reconcile/restart the agent.`,
+            ),
+          );
+          process.exit(1);
+        }
+        // Lazy import so the CLI doesn't pay for it on every invocation.
+        const { injectSlashCommand, InjectError } = await import("../agents/inject.js");
+        // Exit-code contract:
+        //   0  — outcome=ok, OR outcome=ok_no_output (the inject did run).
+        //   1  — outcome=failed (validation, session missing, tmux error).
+        // Output routing:
+        //   ok                          → captured output to stdout.
+        //   ok_no_output (silentNote)   → "✓ <verb> — <silentNote>" to stdout.
+        //   ok_no_output (expects out)  → "⚠ <verb> — empty capture" to stderr.
+        //   ok_no_output (silent verb)  → bare "✓ <verb>" to stdout.
+        //   failed                      → error message to stderr, exit 1.
+        try {
+          const result = await injectSlashCommand(name, slashCommand, {
+            timeoutMs: parseInt(opts.timeout, 10) || 5000,
+            settleMs: parseInt(opts.settle, 10) || 2000,
+          });
+          if (result.outcome === "ok") {
+            console.log(result.output);
+            if (result.truncated) {
+              console.log(chalk.yellow("\n... (output truncated to 3000 bytes)"));
+            }
+            return;
+          }
+          if (result.outcome === "ok_no_output") {
+            const meta = result.meta;
+            if (meta?.silentNote) {
+              console.log(chalk.green(`✓ ${result.command} — ${meta.silentNote}`));
+            } else if (meta?.expectsOutput) {
+              console.error(chalk.yellow(`⚠ ${result.command} — empty capture`));
+            } else {
+              console.log(chalk.green(`✓ ${result.command}`));
+            }
+            return;
+          }
+          // outcome === 'failed'
+          const code = result.errorCode ?? "tmux_failed";
+          const msg = result.errorMessage ?? "unknown error";
+          console.error(chalk.red(`inject failed (${code}): ${msg}`));
+          process.exit(1);
+        } catch (err) {
+          if (err instanceof InjectError) {
+            console.error(chalk.red(`inject failed (${err.code}): ${err.message}`));
+            process.exit(1);
+          }
+          throw err;
+        }
+      }),
     );
 
   // switchroom agent logs <name>
@@ -1398,20 +1585,35 @@ export function registerAgentCommand(program: Command): void {
               configPath,
               { preserveClaudeMd: opts.preserveClaudeMd },
             );
-            if (result.changes.length === 0) {
+            // Also regenerate systemd units so a yaml change that affects
+            // which unit template gets rendered (legacy_pty toggle, fresh
+            // agent that should default to tmux but currently has a stale
+            // legacy unit on disk, etc.) actually triggers regen + daemon-
+            // reload instead of falsely reporting "already in sync". This
+            // mirrors what reconcileAndRestartAgent already does for the
+            // restart-bearing path; without it the standalone `reconcile`
+            // CLI verb misses systemd-unit drift entirely.
+            const unitChanges = regenerateSystemdUnitsForAgent(n, config, agentsDir);
+            const allChanges = [...result.changes, ...unitChanges];
+            if (allChanges.length === 0) {
               console.log(chalk.gray(`  ${n}: already in sync`));
             } else {
               agentsTouched++;
-              totalChanges += result.changes.length;
-              console.log(chalk.green(`  ${n}: reconciled (${result.changes.length} file${result.changes.length === 1 ? "" : "s"})`));
+              totalChanges += allChanges.length;
+              console.log(chalk.green(`  ${n}: reconciled (${allChanges.length} file${allChanges.length === 1 ? "" : "s"})`));
 
               // Categorize and display changes by reload semantics
               const semantics = result.changesBySemantics;
               if (semantics) {
-                const { hot, staleTillRestart, restartRequired } = semantics;
+                const { hot, staleTillRestart } = semantics;
+                // Treat changed systemd units as restart-required: an
+                // ExecStart / Type / EnvironmentFile flip only takes effect
+                // after `systemctl restart`. daemon-reload alone does not
+                // re-spawn the running process under the new unit.
+                const restartRequired = [...semantics.restartRequired, ...unitChanges];
 
                 if (restartRequired.length > 0) {
-                  console.log(chalk.yellow("\n  Changed (restart required — soul/MCP/settings/launch):"));
+                  console.log(chalk.yellow("\n  Changed (restart required — soul/MCP/settings/launch/systemd):"));
                   for (const f of restartRequired) {
                     console.log(chalk.yellow(`    - ${f}`));
                   }
@@ -1454,13 +1656,17 @@ export function registerAgentCommand(program: Command): void {
             }
 
             // Determine whether to restart: explicit flag, graceful flag, or auto-restart
-            // triggered by restart-required changes (soul fields, MCP, settings, etc.)
+            // triggered by restart-required changes (soul fields, MCP, settings,
+            // or a regenerated systemd unit). Unit drift counts as restart-required
+            // because daemon-reload alone does not re-spawn the running process
+            // under the new ExecStart / Type.
             const changesBySemantics = result.changesBySemantics;
             const autoRestartNeeded =
               !opts.noRestart &&
-              changesBySemantics !== undefined &&
-              changesBySemantics.restartRequired.length > 0;
-            const shouldRestart = (opts.restart || opts.gracefulRestart || autoRestartNeeded) && result.changes.length > 0;
+              ((changesBySemantics !== undefined &&
+                changesBySemantics.restartRequired.length > 0) ||
+                unitChanges.length > 0);
+            const shouldRestart = (opts.restart || opts.gracefulRestart || autoRestartNeeded) && allChanges.length > 0;
 
             if (shouldRestart) {
               try {

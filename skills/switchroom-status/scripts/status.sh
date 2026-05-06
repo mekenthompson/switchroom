@@ -13,7 +13,7 @@ RESET='\033[0m'
 
 if ! command -v switchroom &>/dev/null; then
   echo "ERROR: switchroom not found on PATH"
-  echo "Install: npm install -g switchroom-ai"
+  echo "Install: npm install -g switchroom"
   exit 1
 fi
 

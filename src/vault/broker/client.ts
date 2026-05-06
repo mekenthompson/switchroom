@@ -309,6 +309,22 @@ type RpcResult =
  * Send a single request to the broker and get a response.
  * Returns { kind: "unreachable", msg } on any connection / protocol failure.
  */
+/**
+ * Public single-shot RPC helper. Used by the approval-kernel client (RFC B)
+ * which needs to round-trip new ops without piggy-backing on the legacy
+ * BrokerClient surface. Same connect/timeout/parse semantics as the
+ * internal `rpc()` — this is just an exported alias.
+ */
+export async function rpcRaw(
+  req: Parameters<typeof encodeRequest>[0],
+  opts?: BrokerClientOpts,
+): Promise<
+  | { kind: "response"; resp: BrokerResponse }
+  | { kind: "unreachable"; msg: string }
+> {
+  return rpc(req, opts);
+}
+
 async function rpc(
   req: Parameters<typeof encodeRequest>[0],
   opts?: BrokerClientOpts,

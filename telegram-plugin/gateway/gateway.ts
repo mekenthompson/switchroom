@@ -136,6 +136,9 @@ import {
 import {
   wrapAgentCallbacks,
   parseAgentCallback,
+  extractAgentButtonMeta,
+  keyboardIsSingleUse,
+  type AgentButtonMeta,
 } from '../inline-keyboard-callbacks.js'
 import {
   startText as buildStartText,
@@ -189,6 +192,7 @@ import {
   formatQuotaBlock,
   getCachedAccountQuota,
   prefetchAccountQuotaIfStale,
+  hydrateAccountQuotaCacheFromDisk,
   clearAccountQuotaCache,
 } from '../quota-check.js'
 import {
@@ -204,6 +208,8 @@ import {
 } from '../auto-fallback.js'
 import { markSlotQuotaExhausted, DEFAULT_SLOT } from '../../src/auth/accounts.js'
 import { fallbackToNextSlot, currentActiveSlot, type AuthCodeOutcome } from '../../src/auth/manager.js'
+import { injectSlashCommand as injectSlashCommandImpl } from '../../src/agents/inject.js'
+import { handleInjectCommand } from './inject-handler.js'
 import { type BannerState } from '../slot-banner.js'
 import { refreshBanner } from '../slot-banner-driver.js'
 import { dispatchFallbackNotification } from '../auto-fallback-dispatcher.js'
@@ -374,12 +380,53 @@ try {
   }
 }
 
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN
-if (!TOKEN) {
+// Issue #758: if TELEGRAM_BOT_TOKEN is not set in env (e.g. agent's .env was
+// never written because bot_token in switchroom.yaml is a `vault:` reference),
+// materialize it from the vault at startup. Resolved value is held in
+// process.env only — never written back to disk.
+//
+// The outer try/catch is narrowed (post-#761 review) to ONLY catch the case
+// where the helper module itself fails to load (ERR_MODULE_NOT_FOUND from the
+// dynamic import). Anything else — including throws from inside
+// materializeBotToken that aren't BotTokenMaterializeError — must propagate
+// with its original message so we don't mask real bugs behind the legacy
+// "set in .env" hint.
+type MaterializeMod = typeof import('../../src/telegram/materialize-bot-token.js')
+let materializeMod: MaterializeMod | null = null
+try {
+  materializeMod = await import('../../src/telegram/materialize-bot-token.js')
+} catch (err) {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  if (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND') {
+    // Module genuinely missing — fall through with materializeMod=null and
+    // handle below.
+  } else {
+    // Programming error, side-effect failure during module init, etc.
+    // Propagate the real message rather than masking it.
+    throw err
+  }
+}
+
+let TOKEN: string
+if (materializeMod !== null) {
+  const { materializeBotToken, BotTokenMaterializeError } = materializeMod
+  try {
+    TOKEN = await materializeBotToken({ agentName: process.env.SWITCHROOM_AGENT_NAME })
+  } catch (err) {
+    if (err instanceof BotTokenMaterializeError) {
+      process.stderr.write(`telegram gateway: ${err.message}\n`)
+      process.exit(1)
+    }
+    throw err
+  }
+} else if (process.env.TELEGRAM_BOT_TOKEN) {
+  TOKEN = process.env.TELEGRAM_BOT_TOKEN
+} else {
   process.stderr.write(
     `telegram gateway: TELEGRAM_BOT_TOKEN required\n` +
     `  set in ${ENV_FILE}\n` +
-    `  format: TELEGRAM_BOT_TOKEN=123456789:AAH...\n`,
+    `  format: TELEGRAM_BOT_TOKEN=123456789:AAH...\n` +
+    `  (token-materialization helper not found)\n`,
   )
   process.exit(1)
 }
@@ -1212,6 +1259,32 @@ const pendingAskUser = new Map<string, PendingAskUser>()
 const pendingReauthFlows = new Map<string, { agent: string; startedAt: number }>()
 const REAUTH_INTERCEPT_TTL_MS = 10 * 60_000
 
+// #710: per-message agent-button metadata (ack_text / single_use). Keyed by
+// `${chatId}:${messageId}` → Map<rawCallbackData, AgentButtonMeta>. Populated
+// when an agent-emitted inline_keyboard is sent; consumed by the
+// callback_query handler to honor agent-specified post-tap UX. Bounded by
+// AGENT_BUTTON_META_MAX (LRU-ish — oldest insertion deleted when over cap)
+// so a long-lived gateway can't grow the map unbounded. Restart-safe by
+// design: when this map is empty (e.g. fresh process) the defaults apply
+// (`'✓ received'` toast + strip keyboard) — the agent only loses any
+// custom ack_text override.
+const agentButtonMeta = new Map<string, Map<string, AgentButtonMeta>>()
+const AGENT_BUTTON_META_MAX = 1000
+function rememberAgentButtonMeta(
+  chatId: string | number,
+  messageId: number,
+  meta: Map<string, AgentButtonMeta>,
+): void {
+  if (meta.size === 0) return
+  const key = `${chatId}:${messageId}`
+  agentButtonMeta.set(key, meta)
+  while (agentButtonMeta.size > AGENT_BUTTON_META_MAX) {
+    const oldest = agentButtonMeta.keys().next().value
+    if (oldest === undefined) break
+    agentButtonMeta.delete(oldest)
+  }
+}
+
 // Vault
 const vaultPassphraseCache = new Map<string, { passphrase: string; expiresAt: number }>()
 const VAULT_PASSPHRASE_TTL_MS = 30 * 60 * 1000
@@ -1853,6 +1926,8 @@ const ipcServer: IpcServer = createIpcServer({
             gatewayInfo: { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS },
             restartReason: reason,
             restartAgeMs: markerAgeMs,
+            loadAccounts: () => loadAccountsForBootCard(agentSlug),
+            tmuxSupervisor: process.env.SWITCHROOM_TMUX_SUPERVISOR === '1',
           }, ackMsgId).then(handle => {
             activeBootCard = handle
           }).catch((err: Error) => {
@@ -2271,6 +2346,7 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
   // pass through unchanged. Attached to the LAST chunk only so buttons
   // appear on the final visible message.
   let replyMarkup: { inline_keyboard: AnyButton[][] } | undefined
+  let replyButtonMeta: Map<string, AgentButtonMeta> | undefined
   const rawKeyboard = args.inline_keyboard as AnyButton[][] | undefined
   if (rawKeyboard != null) {
     const validationErrors = validateInlineKeyboard(rawKeyboard)
@@ -2280,6 +2356,7 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
         .join('; ')
       throw new Error(`inline_keyboard validation failed: ${summary}`)
     }
+    replyButtonMeta = extractAgentButtonMeta(rawKeyboard)
     replyMarkup = { inline_keyboard: wrapAgentCallbacks(rawKeyboard) }
   }
 
@@ -2394,6 +2471,16 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
     throw new Error(`reply failed after ${sentIds.length} of ${chunks.length} chunk(s) sent: ${msg}`)
   } finally {
     stopTypingLoop(chat_id)
+  }
+
+  // #710: remember per-button agent meta (ack_text / single_use) keyed
+  // by the message that actually carries the keyboard — that's the last
+  // text chunk, since the keyboard is attached only on isLastChunk.
+  if (replyButtonMeta != null && replyButtonMeta.size > 0 && sentIds.length >= chunks.length) {
+    const keyboardMsgId = sentIds[chunks.length - 1]
+    if (typeof keyboardMsgId === 'number') {
+      rememberAgentButtonMeta(chat_id, keyboardMsgId, replyButtonMeta)
+    }
   }
 
   // #273: when files is 2-10 photos, batch them into a single
@@ -2540,6 +2627,7 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
   // this agent. Only attached on done=true so buttons land on the
   // final answer message, not on intermediate draft edits.
   let streamReplyMarkup: { inline_keyboard: AnyButton[][] } | undefined
+  let streamButtonMeta: Map<string, AgentButtonMeta> | undefined
   const rawStreamKeyboard = args.inline_keyboard as AnyButton[][] | undefined
   if (rawStreamKeyboard != null && Boolean(args.done)) {
     const validationErrors = validateInlineKeyboard(rawStreamKeyboard)
@@ -2549,6 +2637,7 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
         .join('; ')
       throw new Error(`inline_keyboard validation failed: ${summary}`)
     }
+    streamButtonMeta = extractAgentButtonMeta(rawStreamKeyboard)
     streamReplyMarkup = { inline_keyboard: wrapAgentCallbacks(rawStreamKeyboard) }
   }
 
@@ -2636,6 +2725,16 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
         Date.now(),
       )
     } catch { /* best-effort signal */ }
+  }
+  // #710: stash agent-button meta keyed by the final message id so the
+  // callback handler can honor ack_text / single_use on tap.
+  if (
+    args.done === true
+    && result.messageId != null
+    && streamButtonMeta != null
+    && streamButtonMeta.size > 0
+  ) {
+    rememberAgentButtonMeta(args.chat_id as string, result.messageId, streamButtonMeta)
   }
   // #546 dedup record: capture the final stream_reply text on the
   // terminal call so a subsequent retry (different bridge, same
@@ -5830,6 +5929,17 @@ function buildAgentMetadata(agentName: string): AgentMetadata {
   }
 }
 
+// RFC B §9: register /approvals list|revoke against the approval kernel.
+// The kernel's IPC client (`src/vault/approvals/client.ts`) round-trips
+// through the vault broker — same socket, no new daemon. The isApprover
+// gate reuses the existing dmCommandGate / allowFrom pattern.
+{
+  const { registerApprovalsCommands } = await import('./approvals-commands.js')
+  registerApprovalsCommands(bot, {
+    isApprover: ctx => dmCommandGate(ctx) !== null,
+  })
+}
+
 bot.command('start', async ctx => {
   // dmCommandGate (#894 backport): silent drop on disabled or
   // non-allowlisted senders so the bot doesn't leak its existence.
@@ -5880,6 +5990,23 @@ bot.command('agents', async ctx => {
       lines.push(`    <i>${escapeHtmlForTg(a.template)} → ${escapeHtmlForTg(a.topic_name)}${a.topic_emoji ? ' ' + a.topic_emoji : ''}</i>`)
     }
     return lines.join('\n')
+  })
+})
+
+// /inject — #725 Phase 2 slash-command bridge. Implementation in
+// inject-handler.ts so it's unit-testable without booting the bot.
+bot.command('inject', async ctx => {
+  await handleInjectCommand(ctx, {
+    isAuthorized: isAuthorizedSender,
+    inject: injectSlashCommandImpl,
+    // accent is already inlined into the body by the handler via
+    // buildAccentHeader; switchroomReply doesn't need to know about it.
+    reply: async (ctx, text, opts) => switchroomReply(ctx, text, { html: opts?.html }),
+    getAgentName: getMyAgentName,
+    getArgs: getCommandArgs,
+    escapeHtml: escapeHtmlForTg,
+    preBlock,
+    formatOutput: formatSwitchroomOutput,
   })
 })
 
@@ -6742,6 +6869,43 @@ function fetchDashboardState(agent: string): DashboardState | null {
     accounts,
     accountsTruncated,
     canBootstrapShare,
+  }
+}
+
+/**
+ * Build the per-account list rendered on the boot/health card (issue
+ * #708). Reuses `fetchDashboardState` so the data source matches
+ * `/auth` exactly — same cache, same shape. Returns null on any
+ * failure so the boot card silently omits the section.
+ */
+function loadAccountsForBootCard(agent: string): ReadonlyArray<AccountSummary> | null {
+  try {
+    // Re-hydrate the in-process cache from on-disk snapshots
+    // captured by previous gateway lifetimes. Without this, a fresh
+    // boot would render the accounts section with empty quota rows
+    // until the background prefetch ticks. Best-effort.
+    try {
+      const labels = switchroomExecJson<Array<{ label?: string }>>([
+        'auth', 'account', 'list', '--json',
+      ])
+      if (Array.isArray(labels)) {
+        hydrateAccountQuotaCacheFromDisk(
+          labels.map((l) => l?.label).filter((s): s is string => typeof s === 'string'),
+        )
+      }
+    } catch {
+      /* hydrate is best-effort; fall through to live state */
+    }
+
+    const state = fetchDashboardState(agent)
+    if (!state || !state.accounts) return null
+    // Show only accounts enabled on this agent — fallback rows on the
+    // dashboard are useful, but on the boot card "accounts I'm using"
+    // is the right scope.
+    const enabled = state.accounts.filter((a) => a.enabledHere)
+    return enabled.length > 0 ? enabled : null
+  } catch {
+    return null
   }
 }
 
@@ -8181,6 +8345,16 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // RFC B §6.1: apv:<request_id>:<choice>[:<param>] — approval kernel taps.
+  // Routed through the generic kernel handler so any surface that uses
+  // buildApprovalCard inherits consume → record → confirmation UX without
+  // each surface re-implementing it.
+  if (data.startsWith('apv:')) {
+    const { handleApprovalCallback } = await import('./approval-callback.js')
+    await handleApprovalCallback(ctx, data)
+    return
+  }
+
   // op:<action>:<encoded-agent> callbacks from operator-events.ts
   // renderOperatorEvent(). Agent name is URL-encoded at emit (issue #24).
   // Actions: dismiss, restart, reauth, swap-slot, add-slot, logs.
@@ -8273,11 +8447,21 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    // Ack the spinner FIRST so the user doesn't see it stick if the
-    // forward path takes a moment.
-    await ctx.answerCallbackQuery().catch(() => {})
     const cbChatId = String(ctx.chat?.id ?? ctx.from.id)
     const cbMessageId = ctx.callbackQuery?.message?.message_id
+    // #710: look up agent-supplied per-button meta (ack_text / single_use)
+    // stashed at send time. Empty map after a gateway restart — defaults
+    // still give the user-visible toast + keyboard removal.
+    const metaForMessage = cbMessageId != null
+      ? agentButtonMeta.get(`${cbChatId}:${cbMessageId}`)
+      : undefined
+    const tapMeta = metaForMessage?.get(agentCb.raw)
+    const ackText = (typeof tapMeta?.ack_text === 'string' && tapMeta.ack_text.length > 0)
+      ? tapMeta.ack_text
+      : '✓ received'
+    // Ack the spinner FIRST with a visible toast so the user knows the
+    // tap registered (#710 — empty ack showed nothing, users re-tapped).
+    await ctx.answerCallbackQuery({ text: ackText }).catch(() => {})
     const buttonText = (() => {
       // Best-effort: pull the tapped button's label from the source
       // message's keyboard so the agent gets a human-readable echo.
@@ -8337,6 +8521,21 @@ bot.on('callback_query:data', async ctx => {
         '⏳ Agent is restarting — your button tap was queued but won\'t be processed until it comes back.',
         cbThreadId != null ? { message_thread_id: cbThreadId } : {},
       ).catch(() => {})
+    }
+    // #710: strip the keyboard after tap so the buttons can't be
+    // double-fired. Default policy is single-use — preserve the
+    // keyboard only if at least one button on the message explicitly
+    // opts out via `single_use: false`. With no stashed meta (e.g.
+    // gateway restarted between send and tap) the default fires too,
+    // which is the desired UX.
+    const stripKeyboard = metaForMessage == null || keyboardIsSingleUse(metaForMessage)
+    if (stripKeyboard && cbMessageId != null) {
+      await ctx.editMessageReplyMarkup({
+        reply_markup: { inline_keyboard: [] },
+      }).catch(() => {})
+      if (metaForMessage != null) {
+        agentButtonMeta.delete(`${cbChatId}:${cbMessageId}`)
+      }
     }
     return
   }
@@ -9839,6 +10038,8 @@ void (async () => {
                       gatewayInfo: { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS },
                       restartReason: reason,
                       restartAgeMs: markerAgeMs,
+                      loadAccounts: () => loadAccountsForBootCard(agentSlug),
+                      tmuxSupervisor: process.env.SWITCHROOM_TMUX_SUPERVISOR === '1',
                     }, ackMsgId)
                     activeBootCard = handle
                   } catch (err) {

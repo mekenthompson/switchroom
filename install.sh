@@ -2,7 +2,7 @@
 # Switchroom installer.
 #
 # Bootstraps a fresh Ubuntu box to run switchroom agents:
-# apt deps, bun, node 22 via nvm, claude CLI, switchroom-ai.
+# apt deps, bun, node 22 via nvm, claude CLI, switchroom.
 # Does NOT configure anything — run `switchroom setup` after.
 #
 # Usage:
@@ -37,7 +37,7 @@ need_sudo() {
 printf '%s\n' "$BOLD"
 cat <<'BANNER'
   Switchroom installer
-  Bootstraps bun, node, claude CLI, and switchroom-ai.
+  Bootstraps bun, node, claude CLI, and switchroom.
 BANNER
 printf '%s\n' "$RESET"
 
@@ -60,6 +60,13 @@ if [ ${#need_apt[@]} -gt 0 ]; then
 else
   ok "apt packages already present"
 fi
+
+# tmux is the default agent supervisor as of #725 PR-1 — a hard prereq.
+# Hosts that genuinely cannot run tmux can opt agents into the legacy
+# PTY supervisor per-agent via `experimental.legacy_pty: true` in
+# switchroom.yaml, but the binary itself is required for the default
+# install path and to keep the unit template renderable.
+have tmux || die "tmux is required (or set experimental.legacy_pty: true per agent)"
 
 # ---- bun ----
 
@@ -105,10 +112,10 @@ if [ "$need_node_install" = "1" ]; then
   ok "node installed ($(node -v))"
 fi
 
-# ---- claude CLI + switchroom-ai ----
+# ---- claude CLI + switchroom ----
 
-log "Installing @anthropic-ai/claude-code and switchroom-ai globally via npm"
-npm install -g --silent @anthropic-ai/claude-code switchroom-ai
+log "Installing @anthropic-ai/claude-code and switchroom globally via npm"
+npm install -g --silent @anthropic-ai/claude-code switchroom
 ok "CLIs installed"
 
 have claude     || warn "claude not on PATH — open a new shell or run: export PATH=\"$(npm prefix -g)/bin:\$PATH\""

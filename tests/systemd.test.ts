@@ -1,7 +1,10 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import {
   generateUnit,
   generateGatewayUnit,
+  generateAgentTmuxConf,
   cronToOnCalendar,
   generateTimerUnit,
   generateTimerServiceUnit,
@@ -34,8 +37,22 @@ describe("generateUnit", () => {
     expect(unit).toContain("Description=switchroom agent: health-coach");
   });
 
-  it("uses script -qfc for PTY provision", () => {
+  it("uses tmux new-session by default (#725 PR-1)", () => {
     const unit = generateUnit("health-coach", "/home/user/.switchroom/agents/health-coach");
+    expect(unit).toContain("ExecStart=/usr/bin/tmux -L switchroom-health-coach");
+    expect(unit).toContain("new-session -A -d -s health-coach");
+    expect(unit).toContain("/home/user/.switchroom/agents/health-coach/start.sh");
+  });
+
+  it("uses script -qfc when legacy_pty=true (rollback)", () => {
+    const unit = generateUnit(
+      "health-coach",
+      "/home/user/.switchroom/agents/health-coach",
+      false,
+      undefined,
+      undefined,
+      true,
+    );
     expect(unit).toContain("ExecStart=/usr/bin/script -qfc");
     expect(unit).toContain("/home/user/.switchroom/agents/health-coach/start.sh");
   });
@@ -109,8 +126,13 @@ describe("generateUnit", () => {
     expect(serviceSection).not.toContain("StartLimitIntervalSec");
   });
 
-  it("sets Type=simple for script-based execution", () => {
+  it("sets Type=forking for tmux-based execution by default (#725 PR-1)", () => {
     const unit = generateUnit("test", "/tmp/test");
+    expect(unit).toContain("Type=forking");
+  });
+
+  it("sets Type=simple under legacy_pty (script-based execution)", () => {
+    const unit = generateUnit("test", "/tmp/test", false, undefined, undefined, true);
     expect(unit).toContain("Type=simple");
   });
 
@@ -125,21 +147,45 @@ describe("generateUnit", () => {
     expect(unit).toContain("WantedBy=default.target");
   });
 
-  it("uses expect autoaccept wrapper when useAutoaccept=true", () => {
+  it("uses TS pane-poller (not expect) by default when useAutoaccept=true (#725 PR-4)", () => {
+    // PR-4: the default first-run autoaccept path is the TS pane-poller
+    // fired from ExecStartPost. The expect wrapper is gated behind the
+    // legacy_autoaccept_expect rollback flag.
     const unit = generateUnit("fork", "/tmp/fork", true);
-    expect(unit).toContain("/usr/bin/expect");
-    expect(unit).toContain("autoaccept.exp");
-    expect(unit).toContain("/tmp/fork/start.sh");
+    expect(unit).not.toContain("expect -f");
+    expect(unit).not.toContain("autoaccept.exp");
+    expect(unit).toContain("bash -l /tmp/fork/start.sh");
+    expect(unit).toContain("autoaccept-poll.ts");
+    expect(unit).toContain(" fork");
     // Should NOT reference the old Python autoaccept script
     expect(unit).not.toContain("autoaccept.py");
     expect(unit).not.toContain("/usr/bin/python3");
   });
 
-  it("does not use expect wrapper by default", () => {
+  it("uses expect autoaccept wrapper when legacy_autoaccept_expect=true (rollback)", () => {
+    const unit = generateUnit(
+      "fork",
+      "/tmp/fork",
+      true, // useAutoaccept
+      undefined,
+      undefined,
+      false, // legacyPty
+      true, // legacyAutoacceptExpect
+    );
+    expect(unit).toContain("expect -f");
+    expect(unit).toContain("autoaccept.exp");
+    expect(unit).toContain("/tmp/fork/start.sh");
+    // Poller must NOT also fire when expect is in charge.
+    expect(unit).not.toContain("autoaccept-poll.ts");
+  });
+
+  it("does not use expect wrapper or poller when useAutoaccept=false", () => {
     const unit = generateUnit("plain", "/tmp/plain", false);
     expect(unit).not.toContain("autoaccept.exp");
-    expect(unit).not.toContain("/usr/bin/expect");
-    expect(unit).toContain("/bin/bash");
+    expect(unit).not.toContain("expect -f");
+    expect(unit).not.toContain("autoaccept-poll.ts");
+    // Default supervisor wraps `bash -l ...start.sh` inside tmux.
+    expect(unit).toContain("bash -l /tmp/plain/start.sh");
   });
 
   // Regression: Ken had been hand-patching EnvironmentFile=- into
@@ -159,6 +205,86 @@ describe("generateUnit", () => {
     // the file being absent. Without it, systemd refuses to start
     // units on fresh installs where vault init hasn't run yet.
     expect(unit).toMatch(/EnvironmentFile=-/);
+  });
+
+  // ─── #725 PR-1: tmux supervisor is default; legacy_pty rollback ─────
+  describe("tmux supervisor (default) and legacy_pty rollback (#725 PR-1)", () => {
+    it("default: tmux ExecStart, no script -qfc", () => {
+      const unit = generateUnit("legacy", "/tmp/legacy");
+      expect(unit).toContain("Type=forking");
+      expect(unit).toContain("Delegate=yes");
+      expect(unit).toContain("ExecStart=/usr/bin/tmux -L switchroom-legacy");
+      expect(unit).not.toContain("ExecStart=/usr/bin/script -qfc");
+    });
+
+    it("legacy_pty=true: script -qfc ExecStart, Type=simple, no Delegate", () => {
+      const unit = generateUnit("legacy", "/tmp/legacy", false, undefined, undefined, true);
+      expect(unit).toContain("Type=simple");
+      expect(unit).toContain("ExecStart=/usr/bin/script -qfc");
+      expect(unit).not.toContain("/usr/bin/tmux");
+      expect(unit).not.toContain("Delegate=yes");
+    });
+
+    it("legacy_pty=true with autoaccept: script -qfc wraps autoaccept.exp", () => {
+      const unit = generateUnit("legacy", "/tmp/legacy", true, "legacy-gateway", undefined, true);
+      expect(unit).toContain("ExecStart=/usr/bin/script -qfc");
+      expect(unit).toContain("autoaccept.exp");
+      expect(unit).not.toContain("/usr/bin/tmux");
+    });
+
+    it("default + autoaccept: tmux ExecStart runs start.sh directly; poller fires from ExecStartPost (#725 PR-4)", () => {
+      const unit = generateUnit("gymbro", "/tmp/gymbro", true, "gymbro-gateway");
+      expect(unit).toContain("Type=forking");
+      expect(unit).toContain("Delegate=yes");
+      // No expect wrapper inside the tmux session — claude launches directly.
+      expect(unit).toContain("new-session -A -d -s gymbro -x 400 -y 50 'bash -l /tmp/gymbro/start.sh'");
+      expect(unit).not.toContain("'expect -f");
+      // Pipe-pane unchanged.
+      expect(unit).toContain("ExecStartPost=/usr/bin/tmux -L switchroom-gymbro pipe-pane -o -t gymbro 'cat >> /tmp/gymbro/service.log'");
+      // Autoaccept poller fires in the background after the session is up.
+      expect(unit).toContain("autoaccept-poll.ts gymbro");
+      // Leading `-` on ExecStop = ignore non-zero exit (silences the
+      // script→tmux migration FAILURE on the first restart).
+      expect(unit).toContain("ExecStop=-/usr/bin/tmux -L switchroom-gymbro kill-session -t gymbro");
+      expect(unit).not.toContain("ExecStop=/usr/bin/tmux");
+      expect(unit).not.toContain("/usr/bin/script -qfc");
+    });
+
+    it("default + autoaccept + legacy_autoaccept_expect=true: tmux wraps expect (rollback path)", () => {
+      const unit = generateUnit(
+        "gymbro",
+        "/tmp/gymbro",
+        true,
+        "gymbro-gateway",
+        undefined,
+        false,
+        true,
+      );
+      expect(unit).toContain("ExecStart=/usr/bin/tmux -L switchroom-gymbro -f /tmp/gymbro/tmux.conf new-session -A -d -s gymbro -x 400 -y 50 'expect -f");
+      expect(unit).toContain("/tmp/gymbro/start.sh");
+      // Poller must NOT fire alongside the legacy wrapper.
+      expect(unit).not.toContain("autoaccept-poll.ts");
+    });
+
+    it("default + no autoaccept: tmux ExecStart wraps `bash -l start.sh`", () => {
+      const unit = generateUnit("plain", "/tmp/plain");
+      expect(unit).toContain("Type=forking");
+      expect(unit).toContain("Delegate=yes");
+      expect(unit).toContain("new-session -A -d -s plain -x 400 -y 50 'bash -l /tmp/plain/start.sh'");
+      expect(unit).not.toContain("autoaccept.exp");
+      expect(unit).not.toContain("/usr/bin/script -qfc");
+    });
+
+    it("preserves cgroup kill semantics and memory ceilings under default tmux supervisor", () => {
+      const unit = generateUnit("gymbro", "/tmp/gymbro", true, "gymbro-gateway");
+      expect(unit).toContain("KillMode=control-group");
+      expect(unit).toContain("KillSignal=SIGTERM");
+      expect(unit).toContain("SendSIGKILL=yes");
+      expect(unit).toContain("TimeoutStopSec=15");
+      expect(unit).toContain("Restart=on-failure");
+      expect(unit).toContain("MemoryMax=8G");
+      expect(unit).toContain("MemoryHigh=6G");
+    });
   });
 });
 
@@ -261,7 +387,7 @@ describe("generateGatewayUnit", () => {
   it("references the bundled gateway dist when present, .ts fallback otherwise (#634)", () => {
     // Strategic packaging fix: the systemd unit prefers
     // `telegram-plugin/dist/gateway/gateway.js` because the npm package
-    // ships dist (so a fresh `bun add -g switchroom-ai` install runs
+    // ships dist (so a fresh `bun add -g switchroom` install runs
     // without needing the workspace's `src/` tree). Falls back to the
     // .ts source for dev workspaces that haven't built yet.
     //
@@ -427,12 +553,16 @@ describe("autoaccept detection via usesSwitchroomTelegramPlugin", () => {
     const officialAgent = { profile: "default", channels: { telegram: { plugin: "official" } } } as AgentConfig;
 
     const autoUnit = generateUnit("dev", "/tmp/dev", usesSwitchroomTelegramPlugin(defaultAgent));
-    expect(autoUnit).toContain("autoaccept.exp");
-    expect(autoUnit).toContain("/usr/bin/expect");
+    // #725 PR-4 — default first-run autoaccept is the TS pane-poller, not expect.
+    expect(autoUnit).not.toContain("autoaccept.exp");
+    expect(autoUnit).not.toContain("expect -f");
+    expect(autoUnit).toContain("autoaccept-poll.ts dev");
+    expect(autoUnit).toContain("bash -l /tmp/dev/start.sh");
 
     const plainUnit = generateUnit("plain", "/tmp/plain", usesSwitchroomTelegramPlugin(officialAgent));
     expect(plainUnit).not.toContain("autoaccept.exp");
-    expect(plainUnit).toContain("/bin/bash");
+    expect(plainUnit).not.toContain("autoaccept-poll.ts");
+    expect(plainUnit).toContain("bash -l");
   });
 });
 
@@ -497,5 +627,46 @@ describe("shouldInstallBrokerUnit (#207)", () => {
       },
     } as unknown as SwitchroomConfig;
     expect(shouldInstallBrokerUnit(cfg)).toBe(true);
+  });
+});
+
+// ─── #725 Phase 1: managed tmux.conf + autoaccept interact block ─────────
+describe("generateAgentTmuxConf", () => {
+  it("pins default-terminal to xterm-256color (tmux 3.x ignores -e TERM)", () => {
+    expect(generateAgentTmuxConf()).toContain('set -g default-terminal "xterm-256color"');
+  });
+
+  it("declares a generous history-limit so capture-pane returns scrollback", () => {
+    expect(generateAgentTmuxConf()).toContain("set -g history-limit 100000");
+  });
+
+  it("disables the status bar so attach matches today's tail UX", () => {
+    expect(generateAgentTmuxConf()).toContain("set -g status off");
+  });
+
+  it("disables remain-on-exit so claude exit fires Restart=on-failure", () => {
+    expect(generateAgentTmuxConf()).toContain("set -g remain-on-exit off");
+  });
+
+  it("enables focus-events so the pane reports focus to the spawned shell (Phase 1.x)", () => {
+    expect(generateAgentTmuxConf()).toContain("set -g focus-events on");
+  });
+});
+
+describe("autoaccept.exp (#725 Phase 1)", () => {
+  const expPath = resolve(__dirname, "../bin/autoaccept.exp");
+  const content = readFileSync(expPath, "utf-8");
+
+  it("bounds the autoaccept loop with a 30s timeout", () => {
+    expect(content).toContain("set timeout 30");
+    expect(content).not.toContain("set timeout -1");
+  });
+
+  it("includes a timeout {} arm so the expect block falls through cleanly", () => {
+    expect(content).toMatch(/timeout\s*\{/);
+  });
+
+  it("ends with an interact block so external tmux send-keys reaches the spawned shell", () => {
+    expect(content).toMatch(/interact\s*\{[^}]*eof\s+exit[^}]*\}/);
   });
 });

@@ -59,12 +59,14 @@ const enqueue = (chatId: string): SessionEvent => ({
 
 describe('P2: completion gates on background fleet members', () => {
   it('hasLiveBackground reflects fleet status correctly', () => {
+    // isBackgroundDispatch is the sticky flag used by hasLiveBackground —
+    // status alone is no longer the gate (fixes #757).
     const fleet = new Map([
-      ['a', { agentId: 'a', status: 'background' as const, terminalAt: null } as never],
-      ['b', { agentId: 'b', status: 'done' as const, terminalAt: 2000 } as never],
+      ['a', { agentId: 'a', status: 'background' as const, terminalAt: null, isBackgroundDispatch: true } as never],
+      ['b', { agentId: 'b', status: 'done' as const, terminalAt: 2000, isBackgroundDispatch: false } as never],
     ])
     expect(hasLiveBackground(fleet as never)).toBe(true)
-    fleet.set('a', { agentId: 'a', status: 'done' as const, terminalAt: 3000 } as never)
+    fleet.set('a', { agentId: 'a', status: 'done' as const, terminalAt: 3000, isBackgroundDispatch: true } as never)
     expect(hasLiveBackground(fleet as never)).toBe(false)
   })
 

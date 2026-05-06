@@ -8,16 +8,32 @@
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 
-vi.mock("../config/loader.js", () => ({
-  loadConfig: vi.fn(() => ({
+// Mutable config seam so individual tests can swap in `drive:` blocks.
+const configMock = {
+  current: {
     switchroom: { version: 1 },
     telegram: { bot_token: "x", forum_chat_id: "1" },
     agents: { klanker: {} },
     vault: { path: "~/.switchroom/vault.enc" },
-  })),
+  } as Record<string, unknown>,
+};
+
+vi.mock("../config/loader.js", () => ({
+  loadConfig: vi.fn(() => configMock.current),
   resolvePath: (p: string) => p.replace(/^~/, "/tmp"),
   findConfigFile: () => "/tmp/switchroom.yaml",
   ConfigError: class ConfigError extends Error {},
+}));
+
+// Vault-secret resolver seam: tests opt in by populating this map and
+// configuring drive.google_client_id = 'vault:<key>'.
+const vaultMock = {
+  secrets: {} as Record<string, { kind: string; value: string } | null>,
+};
+vi.mock("../vault/vault.js", () => ({
+  getSecret: vi.fn((_pp: string, _vp: string, key: string) =>
+    vaultMock.secrets[key] ?? null,
+  ),
 }));
 
 import { __test, type DriveCliDeps } from "./drive.js";
@@ -84,6 +100,13 @@ describe("drive connect", () => {
     process.env.SWITCHROOM_GOOGLE_CLIENT_ID = "cid";
     process.env.SWITCHROOM_GOOGLE_CLIENT_SECRET = "csec";
     process.env.SWITCHROOM_APPROVER_USER_ID = "42";
+    configMock.current = {
+      switchroom: { version: 1 },
+      telegram: { bot_token: "x", forum_chat_id: "1" },
+      agents: { klanker: {} },
+      vault: { path: "~/.switchroom/vault.enc" },
+    };
+    vaultMock.secrets = {};
   });
 
   it("granted: writes vault slots and exits 0", async () => {
@@ -212,6 +235,155 @@ describe("drive connect", () => {
     const { deps, exit } = makeDeps();
     await __test.runConnect({ agentName: "klanker" }, deps);
     expect(exit.code).toBe(4);
+  });
+
+  // ─── drive: config block ────────────────────────────────────────────────
+  // Precedence is env > config: env vars exist for one-off override (CI,
+  // emergency rotation) and back-compat with the env-only flow shipped in
+  // #766. Config is the persistent baseline.
+
+  it("config: reads google_client_id/secret from drive: block when env is unset", async () => {
+    delete process.env.SWITCHROOM_GOOGLE_CLIENT_ID;
+    delete process.env.SWITCHROOM_GOOGLE_CLIENT_SECRET;
+    delete process.env.SWITCHROOM_APPROVER_USER_ID;
+    configMock.current = {
+      ...configMock.current,
+      drive: {
+        google_client_id: "cfg-id",
+        google_client_secret: "cfg-secret",
+        approvers: [42],
+      },
+    };
+    const { deps, exit, writes } = makeDeps();
+    await __test.runConnect({ agentName: "klanker" }, deps);
+    expect(exit.code).toBe(0);
+    expect(writes.token).toBe(1);
+    const oauthSpy = deps.runOAuth as ReturnType<typeof vi.fn>;
+    const cfgArg = oauthSpy.mock.calls[0]?.[0] as { client_id: string; client_secret: string };
+    expect(cfgArg.client_id).toBe("cfg-id");
+    expect(cfgArg.client_secret).toBe("cfg-secret");
+  });
+
+  it("config: env wins over config (precedence: env > config)", async () => {
+    process.env.SWITCHROOM_GOOGLE_CLIENT_ID = "env-id";
+    process.env.SWITCHROOM_GOOGLE_CLIENT_SECRET = "env-secret";
+    configMock.current = {
+      ...configMock.current,
+      drive: {
+        google_client_id: "cfg-id",
+        google_client_secret: "cfg-secret",
+        approvers: [42],
+      },
+    };
+    const { deps, exit } = makeDeps();
+    await __test.runConnect({ agentName: "klanker" }, deps);
+    expect(exit.code).toBe(0);
+    const oauthSpy = deps.runOAuth as ReturnType<typeof vi.fn>;
+    const cfgArg = oauthSpy.mock.calls[0]?.[0] as { client_id: string; client_secret: string };
+    expect(cfgArg.client_id).toBe("env-id");
+    expect(cfgArg.client_secret).toBe("env-secret");
+  });
+
+  it("config: vault: refs in google_client_id/secret are resolved", async () => {
+    delete process.env.SWITCHROOM_GOOGLE_CLIENT_ID;
+    delete process.env.SWITCHROOM_GOOGLE_CLIENT_SECRET;
+    vaultMock.secrets = {
+      "google-oauth-client-id": { kind: "string", value: "resolved-id" },
+      "google-oauth-client-secret": { kind: "string", value: "resolved-secret" },
+    };
+    configMock.current = {
+      ...configMock.current,
+      drive: {
+        google_client_id: "vault:google-oauth-client-id",
+        google_client_secret: "vault:google-oauth-client-secret",
+        approvers: [42],
+      },
+    };
+    const { deps, exit } = makeDeps();
+    await __test.runConnect({ agentName: "klanker" }, deps);
+    expect(exit.code).toBe(0);
+    const oauthSpy = deps.runOAuth as ReturnType<typeof vi.fn>;
+    const cfgArg = oauthSpy.mock.calls[0]?.[0] as { client_id: string; client_secret: string };
+    expect(cfgArg.client_id).toBe("resolved-id");
+    expect(cfgArg.client_secret).toBe("resolved-secret");
+  });
+
+  it("config: missing vault entry referenced by drive.google_client_id exits 4", async () => {
+    delete process.env.SWITCHROOM_GOOGLE_CLIENT_ID;
+    delete process.env.SWITCHROOM_GOOGLE_CLIENT_SECRET;
+    configMock.current = {
+      ...configMock.current,
+      drive: {
+        google_client_id: "vault:nope",
+        google_client_secret: "raw",
+        approvers: [42],
+      },
+    };
+    const { deps, exit, errOut } = makeDeps();
+    await __test.runConnect({ agentName: "klanker" }, deps);
+    expect(exit.code).toBe(4);
+    expect(errOut.join("\n")).toMatch(/vault key 'nope'/);
+  });
+
+  it("config: per-agent drive.approvers wins over top-level drive.approvers", async () => {
+    delete process.env.SWITCHROOM_APPROVER_USER_ID;
+    configMock.current = {
+      ...configMock.current,
+      agents: { klanker: { drive: { approvers: [777] } } },
+      drive: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+        approvers: [42],
+      },
+    };
+    const { deps, exit } = makeDeps();
+    await __test.runConnect({ agentName: "klanker" }, deps);
+    expect(exit.code).toBe(0);
+    const waitSpy = deps.waitForApproval as ReturnType<typeof vi.fn>;
+    const callArg = waitSpy.mock.calls[0]?.[0] as { approver_set: string[] };
+    expect(callArg.approver_set).toEqual(["user:777"]);
+  });
+
+  it("config: top-level drive.approvers used when no env, no flag, no per-agent override", async () => {
+    delete process.env.SWITCHROOM_APPROVER_USER_ID;
+    configMock.current = {
+      ...configMock.current,
+      drive: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+        approvers: [42],
+      },
+    };
+    const { deps, exit } = makeDeps();
+    await __test.runConnect({ agentName: "klanker" }, deps);
+    expect(exit.code).toBe(0);
+    const waitSpy = deps.waitForApproval as ReturnType<typeof vi.fn>;
+    const callArg = waitSpy.mock.calls[0]?.[0] as { approver_set: string[] };
+    expect(callArg.approver_set).toEqual(["user:42"]);
+  });
+
+  it("missing all sources (env + config): exits 4 with helpful message naming both", async () => {
+    delete process.env.SWITCHROOM_GOOGLE_CLIENT_ID;
+    delete process.env.SWITCHROOM_GOOGLE_CLIENT_SECRET;
+    delete process.env.SWITCHROOM_APPROVER_USER_ID;
+    const { deps, exit, errOut } = makeDeps();
+    await __test.runConnect({ agentName: "klanker" }, deps);
+    expect(exit.code).toBe(4);
+    const blob = errOut.join("\n");
+    expect(blob).toMatch(/switchroom\.yaml/);
+    expect(blob).toMatch(/SWITCHROOM_GOOGLE_CLIENT_ID/);
+  });
+
+  it("missing approver across all sources: exits 4 naming both options", async () => {
+    delete process.env.SWITCHROOM_APPROVER_USER_ID;
+    // client id/secret still come from env; only approver is missing.
+    const { deps, exit, errOut } = makeDeps();
+    await __test.runConnect({ agentName: "klanker" }, deps);
+    expect(exit.code).toBe(4);
+    const blob = errOut.join("\n");
+    expect(blob).toMatch(/drive\.approvers/);
+    expect(blob).toMatch(/SWITCHROOM_APPROVER_USER_ID/);
+    expect(blob).toMatch(/--approver/);
   });
 });
 

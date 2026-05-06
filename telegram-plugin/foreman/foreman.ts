@@ -114,14 +114,32 @@ try {
 }
 
 // ─── Bot token ────────────────────────────────────────────────────────────
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN
-if (!TOKEN) {
-  process.stderr.write(
-    `foreman: TELEGRAM_BOT_TOKEN required\n` +
-    `  set in ${ENV_FILE}\n` +
-    `  format: TELEGRAM_BOT_TOKEN=123456789:AAH...\n`,
-  )
-  process.exit(1)
+// Issue #758: when bot_token is a `vault:` ref and no .env was written,
+// materialize it from the vault at startup (in-memory only).
+let TOKEN: string
+try {
+  const { materializeBotToken, BotTokenMaterializeError } = await import('../../src/telegram/materialize-bot-token.js')
+  try {
+    TOKEN = await materializeBotToken()
+  } catch (err) {
+    if (err instanceof BotTokenMaterializeError) {
+      process.stderr.write(`foreman: ${err.message}\n`)
+      process.exit(1)
+    }
+    throw err
+  }
+} catch (err) {
+  if (process.env.TELEGRAM_BOT_TOKEN) {
+    TOKEN = process.env.TELEGRAM_BOT_TOKEN
+  } else {
+    process.stderr.write(
+      `foreman: TELEGRAM_BOT_TOKEN required\n` +
+      `  set in ${ENV_FILE}\n` +
+      `  format: TELEGRAM_BOT_TOKEN=123456789:AAH...\n` +
+      `  (token-materialization helper failed to load: ${(err as Error).message})\n`,
+    )
+    process.exit(1)
+  }
 }
 
 // ─── Access list ──────────────────────────────────────────────────────────

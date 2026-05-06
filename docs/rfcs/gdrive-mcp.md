@@ -12,7 +12,7 @@ Add a Google Drive MCP server so agents can read and (with explicit approval) wr
 
 ## 2. MCP server choice
 
-**Pinned:** [`taylorwilsdon/google_workspace_mcp`](https://github.com/taylorwilsdon/google_workspace_mcp), pin tag `v0.5.x` (latest stable as of 2026-05). Track a specific commit SHA in `switchroom.yaml` rather than a floating tag so upgrades are explicit.
+**Pinned:** [`taylorwilsdon/google_workspace_mcp`](https://github.com/taylorwilsdon/google_workspace_mcp), pinned to **v1.20.3** (commit `f3c7dc5df2641c8545abc9e8f402d794f2853745`), MIT-licensed. The RFC originally targeted `v0.5.x`, but no such tag exists upstream — v1.20.3 is the validated pin used by the implementation. Track the explicit commit SHA in `switchroom.yaml` rather than a floating tag so upgrades are explicit.
 
 - **Runtime:** Python 3.11+, run via `uvx` so no system-wide install is required. Switchroom's existing MCP-subprocess machinery already supports `uvx`-launched servers.
 - **License:** MIT.

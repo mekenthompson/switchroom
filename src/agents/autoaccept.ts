@@ -78,14 +78,36 @@ export interface AutoacceptResult {
 // is true (one-release rollback knob).
 export const PROMPTS: PromptRule[] = [
   {
-    // Dev-channels acknowledgement — shown once per machine when
-    // --dangerously-load-development-channels is first used. Tightly
-    // scoped to "development channels" to avoid over-matching per-tool
-    // confirmations like "Yes, I accept this file edit." (those must
-    // fall through to the plugin's permission_request flow).
+    // NEW dev-channels prompt wording (Claude Code mid-2026+):
+    //   WARNING: Loading development channels
+    //   ❯ 1. I am using this for local development
+    //     2. Exit
+    // Option 1 is already highlighted, so just Enter — no Down needed.
+    // Tightly scoped to "Loading … development channels" so we don't
+    // over-match anywhere else.
+    name: "dev-channels-loading",
+    match: /Loading.{1,30}development.{1,30}channels/,
+    keys: ["Enter"],
+  },
+  {
+    // Belt-and-suspenders for the new prompt: match on the option-row
+    // text in case the WARNING header has scrolled past the capture
+    // window. "local development" is unique to this prompt and won't
+    // appear in per-tool confirmations.
+    name: "dev-channels-local",
+    match: /using this for local development/,
+    keys: ["Enter"],
+  },
+  {
+    // LEGACY dev-channels acknowledgement — old wording before the 2026
+    // TUI rename ("Yes, I accept the use of development channels"). Kept
+    // as a fallback for older Claude Code releases. Tightly scoped to
+    // "development channels" to avoid over-matching per-tool confirmations
+    // like "Yes, I accept this file edit." (those must fall through to
+    // the plugin's permission_request flow).
     name: "dev-channels",
     match: /I.{0,5}accept.{0,80}development.{0,10}channels/,
-    // Down + Enter — selects the second option (the "I accept" one).
+    // Down + Enter — selects the second option (the legacy "I accept" one).
     keys: ["Down", "Enter"],
   },
   {

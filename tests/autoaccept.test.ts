@@ -222,6 +222,18 @@ describe("PROMPTS — regex sanity (translated from bin/autoaccept.exp)", () => 
       expected: "dev-channels",
     },
     {
+      // NEW prompt wording (mid-2026+): WARNING header.
+      text: "WARNING: Loading development channels",
+      expected: "dev-channels-loading",
+    },
+    {
+      // NEW prompt wording (mid-2026+): option-row text. The header
+      // matcher is preferred (defined first) but if scrollback hides it,
+      // the option-row matcher catches the prompt.
+      text: "❯ 1. I am using this for local development",
+      expected: "dev-channels-local",
+    },
+    {
       text: "Anthropic API   /   Bedrock   /   Vertex",
       expected: "provider",
     },
@@ -244,6 +256,83 @@ describe("PROMPTS — regex sanity (translated from bin/autoaccept.exp)", () => 
     const text = "Yes, I accept this file edit";
     const hit = PROMPTS.find((p) => p.match.test(text));
     expect(hit).toBeUndefined();
+  });
+
+  it("does NOT match other 'accept ... development' phrasings that aren't the dev-channels prompt", () => {
+    // Defensive: confirm the new matchers don't fire on tangentially
+    // related strings. Per-tool confirmations and any other dialog must
+    // remain the security boundary.
+    const negatives = [
+      "Yes, accept this development file edit",
+      "Allow Claude to make development changes to this file?",
+      "I am using this for production",
+    ];
+    for (const text of negatives) {
+      const hit = PROMPTS.find((p) => p.match.test(text));
+      expect(hit, `unexpectedly matched: ${text}`).toBeUndefined();
+    }
+  });
+});
+
+describe("runAutoaccept — new dev-channels prompt dispatch", () => {
+  // Re-declare the local helper here so this block can drive captures
+  // independent of the module-level setup.
+  function setupTmuxLocal(captureScreens: string[]) {
+    const sentKeys: string[][] = [];
+    let captureIdx = 0;
+    mockedExec.mockImplementation((_bin: string, args: readonly string[]) => {
+      const subcmd = args[2];
+      if (subcmd === "capture-pane") {
+        const next = captureIdx < captureScreens.length
+          ? captureScreens[captureIdx]
+          : "";
+        captureIdx++;
+        return Buffer.from(next, "utf8");
+      }
+      if (subcmd === "send-keys") {
+        sentKeys.push([...args.slice(5)]);
+        return Buffer.from("");
+      }
+      return Buffer.from("");
+    });
+    return { sentKeys };
+  }
+
+  it("fires the new 'Loading development channels' prompt with Enter only (no Down)", async () => {
+    const { sentKeys } = setupTmuxLocal([
+      "WARNING: Loading development channels\n❯ 1. I am using this for local development\n  2. Exit",
+      "",
+    ]);
+    const res = await runAutoaccept({
+      agentName: "a",
+      idleTimeoutMs: 1,
+      pollIntervalMs: 0,
+      now: () => 0,
+      sleep: () => {},
+      maxPolls: 4,
+    });
+    // The header matcher is defined first and wins.
+    expect(res.fired).toContain("dev-channels-loading");
+    // Critical: keys are Enter only — no Down keystroke would land on the
+    // "Exit" option and kill claude on first launch.
+    expect(sentKeys[0]).toEqual(["Enter"]);
+  });
+
+  it("still fires the legacy dev-channels prompt with Down+Enter for older Claude Code releases", async () => {
+    const { sentKeys } = setupTmuxLocal([
+      "Yes, I accept the use of development channels",
+      "",
+    ]);
+    const res = await runAutoaccept({
+      agentName: "a",
+      idleTimeoutMs: 1,
+      pollIntervalMs: 0,
+      now: () => 0,
+      sleep: () => {},
+      maxPolls: 4,
+    });
+    expect(res.fired).toContain("dev-channels");
+    expect(sentKeys[0]).toEqual(["Down", "Enter"]);
   });
 });
 

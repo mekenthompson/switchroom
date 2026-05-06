@@ -524,11 +524,32 @@ export interface ReconcileAndRestartOpts {
  * and every restart picks them up without the operator having to
  * remember to run `switchroom systemd install`.
  */
-export function regenerateSystemdUnitsForAgent(
+/**
+ * Pure planning function — given resolved config, decide which systemd
+ * units (agent + optional gateway) should exist for an agent and whether
+ * each one's content drifts from disk.
+ *
+ * No fs writes, no daemon-reload. Split out from
+ * `regenerateSystemdUnitsForAgent` so unit tests can drive the decision
+ * logic directly without scribbling on the real ~/.config/systemd/user
+ * dir or shelling out to systemctl. The `readUnit` test seam lets tests
+ * inject canned on-disk content per path.
+ */
+export interface UnitDriftRecord {
+  unitName: string;
+  unitPath: string;
+  desired: string;
+  current: string;
+  drifted: boolean;
+}
+
+export function planAgentSystemdUnits(
   name: string,
   config: SwitchroomConfig,
   agentsDir: string,
-): string[] {
+  readUnit: (path: string) => string = (p) =>
+    existsSync(p) ? readFileSync(p, "utf-8") : "",
+): UnitDriftRecord[] {
   const agentConfig = config.agents[name];
   if (!agentConfig) return [];
 
@@ -538,35 +559,76 @@ export function regenerateSystemdUnitsForAgent(
 
   const resolved = resolveAgentConfig(config.defaults, config.profiles, agentConfig);
   const timezone = resolveTimezone(config, resolved);
+  // Without resolving these flags here, generateUnit() defaulted both to
+  // false, so a legacy_pty:true agent would render the tmux unit on every
+  // reconcile pass — disagreeing with what installAllUnits writes and
+  // ping-ponging the unit file. Mirror what installAllUnits does so the
+  // drift comparison below answers the right question.
+  const legacyPty = resolved.experimental?.legacy_pty === true;
+  const legacyAutoacceptExpect =
+    resolved.experimental?.legacy_autoaccept_expect === true;
 
-  const changed: string[] = [];
+  const records: UnitDriftRecord[] = [];
 
-  const desiredUnit = generateUnit(name, agentDir, useAutoaccept, gwName, timezone);
+  const desiredUnit = generateUnit(
+    name,
+    agentDir,
+    useAutoaccept,
+    gwName,
+    timezone,
+    legacyPty,
+    legacyAutoacceptExpect,
+  );
   const agentUnitPath = unitFilePath(name);
-  const currentUnit = existsSync(agentUnitPath) ? readFileSync(agentUnitPath, "utf-8") : "";
-  if (currentUnit !== desiredUnit) {
-    installUnit(name, desiredUnit);
-    changed.push(agentUnitPath);
-  }
+  const currentUnit = readUnit(agentUnitPath);
+  records.push({
+    unitName: name,
+    unitPath: agentUnitPath,
+    desired: desiredUnit,
+    current: currentUnit,
+    drifted: currentUnit !== desiredUnit,
+  });
 
   if (useAutoaccept && gwName) {
     const stateDir = resolve(agentDir, "telegram");
     const adminEnabled = resolved.admin === true;
-    const desiredGw = generateGatewayUnit(stateDir, name, adminEnabled);
+    // Pass legacyPty so the gateway env (SWITCHROOM_TMUX_SUPERVISOR=1) is
+    // stamped consistently with installAllUnits — without it, drift detection
+    // would falsely flag (or skip) gateway-unit changes whenever legacy_pty
+    // toggled.
+    const desiredGw = generateGatewayUnit(stateDir, name, adminEnabled, legacyPty);
     const gwUnitPath = unitFilePath(gwName);
-    const currentGw = existsSync(gwUnitPath) ? readFileSync(gwUnitPath, "utf-8") : "";
-    if (currentGw !== desiredGw) {
-      installUnit(gwName, desiredGw);
-      changed.push(gwUnitPath);
-    }
+    const currentGw = readUnit(gwUnitPath);
+    records.push({
+      unitName: gwName,
+      unitPath: gwUnitPath,
+      desired: desiredGw,
+      current: currentGw,
+      drifted: currentGw !== desiredGw,
+    });
   }
 
+  return records;
+}
+
+export function regenerateSystemdUnitsForAgent(
+  name: string,
+  config: SwitchroomConfig,
+  agentsDir: string,
+): string[] {
+  const plan = planAgentSystemdUnits(name, config, agentsDir);
+  const changed: string[] = [];
+  for (const rec of plan) {
+    if (rec.drifted) {
+      installUnit(rec.unitName, rec.desired);
+      changed.push(rec.unitPath);
+    }
+  }
   if (changed.length > 0) {
     // Re-read disk so systemd picks up the new ExecStart / Environment /
     // EnvironmentFile directives before the next `restart` fires.
     daemonReload();
   }
-
   return changed;
 }
 
@@ -1488,20 +1550,35 @@ export function registerAgentCommand(program: Command): void {
               configPath,
               { preserveClaudeMd: opts.preserveClaudeMd },
             );
-            if (result.changes.length === 0) {
+            // Also regenerate systemd units so a yaml change that affects
+            // which unit template gets rendered (legacy_pty toggle, fresh
+            // agent that should default to tmux but currently has a stale
+            // legacy unit on disk, etc.) actually triggers regen + daemon-
+            // reload instead of falsely reporting "already in sync". This
+            // mirrors what reconcileAndRestartAgent already does for the
+            // restart-bearing path; without it the standalone `reconcile`
+            // CLI verb misses systemd-unit drift entirely.
+            const unitChanges = regenerateSystemdUnitsForAgent(n, config, agentsDir);
+            const allChanges = [...result.changes, ...unitChanges];
+            if (allChanges.length === 0) {
               console.log(chalk.gray(`  ${n}: already in sync`));
             } else {
               agentsTouched++;
-              totalChanges += result.changes.length;
-              console.log(chalk.green(`  ${n}: reconciled (${result.changes.length} file${result.changes.length === 1 ? "" : "s"})`));
+              totalChanges += allChanges.length;
+              console.log(chalk.green(`  ${n}: reconciled (${allChanges.length} file${allChanges.length === 1 ? "" : "s"})`));
 
               // Categorize and display changes by reload semantics
               const semantics = result.changesBySemantics;
               if (semantics) {
-                const { hot, staleTillRestart, restartRequired } = semantics;
+                const { hot, staleTillRestart } = semantics;
+                // Treat changed systemd units as restart-required: an
+                // ExecStart / Type / EnvironmentFile flip only takes effect
+                // after `systemctl restart`. daemon-reload alone does not
+                // re-spawn the running process under the new unit.
+                const restartRequired = [...semantics.restartRequired, ...unitChanges];
 
                 if (restartRequired.length > 0) {
-                  console.log(chalk.yellow("\n  Changed (restart required — soul/MCP/settings/launch):"));
+                  console.log(chalk.yellow("\n  Changed (restart required — soul/MCP/settings/launch/systemd):"));
                   for (const f of restartRequired) {
                     console.log(chalk.yellow(`    - ${f}`));
                   }
@@ -1544,13 +1621,17 @@ export function registerAgentCommand(program: Command): void {
             }
 
             // Determine whether to restart: explicit flag, graceful flag, or auto-restart
-            // triggered by restart-required changes (soul fields, MCP, settings, etc.)
+            // triggered by restart-required changes (soul fields, MCP, settings,
+            // or a regenerated systemd unit). Unit drift counts as restart-required
+            // because daemon-reload alone does not re-spawn the running process
+            // under the new ExecStart / Type.
             const changesBySemantics = result.changesBySemantics;
             const autoRestartNeeded =
               !opts.noRestart &&
-              changesBySemantics !== undefined &&
-              changesBySemantics.restartRequired.length > 0;
-            const shouldRestart = (opts.restart || opts.gracefulRestart || autoRestartNeeded) && result.changes.length > 0;
+              ((changesBySemantics !== undefined &&
+                changesBySemantics.restartRequired.length > 0) ||
+                unitChanges.length > 0);
+            const shouldRestart = (opts.restart || opts.gracefulRestart || autoRestartNeeded) && allChanges.length > 0;
 
             if (shouldRestart) {
               try {

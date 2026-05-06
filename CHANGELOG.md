@@ -1,41 +1,19 @@
 # Changelog
 
-## v0.7.2 — 2026-05-06
+## v0.5.0 — 2026-05-06
 
-### Fixed
+Initial release of `switchroom` (npm package renamed from
+`switchroom-ai`). The historical `switchroom-ai` package on npm is
+deprecated — see https://www.npmjs.com/package/switchroom for the new
+home. Version reset to 0.5.0; the 25 prior `switchroom-ai` tags are
+documentation-only and will be cleaned up out-of-band.
 
-- **`switchroom agent restart` preflight no longer rejects v0.7.0+
-  units (#745)** — the preflight in `src/cli/agent.ts` was written
-  against the legacy `expect autoaccept.exp` wrapper and refused to
-  start any unit that didn't contain it. v0.7.0 flipped the default
-  to the TS `autoaccept-poll` ExecStartPost, which broke restarts
-  fleet-wide. Preflight now accepts either handler and only requires
-  the `expect` binary on PATH when the legacy wrapper is in use.
-  Versions 0.7.0 and 0.7.1 are unusable in default mode without
-  `--force` — upgrade directly to 0.7.2.
-
-## v0.7.0 — 2026-05-06
+This release consolidates the in-flight work from PRs #738 / #740 /
+#742 / #743 / #745 / #747 into a single disciplined first cut on the
+new package name. Substantive changes from prior `switchroom-ai@0.6.14`:
 
 ### Changed
 
-- **First-run autoaccept now uses a TS pane-poller instead of `expect`
-  (#725 PR-4)** — the small set of first-run claude TUI prompts (theme
-  picker, MCP trust, dev-channels acknowledgement, API provider) are
-  now dispatched by a `tmux capture-pane` + `tmux send-keys` poller
-  fired from the agent unit's `ExecStartPost=`. Soft-fail throughout;
-  exits cleanly after ~30s of pane idle. The legacy `expect` wrapper
-  (`bin/autoaccept.exp`) is preserved as a one-release rollback knob:
-  set `experimental.legacy_autoaccept_expect: true` per-agent to revert
-  to the historical wrapper while the new path stabilises.
-- **`!` interrupt marker now delivers SIGINT via `tmux send-keys C-c`
-  for tmux-supervised agents (#725 PR-3)**, falling back to
-  `systemctl kill --signal=INT` on send-keys failure. Better signal
-  delivery to runaway tool children — send-keys hits the pane's
-  foreground process (claude or whatever child Bash is currently
-  spinning), where the cgroup-wide kill also wakes the tmux server
-  and supervisor wrappers and may not always reach grandchildren
-  cleanly. `experimental.legacy_pty: true` agents continue to use
-  the cgroup path unchanged.
 - **tmux supervisor is now the default (#725 PR-1)** — `script -qfc`
   PTY wrapping is replaced by per-agent `tmux new-session` for all
   agents by default. The user-facing flag rename is
@@ -46,15 +24,20 @@
   is now a hard prereq (`install.sh` enforces); hosts without tmux
   must opt agents into legacy via `experimental.legacy_pty: true`.
   See `docs/tmux-supervisor-fanout.md` for the rollback runbook.
+- **`!` interrupt marker now delivers SIGINT via `tmux send-keys C-c`
+  for tmux-supervised agents (#725 PR-3)**, falling back to
+  `systemctl kill --signal=INT` on send-keys failure. Better signal
+  delivery to runaway tool children.
+- **First-run autoaccept now uses a TS pane-poller instead of `expect`
+  (#725 PR-4)** — the small set of first-run claude TUI prompts (theme
+  picker, MCP trust, dev-channels acknowledgement, API provider) are
+  now dispatched by a `tmux capture-pane` + `tmux send-keys` poller
+  fired from the agent unit's `ExecStartPost=`. Soft-fail throughout;
+  exits cleanly after ~30s of pane idle. The legacy `expect` wrapper
+  (`bin/autoaccept.exp`) is preserved as a one-release rollback knob:
+  set `experimental.legacy_autoaccept_expect: true` per-agent to revert.
 - **`experimental.tmux_supervisor` deprecated** — still parseable for
-  one release with a one-time stderr warning. Migration is automatic:
-  `tmux_supervisor: false` → `legacy_pty: true`; `tmux_supervisor:
-  true` → omit (or `legacy_pty: false`). Compatibility shim will be
-  removed in the next minor release.
-- **`SWITCHROOM_TMUX_SUPERVISOR` env var unchanged** — the user-facing
-  flag was renamed but the gateway/boot-probes/boot-card env-var
-  contract is preserved. The gateway unit stamps `=1` in the default
-  (tmux) configuration; `legacy_pty: true` omits the var.
+  one release with a one-time stderr warning. Migration is automatic.
 
 ### Added
 
@@ -64,71 +47,19 @@
   `~/.switchroom/agents/<agent>/crash-reports/<ISO8601>-<reason>.txt`
   so RCA has the live screen state at the moment of the kill.
   Retention: 20 most recent files per agent. Size cap: 10 MB per
-  file. Capture is best-effort — a missing tmux/socket/file-write
-  failure never blocks the restart. Operator-initiated restarts
-  (`switchroom agent restart`) skip capture; only watchdog-triggered
-  restarts produce reports. New helper module `src/agents/tmux.ts`
-  exposes `captureAgentPane()` for code paths already in TS;
-  `bin/bridge-watchdog.sh` uses an inline bash mirror in the hot
-  path. See `docs/crash-reports.md`.
-- **tmux supervisor pre-fanout hardening (#725)** — PID resolver walks
-  the unit cgroup to pick the heaviest-RSS claude/node process, so
-  boot cards and `getAgentStatus` no longer report the ~2 MB tmux
-  server PID under `Type=forking`. Mirrors `agent_main_pid()` in
-  `bin/bridge-watchdog.sh`. Companion runbook for the canary fanout
-  lives at [`docs/tmux-supervisor-fanout.md`](docs/tmux-supervisor-fanout.md).
-- **tmux supervisor opt-in flag (#725 Phase 1)** — new per-agent
-  `experimental.tmux_supervisor` boolean (default `false`). When `true`,
-  the systemd unit replaces `script -qfc` with `tmux new-session` so
-  external `tmux send-keys` can drive the running Claude REPL (foundation
-  for #163 `/remotecontrol` and broader slash-command passthrough). Ships
-  a managed `tmux.conf` per agent (`default-terminal xterm-256color`,
-  `history-limit 100000`, `status off`, `remain-on-exit off`).
-  Patches `bin/autoaccept.exp` with `set timeout 30` and `interact { eof
-  exit }` so external send-keys reaches Claude. `switchroom agent attach`
-  now actually attaches to the tmux session when the flag is on.
-- **Webhook dispatch (#715)** — verified webhook events now trigger fresh
-  `claude -p` invocations so agents can react in Telegram without polling
-  `webhook-events.jsonl` manually.
-  - New module `src/web/webhook-dispatch.ts`:
-    - **Static matcher** (`event`, `actions`, `labels_any`, `labels_all`,
-      `exclude_authors`) — no CEL/expression parser; fully JSON-Schema-validatable.
-    - **`{{field}}` template rendering** against a flat helper bag:
-      `repo`, `number`, `title`, `html_url`, `author`, `labels`, `action`, `event`.
-    - **Cooldown** — same `(event, repo, number, rule-index)` combination
-      coalesces within the window. State on disk per-agent at
-      `<agent>/telegram/webhook-cooldown.json`.
-    - **Quiet hours** — wraps midnight when `start > end`. Skips dispatch
-      entirely (event still in JSONL for manual review).
-    - **`spawnAgentOneShot()`** — same env setup as `buildCronScript` in
-      `scaffold.ts`: OAuth forced, `ANTHROPIC_API_KEY` unset, token injected
-      from `.oauth-token`, `CLAUDE_CONFIG_DIR` and `SWITCHROOM_AGENT_NAME` set.
-  - `WebhookHandlerArgs` gains optional `dispatchConfig` field; handler
-    calls `evaluateDispatch()` after JSONL append (non-fatal — dispatch
-    errors never downgrade the 202).
-  - `webhook_dispatch` added to `TelegramChannelSchema` in
-    `src/config/schema.ts`; cascades via existing channels deep-merge.
-  - **CLI**: `switchroom telegram dispatch test --agent <name> --payload
-    <file.json> --event <type>` — dry-runs matchers offline, prints which
-    rules match and the rendered prompt without spawning.
-  - Test fixtures in `tests/fixtures/` (GitHub PR opened/labeled/dependabot/push).
-  - 35 unit tests covering all matcher combinations, template rendering,
-    cooldown state machine, quiet hours, and `evaluateDispatch` integration.
+  file. See `docs/crash-reports.md`.
+- **Preflight accepts `autoaccept-poll` wiring (#745)** — the
+  `switchroom agent restart` preflight in `src/cli/agent.ts` now
+  accepts either the legacy `expect autoaccept.exp` wrapper or the
+  new `autoaccept-poll` ExecStartPost, and only requires the `expect`
+  binary on PATH when the legacy wrapper is in use.
 
-- **Webhook ingest hardening (#714)** — two defenses added to
-  `src/web/webhook-handler.ts` before auto-dispatch ships:
-  - **Dedup by `X-GitHub-Delivery`**: per-agent LRU (1000 entries, 24h
-    retention) backed by `~/.switchroom/agents/<agent>/telegram/webhook-dedup.json`.
-    Replay returns 200 `{ok:true,deduped:true}` and skips JSONL append.
-    Generic source has no delivery header — dedup is skipped silently.
-  - **Per-source token-bucket rate limit**: off by default; opt-in via
-    `channels.telegram.webhook_rate_limit.rpm` in switchroom.yaml (set
-    e.g. `rpm: 60` for one request/sec sustained, burst equal to rpm).
-    When enabled, exceeding the limit returns 429 with `Retry-After`.
-    First throttle event per `(agent, source)` per 60s window is written
-    to `<agent>/telegram/issues.jsonl` for Telegram visibility.
-  - `webhook_rate_limit` added to `TelegramChannelSchema` in
-    `src/config/schema.ts`; cascades via the existing channels deep-merge.
+### Fixed
+
+- **Build now bundles `dist/cli/autoaccept-poll.js` (#747)** — the
+  systemd unit's `ExecStartPost=` references the bundled `.js`
+  artifact; prior internal cuts shipped without it, breaking
+  default-mode units on fresh installs.
 
 ## v0.6.14 — 2026-05-05
 

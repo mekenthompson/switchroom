@@ -3,7 +3,7 @@
 # switchroom-cli-wrapper.sh — run the switchroom CLI via bun, not node.
 #
 # Context: the packaged `switchroom` binary installed by `bun install -g
-# switchroom-ai` has `#!/usr/bin/env node` as its shebang. On hosts that
+# switchroom` has `#!/usr/bin/env node` as its shebang. On hosts that
 # run bun but not node (which is switchroom's documented runtime), every
 # invocation of the binary ENOENTs silently.
 #

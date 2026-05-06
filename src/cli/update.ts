@@ -32,7 +32,7 @@ const RESTART_SETTLE_TIMEOUT_MS = 30_000;
  *
  * Strategy:
  *   1. Walk up from this source file looking for a package.json with
- *      `"name": "switchroom-ai"` and a `.git` sibling. This handles both `bun
+ *      `"name": "switchroom"` and a `.git` sibling. This handles both `bun
  *      link`-installed and direct-checkout invocations.
  *   2. Fall back to `realpath $(command -v switchroom)` and walk up from there.
  *
@@ -46,7 +46,7 @@ function locateSwitchroomInstallDir(): string | null {
     if (existsSync(pkgPath)) {
       try {
         const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
-        if (pkg.name === "switchroom-ai" && existsSync(join(dir, ".git"))) {
+        if (pkg.name === "switchroom" && existsSync(join(dir, ".git"))) {
           return dir;
         }
       } catch { /* ignore */ }

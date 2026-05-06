@@ -16,9 +16,9 @@ Switchroom asks the user to approve sensitive actions through several independen
 
 Approval-shaped surfaces in the codebase today:
 
-- **Deferred-secret cards** with `vd:unlock|cancel` callbacks — `telegram-plugin/gateway/gateway.ts:5497`.
+- **Deferred-secret cards** with `vd:unlock|cancel` callbacks — `telegram-plugin/gateway/gateway.ts:5555`.
 - **Vault grants** via the `/vault grant` wizard, persisted to SQLite at `~/.switchroom/vault-grants.db` — schema in `src/vault/grants.ts`.
-- **Operator and dashboard prompts** under `op:` and `auth:` callback prefixes — `telegram-plugin/gateway/gateway.ts`.
+- **Operator and dashboard prompts** under `op:` and `auth:` callback prefixes — `telegram-plugin/gateway/gateway.ts` (callback dispatcher at `:8285`; infrastructure-prefix list at `:2304`).
 
 Adding a Google Drive MCP, then Notion, Slack, and Gmail, means adding a fresh approval surface every time unless the shape is unified. Each duplicates: callback parser, storage decision, TTL semantics, revocation command, audit trail. The user sees inconsistent UX and there is no `/revoke-all` killswitch covering everything.
 
@@ -61,20 +61,32 @@ This is a real bug fix needed for the kernel (and arguably for any long-running 
 
 ## 5. Decision storage
 
-One table, ordinary SQLite columns, no HMAC, no chains, no nonce side-table.
+Two tables in `vault-grants.db`: a **grants** table for durable decisions, and a **nonces** table that holds the per-prompt 8-hex callback request id and tracks single-use redemption. No HMAC, no chains.
 
 ```sql
 CREATE TABLE approval_decisions (
-  id                 TEXT PRIMARY KEY,    -- UUID v4
-  agent_unit         TEXT NOT NULL,       -- systemd unit, verified via peercred + verifySystemdUnit
-  scope              TEXT NOT NULL,       -- see §6
-  decision           TEXT NOT NULL,       -- allow_once | allow_always | allow_ttl | deny | deny_perm
-  ttl_expires_at     INTEGER,             -- unix-ms, NULL for non-ttl
-  granted_at         INTEGER NOT NULL,
-  granted_by_user_id INTEGER NOT NULL,    -- Telegram user_id
-  last_used_at       INTEGER,             -- for sliding-window TTL + staleness
-  revoked_at         INTEGER,
-  revoke_reason      TEXT
+  id                       TEXT PRIMARY KEY,    -- UUID v4
+  agent_unit               TEXT NOT NULL,       -- systemd unit, verified via peercred + verifySystemdUnit
+  scope                    TEXT NOT NULL,       -- see §6
+  decision                 TEXT NOT NULL,       -- allow_once | allow_always | allow_ttl | deny | deny_perm
+  ttl_expires_at           INTEGER,             -- unix-ms, NULL for non-ttl
+  granted_at               INTEGER NOT NULL,
+  granted_by_user_id       INTEGER NOT NULL,    -- Telegram user_id
+  approver_set_canonical   TEXT NOT NULL,       -- canonicalized JSON of allowFrom at grant time; see §5.1
+  last_used_at             INTEGER,             -- for sliding-window TTL + staleness
+  revoked_at               INTEGER,
+  revoke_reason            TEXT
+);
+
+CREATE TABLE approval_nonces (
+  request_id   TEXT PRIMARY KEY,    -- 8-hex from generateAskId; appears in apv:<id>:... callback_data
+  decision_id  TEXT,                -- FK into approval_decisions once a tap lands; NULL while pending
+  agent_unit   TEXT NOT NULL,
+  scope        TEXT NOT NULL,
+  why          TEXT,                -- agent-supplied "why this access" string
+  created_at   INTEGER NOT NULL,    -- unix-ms
+  expires_at   INTEGER NOT NULL,    -- unix-ms; 5-min default per §8.1
+  consumed_at  INTEGER              -- unix-ms; set atomically on first tap; subsequent taps no-op
 );
 
 CREATE TABLE approval_audit (
@@ -96,8 +108,8 @@ The "same-uid attacker writes a forged grant row directly to SQLite" attack is a
 
 A grant recorded when `allowFrom = ["U1"]` must not silently extend if `allowFrom` later becomes `["U1", "U2"]`. We don't HMAC-bind the approver set into the row, but we do compare on lookup:
 
-- Store the approver set captured at grant time alongside the row (canonicalized JSON: NFC-normalized, sorted lexicographically, no insignificant whitespace).
-- At every `lookupDecision`, re-read the current `allowFrom`, canonicalize identically, compare.
+- Store the approver set captured at grant time in the `approver_set_canonical` column (canonicalized JSON: NFC-normalized, sorted lexicographically, no insignificant whitespace).
+- At every `lookupDecision`, re-read the current `allowFrom`, canonicalize identically, compare against the row's `approver_set_canonical`.
 - If they differ: write a `drift_revoke` audit row, return no-grant, force re-prompt under the new approver set.
 - If the current set has more than one approver, all standing grants are dormant until the operator re-confirms each one.
 
@@ -133,7 +145,7 @@ apv:<8-hex request id>:<action>[:<param>]
 ```
 
 - 8-hex request id matches `generateAskId` convention.
-- Single-use enforced by an atomic `UPDATE approval_decisions SET ... WHERE id = ? AND consumed_at IS NULL` with a rowcount check. A re-tap of an already-consumed callback returns a brief "this prompt expired" toast via `answerCallbackQuery`.
+- Single-use enforced by an atomic `UPDATE approval_nonces SET consumed_at = ? WHERE request_id = ? AND consumed_at IS NULL` with a rowcount check. Only on rowcount=1 does the kernel proceed to insert/update the corresponding `approval_decisions` row. A re-tap of an already-consumed callback returns a brief "this prompt expired" toast via `answerCallbackQuery`.
 - Examples: `apv:a3f1b9c2:allow`, `apv:a3f1b9c2:ttl:1h`, `apv:a3f1b9c2:deny`.
 
 Full scope and humanized title are stored server-side keyed by request id.
@@ -152,7 +164,7 @@ The card surfaces only the common subset. Full mode set is editable via `/approv
 
 ## 8. Telegram approval card UX
 
-One shape, every surface. Built on the existing `aq:` (ask_user) primitive at `telegram-plugin/gateway/gateway.ts:8209` — that path already handles topic routing, quote-reply targeting, reaction lifecycle, and `allowFrom` enforcement. The kernel registers a new `apv:` callback handler and reuses the rest.
+One shape, every surface. Built on the existing `aq:` (ask_user) primitive at `telegram-plugin/gateway/gateway.ts:8321` — that path already handles topic routing, quote-reply targeting, reaction lifecycle, and `allowFrom` enforcement. The kernel registers a new `apv:` callback handler and reuses the rest.
 
 ### 8.1 Card states
 
@@ -191,9 +203,9 @@ The kernel calls `humanize()` before rendering but never blocks on it.
 
 ### 8.3 Patterns preserved through migration
 
-- **`perm:more` expand button** at `gateway.ts:1946` — basis of the new card's expand. Same UX shape.
-- **`vd:unlock` deferred-secret card flow** at `gateway.ts:5497` — Phase 2 migrates this surface; the inline-passphrase capture step must survive the move.
-- **`aq:` topic-routing + reaction lifecycle** at `gateway.ts:8209` — inherit, do not rebuild.
+- **`perm:more` expand button** at `gateway.ts:1980` — basis of the new card's expand. Same UX shape.
+- **`vd:unlock` deferred-secret card flow** at `gateway.ts:5555` — Phase 2 migrates this surface; the inline-passphrase capture step must survive the move.
+- **`aq:` topic-routing + reaction lifecycle** at `gateway.ts:8321` — inherit, do not rebuild.
 - **`allowFrom` enforcement on every callback** — match the existing pattern.
 
 ## 9. Audit, revocation, staleness
@@ -256,7 +268,7 @@ The vault broker is request/response. Approvals can wait up to 5 minutes for a t
 
 **Phase 1 — kernel folded into vault broker.** New `approval_decisions` and `approval_audit` tables in `vault-grants.db` (no rename), new RPC methods on `src/vault/broker/server.ts`, broaden peercred regex (§4.1), short-poll wait protocol (§10), `apv:` callback router in gateway, `/approvals list|revoke|add|stats` commands, drift revocation, plus tests matching the existing broker's coverage. **~1.5 days.**
 
-**Phase 2 — secrets as first consumer.** Migrate the deferred-secret card path (`gateway.ts:5497`) to call the kernel. Lower-traffic, validates the abstraction. Preserve the inline-passphrase capture UX. ~0.5 day.
+**Phase 2 — secrets as first consumer.** Migrate the deferred-secret card path (`gateway.ts:5555`) to call the kernel. Lower-traffic, validates the abstraction. Preserve the inline-passphrase capture UX. ~0.5 day.
 
 **Phase 3 — first MCP consumer (Google Drive).** Covered separately in **RFC C — Google Drive MCP integration**.
 

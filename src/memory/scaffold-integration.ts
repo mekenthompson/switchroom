@@ -68,10 +68,13 @@ export function getPlaywrightMcpSettingsEntry(): { key: string; value: McpServer
  * is `mcp_servers: { gdrive: false }`. The reconciler honours either.
  */
 export function getGdriveMcpSettingsEntry(): { key: string; value: McpServerConfig } {
-  // Specific commit SHA — bump deliberately. Replace with a real upstream
-  // SHA at integration time; this pin is the v0.5.0 tag commit on
-  // taylorwilsdon/google_workspace_mcp.
-  const PINNED_SHA = "v0.5.0";
+  // Specific commit SHA — bump deliberately. Pinning to a 40-char commit
+  // SHA (not a tag) means upstream history rewrites can't change what we
+  // run. google_workspace_mcp v1.20.3 = f3c7dc5df2641c8545abc9e8f402d794f2853745;
+  // verified MIT-licensed at this SHA on 2026-05-06.
+  // (Note: RFC C originally referenced v0.5.0; that tag does not exist on
+  // upstream — v1.20.3 is the latest stable as of this pin.)
+  const PINNED_SHA = "f3c7dc5df2641c8545abc9e8f402d794f2853745";
   return {
     key: "gdrive",
     value: {

@@ -39,12 +39,11 @@ export function detectHeadless(env: OAuthEnv): boolean {
     (env.SSH_CONNECTION && env.SSH_CONNECTION.trim() !== "") ||
     (env.SSH_TTY && env.SSH_TTY.trim() !== ""),
   );
-  if (hasDisplay) return false;
-  // No display + SSH = definitely headless. No display + not SSH could be a
-  // Linux server console; treat as headless too because we still can't open
-  // a browser.
-  if (inSsh) return true;
-  return !hasDisplay;
+  // "Local desktop" = DISPLAY/WAYLAND set AND not over SSH (X-forwarding
+  // can set DISPLAY remotely, in which case we still can't reliably pop a
+  // browser on the user's screen). Anything else is headless.
+  if (hasDisplay && !inSsh) return false;
+  return true;
 }
 
 /**

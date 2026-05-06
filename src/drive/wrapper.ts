@@ -48,6 +48,11 @@ export interface WrapperDeps {
   /**
    * Called the first time we successfully mint an access token after a prior
    * invalid_grant. Used to flip the sidecar status slot back to `connected`.
+   *
+   * Caller is responsible for: (a) writing `status: 'connected'` back to
+   * the vault status slot, (b) editing or removing the prior reconnect
+   * card if still pending. The wrapper itself only signals — it does not
+   * touch the status slot or any UI surface.
    */
   onReconnected?: () => Promise<void>;
   /** Google OAuth client config (client_id / client_secret / scopes). */

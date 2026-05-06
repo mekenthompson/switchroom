@@ -1,10 +1,10 @@
 /**
  * Drive disconnect / killswitch path per RFC C §4.3.
  *
- * Order of operations matters: revoke locally FIRST so a Google API outage
- * cannot leave the agent with a live refresh token in vault. Best-effort
- * Google revoke runs after; failure is surfaced but does NOT block local
- * cleanup.
+ * Order of operations matters: delete the local refresh token before
+ * contacting Google so an outage can't leave a live token in vault.
+ * Best-effort Google revoke runs after; failure is surfaced but does NOT
+ * block local cleanup.
  *
  * Composes the OAuth `revokeRefreshToken()` helper with the vault-slot
  * `deleteSlots()` helper. Returned record tells the caller (CLI, killswitch

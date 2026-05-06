@@ -374,14 +374,36 @@ try {
   }
 }
 
-const TOKEN = process.env.TELEGRAM_BOT_TOKEN
-if (!TOKEN) {
-  process.stderr.write(
-    `telegram gateway: TELEGRAM_BOT_TOKEN required\n` +
-    `  set in ${ENV_FILE}\n` +
-    `  format: TELEGRAM_BOT_TOKEN=123456789:AAH...\n`,
-  )
-  process.exit(1)
+// Issue #758: if TELEGRAM_BOT_TOKEN is not set in env (e.g. agent's .env was
+// never written because bot_token in switchroom.yaml is a `vault:` reference),
+// materialize it from the vault at startup. Resolved value is held in
+// process.env only — never written back to disk.
+let TOKEN: string
+try {
+  const { materializeBotToken, BotTokenMaterializeError } = await import('../../src/telegram/materialize-bot-token.js')
+  try {
+    TOKEN = await materializeBotToken({ agentName: process.env.SWITCHROOM_AGENT_NAME })
+  } catch (err) {
+    if (err instanceof BotTokenMaterializeError) {
+      process.stderr.write(`telegram gateway: ${err.message}\n`)
+      process.exit(1)
+    }
+    throw err
+  }
+} catch (err) {
+  // Fallback if the helper module failed to load — preserve the legacy
+  // error so installs without the new module still surface a clear hint.
+  if (process.env.TELEGRAM_BOT_TOKEN) {
+    TOKEN = process.env.TELEGRAM_BOT_TOKEN
+  } else {
+    process.stderr.write(
+      `telegram gateway: TELEGRAM_BOT_TOKEN required\n` +
+      `  set in ${ENV_FILE}\n` +
+      `  format: TELEGRAM_BOT_TOKEN=123456789:AAH...\n` +
+      `  (token-materialization helper failed to load: ${(err as Error).message})\n`,
+    )
+    process.exit(1)
+  }
 }
 
 const STATIC = process.env.TELEGRAM_ACCESS_MODE === 'static'

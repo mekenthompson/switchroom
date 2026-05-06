@@ -6,17 +6,20 @@
  * follow-up so the operator gets a Telegram approval card after a successful
  * Google OAuth and the CLI blocks until they tap.
  *
- * Sourcing of inputs that aren't covered by the existing config schema:
- *   - Google OAuth client id/secret: env vars
- *       SWITCHROOM_GOOGLE_CLIENT_ID, SWITCHROOM_GOOGLE_CLIENT_SECRET.
+ * Sourcing of inputs (precedence: env > config, with --approver winning
+ * over both for the approver field):
+ *   - Google OAuth client id/secret:
+ *       env: SWITCHROOM_GOOGLE_CLIENT_ID, SWITCHROOM_GOOGLE_CLIENT_SECRET
+ *       config: drive.google_client_id, drive.google_client_secret
+ *         (raw strings or 'vault:<key>' refs resolved against the unlocked vault)
  *   - Approver user id (Telegram numeric id, prefixed `user:` per the kernel
- *     canonicalization convention used elsewhere): env var
- *       SWITCHROOM_APPROVER_USER_ID
- *     (or pass `--approver` on the command).
+ *     canonicalization convention used elsewhere):
+ *       --approver flag, OR env SWITCHROOM_APPROVER_USER_ID, OR
+ *       config agents.<agent>.drive.approvers (per-agent), OR
+ *       config drive.approvers (top-level)
  *
- * These deliberately avoid a schema change — the drive CLI ships before the
- * config-side wiring is settled. A follow-up will likely move both into
- * switchroom.yaml under a `drive:` block.
+ * Env-only operation is preserved for back-compat — agents that were
+ * configured before the `drive:` block existed continue to work unchanged.
  */
 
 import type { Command } from "commander";
@@ -49,6 +52,8 @@ import {
   waitForApproval,
   type WaitForApprovalResult,
 } from "../vault/approvals/wait.js";
+import { isVaultReference, parseVaultReference } from "../vault/resolver.js";
+import { getSecret } from "../vault/vault.js";
 
 // ── Exit codes (documented in command help) ──────────────────────────────────
 //   0 = success
@@ -274,23 +279,48 @@ async function runConnect(args: ConnectArgs, deps: DriveCliDeps): Promise<void> 
   }
 
   // 2. Resolve OAuth client + approver.
-  const clientId = process.env.SWITCHROOM_GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.SWITCHROOM_GOOGLE_CLIENT_SECRET;
-  if (!clientId || !clientSecret) {
+  //
+  // Precedence (env > config) is deliberate: env vars are used for one-off
+  // overrides (CI, debugging, emergency rotation) while the config block is
+  // the persistent baseline. This also preserves back-compat with operators
+  // who set the env vars before the `drive:` block existed.
+  //
+  // Values from config that look like 'vault:<key>' are resolved AFTER the
+  // passphrase prompt below (we don't have the unlocked vault yet here).
+  const driveCfg = config.drive;
+  const agentDriveCfg = config.agents[args.agentName]?.drive;
+
+  let clientIdRaw = process.env.SWITCHROOM_GOOGLE_CLIENT_ID ?? driveCfg?.google_client_id;
+  let clientSecretRaw = process.env.SWITCHROOM_GOOGLE_CLIENT_SECRET ?? driveCfg?.google_client_secret;
+  if (!clientIdRaw || !clientSecretRaw) {
     err(
       chalk.red(
-        "Error: SWITCHROOM_GOOGLE_CLIENT_ID and SWITCHROOM_GOOGLE_CLIENT_SECRET must be set.",
+        "Error: missing Google OAuth client credentials. Set drive.google_client_id " +
+          "and drive.google_client_secret in switchroom.yaml (vault:<key> refs supported), " +
+          "or set env vars SWITCHROOM_GOOGLE_CLIENT_ID and SWITCHROOM_GOOGLE_CLIENT_SECRET.",
       ),
     );
     return exit(EXIT_ERROR);
   }
-  const approver =
-    args.approver ?? process.env.SWITCHROOM_APPROVER_USER_ID ?? "";
+
+  // Approver: --approver flag > env > per-agent config > top-level config.
+  // Per-agent config replaces (does not extend) the top-level approvers list.
+  let approver = args.approver ?? process.env.SWITCHROOM_APPROVER_USER_ID ?? "";
+  if (!approver) {
+    const cfgApprovers = agentDriveCfg?.approvers ?? driveCfg?.approvers;
+    if (cfgApprovers && cfgApprovers.length > 0) {
+      // Use the first entry. Multi-approver-set is supported by the kernel
+      // but the CLI's current model is one approver per connect invocation
+      // (any one of the set is sufficient — but we only pass one here for
+      // back-compat with the existing wait flow).
+      approver = String(cfgApprovers[0]);
+    }
+  }
   if (!approver) {
     err(
       chalk.red(
-        "Error: no approver configured. Pass --approver <user_id> or set " +
-          "SWITCHROOM_APPROVER_USER_ID.",
+        "Error: no approver configured. Pass --approver <user_id>, set " +
+          "drive.approvers in switchroom.yaml, or set SWITCHROOM_APPROVER_USER_ID.",
       ),
     );
     return exit(EXIT_ERROR);
@@ -311,12 +341,6 @@ async function runConnect(args: ConnectArgs, deps: DriveCliDeps): Promise<void> 
     return exit(EXIT_ERROR);
   }
   const approverPrincipal = `user:${approverRaw}`;
-
-  const oauthCfg: OAuthClientConfig = {
-    client_id: clientId,
-    client_secret: clientSecret,
-    scopes: DEFAULT_SCOPES,
-  };
 
   // 3. Resolve passphrase BEFORE OAuth (fail-fast). If the passphrase is
   // wrong, the OAuth flow would otherwise complete and the freshly-minted
@@ -384,6 +408,51 @@ async function runConnect(args: ConnectArgs, deps: DriveCliDeps): Promise<void> 
     // already handled above; defensive only
     existingToken = null;
   }
+
+  // Resolve any 'vault:<key>' references that came from the config block.
+  // Env-supplied values are used as-is (operators set raw values in env).
+  const resolveMaybeVaultRef = (raw: string, label: string): string | null => {
+    if (!isVaultReference(raw)) return raw;
+    const key = parseVaultReference(raw);
+    try {
+      const entry = getSecret(passphrase, vaultPath, key);
+      if (!entry) {
+        err(
+          chalk.red(
+            `Error: ${label} references vault key '${key}' but no such secret is in the vault.`,
+          ),
+        );
+        return null;
+      }
+      if (entry.kind !== "string") {
+        err(
+          chalk.red(
+            `Error: ${label} vault entry '${key}' is not a string (kind=${entry.kind}).`,
+          ),
+        );
+        return null;
+      }
+      return entry.value;
+    } catch (e) {
+      err(
+        chalk.red(
+          `Error resolving ${label} vault ref '${key}': ${(e as Error).message}`,
+        ),
+      );
+      return null;
+    }
+  };
+
+  const clientId = resolveMaybeVaultRef(clientIdRaw, "google_client_id");
+  if (clientId === null) return exit(EXIT_ERROR);
+  const clientSecret = resolveMaybeVaultRef(clientSecretRaw, "google_client_secret");
+  if (clientSecret === null) return exit(EXIT_ERROR);
+
+  const oauthCfg: OAuthClientConfig = {
+    client_id: clientId,
+    client_secret: clientSecret,
+    scopes: DEFAULT_SCOPES,
+  };
 
   if (!existingToken) {
     // 5. Pick OAuth tier and run the flow.
@@ -621,9 +690,11 @@ export function registerDriveCommand(program: Command, deps: DriveCliDeps = {}):
     .command("connect <agent>")
     .description(
       "Run Google OAuth for <agent>, persist refresh token to vault, then " +
-        "block on a Telegram approval card. Requires SWITCHROOM_GOOGLE_CLIENT_ID, " +
-        "SWITCHROOM_GOOGLE_CLIENT_SECRET, and either --approver or " +
-        "SWITCHROOM_APPROVER_USER_ID.",
+        "block on a Telegram approval card. Recommended: configure the `drive:` " +
+        "block in switchroom.yaml (google_client_id, google_client_secret — " +
+        "vault:<key> refs supported — and approvers list). Env vars " +
+        "SWITCHROOM_GOOGLE_CLIENT_ID / SWITCHROOM_GOOGLE_CLIENT_SECRET / " +
+        "SWITCHROOM_APPROVER_USER_ID still work and override the config block.",
     )
     .option(
       "--approver <user_id>",

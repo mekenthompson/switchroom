@@ -78,10 +78,9 @@ export const LockRequestSchema = z.object({
 export const ApprovalRequestRequestSchema = z.object({
   v: z.literal(1),
   op: z.literal("approval_request"),
-  agent: z.string().min(1),
-  surface: z.string().min(1),
+  agent_unit: z.string().min(1),
   scope: z.string().min(1),
-  action_grammar: z.string().min(1),
+  action: z.string().min(1),
   approver_set: z.array(z.string()),
   why: z.string().optional(),
   ttl_ms: z.number().int().positive().optional(),
@@ -90,10 +89,9 @@ export const ApprovalRequestRequestSchema = z.object({
 export const ApprovalLookupRequestSchema = z.object({
   v: z.literal(1),
   op: z.literal("approval_lookup"),
-  agent: z.string().min(1),
-  surface: z.string().min(1),
+  agent_unit: z.string().min(1),
   scope: z.string().min(1),
-  action_grammar: z.string().min(1),
+  action: z.string().min(1),
   current_approver_set: z.array(z.string()),
 });
 
@@ -114,16 +112,25 @@ export const ApprovalRevokeRequestSchema = z.object({
 export const ApprovalListRequestSchema = z.object({
   v: z.literal(1),
   op: z.literal("approval_list"),
-  agent: z.string().optional(),
+  agent_unit: z.string().optional(),
 });
+
+export const ApprovalDecisionModeSchema = z.enum([
+  "allow_once",
+  "allow_always",
+  "allow_ttl",
+  "deny",
+  "deny_perm",
+]);
+export type ApprovalDecisionMode = z.infer<typeof ApprovalDecisionModeSchema>;
 
 export const ApprovalRecordRequestSchema = z.object({
   v: z.literal(1),
   op: z.literal("approval_record"),
   request_id: z.string().regex(/^[0-9a-f]{8}$/),
-  granted: z.boolean(),
+  decision: ApprovalDecisionModeSchema,
   approver_set: z.array(z.string()),
-  approver_user_id: z.string().min(1),
+  granted_by_user_id: z.number().int(),
   ttl_ms: z.number().int().positive().nullable().optional(),
 });
 
@@ -240,42 +247,72 @@ export const OkRevokeGrantResponseSchema = z.object({
 
 // ─── Approval kernel responses ──────────────────────────────────────────────
 
-export const OkApprovalRequestResponseSchema = z.object({
-  ok: z.literal(true),
-  request_id: z.string(),
-  expires_at: z.number(),
-});
+/**
+ * approval_request response. Two shapes — discriminated by the literal in
+ * `state` (NOT `status`, to avoid colliding with the BrokerStatus object on
+ * the OkStatusResponse shape).
+ *
+ * - { state: "pending", request_id, expires_at } — the normal path.
+ * - { state: "rate_limited", retry_after_ms } — RFC §10 caps tripped
+ *   (per-agent max 2 concurrent; global max 32).
+ */
+/**
+ * approval_request response. Carries a `kind: "approval_request"` tag so
+ * the discriminated union at the broker response level can narrow without
+ * the lookup response (`state` field, no `kind`) ever matching here.
+ *
+ * - `state: "pending"` — nonce issued, request_id + expires_at returned.
+ * - `state: "rate_limited"` — RFC §10 caps tripped; retry_after_ms returned.
+ */
+export const OkApprovalRequestResponseSchema = z.discriminatedUnion("state", [
+  z.object({
+    ok: z.literal(true),
+    kind: z.literal("approval_request"),
+    state: z.literal("pending"),
+    request_id: z.string(),
+    expires_at: z.number(),
+  }),
+  z.object({
+    ok: z.literal(true),
+    kind: z.literal("approval_request"),
+    state: z.literal("rate_limited"),
+    retry_after_ms: z.number(),
+  }),
+]);
 
 export const ApprovalDecisionMetaSchema = z.object({
   id: z.string(),
-  agent: z.string(),
-  surface: z.string(),
+  agent_unit: z.string(),
   scope: z.string(),
-  action_grammar: z.string(),
-  granted: z.boolean(),
-  approver_set: z.array(z.string()),
+  action: z.string(),
+  decision: ApprovalDecisionModeSchema,
   granted_at: z.number(),
-  expires_at: z.number().nullable(),
+  granted_by_user_id: z.number(),
+  ttl_expires_at: z.number().nullable(),
+  last_used_at: z.number().nullable(),
   revoked_at: z.number().nullable(),
+  revoke_reason: z.string().nullable(),
 });
 export type ApprovalDecisionMeta = z.infer<typeof ApprovalDecisionMetaSchema>;
 
+/**
+ * approval_lookup response. Discriminant is `state` — RFC §10 lifecycle.
+ * Renamed from `status` to avoid colliding with BrokerStatus on the response
+ * union (the latter's `status` is an object; this one's was a string —
+ * narrowing required a `typeof` smell at the call site).
+ */
 export const OkApprovalLookupResponseSchema = z.object({
   ok: z.literal(true),
-  status: z.enum(["granted", "denied", "pending", "expired", "drift_revoked", "no_decision"]),
+  state: z.enum(["granted", "denied", "pending", "expired", "drift_revoked", "no_decision"]),
   decision: ApprovalDecisionMetaSchema.nullable().optional(),
 });
 
 export const OkApprovalConsumeResponseSchema = z.object({
   ok: z.literal(true),
   consumed: z.boolean(),
-  // Nonce metadata returned to the gateway so it can render the post-tap card
-  // and (on grant) call recordDecision via approval_record. We expose enough
-  // for the gateway to act without re-querying.
-  agent: z.string().optional(),
-  surface: z.string().optional(),
+  agent_unit: z.string().optional(),
   scope: z.string().optional(),
-  action_grammar: z.string().optional(),
+  action: z.string().optional(),
   why: z.string().nullable().optional(),
 });
 

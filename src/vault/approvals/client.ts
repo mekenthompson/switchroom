@@ -6,32 +6,31 @@
  * JSON. Each helper returns a typed result or `null` when the broker is
  * unreachable — same convention as `BrokerClient`.
  *
- * The agent-side wait loop (short-poll per RFC §10) is NOT implemented here
- * yet. Phase 1 of the migration is broker-resident state + gateway
- * round-trip; agents that need to wait will short-poll lookupApproval at
- * 2s intervals. That's the next slice of work and is intentionally out of
- * this commit so the surface area stays reviewable.
+ * Discriminant note: the lookup wire response uses `state` (not `status`) to
+ * avoid colliding with `BrokerStatus` on the broker response union. The
+ * helpers below normalize that field name out for callers.
  */
 
 import { rpcRaw, type BrokerClientOpts } from "../broker/client.js";
-import type { ApprovalDecisionMeta } from "../broker/protocol.js";
+import type {
+  ApprovalDecisionMeta,
+  ApprovalDecisionMode,
+} from "../broker/protocol.js";
 
 export interface ApprovalRequestArgs {
-  agent: string;
-  surface: string;
+  agent_unit: string;
   scope: string;
-  action_grammar: string;
+  action: string;
   approver_set: string[];
   why?: string;
   ttl_ms?: number;
 }
 
-export interface ApprovalRequestResult {
-  request_id: string;
-  expires_at: number;
-}
+export type ApprovalRequestResult =
+  | { state: "pending"; request_id: string; expires_at: number }
+  | { state: "rate_limited"; retry_after_ms: number };
 
-export type ApprovalLookupStatus =
+export type ApprovalLookupState =
   | "granted"
   | "denied"
   | "pending"
@@ -40,16 +39,15 @@ export type ApprovalLookupStatus =
   | "no_decision";
 
 export interface ApprovalLookupResult {
-  status: ApprovalLookupStatus;
+  state: ApprovalLookupState;
   decision: ApprovalDecisionMeta | null;
 }
 
 export interface ApprovalConsumeResult {
   consumed: boolean;
-  agent?: string;
-  surface?: string;
+  agent_unit?: string;
   scope?: string;
-  action_grammar?: string;
+  action?: string;
   why?: string | null;
 }
 
@@ -61,10 +59,9 @@ export async function approvalRequest(
     {
       v: 1,
       op: "approval_request",
-      agent: args.agent,
-      surface: args.surface,
+      agent_unit: args.agent_unit,
       scope: args.scope,
-      action_grammar: args.action_grammar,
+      action: args.action,
       approver_set: args.approver_set,
       why: args.why,
       ttl_ms: args.ttl_ms,
@@ -72,16 +69,22 @@ export async function approvalRequest(
     opts,
   );
   if (r.kind !== "response" || !r.resp.ok) return null;
-  if (!("request_id" in r.resp)) return null;
-  return { request_id: r.resp.request_id, expires_at: r.resp.expires_at };
+  if (!("kind" in r.resp) || r.resp.kind !== "approval_request") return null;
+  if (r.resp.state === "rate_limited") {
+    return { state: "rate_limited", retry_after_ms: r.resp.retry_after_ms };
+  }
+  return {
+    state: "pending",
+    request_id: r.resp.request_id,
+    expires_at: r.resp.expires_at,
+  };
 }
 
 export async function approvalLookup(
   args: {
-    agent: string;
-    surface: string;
+    agent_unit: string;
     scope: string;
-    action_grammar: string;
+    action: string;
     current_approver_set: string[];
   },
   opts?: BrokerClientOpts,
@@ -90,22 +93,28 @@ export async function approvalLookup(
     {
       v: 1,
       op: "approval_lookup",
-      agent: args.agent,
-      surface: args.surface,
+      agent_unit: args.agent_unit,
       scope: args.scope,
-      action_grammar: args.action_grammar,
+      action: args.action,
       current_approver_set: args.current_approver_set,
     },
     opts,
   );
   if (r.kind !== "response" || !r.resp.ok) return null;
-  // Both OkStatusResponse and OkApprovalLookupResponse carry `status`, but
-  // the former's is an object (BrokerStatus) and the latter's is a string.
-  // Narrow on the string-typed shape we actually want.
-  if (!("status" in r.resp) || typeof r.resp.status !== "string") return null;
-  const lookup = r.resp as { status: string; decision?: ApprovalDecisionMeta | null };
+  if (!("state" in r.resp) || typeof r.resp.state !== "string") return null;
+  // Approval lookup is the only response with `state: <string>`. The new
+  // approval_request response also has `state` but it's still distinguishable
+  // by the values; we narrow on the lookup states here.
+  const lookupStates = new Set([
+    "granted", "denied", "pending", "expired", "drift_revoked", "no_decision",
+  ]);
+  if (!lookupStates.has(r.resp.state)) return null;
+  const lookup = r.resp as {
+    state: ApprovalLookupState;
+    decision?: ApprovalDecisionMeta | null;
+  };
   return {
-    status: lookup.status as ApprovalLookupStatus,
+    state: lookup.state,
     decision: lookup.decision ?? null,
   };
 }
@@ -119,10 +128,9 @@ export async function approvalConsume(
   if (!("consumed" in r.resp)) return null;
   return {
     consumed: r.resp.consumed,
-    agent: r.resp.agent,
-    surface: r.resp.surface,
+    agent_unit: r.resp.agent_unit,
     scope: r.resp.scope,
-    action_grammar: r.resp.action_grammar,
+    action: r.resp.action,
     why: r.resp.why ?? null,
   };
 }
@@ -145,9 +153,9 @@ export async function approvalRevoke(
 export async function approvalRecord(
   args: {
     request_id: string;
-    granted: boolean;
+    decision: ApprovalDecisionMode;
     approver_set: string[];
-    approver_user_id: string;
+    granted_by_user_id: number;
     ttl_ms?: number | null;
   },
   opts?: BrokerClientOpts,
@@ -157,9 +165,9 @@ export async function approvalRecord(
       v: 1,
       op: "approval_record",
       request_id: args.request_id,
-      granted: args.granted,
+      decision: args.decision,
       approver_set: args.approver_set,
-      approver_user_id: args.approver_user_id,
+      granted_by_user_id: args.granted_by_user_id,
       ttl_ms: args.ttl_ms ?? null,
     },
     opts,
@@ -170,10 +178,10 @@ export async function approvalRecord(
 }
 
 export async function approvalList(
-  agent?: string,
+  agent_unit?: string,
   opts?: BrokerClientOpts,
 ): Promise<ApprovalDecisionMeta[] | null> {
-  const r = await rpcRaw({ v: 1, op: "approval_list", agent }, opts);
+  const r = await rpcRaw({ v: 1, op: "approval_list", agent_unit }, opts);
   if (r.kind !== "response" || !r.resp.ok) return null;
   if (!("decisions" in r.resp)) return null;
   return r.resp.decisions as ApprovalDecisionMeta[];

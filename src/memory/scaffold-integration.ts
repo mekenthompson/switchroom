@@ -51,6 +51,50 @@ export function getPlaywrightMcpSettingsEntry(): { key: string; value: McpServer
 }
 
 /**
+ * Return the MCP server entry for the Google Workspace MCP (Drive + Docs +
+ * Sheets + Calendar + Gmail) per RFC C §2.
+ *
+ * Pinned to a specific upstream commit SHA — RFC C requires this rather
+ * than a floating tag so upgrades are explicit. The chosen SHA corresponds
+ * to taylorwilsdon/google_workspace_mcp v0.5.x as of 2026-05.
+ *
+ * The server is launched via `uvx --from git+https://...@<sha>` so no
+ * system-wide install is required and the version is reproducible.
+ *
+ * Default OFF — the server only does anything useful after the operator
+ * has run `switchroom drive connect <agent>` and consented through the
+ * onboarding card. Agents that need it opt-in via
+ * `mcp_servers: { gdrive: true }`; opt-out (the usual default-MCP shape)
+ * is `mcp_servers: { gdrive: false }`. The reconciler honours either.
+ */
+export function getGdriveMcpSettingsEntry(): { key: string; value: McpServerConfig } {
+  // Specific commit SHA — bump deliberately. Pinning to a 40-char commit
+  // SHA (not a tag) means upstream history rewrites can't change what we
+  // run. google_workspace_mcp v1.20.3 = f3c7dc5df2641c8545abc9e8f402d794f2853745;
+  // verified MIT-licensed at this SHA on 2026-05-06.
+  // (Note: RFC C originally referenced v0.5.0; that tag does not exist on
+  // upstream — v1.20.3 is the latest stable as of this pin.)
+  const PINNED_SHA = "f3c7dc5df2641c8545abc9e8f402d794f2853745";
+  return {
+    key: "gdrive",
+    value: {
+      command: "uvx",
+      args: [
+        "--from",
+        `git+https://github.com/taylorwilsdon/google_workspace_mcp.git@${PINNED_SHA}`,
+        "google-workspace-mcp",
+      ],
+      env: {
+        // The MCP wrapper reads the refresh token from the broker on
+        // startup; the bridging script (drive-mcp-launcher.ts, future
+        // work) injects GOOGLE_OAUTH_REFRESH_TOKEN at spawn time.
+        GOOGLE_OAUTH_TOKEN_FROM_VAULT: "1",
+      },
+    },
+  };
+}
+
+/**
  * Describes a single built-in default MCP entry.
  *
  * - `key`: the mcpServers key in settings.json (e.g. "playwright")

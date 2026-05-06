@@ -116,9 +116,28 @@ try {
 // ─── Bot token ────────────────────────────────────────────────────────────
 // Issue #758: when bot_token is a `vault:` ref and no .env was written,
 // materialize it from the vault at startup (in-memory only).
-let TOKEN: string
+//
+// The outer try/catch is narrowed (post-#761 review) to ONLY catch
+// ERR_MODULE_NOT_FOUND from the dynamic import. Other errors (e.g. throws
+// from inside materializeBotToken that aren't BotTokenMaterializeError)
+// must propagate so we don't mask real bugs behind the legacy "set in .env"
+// hint.
+type MaterializeMod = typeof import('../../src/telegram/materialize-bot-token.js')
+let materializeMod: MaterializeMod | null = null
 try {
-  const { materializeBotToken, BotTokenMaterializeError } = await import('../../src/telegram/materialize-bot-token.js')
+  materializeMod = await import('../../src/telegram/materialize-bot-token.js')
+} catch (err) {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  if (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND') {
+    // Module missing — fall through with materializeMod=null.
+  } else {
+    throw err
+  }
+}
+
+let TOKEN: string
+if (materializeMod !== null) {
+  const { materializeBotToken, BotTokenMaterializeError } = materializeMod
   try {
     TOKEN = await materializeBotToken()
   } catch (err) {
@@ -128,18 +147,16 @@ try {
     }
     throw err
   }
-} catch (err) {
-  if (process.env.TELEGRAM_BOT_TOKEN) {
-    TOKEN = process.env.TELEGRAM_BOT_TOKEN
-  } else {
-    process.stderr.write(
-      `foreman: TELEGRAM_BOT_TOKEN required\n` +
-      `  set in ${ENV_FILE}\n` +
-      `  format: TELEGRAM_BOT_TOKEN=123456789:AAH...\n` +
-      `  (token-materialization helper failed to load: ${(err as Error).message})\n`,
-    )
-    process.exit(1)
-  }
+} else if (process.env.TELEGRAM_BOT_TOKEN) {
+  TOKEN = process.env.TELEGRAM_BOT_TOKEN
+} else {
+  process.stderr.write(
+    `foreman: TELEGRAM_BOT_TOKEN required\n` +
+    `  set in ${ENV_FILE}\n` +
+    `  format: TELEGRAM_BOT_TOKEN=123456789:AAH...\n` +
+    `  (token-materialization helper not found)\n`,
+  )
+  process.exit(1)
 }
 
 // ─── Access list ──────────────────────────────────────────────────────────

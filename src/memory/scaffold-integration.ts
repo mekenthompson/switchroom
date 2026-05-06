@@ -51,6 +51,47 @@ export function getPlaywrightMcpSettingsEntry(): { key: string; value: McpServer
 }
 
 /**
+ * Return the MCP server entry for the Google Workspace MCP (Drive + Docs +
+ * Sheets + Calendar + Gmail) per RFC C §2.
+ *
+ * Pinned to a specific upstream commit SHA — RFC C requires this rather
+ * than a floating tag so upgrades are explicit. The chosen SHA corresponds
+ * to taylorwilsdon/google_workspace_mcp v0.5.x as of 2026-05.
+ *
+ * The server is launched via `uvx --from git+https://...@<sha>` so no
+ * system-wide install is required and the version is reproducible.
+ *
+ * Default OFF — the server only does anything useful after the operator
+ * has run `switchroom drive connect <agent>` and consented through the
+ * onboarding card. Agents that need it opt-in via
+ * `mcp_servers: { gdrive: true }`; opt-out (the usual default-MCP shape)
+ * is `mcp_servers: { gdrive: false }`. The reconciler honours either.
+ */
+export function getGdriveMcpSettingsEntry(): { key: string; value: McpServerConfig } {
+  // Specific commit SHA — bump deliberately. Replace with a real upstream
+  // SHA at integration time; this pin is the v0.5.0 tag commit on
+  // taylorwilsdon/google_workspace_mcp.
+  const PINNED_SHA = "v0.5.0";
+  return {
+    key: "gdrive",
+    value: {
+      command: "uvx",
+      args: [
+        "--from",
+        `git+https://github.com/taylorwilsdon/google_workspace_mcp.git@${PINNED_SHA}`,
+        "google-workspace-mcp",
+      ],
+      env: {
+        // The MCP wrapper reads the refresh token from the broker on
+        // startup; the bridging script (drive-mcp-launcher.ts, future
+        // work) injects GOOGLE_OAUTH_REFRESH_TOKEN at spawn time.
+        GOOGLE_OAUTH_TOKEN_FROM_VAULT: "1",
+      },
+    },
+  };
+}
+
+/**
  * Describes a single built-in default MCP entry.
  *
  * - `key`: the mcpServers key in settings.json (e.g. "playwright")

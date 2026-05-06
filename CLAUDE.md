@@ -173,8 +173,8 @@ also a mini-deploy of any scaffold changes.
 
 `~/.bun/bin/switchroom` is typically a symlink to the workspace's
 `dist/cli/switchroom.js`. If you built with `bun run build`, the global
-CLI is already fresh — no `npm i -g` needed. An `npm i -g switchroom-ai`
-installs a separate, pinned copy at `~/.nvm/…/node_modules/switchroom-ai`;
+CLI is already fresh — no `npm i -g` needed. An `npm i -g switchroom`
+installs a separate, pinned copy at `~/.nvm/…/node_modules/switchroom`;
 PATH resolution order determines which wins. Prefer the bun-linked install
 on dev machines, the npm-global install on consumer machines.
 

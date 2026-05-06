@@ -293,7 +293,7 @@ export function resolveGatewayUnitName(
  * /reconcile, etc.).
  *
  * Historically we pointed at `~/.bun/bin/switchroom` (installed by
- * `bun install -g switchroom-ai`). That file has `#!/usr/bin/env node`
+ * `bun install -g switchroom`). That file has `#!/usr/bin/env node`
  * as its shebang, so on bun-only hosts without node on PATH the binary
  * ENOENTs silently and every gateway CLI invocation fails with no
  * Telegram-facing signal (see reference/restart-and-know-what-im-running.md
@@ -351,7 +351,7 @@ export function generateGatewayUnit(stateDir: string, agentName: string, adminEn
   const pluginDir = resolve(import.meta.dirname, "../../telegram-plugin");
   // Prefer the bundled `dist/gateway/gateway.js` (#634 strategic
   // packaging fix) — it has all `src/` cross-imports inlined, so a
-  // fresh `npm i -g switchroom-ai` install runs without needing the
+  // fresh `npm i -g switchroom` install runs without needing the
   // workspace's `src/` tree on disk. Falls back to the .ts source for
   // dev workspaces that haven't built yet (or the rare stale-dist
   // race where `dist/` was wiped without a rebuild). The fallback

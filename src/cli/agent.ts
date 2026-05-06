@@ -170,7 +170,7 @@ function checkSwitchroomBranch(): string | null {
   }
 }
 
-function preflightCheck(
+export function preflightCheck(
   name: string,
   agentDir: string,
   usesDevChannels: boolean,
@@ -194,27 +194,35 @@ function preflightCheck(
       `systemd unit not found at ${unitPath}. Run: switchroom agent create ${name}`,
     );
   } else if (usesDevChannels) {
-    // 3. If using dev channels, the unit MUST use the expect wrapper
+    // 3. If using dev channels, the unit must dispatch the first-run
+    //    TUI prompts somehow — either the legacy `expect` wrapper, or
+    //    the v0.7.0+ `autoaccept-poll.ts` ExecStartPost poller.
     const unitContent = readFileSync(unitPath, "utf-8");
-    if (!unitContent.includes("expect")) {
+    const hasExpect = unitContent.includes("autoaccept.exp");
+    const hasPoller = unitContent.includes("autoaccept-poll");
+    if (!hasExpect && !hasPoller) {
       errors.push(
-        `systemd unit is missing the expect autoaccept wrapper — ` +
-        `dev channels will hang on the confirmation dialog. ` +
-        `Fix: switchroom systemd install (regenerates the unit)`,
+        `systemd unit has no autoaccept handler — dev channels will hang ` +
+        `on the confirmation dialog. Fix: switchroom systemd install ` +
+        `(regenerates the unit)`,
       );
     }
-  }
 
-  // 4. expect binary exists (if needed)
-  if (usesDevChannels) {
-    try {
-      const { execSync: exec } = require("node:child_process");
-      exec("which expect", { stdio: "pipe" });
-    } catch {
-      errors.push(
-        `'expect' binary not found on PATH — required for dev channels. ` +
-        `Install: sudo apt install expect`,
-      );
+    // 4. If the unit uses the legacy expect wrapper, the binary must be
+    //    on PATH. The TS poller path has no extra binary requirement
+    //    beyond tmux (already gated by install.sh).
+    if (hasExpect && !hasPoller) {
+      try {
+        const { execSync: exec } = require("node:child_process");
+        exec("which expect", { stdio: "pipe" });
+      } catch {
+        errors.push(
+          `'expect' binary not found on PATH — required by legacy autoaccept. ` +
+          `Install: sudo apt install expect (or remove ` +
+          `experimental.legacy_autoaccept_expect / legacy_pty to use the ` +
+          `default tmux poller)`,
+        );
+      }
     }
   }
 

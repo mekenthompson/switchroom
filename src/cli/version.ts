@@ -74,7 +74,7 @@ function locateSwitchroomInstallDir(): string | null {
     if (existsSync(pkgPath)) {
       try {
         const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
-        if (pkg.name === "switchroom-ai" && existsSync(join(dir, ".git"))) {
+        if (pkg.name === "switchroom" && existsSync(join(dir, ".git"))) {
           return dir;
         }
       } catch { /* ignore */ }

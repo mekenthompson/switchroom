@@ -49,7 +49,7 @@ export interface AgentSkillReconcileResult {
  * Switchroom package. The pool is shipped alongside the dist/ output —
  * see `package.json` "files" — so this resolves correctly whether
  * Switchroom is running from source (`bun run dev`) or from a
- * globally installed copy under `node_modules/switchroom-ai/`.
+ * globally installed copy under `node_modules/switchroom/`.
  *
  * Exposed for tests so they can override the pool location with a tmpdir.
  */

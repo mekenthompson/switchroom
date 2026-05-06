@@ -387,7 +387,7 @@ describe("generateGatewayUnit", () => {
   it("references the bundled gateway dist when present, .ts fallback otherwise (#634)", () => {
     // Strategic packaging fix: the systemd unit prefers
     // `telegram-plugin/dist/gateway/gateway.js` because the npm package
-    // ships dist (so a fresh `bun add -g switchroom-ai` install runs
+    // ships dist (so a fresh `bun add -g switchroom` install runs
     // without needing the workspace's `src/` tree). Falls back to the
     // .ts source for dev workspaces that haven't built yet.
     //

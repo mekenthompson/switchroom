@@ -89,7 +89,7 @@ For common failures, give the exact fix:
 
 | Problem | Fix |
 |---------|-----|
-| `switchroom: command not found` | `npm install -g switchroom-ai` |
+| `switchroom: command not found` | `npm install -g switchroom` |
 | Per-agent auth expired (slot model) | `switchroom auth login <agent>` |
 | Account expired (new model — `auth account list` shows red ✗) | `switchroom auth refresh-accounts` (one tick); if no refresh-token, the account needs re-adding |
 | Account quota-exhausted (yellow ⊘ in `auth account list`) | Auto-fallback handles it if the agent has multiple accounts; otherwise wait for the reset window or `switchroom auth enable <other-account> <agent>` |

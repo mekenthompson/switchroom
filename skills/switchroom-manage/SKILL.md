@@ -67,7 +67,7 @@ Verify with `switchroom auth account list` — shows accounts, which agents use 
 ## Behavior
 
 1. Run the matching `switchroom` command using the Bash tool.
-2. If the command fails with "command not found", tell the user that `switchroom` is not installed or not on PATH and suggest running `npm install -g switchroom-ai` or checking their installation.
+2. If the command fails with "command not found", tell the user that `switchroom` is not installed or not on PATH and suggest running `npm install -g switchroom` or checking their installation.
 3. Format the output cleanly for the user. For list commands, present results as a table or bulleted list. For start/stop/restart, confirm the action taken.
 4. If the user just types `/switchroom` with no subcommand, show this help summary:
 

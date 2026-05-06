@@ -68,6 +68,7 @@ CREATE TABLE approval_decisions (
   id                       TEXT PRIMARY KEY,    -- UUID v4
   agent_unit               TEXT NOT NULL,       -- systemd unit, verified via peercred + verifySystemdUnit
   scope                    TEXT NOT NULL,       -- see §6
+  action                   TEXT NOT NULL,       -- agent's intended action (read|write|...); required for the (agent_unit, scope, action) lookup index per §6
   decision                 TEXT NOT NULL,       -- allow_once | allow_always | allow_ttl | deny | deny_perm
   ttl_expires_at           INTEGER,             -- unix-ms, NULL for non-ttl
   granted_at               INTEGER NOT NULL,
@@ -79,14 +80,16 @@ CREATE TABLE approval_decisions (
 );
 
 CREATE TABLE approval_nonces (
-  request_id   TEXT PRIMARY KEY,    -- 8-hex from generateAskId; appears in apv:<id>:... callback_data
-  decision_id  TEXT,                -- FK into approval_decisions once a tap lands; NULL while pending
-  agent_unit   TEXT NOT NULL,
-  scope        TEXT NOT NULL,
-  why          TEXT,                -- agent-supplied "why this access" string
-  created_at   INTEGER NOT NULL,    -- unix-ms
-  expires_at   INTEGER NOT NULL,    -- unix-ms; 5-min default per §8.1
-  consumed_at  INTEGER              -- unix-ms; set atomically on first tap; subsequent taps no-op
+  request_id              TEXT PRIMARY KEY,    -- 8-hex from generateAskId; appears in apv:<id>:... callback_data
+  decision_id             TEXT,                -- FK into approval_decisions once a tap lands; NULL while pending
+  agent_unit              TEXT NOT NULL,
+  scope                   TEXT NOT NULL,
+  action                  TEXT NOT NULL,       -- intended action; carried on the nonce so redemption is atomic without a join
+  approver_set_canonical  TEXT NOT NULL,       -- snapshot of allowFrom at request time; lets the consume step verify drift without a separate lookup
+  why                     TEXT,                -- agent-supplied "why this access" string
+  created_at              INTEGER NOT NULL,    -- unix-ms
+  expires_at              INTEGER NOT NULL,    -- unix-ms; 5-min default per §8.1
+  consumed_at             INTEGER              -- unix-ms; set atomically on first tap; subsequent taps no-op
 );
 
 CREATE TABLE approval_audit (
@@ -94,13 +97,16 @@ CREATE TABLE approval_audit (
   ts          INTEGER NOT NULL,
   agent_unit  TEXT NOT NULL,
   scope       TEXT NOT NULL,
-  action      TEXT NOT NULL,    -- request | grant | deny | revoke | timeout | match
+  action      TEXT,             -- agent's intended action (read|write|...); same column name as on approval_decisions
+  event       TEXT NOT NULL,    -- kernel verb: request | grant | deny | revoke | timeout | match | consume | expire | drift_revoke
   decision_id TEXT,
   context     TEXT              -- JSON: why-string, request_id
 );
 ```
 
 UUID is the durable primary key. The 8-hex callback token (matching existing `generateAskId` at `telegram-plugin/ask-user.ts:133`) maps to the UUID for the prompt's lifetime only.
+
+The audit table splits agent-intent from kernel-verb into two columns: `action` records what the agent wanted to do (read/write/etc., same vocabulary as `approval_decisions.action`) and `event` records what the kernel did about it. Audit-by-scope queries need both. `event` is a superset of the original RFC vocabulary — it adds `consume`, `expire`, and `drift_revoke` for operational events the kernel records (nonce redemption, prompt timeout, drift-triggered auto-revocation per §5.1).
 
 The "same-uid attacker writes a forged grant row directly to SQLite" attack is acknowledged per §3 and not defended against in code; it's defended against by the trust model documented in `docs/vault.md`.
 
@@ -156,7 +162,7 @@ Universal across surfaces:
 
 - `allow_once` — single use. **This is what the primary `Allow` button binds to.**
 - `allow_always` — standing grant, no expiry. Subject to drift-revocation (§5.1).
-- `allow_ttl` — bounded grant, **sliding window with hard cap.** Each successful match against an `allow_ttl` row updates `last_used_at` and extends `ttl_expires_at = now + ttl_original_ms`. Renewal is silent (sudo-style, not Bitwarden-style). The renewal does NOT extend past `granted_at + max_lifetime` (default 30 days; hard cap). Default TTL is 1h; user can override via the expand picker.
+- `allow_ttl` — bounded grant, **sliding window with hard cap.** Each successful match against an `allow_ttl` row updates `last_used_at` and extends `ttl_expires_at = now + ttl_original_ms`. Renewal is silent (sudo-style, not Bitwarden-style). The renewal does NOT extend past `granted_at + max_lifetime`. Default sliding-window TTL: 7 days (configurable per-decision via `opts.max_ttl_lifetime_ms`). The implementation chose a more conservative default than the original 30d; either value is reasonable, the codepath is the same. Default per-prompt TTL is 1h; user can override via the expand picker.
 - `deny` — single-shot reject.
 - `deny_perm` — standing reject; future requests auto-fail without re-prompt.
 

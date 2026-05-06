@@ -41,7 +41,17 @@ export function generateUnit(
 ): string {
   const logFile = resolve(agentDir, "service.log");
   const autoacceptExp = resolve(import.meta.dirname, "../../bin/autoaccept.exp");
-  const autoacceptPollEntry = resolve(import.meta.dirname, "../cli/autoaccept-poll.ts");
+  // Resolve the autoaccept-poll entrypoint preferring the bundled .js.
+  // Published npm packages ship dist/ only (no src/), so .js is the only
+  // available file in production; in dev (`bun bin/switchroom.ts` from a
+  // source checkout) only .ts exists until the first build. Probe both
+  // and use whichever is on disk so dev and published installs both work.
+  const autoacceptPollCandidates = [
+    resolve(import.meta.dirname, "../cli/autoaccept-poll.js"),
+    resolve(import.meta.dirname, "../cli/autoaccept-poll.ts"),
+  ];
+  const autoacceptPollEntry =
+    autoacceptPollCandidates.find((p) => existsSync(p)) ?? autoacceptPollCandidates[0];
   const tmuxConfPath = resolve(agentDir, "tmux.conf");
   const tmuxSocket = `switchroom-${name}`;
 

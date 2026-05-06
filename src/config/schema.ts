@@ -620,6 +620,58 @@ export const ChannelsSchema = z
  */
 const TIMEZONE_REGEX = /^UTC$|^[A-Z][A-Za-z0-9_+-]+(\/[A-Z][A-Za-z0-9_+-]+){1,2}$/;
 
+const ApproverIdSchema = z.union([z.number(), z.string().regex(/^\d+$/)]);
+
+/**
+ * Top-level drive config block. Centralizes Google OAuth client credentials
+ * and the approver allowlist used by `switchroom drive connect` so operators
+ * don't have to manage env vars. The block is optional — when omitted, the
+ * CLI falls back to env vars (SWITCHROOM_GOOGLE_CLIENT_ID/_SECRET,
+ * SWITCHROOM_APPROVER_USER_ID). When both are set, env wins (deliberate:
+ * env is for one-off overrides; config is the persistent baseline).
+ */
+export const DriveConfigSchema = z
+  .object({
+    google_client_id: z
+      .string()
+      .min(1)
+      .describe(
+        "Google OAuth client ID (literal string or vault reference e.g. 'vault:google-oauth-client-id')"
+      ),
+    google_client_secret: z
+      .string()
+      .min(1)
+      .describe(
+        "Google OAuth client secret (literal string or vault reference e.g. 'vault:google-oauth-client-secret')"
+      ),
+    approvers: z
+      .array(ApproverIdSchema)
+      .min(1)
+      .describe(
+        "Array of numeric Telegram user IDs authorized to approve drive onboarding. " +
+        "At least one must be specified."
+      ),
+  })
+  .optional();
+
+/**
+ * Per-agent drive override. Currently just narrows the approver set for a
+ * single agent. google_client_id/secret are not per-agent — those live at
+ * the top level (one OAuth client per switchroom install).
+ */
+export const AgentDriveConfigSchema = z
+  .object({
+    approvers: z
+      .array(ApproverIdSchema)
+      .min(1)
+      .optional()
+      .describe(
+        "Per-agent approver override. When set, replaces (does not extend) " +
+        "the top-level drive.approvers list for this agent's onboarding card."
+      ),
+  })
+  .optional();
+
 const profileFields = {
   extends: z.string().optional(),
   bot_token: z.string().optional(),
@@ -1097,6 +1149,11 @@ export const AgentSchema = z.object({
       "claim_worktree accepts the alias as the repo argument. " +
       "Absolute paths may always be passed regardless of this list.",
     ),
+  drive: AgentDriveConfigSchema.describe(
+    "Per-agent drive onboarding overrides (currently just approvers). " +
+    "When set, replaces the top-level drive.approvers list for this agent. " +
+    "google_client_id/secret are not per-agent — they live at the top level.",
+  ),
   repos: z
     .record(
       z.string().regex(
@@ -1276,6 +1333,14 @@ export const SwitchroomConfigSchema = z.object({
   telegram: TelegramConfigSchema,
   memory: MemoryBackendConfigSchema.optional(),
   vault: VaultConfigSchema.optional(),
+  drive: DriveConfigSchema.describe(
+    "Optional drive onboarding configuration. When set, supplies Google " +
+    "OAuth client credentials and the approver allowlist for `switchroom " +
+    "drive connect`. Env vars (SWITCHROOM_GOOGLE_CLIENT_ID, " +
+    "SWITCHROOM_GOOGLE_CLIENT_SECRET, SWITCHROOM_APPROVER_USER_ID) take " +
+    "precedence over this block when set, preserving back-compat with " +
+    "the env-only flow shipped in #766.",
+  ),
   quota: QuotaConfigSchema.optional().describe(
     "Optional weekly/monthly USD spend budgets rendered in the session " +
     "greeting. Usage is read from ccusage at runtime; no network calls.",
@@ -1319,6 +1384,8 @@ export type ScheduleEntry = z.infer<typeof ScheduleEntrySchema>;
 export type TelegramConfig = z.infer<typeof TelegramConfigSchema>;
 export type MemoryBackendConfig = z.infer<typeof MemoryBackendConfigSchema>;
 export type VaultConfig = z.infer<typeof VaultConfigSchema>;
+export type DriveConfig = z.infer<typeof DriveConfigSchema>;
+export type AgentDriveConfig = z.infer<typeof AgentDriveConfigSchema>;
 export type VaultBrokerConfig = z.infer<typeof VaultConfigSchema>["broker"];
 export type QuotaConfig = z.infer<typeof QuotaConfigSchema>;
 export type CodeRepoEntry = z.infer<typeof CodeRepoEntrySchema>;

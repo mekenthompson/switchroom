@@ -10,7 +10,14 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { AgentSchema, ScheduleEntrySchema, VaultConfigSchema } from "./schema.js";
+import {
+  AgentDriveConfigSchema,
+  AgentSchema,
+  DriveConfigSchema,
+  ScheduleEntrySchema,
+  SwitchroomConfigSchema,
+  VaultConfigSchema,
+} from "./schema.js";
 
 describe("ScheduleEntrySchema.secrets", () => {
   it("accepts a list of valid vault key names", () => {
@@ -224,6 +231,112 @@ describe("AgentSchema.fallback_model", () => {
   it("rejects model names with shell-special characters", () => {
     expect(() =>
       AgentSchema.parse(baseAgentInput({ fallback_model: "model$foo" })),
+    ).toThrow();
+  });
+});
+
+describe("DriveConfigSchema (top-level drive: block)", () => {
+  it("parses a fully-populated block", () => {
+    const result = DriveConfigSchema.parse({
+      google_client_id: "raw-id",
+      google_client_secret: "raw-secret",
+      approvers: [12345],
+    });
+    expect(result?.google_client_id).toBe("raw-id");
+    expect(result?.approvers).toEqual([12345]);
+  });
+
+  it("accepts vault: refs for client id/secret", () => {
+    const result = DriveConfigSchema.parse({
+      google_client_id: "vault:google-oauth-client-id",
+      google_client_secret: "vault:google-oauth-client-secret",
+      approvers: [12345],
+    });
+    expect(result?.google_client_id).toBe("vault:google-oauth-client-id");
+    expect(result?.google_client_secret).toBe("vault:google-oauth-client-secret");
+  });
+
+  it("accepts numeric-string approver ids", () => {
+    const result = DriveConfigSchema.parse({
+      google_client_id: "id",
+      google_client_secret: "secret",
+      approvers: ["12345", "111"],
+    });
+    expect(result?.approvers).toEqual(["12345", "111"]);
+  });
+
+  it("rejects non-numeric string approver", () => {
+    expect(() =>
+      DriveConfigSchema.parse({
+        google_client_id: "id",
+        google_client_secret: "secret",
+        approvers: ["ken"],
+      }),
+    ).toThrow();
+  });
+
+  it("requires at least one approver when block is present", () => {
+    expect(() =>
+      DriveConfigSchema.parse({
+        google_client_id: "id",
+        google_client_secret: "secret",
+        approvers: [],
+      }),
+    ).toThrow();
+  });
+
+  it("requires google_client_id and google_client_secret when block is present", () => {
+    expect(() =>
+      DriveConfigSchema.parse({ approvers: [1] }),
+    ).toThrow();
+    expect(() =>
+      DriveConfigSchema.parse({
+        google_client_id: "id",
+        approvers: [1],
+      }),
+    ).toThrow();
+  });
+
+  it("is fully optional — undefined is accepted (back-compat with env-only flow)", () => {
+    expect(DriveConfigSchema.parse(undefined)).toBeUndefined();
+  });
+
+  it("is wired onto the top-level SwitchroomConfigSchema as `drive`", () => {
+    const result = SwitchroomConfigSchema.parse({
+      switchroom: { version: 1 },
+      telegram: { bot_token: "x", forum_chat_id: "1" },
+      drive: {
+        google_client_id: "vault:google-oauth-client-id",
+        google_client_secret: "vault:google-oauth-client-secret",
+        approvers: [12345],
+      },
+      agents: {},
+    });
+    expect(result.drive?.google_client_id).toBe("vault:google-oauth-client-id");
+  });
+});
+
+describe("AgentDriveConfigSchema (per-agent override)", () => {
+  it("accepts an approvers override", () => {
+    const result = AgentDriveConfigSchema.parse({ approvers: [123, 456] });
+    expect(result?.approvers).toEqual([123, 456]);
+  });
+
+  it("is optional everywhere — block can be omitted on the agent", () => {
+    const result = AgentSchema.parse(baseAgentInput());
+    expect(result.drive).toBeUndefined();
+  });
+
+  it("is wired onto AgentSchema as `drive`", () => {
+    const result = AgentSchema.parse(
+      baseAgentInput({ drive: { approvers: [999] } }),
+    );
+    expect(result.drive?.approvers).toEqual([999]);
+  });
+
+  it("rejects an empty approvers list when the block is present", () => {
+    expect(() =>
+      AgentSchema.parse(baseAgentInput({ drive: { approvers: [] } })),
     ).toThrow();
   });
 });

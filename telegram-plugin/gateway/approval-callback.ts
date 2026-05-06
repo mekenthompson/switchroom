@@ -27,6 +27,7 @@ import {
   approvalConsume,
   approvalRecord,
 } from "../../src/vault/approvals/client.js";
+import type { ApprovalDecisionMode } from "../../src/vault/approvals/schema.js";
 
 export async function handleApprovalCallback(
   ctx: Context,
@@ -50,16 +51,19 @@ export async function handleApprovalCallback(
     return;
   }
 
-  // Compute granted + ttl from the choice variant.
+  // Compute decision + ttl from the choice variant.
+  let decision: ApprovalDecisionMode;
   let granted: boolean;
   let ttl_ms: number | null = null;
   let displayMode: string;
   switch (parsed.choice.kind) {
     case "deny":
+      decision = "deny";
       granted = false;
       displayMode = "denied";
       break;
     case "once":
+      decision = "allow_once";
       granted = true;
       // No expiry — recorded as a one-shot grant; the agent calls
       // approval_lookup at most once, then proceeds. /approvals revoke
@@ -67,10 +71,12 @@ export async function handleApprovalCallback(
       displayMode = "granted once";
       break;
     case "always":
+      decision = "allow_always";
       granted = true;
       displayMode = "granted always";
       break;
     case "ttl": {
+      decision = "allow_ttl";
       granted = true;
       const ms = ttlMsFromToken(parsed.choice.param);
       if (ms === null) {
@@ -83,18 +89,18 @@ export async function handleApprovalCallback(
     }
   }
 
-  const approver_user_id = ctx.from?.id?.toString() ?? "unknown";
+  const granted_by_user_id = ctx.from?.id ?? 0;
   // Approver set at decision time = the chat that received the card. We
   // store the singleton for now; the gateway-side approver-set lookup
   // (drift detection input) will widen this in the per-callsite wire-up
   // when each surface migrates and starts passing access.allowFrom.
-  const approver_set = [approver_user_id];
+  const approver_set = [String(granted_by_user_id)];
 
   const decision_id = await approvalRecord({
     request_id: parsed.request_id,
-    granted,
+    decision,
     approver_set,
-    approver_user_id,
+    granted_by_user_id,
     ttl_ms,
   });
 

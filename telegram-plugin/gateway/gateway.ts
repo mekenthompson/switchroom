@@ -384,9 +384,32 @@ try {
 // never written because bot_token in switchroom.yaml is a `vault:` reference),
 // materialize it from the vault at startup. Resolved value is held in
 // process.env only — never written back to disk.
-let TOKEN: string
+//
+// The outer try/catch is narrowed (post-#761 review) to ONLY catch the case
+// where the helper module itself fails to load (ERR_MODULE_NOT_FOUND from the
+// dynamic import). Anything else — including throws from inside
+// materializeBotToken that aren't BotTokenMaterializeError — must propagate
+// with its original message so we don't mask real bugs behind the legacy
+// "set in .env" hint.
+type MaterializeMod = typeof import('../../src/telegram/materialize-bot-token.js')
+let materializeMod: MaterializeMod | null = null
 try {
-  const { materializeBotToken, BotTokenMaterializeError } = await import('../../src/telegram/materialize-bot-token.js')
+  materializeMod = await import('../../src/telegram/materialize-bot-token.js')
+} catch (err) {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  if (code === 'ERR_MODULE_NOT_FOUND' || code === 'MODULE_NOT_FOUND') {
+    // Module genuinely missing — fall through with materializeMod=null and
+    // handle below.
+  } else {
+    // Programming error, side-effect failure during module init, etc.
+    // Propagate the real message rather than masking it.
+    throw err
+  }
+}
+
+let TOKEN: string
+if (materializeMod !== null) {
+  const { materializeBotToken, BotTokenMaterializeError } = materializeMod
   try {
     TOKEN = await materializeBotToken({ agentName: process.env.SWITCHROOM_AGENT_NAME })
   } catch (err) {
@@ -396,20 +419,16 @@ try {
     }
     throw err
   }
-} catch (err) {
-  // Fallback if the helper module failed to load — preserve the legacy
-  // error so installs without the new module still surface a clear hint.
-  if (process.env.TELEGRAM_BOT_TOKEN) {
-    TOKEN = process.env.TELEGRAM_BOT_TOKEN
-  } else {
-    process.stderr.write(
-      `telegram gateway: TELEGRAM_BOT_TOKEN required\n` +
-      `  set in ${ENV_FILE}\n` +
-      `  format: TELEGRAM_BOT_TOKEN=123456789:AAH...\n` +
-      `  (token-materialization helper failed to load: ${(err as Error).message})\n`,
-    )
-    process.exit(1)
-  }
+} else if (process.env.TELEGRAM_BOT_TOKEN) {
+  TOKEN = process.env.TELEGRAM_BOT_TOKEN
+} else {
+  process.stderr.write(
+    `telegram gateway: TELEGRAM_BOT_TOKEN required\n` +
+    `  set in ${ENV_FILE}\n` +
+    `  format: TELEGRAM_BOT_TOKEN=123456789:AAH...\n` +
+    `  (token-materialization helper not found)\n`,
+  )
+  process.exit(1)
 }
 
 const STATIC = process.env.TELEGRAM_ACCESS_MODE === 'static'

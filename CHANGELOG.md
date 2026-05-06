@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.7.2 — 2026-05-06
+
+### Fixed
+
+- **`switchroom agent restart` preflight no longer rejects v0.7.0+
+  units (#745)** — the preflight in `src/cli/agent.ts` was written
+  against the legacy `expect autoaccept.exp` wrapper and refused to
+  start any unit that didn't contain it. v0.7.0 flipped the default
+  to the TS `autoaccept-poll` ExecStartPost, which broke restarts
+  fleet-wide. Preflight now accepts either handler and only requires
+  the `expect` binary on PATH when the legacy wrapper is in use.
+  Versions 0.7.0 and 0.7.1 are unusable in default mode without
+  `--force` — upgrade directly to 0.7.2.
+
 ## v0.7.0 — 2026-05-06
 
 ### Changed

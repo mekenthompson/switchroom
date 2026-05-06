@@ -49,6 +49,10 @@ import { addAgent, type AgentTopology } from "../agents/add-orchestrator.js";
 import { renameAgent, type HindsightMode } from "../agents/rename-orchestrator.js";
 import { validateBotTokenMatchesAgent } from "../setup/telegram-api.js";
 import { registerAgentPerfCommand } from "./perf.js";
+import {
+  checkVaultPreflightBulk,
+  formatLockedRefusalBulk,
+} from "./agent-vault-preflight.js";
 
 /**
  * Pre-restart preflight check. Verifies the agent's runtime
@@ -1159,16 +1163,47 @@ export function registerAgentCommand(program: Command): void {
       "Override --wait timeout in milliseconds (default 300000)"
     )
     .option("--graceful-restart", "Wait for active turn to complete before restarting (via gateway IPC)")
+    .option(
+      "--force-locked",
+      "Restart even when bot_token is a vault: reference and the vault is locked (the agent will fail to reach Telegram until the vault is unlocked)"
+    )
     .action(
       withConfigError(
         async (
           name: string,
-          opts: { force?: boolean; wait?: boolean; waitTimeout?: string; gracefulRestart?: boolean }
+          opts: {
+            force?: boolean;
+            wait?: boolean;
+            waitTimeout?: string;
+            gracefulRestart?: boolean;
+            forceLocked?: boolean;
+          }
         ) => {
           const config = getConfig(program);
           const agentsDir = resolveAgentsDir(config);
           const names =
             name === "all" ? Object.keys(config.agents) : [name];
+
+          // Vault-locked pre-flight. Runs once across all targets so we
+          // don't ping the broker N times. Catches the "vault: bot_token +
+          // locked broker = dead agent" foot-gun BEFORE issuing any
+          // systemctl restart. --force / --force-locked skips.
+          if (!opts.force && !opts.forceLocked) {
+            const targets = names.filter((n) => config.agents[n] != null);
+            if (targets.length > 0) {
+              const result = await checkVaultPreflightBulk(config, targets);
+              if (result.blocked.length > 0) {
+                console.error(chalk.red("\n  " + formatLockedRefusalBulk(result.blocked, result.reachable) + "\n"));
+                process.exit(4);
+              }
+            }
+          } else if (opts.forceLocked) {
+            console.error(
+              chalk.yellow(
+                "  ⚠ --force-locked: skipping vault-locked pre-flight. Agent will hard-fail at startup if vault is still locked.\n"
+              )
+            );
+          }
 
           // #61 defense #1: warn if the switchroom checkout is on a non-main
           // branch. The gateway runs source directly via `bun gateway.ts`

@@ -31,6 +31,7 @@ import {
   pollDeviceToken,
   buildOobAuthUrl,
   exchangeOobCode,
+  runLoopbackOAuth,
   OAuthTierRejected,
   type OAuthClientConfig,
   type OAuthTier,
@@ -207,11 +208,28 @@ async function defaultRunOAuth(
         if (!code) throw new Error("Auth code cannot be empty");
         return await exchangeOobCode(cfg, code);
       }
-      // desktop_loopback: out of scope for this CLI cut.
-      throw new Error(
-        "Desktop loopback OAuth is not yet implemented. Re-run on a host " +
-          "where device-code or OOB-paste works.",
-      );
+      if (current === "desktop_loopback") {
+        console.log();
+        console.log(chalk.bold("Opening your browser to authorize this agent..."));
+        const tok = await runLoopbackOAuth(cfg, {
+          onAuthUrl: (url, opened) => {
+            if (!opened) {
+              console.log(
+                chalk.yellow(
+                  "Could not auto-open a browser. Open this URL manually:",
+                ),
+              );
+            } else {
+              console.log(chalk.dim("If your browser didn't open, visit:"));
+            }
+            console.log("  " + chalk.cyan(url));
+            console.log();
+            console.log(chalk.dim("Waiting for browser callback..."));
+          },
+        });
+        return tok;
+      }
+      throw new Error(`Unknown OAuth tier: ${current}`);
     } catch (e) {
       if (e instanceof OAuthTierRejected) {
         console.log(

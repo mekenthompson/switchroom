@@ -64,9 +64,54 @@ export function selectInitialTier(env: OAuthEnv): OAuthTier {
     return "device_code";
   }
 
-  // Has a display: device-code is still simpler (no port binding) so
-  // prefer it; loopback is the last resort.
+  // Has a display AND a browser-opener on PATH → loopback gives the cleanest
+  // UX (no copy-paste, no code transcription). Otherwise fall back to
+  // device-code which works without a port bind.
+  if (hasBrowserOpener(env)) {
+    return "desktop_loopback";
+  }
   return "device_code";
+}
+
+/**
+ * Detect whether a browser-opener is available on the host. We check PATH
+ * for `xdg-open` / `open` / `start` based on platform. Tests can short-circuit
+ * by setting `SWITCHROOM_DRIVE_HAS_BROWSER_OPENER=1` or `=0`.
+ */
+export function hasBrowserOpener(
+  env: OAuthEnv & { SWITCHROOM_DRIVE_HAS_BROWSER_OPENER?: string; PATH?: string } = {},
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  const override = env.SWITCHROOM_DRIVE_HAS_BROWSER_OPENER;
+  if (override === "1") return true;
+  if (override === "0") return false;
+
+  if ((platform as string) === "win32") return true; // `start` is a cmd.exe builtin
+  const candidate = platform === "darwin" ? "open" : "xdg-open";
+
+  // Check PATH directories synchronously. We avoid require('fs') at top level
+  // to keep the module browser-friendly; use dynamic import-like access.
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fs = require("node:fs") as typeof import("node:fs");
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const path = require("node:path") as typeof import("node:path");
+    const pathEnv = env.PATH ?? process.env.PATH ?? "";
+    const sep = (platform as string) === "win32" ? ";" : ":";
+    for (const dir of pathEnv.split(sep)) {
+      if (!dir) continue;
+      try {
+        const full = path.join(dir, candidate);
+        fs.accessSync(full, fs.constants.X_OK);
+        return true;
+      } catch {
+        /* not here, keep scanning */
+      }
+    }
+  } catch {
+    /* fall through */
+  }
+  return false;
 }
 
 /**
@@ -220,12 +265,25 @@ export async function exchangeOobCode(
   code: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<TokenResponse> {
+  return exchangeAuthCode(cfg, code, "urn:ietf:wg:oauth:2.0:oob", fetchImpl);
+}
+
+/**
+ * Shared authorization_code → token exchange. Used by both OOB-paste and
+ * desktop-loopback flows; only the redirect_uri differs.
+ */
+export async function exchangeAuthCode(
+  cfg: OAuthClientConfig,
+  code: string,
+  redirectUri: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<TokenResponse> {
   const body = new URLSearchParams({
     client_id: cfg.client_id,
     client_secret: cfg.client_secret,
     code,
     grant_type: "authorization_code",
-    redirect_uri: "urn:ietf:wg:oauth:2.0:oob",
+    redirect_uri: redirectUri,
   });
   const res = await fetchImpl("https://oauth2.googleapis.com/token", {
     method: "POST",
@@ -234,9 +292,248 @@ export async function exchangeOobCode(
   });
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`OOB token exchange failed (${res.status}): ${text}`);
+    throw new Error(`token exchange failed (${res.status}): ${text}`);
   }
   return (await res.json()) as TokenResponse;
+}
+
+// ─── Desktop-loopback flow (RFC C §3 tier 3) ────────────────────────────────
+
+import * as http from "node:http";
+import * as crypto from "node:crypto";
+import { spawn } from "node:child_process";
+
+/**
+ * Build the loopback consent URL targeting an ephemeral local redirect_uri.
+ */
+export function buildLoopbackAuthUrl(
+  cfg: OAuthClientConfig,
+  redirectUri: string,
+  state: string,
+): string {
+  const u = new URL("https://accounts.google.com/o/oauth2/auth");
+  u.searchParams.set("client_id", cfg.client_id);
+  u.searchParams.set("redirect_uri", redirectUri);
+  u.searchParams.set("response_type", "code");
+  u.searchParams.set("scope", cfg.scopes.join(" "));
+  u.searchParams.set("access_type", "offline");
+  u.searchParams.set("prompt", "consent");
+  u.searchParams.set("state", state);
+  return u.toString();
+}
+
+/**
+ * Best-effort browser open. Returns true if we successfully spawned an opener
+ * that exited 0; false otherwise. Caller should print the URL as a fallback.
+ */
+export async function openBrowser(
+  url: string,
+  platform: NodeJS.Platform = process.platform,
+  spawnImpl: typeof spawn = spawn,
+): Promise<boolean> {
+  let cmd: string;
+  let args: string[];
+  if (platform === "darwin") {
+    cmd = "open";
+    args = [url];
+  } else if ((platform as string) === "win32") {
+    cmd = "cmd";
+    args = ["/c", "start", "", url];
+  } else {
+    cmd = "xdg-open";
+    args = [url];
+  }
+  return new Promise<boolean>((resolve) => {
+    try {
+      const p = spawnImpl(cmd, args, { stdio: "ignore", detached: true });
+      p.once("error", () => resolve(false));
+      p.once("spawn", () => {
+        try {
+          p.unref();
+        } catch {
+          /* noop */
+        }
+        resolve(true);
+      });
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+export interface LoopbackOptions {
+  /** Timeout in ms before we abort waiting for the callback. Default 5min. */
+  timeoutMs?: number;
+  /** Override fetch (for tests). */
+  fetchImpl?: typeof fetch;
+  /** Override browser-opener (for tests; return false to skip opening). */
+  openImpl?: (url: string) => Promise<boolean>;
+  /** Called once we know the auth URL — e.g. to print it for the user. */
+  onAuthUrl?: (url: string, opened: boolean) => void;
+  /** Bind host. Default 127.0.0.1. */
+  host?: string;
+}
+
+/**
+ * Run the desktop-loopback OAuth flow:
+ *   1. Bind 127.0.0.1:0
+ *   2. Open Google consent URL in the user's browser (or print the URL)
+ *   3. Wait for Google to redirect back with ?code=...&state=...
+ *   4. Validate state, exchange the code at the token endpoint
+ *
+ * Always closes the ephemeral server before returning, success or fail.
+ */
+export async function runLoopbackOAuth(
+  cfg: OAuthClientConfig,
+  opts: LoopbackOptions = {},
+): Promise<TokenResponse> {
+  const timeoutMs = opts.timeoutMs ?? 5 * 60 * 1000;
+  const host = opts.host ?? "127.0.0.1";
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  const openImpl = opts.openImpl ?? openBrowser;
+  const state = crypto.randomBytes(16).toString("hex");
+
+  // Capture the callback via a single-shot promise.
+  let server: http.Server | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const closeServer = (): Promise<void> =>
+    new Promise((resolve) => {
+      if (!server) return resolve();
+      const s = server;
+      server = null;
+      s.close(() => resolve());
+      // unref so we don't hang the process if a stray connection lingers
+      try {
+        s.unref();
+      } catch {
+        /* noop */
+      }
+    });
+
+  try {
+    const { code, redirectUri } = await new Promise<{
+      code: string;
+      redirectUri: string;
+    }>((resolve, reject) => {
+      server = http.createServer((req, res) => {
+        try {
+          const url = new URL(req.url ?? "/", `http://${host}`);
+          if (url.pathname !== "/") {
+            res.writeHead(404, { "content-type": "text/plain" });
+            res.end("Not found");
+            return;
+          }
+          const gotState = url.searchParams.get("state");
+          const gotCode = url.searchParams.get("code");
+          const gotErr = url.searchParams.get("error");
+
+          if (gotErr) {
+            renderHtml(
+              res,
+              400,
+              "Authorization failed",
+              `Google returned an error: ${escapeHtml(gotErr)}. You can close this tab.`,
+            );
+            reject(new Error(`OAuth error from Google: ${gotErr}`));
+            return;
+          }
+          if (!gotState || gotState !== state) {
+            renderHtml(
+              res,
+              400,
+              "Authorization failed",
+              "State parameter mismatch — refusing this callback. You can close this tab.",
+            );
+            reject(new Error("OAuth state parameter mismatch (possible CSRF)."));
+            return;
+          }
+          if (!gotCode) {
+            renderHtml(
+              res,
+              400,
+              "Authorization failed",
+              "No authorization code present. You can close this tab.",
+            );
+            reject(new Error("OAuth callback missing 'code' parameter."));
+            return;
+          }
+          renderHtml(
+            res,
+            200,
+            "Authorization complete",
+            "Authorization complete. You can close this tab and return to the terminal.",
+          );
+          // We don't know the actual redirectUri until after listen(); resolve
+          // with a placeholder and let the outer scope fill it in. Instead,
+          // capture from the Host header to be safe.
+          const hostHeader = req.headers.host ?? `${host}:?`;
+          resolve({
+            code: gotCode,
+            redirectUri: `http://${hostHeader}`,
+          });
+        } catch (e) {
+          reject(e instanceof Error ? e : new Error(String(e)));
+        }
+      });
+
+      server.on("error", (e) => reject(e));
+
+      server.listen(0, host, () => {
+        const addr = server!.address();
+        if (!addr || typeof addr === "string") {
+          reject(new Error("Failed to determine ephemeral port for loopback OAuth."));
+          return;
+        }
+        const redirectUri = `http://${host}:${addr.port}`;
+        const authUrl = buildLoopbackAuthUrl(cfg, redirectUri, state);
+        // Fire-and-forget the browser open; if it fails the user has the URL.
+        openImpl(authUrl)
+          .then((opened) => opts.onAuthUrl?.(authUrl, opened))
+          .catch(() => opts.onAuthUrl?.(authUrl, false));
+      });
+
+      timer = setTimeout(() => {
+        reject(
+          new Error(
+            `Loopback OAuth timed out after ${Math.round(timeoutMs / 1000)}s waiting for browser callback.`,
+          ),
+        );
+      }, timeoutMs);
+    });
+
+    if (timer) clearTimeout(timer);
+    await closeServer();
+
+    return await exchangeAuthCode(cfg, code, redirectUri, fetchImpl);
+  } finally {
+    if (timer) clearTimeout(timer);
+    await closeServer();
+  }
+}
+
+function renderHtml(
+  res: http.ServerResponse,
+  status: number,
+  title: string,
+  body: string,
+): void {
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(
+    title,
+  )}</title><style>body{font-family:system-ui,sans-serif;max-width:480px;margin:4em auto;padding:0 1em;color:#222}h1{font-size:1.25em}</style></head><body><h1>${escapeHtml(
+    title,
+  )}</h1><p>${body}</p></body></html>`;
+  res.writeHead(status, { "content-type": "text/html; charset=utf-8" });
+  res.end(html);
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /**

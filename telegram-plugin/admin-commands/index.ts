@@ -75,23 +75,6 @@ export function parseCommandName(text: string): string | null {
 }
 
 /**
- * Decide whether an inbound message should be intercepted as an admin command.
- *
- * Returns `{ handled: true }` when:
- *   - `adminEnabled` is true (SWITCHROOM_AGENT_ADMIN=true)
- *   - `text` starts with `/`
- *   - The command name is in ADMIN_COMMAND_NAMES
- *
- * Returns `{ handled: false }` in all other cases — the message should fall
- * through to normal processing (forwarded to Claude via IPC).
- *
- * Note: this function does NOT execute the command. Execution is performed by
- * Grammy's bot.command() handlers in gateway.ts. This function is used:
- *  1. By the gateway middleware to decide whether to forward non-admin-gated
- *     commands to Claude (when adminEnabled=false).
- *  2. By tests to verify the dispatch table is correct without starting a bot.
- */
-/**
  * Parse the argument portion of a slash command (everything after the command
  * token, trimmed). Returns '' when no argument is present.
  *
@@ -152,7 +135,9 @@ export function classifyAdminGate(
   }
   if (cmd === 'restart') {
     const arg = parseCommandArg(text)
-    if (arg === '' || arg === myAgentName) {
+    // Case-insensitive: assertSafeAgentName allows mixed case, so `/restart Clerk`
+    // must still self-target an agent named `clerk`.
+    if (arg === '' || arg.toLowerCase() === myAgentName.toLowerCase()) {
       return { action: 'pass-through' }
     }
     return { action: 'block', reason: 'other-agent', cmd }
@@ -160,6 +145,23 @@ export function classifyAdminGate(
   return { action: 'block', reason: 'admin-required', cmd }
 }
 
+/**
+ * Decide whether an inbound message should be intercepted as an admin command.
+ *
+ * Returns `{ handled: true }` when:
+ *   - `adminEnabled` is true (SWITCHROOM_AGENT_ADMIN=true)
+ *   - `text` starts with `/`
+ *   - The command name is in ADMIN_COMMAND_NAMES
+ *
+ * Returns `{ handled: false }` in all other cases — the message should fall
+ * through to normal processing (forwarded to Claude via IPC).
+ *
+ * Note: this function does NOT execute the command. Execution is performed by
+ * Grammy's bot.command() handlers in gateway.ts. This function is used:
+ *  1. By the gateway middleware to decide whether to forward non-admin-gated
+ *     commands to Claude (when adminEnabled=false).
+ *  2. By tests to verify the dispatch table is correct without starting a bot.
+ */
 export function dispatchAdminCommand(
   text: string,
   adminEnabled: boolean,

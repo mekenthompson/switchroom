@@ -175,6 +175,9 @@ describe('parseCommandArg', () => {
   it('returns empty string for non-slash text', () => {
     expect(parseCommandArg('hello world')).toBe('')
   })
+  it('returns empty string for @botname suffix with no arg', () => {
+    expect(parseCommandArg('/restart@bot')).toBe('')
+  })
 })
 
 // ─── classifyAdminGate ───────────────────────────────────────────────────────
@@ -205,6 +208,11 @@ describe('classifyAdminGate', () => {
     })
     it('passes through when arg matches my agent name', () => {
       expect(classifyAdminGate('/restart clerk', me)).toEqual({ action: 'pass-through' })
+    })
+    it('passes through when arg matches my agent name case-insensitively', () => {
+      expect(classifyAdminGate('/restart Clerk', me)).toEqual({ action: 'pass-through' })
+      expect(classifyAdminGate('/restart CLERK', me)).toEqual({ action: 'pass-through' })
+      expect(classifyAdminGate('/restart clerk', 'Clerk')).toEqual({ action: 'pass-through' })
     })
     it('passes through with @botname suffix and self target', () => {
       expect(classifyAdminGate('/restart@switchroombot clerk', me)).toEqual({

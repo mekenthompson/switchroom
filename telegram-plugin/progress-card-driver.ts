@@ -1758,6 +1758,7 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
           role,
           startedAt: now(),
           originatingTurnKey: currentTurnKey ?? cs.turnKey,
+          isBackgroundDispatch: isBackground,
         })
         cs.fleet.set(event.agentId, isBackground ? { ...member, status: 'background' } : member)
         return
@@ -1813,6 +1814,9 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         // a stuck condition. `originatingTurnKey` has no legacy
         // counterpart — fall back to the current/active turn.
         const startedAt = sa.startedAt > 0 ? sa.startedAt : now()
+        const isBg =
+          sa.parentToolUseId != null &&
+          cs.backgroundParentToolUseIds.has(sa.parentToolUseId)
         cs.fleet.set(
           agentId,
           createFleetMember({
@@ -1820,6 +1824,7 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
             role: sa.description ?? 'agent',
             startedAt,
             originatingTurnKey: currentTurnKey ?? cs.turnKey,
+            isBackgroundDispatch: isBg,
           }),
         )
       }

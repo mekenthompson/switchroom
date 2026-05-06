@@ -39,6 +39,13 @@ export interface FleetMember {
   errorSeen: boolean
   /** Snapshot of driver's currentTurnKey at sub_agent_started. Stable across turns. */
   originatingTurnKey: string
+  /**
+   * True if this member was dispatched with `run_in_background: true`.
+   * Sticky — does NOT clear when status later promotes from background →
+   * running. Used by `hasLiveBackground` to keep the parent turn's
+   * PerChatState alive even after the member starts doing tool work.
+   */
+  isBackgroundDispatch: boolean
 }
 
 export interface CreateFleetMemberArgs {
@@ -46,6 +53,7 @@ export interface CreateFleetMemberArgs {
   role: string
   startedAt: number
   originatingTurnKey: string
+  isBackgroundDispatch?: boolean
 }
 
 export function createFleetMember(args: CreateFleetMemberArgs): FleetMember {
@@ -60,6 +68,7 @@ export function createFleetMember(args: CreateFleetMemberArgs): FleetMember {
     terminalAt: null,
     errorSeen: false,
     originatingTurnKey: args.originatingTurnKey,
+    isBackgroundDispatch: args.isBackgroundDispatch ?? false,
   }
 }
 
@@ -69,10 +78,12 @@ export function applyToolUse(
   input: Record<string, unknown> | undefined,
   now: number,
 ): FleetMember {
-  // P3 of #662 — recovery from stuck. A live tool event proves the
-  // sub-agent is alive again, so flip status back to running. Terminal
-  // statuses (done/failed/killed) are sticky and never reset here.
-  const status: FleetStatus = member.status === 'stuck' ? 'running' : member.status
+  // A live tool event proves the sub-agent is active — flip stuck or
+  // background back to running. Terminal statuses (done/failed/killed)
+  // are sticky and never reset here. Fixes #757: background members
+  // previously stayed ⏸ even while doing real work.
+  const status: FleetStatus =
+    member.status === 'stuck' || member.status === 'background' ? 'running' : member.status
   return {
     ...member,
     status,
@@ -126,15 +137,19 @@ export function markStuck(member: FleetMember, now: number, idleMs: number = 60_
 }
 
 /**
- * P2 of #662 / fixes #64 — true if any fleet member is in
- * `status: 'background'` AND has not yet reached terminal state. Used by
- * the driver's dispose path to keep a PerChatState alive past parent
- * turn_end while background sub-agents are still running, and by the v2
- * renderer's phase resolver to choose ⏸ Background vs ✅ Done.
+ * P2 of #662 / fixes #64 — true if any fleet member was dispatched as a
+ * background worker AND has not yet reached terminal state. Used by the
+ * driver's dispose path to keep a PerChatState alive past parent turn_end
+ * while background sub-agents are still running, and by the v2 renderer's
+ * phase resolver to choose ⏸ Background vs ✅ Done.
+ *
+ * Uses `isBackgroundDispatch` (sticky) rather than current `status`, because
+ * background members promote to `running` once tool activity is observed
+ * (fixes #757 — card goes silent for active background workers).
  */
 export function hasLiveBackground(fleet: ReadonlyMap<string, FleetMember>): boolean {
   for (const m of fleet.values()) {
-    if (m.status === 'background' && m.terminalAt == null) return true
+    if (m.isBackgroundDispatch && m.terminalAt == null) return true
   }
   return false
 }

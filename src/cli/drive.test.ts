@@ -61,6 +61,7 @@ function makeDeps(overrides: Partial<DriveCliDeps> = {}): {
     writeRefreshToken: vi.fn(() => {
       writes.token++;
     }),
+    readRefreshToken: vi.fn(() => null),
     writeStatus: vi.fn(() => {
       writes.status++;
     }),
@@ -137,8 +138,8 @@ describe("drive connect", () => {
     expect(writes.deletes).toBe(1);
   });
 
-  it("rate_limited: cleans up and exits 3", async () => {
-    const { deps, exit } = makeDeps({
+  it("rate_limited: preserves vault slot and exits 3", async () => {
+    const { deps, exit, writes } = makeDeps({
       waitForApproval: vi.fn(
         async () =>
           ({ kind: "rate_limited", retry_after_ms: 5000 }) as WaitForApprovalResult,
@@ -146,6 +147,56 @@ describe("drive connect", () => {
     });
     await __test.runConnect({ agentName: "klanker" }, deps);
     expect(exit.code).toBe(3);
+    expect(writes.token).toBe(1); // OAuth completed, write happened
+    expect(writes.deletes).toBe(0); // but the slot was preserved for retry
+  });
+
+  it("existing refresh_token skips OAuth and re-fires approval", async () => {
+    const { deps, exit, writes } = makeDeps({
+      readRefreshToken: vi.fn(() => "existing-rt"),
+    });
+    const oauthSpy = deps.runOAuth as ReturnType<typeof vi.fn>;
+    await __test.runConnect({ agentName: "klanker" }, deps);
+    expect(exit.code).toBe(0);
+    expect(oauthSpy).not.toHaveBeenCalled();
+    expect(writes.token).toBe(0); // already there, no fresh write
+    expect(writes.status).toBe(0);
+  });
+
+  it("OAuth failure: exits 4 and does NOT call deleter", async () => {
+    const { deps, exit, writes } = makeDeps({
+      runOAuth: vi.fn(async () => {
+        throw new Error("network down");
+      }),
+    });
+    await __test.runConnect({ agentName: "klanker" }, deps);
+    expect(exit.code).toBe(4);
+    expect(writes.token).toBe(0);
+    expect(writes.deletes).toBe(0); // nothing was written, nothing to clean
+  });
+
+  it("waitForApproval throws AbortError: exits 130 (defensive)", async () => {
+    const ac = new AbortController();
+    const { deps, exit, writes } = makeDeps({
+      abortSignal: ac.signal,
+      waitForApproval: vi.fn(async () => {
+        const e = new Error("Aborted");
+        e.name = "AbortError";
+        throw e;
+      }),
+    });
+    ac.abort();
+    await __test.runConnect({ agentName: "klanker" }, deps);
+    expect(exit.code).toBe(130);
+    expect(writes.deletes).toBe(1);
+  });
+
+  it("non-numeric --approver: exits 4 without OAuth", async () => {
+    const { deps, exit } = makeDeps();
+    const oauthSpy = deps.runOAuth as ReturnType<typeof vi.fn>;
+    await __test.runConnect({ agentName: "klanker", approver: "ken" }, deps);
+    expect(exit.code).toBe(4);
+    expect(oauthSpy).not.toHaveBeenCalled();
   });
 
   it("unknown agent: exits 4 without OAuth", async () => {

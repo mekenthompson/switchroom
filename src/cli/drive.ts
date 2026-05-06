@@ -40,6 +40,7 @@ import {
   writeRefreshToken,
   writeStatus,
   deleteSlots,
+  readRefreshToken,
 } from "../drive/vault-slots.js";
 import { buildOnboardingCard } from "../drive/onboarding.js";
 import { disconnectDrive } from "../drive/disconnect.js";
@@ -50,11 +51,11 @@ import {
 
 // ── Exit codes (documented in command help) ──────────────────────────────────
 //   0 = success
-//   1 = denied / general error
-//   2 = approval timed out
-//   3 = rate limited by broker
-//   4 = broker / kernel error
-// 130 = aborted (SIGINT)
+//   1 = denied (user actively rejected)
+//   2 = timeout
+//   3 = rate-limited
+//   4 = config error (missing env, missing approver, broker unreachable)
+// 130 = SIGINT/aborted
 const EXIT_OK = 0;
 const EXIT_DENIED = 1;
 const EXIT_TIMEOUT = 2;
@@ -82,6 +83,7 @@ export interface DriveCliDeps {
   disconnectDrive?: typeof disconnectDrive;
   /** Test seam: substitute vault-slot writers. */
   writeRefreshToken?: typeof writeRefreshToken;
+  readRefreshToken?: typeof readRefreshToken;
   writeStatus?: typeof writeStatus;
   deleteSlots?: typeof deleteSlots;
   /** Test seam: capture exits without killing the process. */
@@ -275,9 +277,22 @@ async function runConnect(args: ConnectArgs, deps: DriveCliDeps): Promise<void> 
     );
     return exit(EXIT_ERROR);
   }
-  const approverPrincipal = approver.startsWith("user:")
-    ? approver
-    : `user:${approver}`;
+  // Validate approver shape: must be numeric Telegram user_id (optionally
+  // already prefixed `user:`). Rejecting non-numeric handles avoids the
+  // silent "user:ken never matches any decision" failure mode.
+  const approverRaw = approver.startsWith("user:")
+    ? approver.slice("user:".length)
+    : approver;
+  if (!/^\d+$/.test(approverRaw)) {
+    err(
+      chalk.red(
+        `Error: --approver must be a numeric Telegram user_id (got '${approver}'). ` +
+          "Find your numeric id via @userinfobot or by inspecting an inbound update.",
+      ),
+    );
+    return exit(EXIT_ERROR);
+  }
+  const approverPrincipal = `user:${approverRaw}`;
 
   const oauthCfg: OAuthClientConfig = {
     client_id: clientId,
@@ -285,34 +300,9 @@ async function runConnect(args: ConnectArgs, deps: DriveCliDeps): Promise<void> 
     scopes: DEFAULT_SCOPES,
   };
 
-  // 3. Pick OAuth tier and run the flow.
-  const env = process.env as Record<string, string | undefined>;
-  const tier = selectInitialTier(env);
-  log(
-    chalk.dim(
-      `Host detected as ${detectHeadless(env) ? "headless" : "desktop"}; trying ${tier} first.`,
-    ),
-  );
-
-  let tokens: TokenResponse;
-  try {
-    const runner = deps.runOAuth ?? defaultRunOAuth;
-    tokens = await runner(oauthCfg, tier, env);
-  } catch (e) {
-    err(chalk.red(`OAuth failed: ${(e as Error).message}`));
-    return exit(EXIT_ERROR);
-  }
-  if (!tokens.refresh_token) {
-    err(
-      chalk.red(
-        "Google did not return a refresh_token. Re-run with prompt=consent to force one.",
-      ),
-    );
-    return exit(EXIT_ERROR);
-  }
-  log(chalk.green("OAuth succeeded."));
-
-  // 4. Write refresh token + status to vault.
+  // 3. Resolve passphrase BEFORE OAuth (fail-fast). If the passphrase is
+  // wrong, the OAuth flow would otherwise complete and the freshly-minted
+  // refresh_token would be lost when the vault write throws.
   const vaultPath = getVaultPath();
   let passphrase: string;
   try {
@@ -323,25 +313,113 @@ async function runConnect(args: ConnectArgs, deps: DriveCliDeps): Promise<void> 
   }
 
   const writeToken = deps.writeRefreshToken ?? writeRefreshToken;
+  const readToken = deps.readRefreshToken ?? readRefreshToken;
   const writeStat = deps.writeStatus ?? writeStatus;
   const deleter = deps.deleteSlots ?? deleteSlots;
 
+  // Verify passphrase against the vault by attempting a slot read. A bad
+  // passphrase throws here; a missing slot returns null (also fine). Retry
+  // up to 3 times before giving up so the user can recover from typos
+  // without losing OAuth progress.
+  const envPassphrase = !!process.env.SWITCHROOM_VAULT_PASSPHRASE;
+  let attempts = 0;
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    try {
+      readToken({ passphrase, vaultPath, agentUnit: args.agentName });
+      break;
+    } catch (e) {
+      attempts++;
+      if (envPassphrase || attempts >= 3) {
+        err(
+          chalk.red(
+            `Passphrase verification failed: ${(e as Error).message}`,
+          ),
+        );
+        return exit(EXIT_ERROR);
+      }
+      err(
+        chalk.yellow(
+          `Passphrase rejected (attempt ${attempts}/3). Try again.`,
+        ),
+      );
+      try {
+        passphrase = await (deps.getPassphrase ?? defaultGetPassphrase)();
+      } catch (pe) {
+        err(chalk.red(`Passphrase error: ${(pe as Error).message}`));
+        return exit(EXIT_ERROR);
+      }
+    }
+  }
+
+  // 4. If a refresh_token already exists in the vault for this agent (e.g.
+  // a prior `connect` was rate_limited at the approval-card stage), skip
+  // the OAuth tier entirely and re-fire the approval card.
+  let existingToken: string | null = null;
   try {
-    writeToken({
+    existingToken = readToken({
       passphrase,
       vaultPath,
       agentUnit: args.agentName,
-      refreshToken: tokens.refresh_token,
     });
-    writeStat({
-      passphrase,
-      vaultPath,
-      agentUnit: args.agentName,
-      status: "connected",
-    });
-  } catch (e) {
-    err(chalk.red(`Vault write failed: ${(e as Error).message}`));
-    return exit(EXIT_ERROR);
+  } catch {
+    // already handled above; defensive only
+    existingToken = null;
+  }
+
+  if (!existingToken) {
+    // 5. Pick OAuth tier and run the flow.
+    const env = process.env as Record<string, string | undefined>;
+    const tier = selectInitialTier(env);
+    log(
+      chalk.dim(
+        `Host detected as ${detectHeadless(env) ? "headless" : "desktop"}; trying ${tier} first.`,
+      ),
+    );
+
+    let tokens: TokenResponse;
+    try {
+      const runner = deps.runOAuth ?? defaultRunOAuth;
+      tokens = await runner(oauthCfg, tier, env);
+    } catch (e) {
+      // No vault writes have happened yet — nothing to clean up.
+      err(chalk.red(`OAuth failed: ${(e as Error).message}`));
+      return exit(EXIT_ERROR);
+    }
+    if (!tokens.refresh_token) {
+      err(
+        chalk.red(
+          "Google did not return a refresh_token. Re-run with prompt=consent to force one.",
+        ),
+      );
+      return exit(EXIT_ERROR);
+    }
+    log(chalk.green("OAuth succeeded."));
+
+    // 6. Write refresh token + status to vault.
+    try {
+      writeToken({
+        passphrase,
+        vaultPath,
+        agentUnit: args.agentName,
+        refreshToken: tokens.refresh_token,
+      });
+      writeStat({
+        passphrase,
+        vaultPath,
+        agentUnit: args.agentName,
+        status: "connected",
+      });
+    } catch (e) {
+      err(chalk.red(`Vault write failed: ${(e as Error).message}`));
+      return exit(EXIT_ERROR);
+    }
+  } else {
+    log(
+      chalk.dim(
+        `Existing refresh_token found in vault; skipping OAuth and re-firing the approval card.`,
+      ),
+    );
   }
 
   // 5. Fire the approval card and block.
@@ -371,6 +449,19 @@ async function runConnect(args: ConnectArgs, deps: DriveCliDeps): Promise<void> 
     });
   } catch (e) {
     process.removeListener("SIGINT", sigintHandler);
+    // Defensive: waitForApproval (per upstream/main) returns
+    // `{kind:"aborted"}` rather than throwing AbortError, but a future
+    // refactor or a non-default sleep impl could change that. Map an
+    // AbortError to exit 130, not exit 4.
+    if (
+      e instanceof Error &&
+      (e.name === "AbortError" ||
+        (typeof e.message === "string" && e.message.toLowerCase().includes("aborted")))
+    ) {
+      err(chalk.yellow(`Aborted. Cleaning up local credentials.`));
+      deleter({ passphrase, vaultPath, agentUnit: args.agentName });
+      return exit(EXIT_ABORTED);
+    }
     err(chalk.red(`Approval wait failed: ${(e as Error).message}`));
     deleter({ passphrase, vaultPath, agentUnit: args.agentName });
     return exit(EXIT_ERROR);
@@ -406,12 +497,16 @@ async function runConnect(args: ConnectArgs, deps: DriveCliDeps): Promise<void> 
     case "rate_limited":
       err(
         chalk.yellow(
-          `Broker rate-limited the request. Retry in ${result.retry_after_ms}ms.`,
+          `Broker rate-limited the request. Retry in ${result.retry_after_ms}ms ` +
+            `by re-running \`switchroom drive connect ${args.agentName}\`. ` +
+            `Your refresh_token is preserved in the vault — OAuth will be skipped on retry.`,
         ),
       );
-      // No vault writes survived this branch in spec — but writes happened
-      // above. Per RFC, rate_limited fires before request lands; clean up.
-      deleter({ passphrase, vaultPath, agentUnit: args.agentName });
+      // IMPORTANT: do NOT delete the vault slot here. If we did, the
+      // freshly-minted refresh_token would be discarded and the user would
+      // have to re-do the Google OAuth flow on retry. Leaving it intact
+      // means the next `connect` invocation sees the existing token,
+      // skips OAuth, and re-fires only the approval card.
       return exit(EXIT_RATE_LIMITED);
     case "expired":
       err(chalk.yellow(`Approval request expired before decision.`));
@@ -515,6 +610,19 @@ export function registerDriveCommand(program: Command, deps: DriveCliDeps = {}):
     .option(
       "--approver <user_id>",
       "Telegram user id (numeric, or `user:<id>`) authorized to approve the onboarding card.",
+    )
+    .addHelpText(
+      "after",
+      [
+        "",
+        "Exit codes:",
+        "  0  success",
+        "  1  denied (user actively rejected)",
+        "  2  approval timed out / expired",
+        "  3  rate-limited by broker (retry preserves refresh_token)",
+        "  4  config error (missing env, missing approver, broker unreachable)",
+        "  130 aborted (SIGINT)",
+      ].join("\n"),
     )
     .action(async (agent: string, opts: { approver?: string }) => {
       await runConnect({ agentName: agent, approver: opts.approver }, deps);

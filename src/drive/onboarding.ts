@@ -8,6 +8,12 @@
  * structures returned here as the request payload, then waits for the
  * decision through the same pending/granted flow as any other approval.
  *
+ * Per RFC B v2, the kernel-client request shape is:
+ *   { agent_unit, scope, action, approver_set, why?, ttl_ms? }
+ * `surface` and `action_grammar` are not part of the v2 protocol; the
+ * card spec exposes only the fields that flow into the kernel call plus
+ * the user-facing UI body/options.
+ *
  * RFC C §5 spells out three options:
  *   1. Allow my Drive (read-only) — recommended (writes the kernel grant
  *      `doc:gdrive:**` action `read`)
@@ -21,7 +27,7 @@
  * deny button.
  */
 
-import { scopeFor, actionGrammar, type DriveAction } from "./grants.js";
+import { scopeFor, type DriveAction } from "./grants.js";
 
 export type OnboardingChoice =
   | { kind: "allow_drive_read" }
@@ -30,11 +36,11 @@ export type OnboardingChoice =
   | { kind: "cancel" };
 
 export interface OnboardingCardSpec {
-  agent: string;
-  surface: "mcp:gdrive";
+  agent_unit: string;
   /** Top-level scope used for the onboarding card itself (system-level). */
   scope: "system:onboarding:gdrive";
-  action_grammar: "onboard";
+  /** Kernel action keyword (per RFC B v2 — was `action_grammar` in v1). */
+  action: "onboard";
   body: string;
   options: Array<{
     label: string;
@@ -45,14 +51,13 @@ export interface OnboardingCardSpec {
   }>;
 }
 
-export function buildOnboardingCard(agent: string): OnboardingCardSpec {
+export function buildOnboardingCard(agent_unit: string): OnboardingCardSpec {
   return {
-    agent,
-    surface: "mcp:gdrive",
+    agent_unit,
     scope: "system:onboarding:gdrive",
-    action_grammar: "onboard",
+    action: "onboard",
     body:
-      `Google Drive enabled for ${agent}.\n\n` +
+      `Google Drive enabled for ${agent_unit}.\n\n` +
       `Most users pick "Allow my Drive" — one tap now, then it just works.\n` +
       `"Per-doc approval" prompts you for every single file the agent opens ` +
       `(20+ prompts in the first hour is typical). Pick that only if you ` +
@@ -89,10 +94,10 @@ export function buildOnboardingCard(agent: string): OnboardingCardSpec {
 }
 
 export interface ReconnectCardSpec {
-  agent: string;
-  surface: "system";
+  agent_unit: string;
   scope: "system:reconnect:gdrive";
-  action_grammar: "reconnect_drive";
+  /** Kernel action keyword (per RFC B v2 — was `action_grammar` in v1). */
+  action: "reconnect_drive";
   body: string;
   /** What the [Reconnect] / [Disconnect permanently] buttons run. */
   options: Array<{
@@ -101,15 +106,14 @@ export interface ReconnectCardSpec {
   }>;
 }
 
-export function buildReconnectCard(agent: string, detail?: string): ReconnectCardSpec {
+export function buildReconnectCard(agent_unit: string, detail?: string): ReconnectCardSpec {
   const detailLine = detail ? `\n\nGoogle said: ${detail}` : "";
   return {
-    agent,
-    surface: "system",
+    agent_unit,
     scope: "system:reconnect:gdrive",
-    action_grammar: "reconnect_drive",
+    action: "reconnect_drive",
     body:
-      `Drive disconnected — reconnect ${agent}?\n\n` +
+      `Drive disconnected — reconnect ${agent_unit}?\n\n` +
       `The refresh token Google issued has been rotated or revoked. ` +
       `This usually means the password changed or the app's access was ` +
       `removed in the Google Account dashboard.${detailLine}`,

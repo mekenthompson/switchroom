@@ -109,28 +109,33 @@ function getVaultPath(configPath?: string): string {
 
 function promptHidden(prompt: string): Promise<string> {
   return new Promise((resolve, reject) => {
-    const rl = createInterface({
-      input: process.stdin,
-      output: process.stdout,
-    });
     if (process.stdin.isTTY) {
+      // TTY path: drive stdin directly in raw mode. Do NOT create a readline
+      // interface here — readline attaches its own `data`/`keypress` listeners
+      // and an internal line buffer that fight with our raw-mode reader,
+      // causing double-handled keystrokes and keeping stdin referenced after
+      // we intend to release it. Keep a single owner of the event stream.
       process.stdout.write(prompt);
       const stdin = process.stdin;
+      const wasRaw = stdin.isRaw;
       stdin.setRawMode(true);
       stdin.resume();
       let input = "";
+      const cleanup = () => {
+        stdin.removeListener("data", onData);
+        stdin.setRawMode(wasRaw);
+        // Pause stdin so the process isn't held open by an active reader
+        // after we're done collecting the passphrase.
+        stdin.pause();
+      };
       const onData = (data: Buffer) => {
         const char = data.toString("utf8");
-        if (char === "\n" || char === "\r") {
-          stdin.setRawMode(false);
-          stdin.removeListener("data", onData);
-          rl.close();
+        if (char === "\n" || char === "\r" || char === "\r\n") {
+          cleanup();
           process.stdout.write("\n");
           resolve(input);
         } else if (char === "\u0003") {
-          stdin.setRawMode(false);
-          stdin.removeListener("data", onData);
-          rl.close();
+          cleanup();
           process.stdout.write("\n");
           reject(new Error("Aborted"));
         } else if (char === "\u007F" || char === "\b") {
@@ -141,6 +146,12 @@ function promptHidden(prompt: string): Promise<string> {
       };
       stdin.on("data", onData);
     } else {
+      // Non-TTY (piped/redirected stdin): readline handles line buffering.
+      // This is the only branch that needs a readline interface.
+      const rl = createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
       rl.question(prompt, (answer) => {
         rl.close();
         resolve(answer);

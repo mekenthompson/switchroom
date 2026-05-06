@@ -113,6 +113,27 @@ if (cliEscape.changed) {
   console.log(`[build] ASCII-escaped ${cliEscape.nonAsciiCount} non-ASCII code units in dist/cli/switchroom.js`);
 }
 
+// Bundle the autoaccept-poll entrypoint. The agent unit's ExecStartPost
+// invokes this in the background to dispatch first-run TUI prompts via
+// `tmux capture-pane` + `tmux send-keys`. Must ship in dist/ because
+// package.json files-array does not include src/.
+console.log("[build] bundling src/cli/autoaccept-poll.ts -> dist/cli/autoaccept-poll.js");
+execSync(
+  `bun build ${JSON.stringify(resolve(root, "src/cli/autoaccept-poll.ts"))} --outdir ${JSON.stringify(outDir)} --target node`,
+  { stdio: "inherit", cwd: root }
+);
+const pollOutFile = resolve(outDir, "autoaccept-poll.js");
+let pollSrc = readFileSync(pollOutFile, "utf8");
+if (pollSrc.startsWith("#!/usr/bin/env node")) {
+  pollSrc = pollSrc.replace(/^#!\/usr\/bin\/env node/, "#!/usr/bin/env bun");
+  writeFileSync(pollOutFile, pollSrc);
+}
+chmodSync(pollOutFile, 0o755);
+const pollEscape = escapeBundleNonAscii(pollOutFile);
+if (pollEscape.changed) {
+  console.log(`[build] ASCII-escaped ${pollEscape.nonAsciiCount} non-ASCII code units in dist/cli/autoaccept-poll.js`);
+}
+
 // Build the telegram-plugin self-contained dist (#634 strategic
 // packaging fix). The plugin's gateway / server / bridge entry points
 // reach across into `src/` (auth, config, vault-broker, build-info).

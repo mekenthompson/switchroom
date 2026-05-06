@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest'
-import { dispatchAdminCommand, parseCommandName, ADMIN_COMMAND_NAMES } from './index.js'
+import {
+  dispatchAdminCommand,
+  parseCommandName,
+  parseCommandArg,
+  classifyAdminGate,
+  ADMIN_COMMAND_NAMES,
+} from './index.js'
 
 // ─── parseCommandName ────────────────────────────────────────────────────────
 
@@ -144,6 +150,110 @@ describe('dispatchAdminCommand', () => {
       expect(dispatchAdminCommand('/restart', false)).toEqual({ handled: false })
       expect(dispatchAdminCommand('/nope', false)).toEqual({ handled: false })
       expect(dispatchAdminCommand('hello', false)).toEqual({ handled: false })
+    })
+  })
+})
+
+// ─── parseCommandArg ─────────────────────────────────────────────────────────
+
+describe('parseCommandArg', () => {
+  it('returns empty string when no arg', () => {
+    expect(parseCommandArg('/restart')).toBe('')
+  })
+  it('returns empty string when only whitespace', () => {
+    expect(parseCommandArg('/restart   ')).toBe('')
+  })
+  it('returns single arg', () => {
+    expect(parseCommandArg('/restart foo')).toBe('foo')
+  })
+  it('returns multi-word arg trimmed', () => {
+    expect(parseCommandArg('/restart   foo bar  ')).toBe('foo bar')
+  })
+  it('works with @botname suffix', () => {
+    expect(parseCommandArg('/restart@bot foo')).toBe('foo')
+  })
+  it('returns empty string for non-slash text', () => {
+    expect(parseCommandArg('hello world')).toBe('')
+  })
+})
+
+// ─── classifyAdminGate ───────────────────────────────────────────────────────
+
+describe('classifyAdminGate', () => {
+  const me = 'clerk'
+
+  it('passes through plain text', () => {
+    expect(classifyAdminGate('hello there', me)).toEqual({ action: 'pass-through' })
+  })
+
+  it('passes through unknown slash commands', () => {
+    expect(classifyAdminGate('/whatever', me)).toEqual({ action: 'pass-through' })
+  })
+
+  it('passes through non-admin commands', () => {
+    expect(classifyAdminGate('/version', me)).toEqual({ action: 'pass-through' })
+    expect(classifyAdminGate('/auth', me)).toEqual({ action: 'pass-through' })
+    expect(classifyAdminGate('/new', me)).toEqual({ action: 'pass-through' })
+  })
+
+  describe('/restart', () => {
+    it('passes through with no arg (self-restart)', () => {
+      expect(classifyAdminGate('/restart', me)).toEqual({ action: 'pass-through' })
+    })
+    it('passes through with whitespace-only arg', () => {
+      expect(classifyAdminGate('/restart   ', me)).toEqual({ action: 'pass-through' })
+    })
+    it('passes through when arg matches my agent name', () => {
+      expect(classifyAdminGate('/restart clerk', me)).toEqual({ action: 'pass-through' })
+    })
+    it('passes through with @botname suffix and self target', () => {
+      expect(classifyAdminGate('/restart@switchroombot clerk', me)).toEqual({
+        action: 'pass-through',
+      })
+    })
+    it('blocks when targeting a different agent', () => {
+      expect(classifyAdminGate('/restart finn', me)).toEqual({
+        action: 'block',
+        reason: 'other-agent',
+        cmd: 'restart',
+      })
+    })
+    it('blocks when targeting `all`', () => {
+      expect(classifyAdminGate('/restart all', me)).toEqual({
+        action: 'block',
+        reason: 'other-agent',
+        cmd: 'restart',
+      })
+    })
+  })
+
+  describe('other admin commands', () => {
+    it('blocks /logs with admin-required reason', () => {
+      expect(classifyAdminGate('/logs', me)).toEqual({
+        action: 'block',
+        reason: 'admin-required',
+        cmd: 'logs',
+      })
+    })
+    it('blocks /grant with admin-required reason regardless of args', () => {
+      expect(classifyAdminGate('/grant clerk telegram', me)).toEqual({
+        action: 'block',
+        reason: 'admin-required',
+        cmd: 'grant',
+      })
+    })
+    it('blocks /agents, /update, /vault, /permissions', () => {
+      for (const c of ['agents', 'update', 'vault', 'permissions', 'stop', 'agentstart', 'reconcile', 'dangerous', 'memory', 'topics']) {
+        const r = classifyAdminGate(`/${c}`, me)
+        expect(r).toEqual({ action: 'block', reason: 'admin-required', cmd: c })
+      }
+    })
+    it('handles @botname suffix', () => {
+      expect(classifyAdminGate('/logs@switchroombot 50', me)).toEqual({
+        action: 'block',
+        reason: 'admin-required',
+        cmd: 'logs',
+      })
     })
   })
 })

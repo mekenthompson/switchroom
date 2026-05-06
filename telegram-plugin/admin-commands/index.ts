@@ -91,6 +91,75 @@ export function parseCommandName(text: string): string | null {
  *     commands to Claude (when adminEnabled=false).
  *  2. By tests to verify the dispatch table is correct without starting a bot.
  */
+/**
+ * Parse the argument portion of a slash command (everything after the command
+ * token, trimmed). Returns '' when no argument is present.
+ *
+ *   parseCommandArg('/restart')           === ''
+ *   parseCommandArg('/restart   ')        === ''
+ *   parseCommandArg('/restart foo')       === 'foo'
+ *   parseCommandArg('/restart@bot foo')   === 'foo'
+ *   parseCommandArg('/restart foo bar')   === 'foo bar'
+ */
+export function parseCommandArg(text: string): string {
+  if (!text.startsWith('/')) return ''
+  const spaceIdx = text.indexOf(' ')
+  if (spaceIdx === -1) return ''
+  return text.slice(spaceIdx + 1).trim()
+}
+
+/**
+ * Result of admin-gate classification used by the gateway middleware to decide
+ * how to handle an inbound slash command when admin gating is OFF.
+ *
+ *  - `pass-through` — let the command fall through to the gateway's local
+ *    bot.command() handler. Used for non-admin commands AND for `/restart`
+ *    targeting the current agent (self-restart is always allowed).
+ *  - `block` — the gateway should reply with an "admin required" warning and
+ *    NOT forward the message to Claude.
+ *
+ * `reason` distinguishes the two block cases for the audit log:
+ *  - `other-agent` — `/restart` aimed at a different agent
+ *  - `admin-required` — any other ADMIN_COMMAND_NAMES verb
+ */
+export type AdminGateDecision =
+  | { action: 'pass-through' }
+  | { action: 'block'; reason: 'other-agent' | 'admin-required'; cmd: string }
+
+/**
+ * Decide what the gateway middleware should do with an inbound text message
+ * when SWITCHROOM_AGENT_ADMIN=false.
+ *
+ * Rules:
+ *  - Non-slash text → pass-through.
+ *  - Unknown / non-admin slash command → pass-through.
+ *  - `/restart` with no arg, or arg matching `myAgentName` → pass-through
+ *    (gateway's local bot.command('restart', …) handles self-restart).
+ *  - `/restart <other-agent>` → block (reason='other-agent').
+ *  - Any other ADMIN_COMMAND_NAMES verb → block (reason='admin-required').
+ *
+ * This function is pure and synchronous so it can be unit-tested without a
+ * Grammy context. The middleware in gateway.ts does the side effects.
+ */
+export function classifyAdminGate(
+  text: string,
+  myAgentName: string,
+): AdminGateDecision {
+  if (!text.startsWith('/')) return { action: 'pass-through' }
+  const cmd = parseCommandName(text)
+  if (cmd === null || !ADMIN_COMMAND_NAMES.has(cmd)) {
+    return { action: 'pass-through' }
+  }
+  if (cmd === 'restart') {
+    const arg = parseCommandArg(text)
+    if (arg === '' || arg === myAgentName) {
+      return { action: 'pass-through' }
+    }
+    return { action: 'block', reason: 'other-agent', cmd }
+  }
+  return { action: 'block', reason: 'admin-required', cmd }
+}
+
 export function dispatchAdminCommand(
   text: string,
   adminEnabled: boolean,

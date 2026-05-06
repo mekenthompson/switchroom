@@ -251,7 +251,7 @@ import { StagingMap } from '../secret-detect/staging.js'
 import { maskToken } from '../secret-detect/mask.js'
 import { defaultVaultWrite, defaultVaultList } from '../secret-detect/vault-write.js'
 import { detectSecrets } from '../secret-detect/index.js'
-import { ADMIN_COMMAND_NAMES, parseCommandName } from '../admin-commands/index.js'
+import { classifyAdminGate } from '../admin-commands/index.js'
 import {
   startSubagentWatcher,
   type SubagentWatcherHandle,
@@ -5690,28 +5690,35 @@ async function runSwitchroomCommandFormatted(ctx: Context, args: string[], label
 }
 
 // ─── Admin-command gating middleware ─────────────────────────────────────
-// When AGENT_ADMIN=false (default), admin slash commands like /agents, /logs,
-// /restart etc. should fall through to Claude rather than being executed
-// locally. Grammy's bot.command() handlers fire BEFORE bot.on('message:text'),
-// so without this middleware the commands would silently execute (or no-op
-// due to isAuthorizedSender) and never reach handleInboundCoalesced.
+// When AGENT_ADMIN=false (default), admin slash commands (/agents, /logs,
+// /grant, etc.) must NOT execute locally — this agent isn't admin-flagged
+// and routing them through Claude burns tokens for no benefit. Reply with a
+// concise "admin required" warning instead.
 //
-// Middleware registered BEFORE bot.command() calls intercepts text messages
-// first. If admin gating is off and the command is in ADMIN_COMMAND_NAMES, we
-// redirect to handleInboundCoalesced so Claude sees the message.
+// Special case: `/restart` with no arg, or `/restart <my-agent-name>`, is
+// allowed to fall through to the local bot.command('restart', …) handler so
+// every agent can self-restart without admin privilege. `/restart <other>`
+// is blocked just like any other admin verb.
 //
 // Invariant: when AGENT_ADMIN=true, this middleware is a no-op — bot.command()
-// handlers run normally and Claude never sees admin commands.
+// handlers run normally for all admin verbs and Claude never sees them.
 bot.use(async (ctx, next) => {
   if (!AGENT_ADMIN && ctx.message?.text) {
-    const cmd = parseCommandName(ctx.message.text)
-    if (cmd !== null && ADMIN_COMMAND_NAMES.has(cmd)) {
-      // Redirect admin command text to Claude via the normal inbound path.
-      // We intentionally do NOT call next() so bot.command() never fires.
+    const myName = getMyAgentName()
+    const decision = classifyAdminGate(ctx.message.text, myName)
+    if (decision.action === 'block') {
+      // Block admin commands the LLM should never see. Reply with a concise
+      // "admin required" warning instead of forwarding to Claude.
       process.stderr.write(
-        `telegram gateway: admin-gate redirect cmd=/${cmd} agent=${process.env.SWITCHROOM_AGENT_NAME ?? '-'} (AGENT_ADMIN=false)\n`,
+        `telegram gateway: admin-gate blocked cmd=/${decision.cmd} agent=${process.env.SWITCHROOM_AGENT_NAME ?? '-'} reason=${decision.reason} (AGENT_ADMIN=false)\n`,
       )
-      await handleInboundCoalesced(ctx, ctx.message.text, undefined)
+      const cmdHtml = escapeHtmlForTg(`/${decision.cmd}`)
+      const nameHtml = escapeHtmlForTg(myName)
+      const text =
+        decision.reason === 'other-agent'
+          ? `⚠️ <code>${cmdHtml}</code> targeting another agent is an admin operation — this agent (<code>${nameHtml}</code>) isn't admin-flagged. Run it from an admin agent, or set <code>admin: true</code> for this agent in switchroom.yaml. (Self-restart is allowed: send <code>/restart</code> with no arg.)`
+          : `⚠️ <code>${cmdHtml}</code> is an admin command — this agent (<code>${nameHtml}</code>) isn't admin-flagged. Run it from an admin agent, or set <code>admin: true</code> for this agent in switchroom.yaml.`
+      await switchroomReply(ctx, text, { html: true })
       return
     }
   }

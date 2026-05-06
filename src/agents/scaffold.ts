@@ -1925,7 +1925,7 @@ export function scaffoldAgent(
     for (let i = 0; i < agentConfig.schedule!.length; i++) {
       const entry = agentConfig.schedule![i];
       const model = entry.model ?? "claude-sonnet-4-6";
-      const script = buildCronScript(agentDir, entry.prompt, model, telegramConfig.forum_chat_id, userId, entry.secrets ?? [], brokerSocket, `cron-${i}`);
+      const script = buildCronScript(agentDir, entry.prompt, model, cronChatId, userId, entry.secrets ?? [], brokerSocket, `cron-${i}`);
       const scriptPath = join(agentDir, "telegram", `cron-${i}.sh`);
       writeFileSync(scriptPath, script, { encoding: "utf-8", mode: 0o700 });
     }
@@ -3059,12 +3059,13 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
     const reconBrokerSocket = switchroomConfig?.vault?.broker?.socket
       ? resolveDualPath(switchroomConfig.vault.broker.socket)
       : resolveDualPath("~/.switchroom/vault-broker.sock");
+    const reconCronChatId = cronUserId ?? telegramConfig.forum_chat_id;
     for (let i = 0; i < agentConfig.schedule!.length; i++) {
       const entry = agentConfig.schedule![i];
       const model = entry.model ?? "claude-sonnet-4-6";
       const script = buildCronScript(
         agentDir, entry.prompt, model,
-        telegramConfig.forum_chat_id, cronUserId, entry.secrets ?? [], reconBrokerSocket,
+        reconCronChatId, cronUserId, entry.secrets ?? [], reconBrokerSocket,
         `cron-${i}`,
       );
       const scriptPath = join(agentDir, "telegram", `cron-${i}.sh`);

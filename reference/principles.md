@@ -52,7 +52,7 @@ Telegram thread, we've made them do our job.
   as *"⚠ skill `weekly-review` failed: missing `hindsight` MCP. Run
   `switchroom agent reconcile coach` to repair."*
 - ❌ **Bad:** Progress card shows `❌ Error` with no next step and a
-  pointer to `journalctl --user -u switchroom-coach`.
+  pointer to "check the agent logs."
 
 - ✅ **Good:** `switchroom vault set telegram-bot-token` prompts for the
   value, masks input, confirms encryption, and tells the user *"now

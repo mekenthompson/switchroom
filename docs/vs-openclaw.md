@@ -1,12 +1,12 @@
 # Switchroom vs OpenClaw: an OpenClaw alternative that works with Claude Pro/Max
 
-If you came here because OpenClaw stopped working with your Claude subscription, or because you don't want to run Docker containers per agent, Switchroom is built for the same use case with a different set of tradeoffs.
+If you came here because OpenClaw stopped working with your Claude subscription, Switchroom is built for the same use case with a different set of tradeoffs. The wedge is simple: Switchroom drives the **stock `claude` CLI** under your existing Pro/Max subscription. OpenClaw runs a custom runtime against your Anthropic API key.
 
 ## TL;DR
 
 - **Switchroom uses your Claude Pro/Max subscription via OAuth.** OpenClaw requires an Anthropic API key and bills per token.
-- **Switchroom runs the unmodified `claude` CLI.** OpenClaw runs a custom runtime that re-implements parts of Claude Code.
-- **Switchroom uses systemd units.** OpenClaw uses Docker containers per agent.
+- **Switchroom runs the stock `claude` CLI.** OpenClaw runs a custom runtime that re-implements parts of Claude Code.
+- **Switchroom inherits every upstream Claude Code feature the day it ships.** OpenClaw has to catch up.
 - **Switchroom has a YAML config cascade** (defaults → profiles → per-agent). OpenClaw uses per-agent JSON/TOML files.
 
 ## Side-by-side
@@ -15,11 +15,10 @@ If you came here because OpenClaw stopped working with your Claude subscription,
 |---|---|---|
 | Auth | Claude Pro/Max OAuth | Anthropic API key |
 | Billing | Your existing subscription | Per-token API billing |
-| Runtime | Official `claude` CLI | Custom runtime |
-| Isolation | systemd unit per agent | Docker container per agent |
-| Channels | Telegram (enhanced fork with 10 MCP tools) | WhatsApp, Telegram, Slack |
+| Runtime | Stock `claude` CLI | Custom runtime |
+| Channels | Telegram (enhanced fork with 15 MCP tools) | WhatsApp, Telegram, Slack |
 | Memory | Hindsight (semantic, knowledge graph, mental models) | File-based |
-| Scheduling | systemd timers | Built-in cron engine |
+| Scheduling | Cron syntax in YAML, fires across reboots | Built-in cron engine |
 | Sub-agents | Native Claude Code sub-agents | Custom orchestration |
 | Config | YAML with cascade + profiles | JSON/TOML per agent |
 | Install | `switchroom setup` wizard | `docker compose up` |
@@ -34,7 +33,7 @@ Using OAuth also means:
 - No API key sitting on a server that could leak.
 - No separate billing relationship with Anthropic to manage.
 
-## Why `claude` CLI matters
+## Why the stock `claude` CLI matters
 
 OpenClaw re-implements Claude's agent loop in a custom runtime. That means when Anthropic ships a new Claude Code feature (sub-agents, skills, MCP improvements, memory tool, code execution) OpenClaw has to catch up. Switchroom inherits every upstream feature the day it lands, because each agent is literally the `claude` binary.
 
@@ -45,21 +44,21 @@ Examples of upstream features Switchroom gets for free:
 - `--continue` for session continuity
 - Hooks (PreToolUse, PostToolUse, Stop, UserPromptSubmit)
 
-## Why no Docker (per agent) matters
+## What you actually get
 
-Docker-per-agent is fine for isolation but expensive in practice:
-- Container image builds and updates take minutes.
-- Memory overhead per container adds up on a small VPS.
-- Filesystem mounts, networking, and secret injection need per-agent configuration.
-- Debugging requires `docker exec` detours.
+Substrate aside, here's what the product promises:
 
-Switchroom uses systemd units. Starting an agent is `systemctl start switchroom-agent@name`. Logs are `journalctl -u switchroom-agent@name`. Preflight checks catch broken configs before the unit is even loaded. Worktrees handle code isolation when sub-agents need it, without containers.
+- **Long-running service per agent.** Survives reboots, network drops, your laptop closing.
+- **Auto-recovery on crash, with audit trail.** A watchdog catches stuck turns, captures a crash-pane snapshot for forensics, restarts the agent. The agent then runs a wake-audit on boot for owed replies and orphan sub-agents. No silent dropped work.
+- **Per-agent isolated logs you can grep.** One process per agent, one log stream per agent.
+- **Scheduled tasks that fire across reboots.** Cron syntax in YAML, per-task model selection, output to Telegram.
+- **Live progress cards in Telegram.** Pinned per topic, every tool call visible. The headline UX.
 
 ## When OpenClaw might still be the right call
 
 - You need WhatsApp or Slack channels today and don't want to wait for Switchroom to ship them.
 - You specifically want API-key billing for compliance/procurement reasons.
-- You need the custom runtime's behavior for a feature Switchroom doesn't replicate.
+- You need the custom runtime's behaviour for a feature Switchroom doesn't replicate.
 
 ## Migrating from OpenClaw
 

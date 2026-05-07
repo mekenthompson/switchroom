@@ -358,6 +358,7 @@ export async function fetchAccountQuota(
       writeAccountQuota(
         label,
         snapshotFromQuotaUtilization(result.data, new Date(now)),
+        opts.home,
       );
     } catch {
       /* best-effort */

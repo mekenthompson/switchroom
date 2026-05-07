@@ -1758,6 +1758,12 @@ describe("scaffoldAgent with global defaults cascade", () => {
             timeout: 5,
             async: false,
           },
+          {
+            type: "command",
+            command: expect.stringContaining("tool-label-stop.mjs"),
+            timeout: 5,
+            async: true,
+          },
         ],
       },
     ]);
@@ -3160,6 +3166,34 @@ describe("secret-detect hook wiring", () => {
     expect(serialized).not.toContain("secret-scrub-stop.mjs");
     // PreToolUse should be entirely absent (no user hooks configured).
     expect(settings.hooks?.PreToolUse).toBeUndefined();
+  });
+
+  it("wires tool-label-pretool.mjs and tool-label-stop.mjs when plugin is switchroom (#783)", () => {
+    const agentConfig = makeAgentConfig();
+    const result = scaffoldAgent(
+      "sd-tool-label-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      makeConfig("sd-tool-label-agent", agentConfig),
+    );
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+    const pre = settings.hooks.PreToolUse as Array<{ matcher?: string; hooks: Array<{ command: string; timeout?: number }> }>;
+    const allPre = pre.flatMap((e) => e.hooks);
+    const labelHook = allPre.find((h) => h.command.includes("tool-label-pretool.mjs"));
+    expect(labelHook).toBeDefined();
+    // Spec requires explicit timeout: 5 (default 600 could wedge agents).
+    expect(labelHook!.timeout).toBe(5);
+    // Catch-all matcher: the entry that contains the label hook MUST NOT have a matcher.
+    const labelEntry = pre.find((e) => e.hooks.some((h) => h.command.includes("tool-label-pretool.mjs")));
+    expect(labelEntry?.matcher).toBeUndefined();
+
+    const stop = settings.hooks.Stop as Array<{ hooks: Array<{ command: string; async?: boolean }> }>;
+    const reaper = stop.flatMap((e) => e.hooks).find((h) => h.command.includes("tool-label-stop.mjs"));
+    expect(reaper).toBeDefined();
+    expect(reaper!.async).toBe(true);
   });
 
   it("preserves user-declared PreToolUse hooks alongside secret-guard", () => {

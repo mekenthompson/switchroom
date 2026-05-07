@@ -1,0 +1,216 @@
+#!/usr/bin/env node
+/**
+ * PreToolUse hook — emits a deterministic human label per tool call.
+ *
+ * Claude Code PreToolUse protocol (v1):
+ *   Input:  JSON on stdin — { session_id, tool_name, tool_input, tool_use_id, cwd, ... }
+ *   Output: exit 0 + empty stdout → allow. We NEVER emit JSON to stdout
+ *           (would risk hookSpecificOutput.updatedInput collisions). We
+ *           NEVER exit non-zero (exit 2 BLOCKS the tool call).
+ *
+ * Side effect: appends one JSON line to
+ *   $TELEGRAM_STATE_DIR/tool-labels-${session_id}.jsonl
+ * with shape { ts, tool_use_id, agent_id, label, tool_name }.
+ *
+ * If $TELEGRAM_STATE_DIR is unset → silent skip (renderer just falls back
+ * to its existing precedence ladder). If session_id or tool_use_id is
+ * missing → skip (the row could never be joined anyway). If the rule
+ * table doesn't produce a label for the tool → skip.
+ *
+ * Tools intentionally NOT labeled here (handled by existing description
+ * / TodoWrite / sub-agent panels in the renderer):
+ *   Bash, Task, Agent, TodoWrite
+ *
+ * Issue #783.
+ */
+
+import { readFileSync, mkdirSync, appendFileSync, existsSync } from 'node:fs'
+import { join, basename } from 'node:path'
+
+function readStdin() {
+  try {
+    return readFileSync(0, 'utf8')
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * One-line, length-bounded escape of a value for inclusion in a label.
+ * Newlines collapsed, very long strings truncated with an ellipsis.
+ */
+function clip(s, max = 80) {
+  if (s == null) return ''
+  let v = String(s).replace(/\s+/g, ' ').trim()
+  if (v.length > max) v = v.slice(0, max - 1) + '…'
+  return v
+}
+
+function safeBasename(p) {
+  if (!p || typeof p !== 'string') return ''
+  try {
+    const b = basename(p)
+    return b || p
+  } catch {
+    return p
+  }
+}
+
+function urlHostPath(u) {
+  if (!u || typeof u !== 'string') return ''
+  try {
+    const x = new URL(u)
+    return x.host + (x.pathname && x.pathname !== '/' ? x.pathname : '')
+  } catch {
+    return u
+  }
+}
+
+/**
+ * Compute a label for a (toolName, input) pair. Returns null when the
+ * tool should NOT be labeled (suppress / fall through to existing
+ * renderer precedence).
+ */
+export function computeLabel(toolName, input) {
+  const i = input ?? {}
+
+  // Tools whose labels are already handled elsewhere — emit nothing so
+  // the existing description / TodoWrite / sub-agent paths win.
+  switch (toolName) {
+    case 'Bash':
+    case 'Task':
+    case 'Agent':
+    case 'TodoWrite':
+    case 'ToolSearch':
+      return null
+  }
+
+  // Built-in rule table.
+  switch (toolName) {
+    case 'Read':
+      return `Reading ${clip(safeBasename(i.file_path))}`.trim()
+    case 'Edit':
+      return `Editing ${clip(safeBasename(i.file_path))}`.trim()
+    case 'Write':
+      return `Writing ${clip(safeBasename(i.file_path))}`.trim()
+    case 'Grep': {
+      const path = i.path ? clip(String(i.path), 40) : '.'
+      const pat = clip(String(i.pattern ?? ''), 40)
+      return `Searching ${path} for ${pat}`
+    }
+    case 'Glob':
+      return `Finding files matching ${clip(String(i.pattern ?? ''), 60)}`
+    case 'WebFetch':
+      return `Fetching ${clip(urlHostPath(i.url), 60)}`
+    case 'WebSearch':
+      return `Searching the web for ${clip(String(i.query ?? ''), 60)}`
+    case 'NotebookEdit':
+      return `Editing notebook ${clip(safeBasename(i.notebook_path))}`
+    case 'BashOutput':
+      return 'Reading background output'
+    case 'KillBash':
+    case 'KillShell':
+      return 'Stopping background process'
+  }
+
+  // MCP allowlist.
+  if (typeof toolName === 'string' && toolName.startsWith('mcp__')) {
+    switch (toolName) {
+      case 'mcp__switchroom-telegram__reply':
+      case 'mcp__switchroom-telegram__stream_reply':
+        return 'Replying'
+      case 'mcp__switchroom-telegram__react': {
+        const emoji = clip(String(i.emoji ?? ''), 8)
+        return emoji ? `Reacting ${emoji}` : 'Reacting'
+      }
+      case 'mcp__switchroom-telegram__get_recent_messages':
+        return 'Reading chat history'
+      case 'mcp__hindsight__recall':
+      case 'mcp__hindsight__reflect':
+        return 'Searching memory'
+      case 'mcp__hindsight__retain':
+        return 'Saving memory'
+      // Explicit suppressions — return null so we don't emit a sidecar
+      // line at all. (Falling through to the default below produces the
+      // same effect, but listing these makes the intent obvious.)
+      case 'mcp__switchroom-telegram__send_typing':
+      case 'mcp__hindsight__sync_retain':
+        return null
+    }
+    // Any other mcp__* tool: not on the allowlist, no label.
+    return null
+  }
+
+  return null
+}
+
+function main() {
+  const raw = readStdin().trim()
+  if (!raw) process.exit(0)
+
+  let event
+  try {
+    event = JSON.parse(raw)
+  } catch {
+    process.exit(0)
+  }
+
+  const stateDir = process.env.TELEGRAM_STATE_DIR
+  if (!stateDir || stateDir.length === 0) process.exit(0)
+
+  const sessionId = event.session_id
+  const toolUseId = event.tool_use_id
+  const toolName = event.tool_name
+  if (!sessionId || !toolUseId || !toolName) process.exit(0)
+
+  let label
+  try {
+    label = computeLabel(toolName, event.tool_input)
+  } catch {
+    process.exit(0)
+  }
+  if (!label) process.exit(0)
+
+  // agent_id: Claude Code does not pass sub-agent agent_id directly to
+  // the hook; fall back to SWITCHROOM_AGENT_NAME or the cwd basename.
+  const agentId =
+    process.env.SWITCHROOM_AGENT_NAME ??
+    (event.cwd ? safeBasename(event.cwd) : null) ??
+    null
+
+  const line = JSON.stringify({
+    ts: Date.now(),
+    tool_use_id: toolUseId,
+    agent_id: agentId,
+    label,
+    tool_name: toolName,
+  }) + '\n'
+
+  try {
+    if (!existsSync(stateDir)) {
+      mkdirSync(stateDir, { recursive: true })
+    }
+    const target = join(stateDir, `tool-labels-${sessionId}.jsonl`)
+    appendFileSync(target, line)
+  } catch (err) {
+    // Never block. Surface to stderr (captured by plugin-logger).
+    try {
+      process.stderr.write(
+        `[tool-label-pretool] write failed: ${err?.message ?? err}\n`,
+      )
+    } catch { /* ignore */ }
+  }
+
+  process.exit(0)
+}
+
+// Skip main() when imported (for unit tests of computeLabel).
+const isMain = (() => {
+  try {
+    const argv1 = process.argv[1] ?? ''
+    return argv1.endsWith('tool-label-pretool.mjs')
+  } catch {
+    return false
+  }
+})()
+if (isMain) main()

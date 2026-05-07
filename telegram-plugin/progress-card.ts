@@ -504,7 +504,7 @@ export function reduce(
         id: state.items.length,
         toolUseId: event.toolUseId ?? null,
         tool: event.toolName,
-        label: toolLabel(event.toolName, event.input, preamble),
+        label: toolLabel(event.toolName, event.input, preamble, event.precomputedLabel),
         humanAuthored: isHumanDescription(event.toolName, event.input),
         state: 'running',
         startedAt: now,
@@ -833,7 +833,7 @@ export function reduce(
         currentTool: event.toolUseId
           ? {
               tool: event.toolName,
-              label: toolLabel(event.toolName, event.input, preamble),
+              label: toolLabel(event.toolName, event.input, preamble, event.precomputedLabel),
               humanAuthored: isHumanDescription(event.toolName, event.input),
               toolUseId: event.toolUseId,
               startedAt: now,

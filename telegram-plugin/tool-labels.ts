@@ -155,7 +155,15 @@ export function toolLabel(
   tool: string,
   input?: Record<string, unknown>,
   preamble?: string,
+  precomputedLabel?: string,
 ): string {
+  // Precomputed sidecar label (PreToolUse hook, #783) — top of the
+  // precedence ladder per spec. The hook deliberately emits NO label
+  // for Bash/Task/Agent/TodoWrite, so falling through to the
+  // existing description path for those is automatic.
+  if (precomputedLabel && precomputedLabel.trim().length > 0) {
+    return truncate(firstLine(precomputedLabel.trim()), MAX_DESCRIPTION_CHARS)
+  }
   if (!input || typeof input !== 'object') return ''
   const str = (k: string): string | undefined =>
     typeof input[k] === 'string' ? (input[k] as string) : undefined

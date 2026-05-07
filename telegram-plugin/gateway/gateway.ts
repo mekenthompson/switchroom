@@ -58,7 +58,8 @@ import { handlePtyPartialPure, type PtyHandlerState } from '../pty-partial-handl
 import { handleStreamReply } from '../stream-reply-handler.js'
 import { createChatLock } from '../chat-lock.js'
 import { createRetryApiCall } from '../retry-api-call.js'
-import { installTgPostLogger } from '../shared/bot-runtime.js'
+import { installTgPostLogger, withTgPostTags } from '../shared/bot-runtime.js'
+import { emitCardEvent } from '../card-event-log.js'
 import { buildAttachmentPath, assertInsideInbox } from '../attachment-path.js'
 import { createPinManager } from '../progress-card-pin-manager.js'
 import { createPinWatchdog } from '../progress-card-pin-watchdog.js'
@@ -9462,6 +9463,13 @@ if (streamMode === 'checklist') {
 
   progressDriver = createProgressDriver({
     emit: ({ chatId, threadId, turnKey, html, done, isFirstEmit, replyToMessageId, agentId }) => {
+      // Tag the outbound API calls so `tg-post` log lines carry turnKey
+      // (and cardMessageId when known) — lets us audit days-old session
+      // logs for "did the card render?" / "what edit storms hit it?"
+      // without parsing free-form progress-card traces. (#card-audit-log)
+      const knownCardMessageId = pinMgr.pinnedMessageId(turnKey, agentId)
+      const tgPostTags: Record<string, string | number> = { turnKey }
+      if (knownCardMessageId != null) tgPostTags.cardMessageId = knownCardMessageId
       const args = {
         chat_id: chatId, text: html, done, message_thread_id: threadId,
         lane: 'progress', format: 'html', turnKey,
@@ -9508,7 +9516,7 @@ if (streamMode === 'checklist') {
       // default in a follow-up PR.
       const draftFlagOn = process.env.PROGRESS_CARD_DRAFT_TRANSPORT === '1'
       const draftEligible = draftFlagOn && isDmChatId(chatId) && threadId == null
-      handleStreamReply(args, { activeDraftStreams, activeDraftParseModes, suppressPtyPreview }, {
+      withTgPostTags(tgPostTags, () => handleStreamReply(args, { activeDraftStreams, activeDraftParseModes, suppressPtyPreview }, {
         // grammy Bot vs local StreamBotApi — see cast pattern above.
         bot: lockedBot as never, retry: robustApiCall, markdownToHtml, escapeMarkdownV2, repairEscapedWhitespace,
         takeHandoffPrefix: () => '', assertAllowedChat, resolveThreadId, disableLinkPreview: true,
@@ -9535,7 +9543,7 @@ if (streamMode === 'checklist') {
               ...(sendMessageDraftFn != null ? { sendMessageDraft: sendMessageDraftFn } : {}),
             }
           : {}),
-      }).then((result) => {
+      })).then((result) => {
         // Successful API call — reset the consecutive-4xx counter.
         progressDriver?.reportApiSuccess(turnKey)
         // #203: progress-card edit is a user-visible signal.
@@ -10188,6 +10196,46 @@ void (async () => {
               // when the bridge has disconnected and events have stopped flowing.
               onStall: (agentId, idleMs, description) => {
                 progressDriver?.onSubAgentStall(agentId, idleMs, description)
+              },
+              // #card-audit-log: symmetric sub_agent_finished surface.
+              // The driver's per-chat shadow knows the parent turnKey and
+              // the registry DB carries the background flag — combine them
+              // into a single audit-log line for retrospective debugging.
+              onFinish: ({ agentId, outcome, toolCount, durationMs }) => {
+                let parentTurnKey = ''
+                let chatId = ''
+                let isBackground = false
+                try {
+                  const fleets = progressDriver?.peekAllFleets() ?? []
+                  for (const f of fleets) {
+                    if (f.fleet.has(agentId)) {
+                      parentTurnKey = f.turnKey
+                      chatId = f.chatId ?? ''
+                      break
+                    }
+                  }
+                } catch {
+                  // peek failures are non-fatal — we still emit the event.
+                }
+                if (turnsDb != null) {
+                  try {
+                    const row = turnsDb
+                      .prepare('SELECT background FROM subagents WHERE jsonl_agent_id = ?')
+                      .get(agentId) as { background: number } | undefined
+                    if (row != null) isBackground = row.background === 1
+                  } catch { /* best-effort */ }
+                }
+                const finalOutcome: 'completed' | 'orphan' | 'background' =
+                  isBackground ? 'background' : (outcome === 'completed' ? 'completed' : 'orphan')
+                emitCardEvent({
+                  agent: process.env.SWITCHROOM_AGENT_NAME ?? '',
+                  chatId,
+                  turnKey: parentTurnKey,
+                  event: 'finalized',
+                  reason: `sub_agent_finished agentId=${agentId} outcome=${finalOutcome} tools=${toolCount}`,
+                  subagents: [agentId],
+                  durationMs,
+                })
               },
             })
             process.stderr.write('telegram gateway: subagent-watcher active\n')

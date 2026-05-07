@@ -25,8 +25,53 @@ import { GrammyError, type Bot, type Context } from 'grammy'
 import { run, type RunnerHandle } from '@grammyjs/runner'
 import { execFileSync, spawnSync } from 'child_process'
 import { createHash } from 'crypto'
+import { AsyncLocalStorage } from 'async_hooks'
 import { clearStaleTelegramPollingState } from '../startup-reset.js'
 import { createRetryApiCall } from '../retry-api-call.js'
+
+// ─── tg-post tag plumbing ─────────────────────────────────────────────────
+
+/**
+ * Per-call tag context for `tg-post` log lines. Callers wrap a Telegram
+ * API invocation in `withTgPostTags({ turnKey, cardMessageId, ... }, () => ...)`
+ * and the transformer reads the tags off the active store and appends them
+ * `key=value` after the existing fields. Used to correlate progress-card
+ * sends/edits to a turnKey + cardMessageId in days-old session audits.
+ *
+ * Untagged callers are unaffected — when no store is active, no tag fields
+ * are emitted and the existing log shape is byte-for-byte unchanged.
+ */
+export type TgPostTags = Record<string, string | number>
+
+const tgPostTagStore = new AsyncLocalStorage<TgPostTags>()
+
+/**
+ * Run `fn` with the given tags attached to any `tg-post` lines emitted from
+ * the inner Telegram API calls. Tags are inherited across awaits within
+ * the same async chain (AsyncLocalStorage semantics). Pass an empty record
+ * or omit tags entirely to fall back to the untagged shape.
+ */
+export function withTgPostTags<T>(tags: TgPostTags, fn: () => T): T {
+  return tgPostTagStore.run(tags, fn)
+}
+
+/** Exposed for the transformer (and tests). Returns undefined when no store is active. */
+export function _getTgPostTags(): TgPostTags | undefined {
+  return tgPostTagStore.getStore()
+}
+
+function formatTgPostTags(tags: TgPostTags | undefined): string {
+  if (!tags) return ''
+  const parts: string[] = []
+  for (const [k, v] of Object.entries(tags)) {
+    if (v == null) continue
+    // Sanitise: tag values land in a single-line space-separated log
+    // record. Strip whitespace + collapse to keep grep happy.
+    const s = String(v).replace(/\s+/g, '_')
+    parts.push(`${k}=${s}`)
+  }
+  return parts.length > 0 ? ' ' + parts.join(' ') : ''
+}
 
 // ─── tg-post observability transformer ────────────────────────────────────
 
@@ -64,10 +109,11 @@ export function installTgPostLogger(bot: Bot): void {
     const hash = bytes > 0
       ? createHash('sha1').update(text).digest('hex').slice(0, 12)
       : '-'
+    const tagSuffix = formatTgPostTags(_getTgPostTags())
     try {
       const res = await prev(method, payload, signal)
       process.stderr.write(
-        `tg-post method=${method} chat=${chat} thread=${thread} parse_mode=${parseMode} bytes=${bytes} hash=${hash} status=ok err=- code=- desc=-\n`,
+        `tg-post method=${method} chat=${chat} thread=${thread} parse_mode=${parseMode} bytes=${bytes} hash=${hash} status=ok err=- code=- desc=-${tagSuffix}\n`,
       )
       return res
     } catch (err) {
@@ -85,7 +131,7 @@ export function installTgPostLogger(bot: Bot): void {
         ? rawDesc.replace(/\s+/g, ' ').slice(0, 80).replace(/[\r\n]/g, ' ') || '-'
         : '-'
       process.stderr.write(
-        `tg-post method=${method} chat=${chat} thread=${thread} parse_mode=${parseMode} bytes=${bytes} hash=${hash} status=err err=${errClass} code=${code} desc=${desc}\n`,
+        `tg-post method=${method} chat=${chat} thread=${thread} parse_mode=${parseMode} bytes=${bytes} hash=${hash} status=err err=${errClass} code=${code} desc=${desc}${tagSuffix}\n`,
       )
       throw err
     }

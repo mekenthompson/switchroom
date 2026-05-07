@@ -50,6 +50,7 @@ import {
   renderGenericEvent,
   type WebhookSource,
 } from './webhook-verify.js'
+import type { WebhookDispatchConfig } from './webhook-dispatch.js'
 
 export interface WebhookConfig {
   /** Per-source secrets, declared in vault under
@@ -86,6 +87,13 @@ export interface WebhookHandlerArgs {
   config: WebhookConfig
   /** True iff `agent` is a known agent in switchroom.yaml. */
   agentExists: boolean
+  /**
+   * Optional dispatch rules from `channels.telegram.webhook_dispatch`.
+   * When present, verified events are evaluated against the rules and
+   * matching ones spawn one-shot `claude -p` turns. Passed through to
+   * the dispatch evaluator; the ingest path itself does not consume it.
+   */
+  dispatchConfig?: WebhookDispatchConfig
 }
 
 export interface WebhookHandlerResult {

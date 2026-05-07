@@ -21,7 +21,7 @@ Every time an agent starts work, a **progress card** pins into its Telegram topi
 
 No silent gaps. No ghosts. No squinting into a black box.
 
-<p align="center"><img src="docs/diagrams/progress-card-anatomy.svg" width="700" alt="Annotated progress card: pin badge, user quote, last 5 steps, collapsed older, in-flight pulse, elapsed timer, sub-agent indent"></p>
+<p align="center"><img src="docs/diagrams/progress-card-anatomy.jpg" width="700" alt="Annotated progress card: pin badge, user quote, last 5 steps, collapsed older, in-flight pulse, elapsed timer, sub-agent indent"></p>
 
 ```
 ⚙️ Working… · ⏱ 12s
@@ -97,7 +97,7 @@ See [`docs/architecture.md`](docs/architecture.md) for the process model, IPC la
 
 Tools that touch the world — Bash, Edit, Write, anything not on an agent's pre-approved allowlist — pause for explicit approval. Switchroom's **approval kernel** (shipped in v0.5.1) routes every gated tool call through an inline Telegram card with the actual diff or command shown. Tap Allow and the tool resumes. Tap Deny and the agent gets a clean refusal it can recover from.
 
-<p align="center"><img src="docs/diagrams/approval-grant-flow.svg" width="700" alt="Approval grant flow: agent tool call pauses at the kernel, broker writes pending grant to sqlite, user taps Allow on the Telegram card, broker releases the gate, tool resumes"></p>
+<p align="center"><img src="docs/diagrams/approval-grant-flow.jpg" width="700" alt="Approval grant flow: agent tool call pauses at the kernel, broker writes pending grant to sqlite, user taps Allow on the Telegram card, broker releases the gate, tool resumes"></p>
 
 - **Inline cards.** Allow / Deny / Allow once / Allow for 1h. No leaving Telegram.
 - **TTL'd grants.** "Allow Bash for 1h" expires automatically. No silent permanent escalation.
@@ -114,7 +114,7 @@ Switchroom never intercepts auth, never proxies inference, never patches the CLI
 
 Agents are systemd user units running inside tmux sessions. They survive reboots, network drops, and your laptop closing. But "always on" isn't enough on its own. Things still die. The product has to handle that gracefully or the illusion breaks.
 
-<p align="center"><img src="docs/diagrams/wake-audit-lifecycle.svg" width="700" alt="Wake-audit lifecycle: kill, crash-pane snapshot, systemd restart, start.sh sets SWITCHROOM_PENDING_TURN, agent acks with three options"></p>
+<p align="center"><img src="docs/diagrams/wake-audit-lifecycle.jpg" width="700" alt="Wake-audit lifecycle: kill, crash-pane snapshot, systemd restart, start.sh sets SWITCHROOM_PENDING_TURN, agent acks with three options"></p>
 
 - **Watchdog.** A user-level systemd unit watches every agent for stuck turns, dead bridges, and runaway resource use. When it has to act, it captures a **crash pane snapshot** of the tmux pty so you can see what the agent was looking at when it died.
 - **Resume protocol.** When an agent reboots mid-turn, `start.sh` exports `SWITCHROOM_PENDING_TURN=true` plus the original chat / message ids. The agent's first action on boot is to acknowledge the gap and ask the user how to proceed (start over, summarise and continue, or drop it).

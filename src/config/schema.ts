@@ -545,6 +545,42 @@ export const TelegramChannelSchema = z
         "Cascades from defaults.channels.telegram.webhook_sources. " +
         "(Migrated from per-agent root in #596 — see #577.)",
       ),
+    webhook_dispatch: z
+      .object({
+        github: z
+          .array(
+            z.object({
+              description: z.string().optional(),
+              match: z
+                .object({
+                  event: z.string(),
+                  actions: z.array(z.string()).optional(),
+                  labels_any: z.array(z.string()).optional(),
+                  labels_all: z.array(z.string()).optional(),
+                  exclude_authors: z.array(z.string()).optional(),
+                })
+                .passthrough(),
+              prompt: z.string(),
+              cooldown: z.string().optional(),
+              quiet_hours: z
+                .object({
+                  start: z.number().int().min(0).max(23),
+                  end: z.number().int().min(0).max(23),
+                  tz: z.string().optional(),
+                })
+                .optional(),
+              model: z.string().optional(),
+            }),
+          )
+          .optional(),
+      })
+      .optional()
+      .describe(
+        "Auto-dispatch rules: when a verified webhook event matches a rule, " +
+        "spawn a one-shot `claude -p` turn for the agent with the rendered " +
+        "prompt. Supports cooldowns, quiet hours, and label/action matchers. " +
+        "Off by default — opt in per agent. See src/web/webhook-dispatch.ts.",
+      ),
     webhook_rate_limit: z
       .object({
         rpm: z.number().int().positive(),
@@ -787,6 +823,28 @@ const profileFields = {
       "to the stable bootstrap render. Loaded once at session start via " +
       "`--append-system-prompt`. Missing files are silently skipped. " +
       "Example: ['BRIEF.md', 'CONTEXT.md'].",
+    ),
+  experimental: z
+    .object({
+      legacy_pty: z
+        .boolean()
+        .optional()
+        .describe(
+          "Opt out of the default tmux supervisor (#725) and run the agent under " +
+          "the legacy PTY supervisor instead. Default: false (tmux is the default).",
+        ),
+      legacy_autoaccept_expect: z
+        .boolean()
+        .optional()
+        .describe(
+          "Opt the autoaccept gateway back into the legacy expect-script behaviour " +
+          "instead of the tmux send-keys path. Default: false.",
+        ),
+    })
+    .optional()
+    .describe(
+      "Opt-in flags for experimental / legacy behaviours. Cascades through " +
+      "defaults → profile → per-agent.",
     ),
 };
 
@@ -1185,6 +1243,28 @@ export const AgentSchema = z.object({
       "shared bare clone at ~/.switchroom/repos/<slug>.git. The worktree path is injected " +
       "into the agent's environment as SWITCHROOM_REPO_<SLUG_UPPER>. " +
       "Agents without this field continue to work unchanged.",
+    ),
+  experimental: z
+    .object({
+      legacy_pty: z
+        .boolean()
+        .optional()
+        .describe(
+          "Opt out of the default tmux supervisor (#725) and run the agent " +
+          "under the legacy PTY supervisor instead. Default: false.",
+        ),
+      legacy_autoaccept_expect: z
+        .boolean()
+        .optional()
+        .describe(
+          "Opt the autoaccept gateway back into the legacy expect-script " +
+          "behaviour instead of the tmux send-keys path. Default: false.",
+        ),
+    })
+    .optional()
+    .describe(
+      "Opt-in flags for experimental / legacy behaviours. Cascades through " +
+      "defaults → profile → per-agent.",
     ),
 });
 

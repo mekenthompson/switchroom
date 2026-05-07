@@ -63,7 +63,7 @@ export function registerApprovalsCommands(
       // Top-level summary by agent, mirroring the GitHub-style permissions UI
       // referenced in RFC §9.
       const byAgent = new Map<string, number>();
-      for (const d of decisions) byAgent.set(d.agent, (byAgent.get(d.agent) ?? 0) + 1);
+      for (const d of decisions) byAgent.set(d.agent_unit, (byAgent.get(d.agent_unit) ?? 0) + 1);
       const summary = Array.from(byAgent.entries())
         .map(([a, n]) => `• <b>${escapeHtml(a)}</b>: ${n}`)
         .join("\n");
@@ -71,14 +71,14 @@ export function registerApprovalsCommands(
         .slice(0, 20)
         .map((d) => {
           const ttl =
-            d.expires_at === null
+            d.ttl_expires_at === null
               ? "always"
-              : `until ${new Date(d.expires_at).toISOString().slice(0, 16).replace("T", " ")}`;
+              : `until ${new Date(d.ttl_expires_at).toISOString().slice(0, 16).replace("T", " ")}`;
           return (
             `<code>${escapeHtml(d.id.slice(0, 8))}</code> ` +
-            `${escapeHtml(d.agent)} → ` +
+            `${escapeHtml(d.agent_unit)} → ` +
             `<code>${escapeHtml(d.scope)}</code> ` +
-            `(${escapeHtml(d.action_grammar)}, ${ttl}) ` +
+            `(${escapeHtml(d.action)}, ${ttl}) ` +
             `· /approvals revoke ${escapeHtml(d.id)}`
           );
         })

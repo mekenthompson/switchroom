@@ -24,7 +24,7 @@ die()   { printf '%s✗%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
 
 # ---- preflight ----
 
-[ "$(uname -s)" = "Linux" ] || die "Linux only. Systemd is core to the design; macOS and Windows aren't supported."
+[ "$(uname -s)" = "Linux" ] || die "This installer targets Linux. macOS and Windows hosts aren't supported by this script today (container packaging is on the roadmap — see reference/rfc-docker-multi-container.md)."
 
 have() { command -v "$1" >/dev/null 2>&1; }
 

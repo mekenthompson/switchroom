@@ -64,7 +64,7 @@ So I built this.
 | **Approval kernel** | Inline allow/deny cards in Telegram for every gated tool. TTL'd grants, full audit trail. |
 | **Sub-agents** | Opus plans, Sonnet implements. Sub-agent work surfaces in the parent card. |
 | **Config cascade** | Defaults, then profiles, then per-agent YAML. Change one line, every agent updates. |
-| **Scheduled tasks** | Cron-based systemd timers. Survive reboots. Headless secret access via the vault broker. |
+| **Scheduled tasks** | Cron-syntax tasks that fire across reboots. Headless secret access via the vault broker. |
 | **Persistent memory** | Hindsight semantic memory with knowledge graphs and mental models. |
 | **Session continuity** | Resume across restarts with freshness gating and a wake-audit. |
 | **Encrypted vault** | AES-256-GCM for secrets. Optional auto-unlock keyed off `/etc/machine-id`. |
@@ -74,24 +74,24 @@ So I built this.
 
 ## Architecture
 
-One Claude Code REPL per agent, dressed up with systemd, a Telegram bot, and a couple of brokers. Each agent runs the unmodified `claude` binary, authenticated directly with Anthropic via official OAuth. No fork, no Agent SDK, no API key interception. The whole thing is scaffolding and lifecycle around the CLI you'd run by hand.
+One long-running service per agent. Each agent runs the stock `claude` CLI — not a fork, not the Agents SDK, not a wrapped harness — authenticated directly with Anthropic via official OAuth. Switchroom is scaffolding and lifecycle around the CLI you'd run by hand: a Telegram bot, an approval broker, a vault broker, a watchdog. See [`docs/architecture.md`](docs/architecture.md) for the process model and how each layer maps to the `claude` CLI.
 
 ```
 You (Telegram)
     │
     ▼
-@YourBot ──┬── switchroom-telegram MCP ──┬── tmux supervisor ──── Claude Code CLI
+@YourBot ──┬── switchroom-telegram MCP ──┬── agent supervisor ─── Claude Code CLI
            │       (15 tools)            │     (per-agent)        │
            │                             │                        ├─ .claude/agents/*.md (sub-agents)
            ├─ Progress cards             ├─ Approval kernel ◄─────┤   settings.json (tools, hooks, MCP)
            ├─ Pin / unpin lifecycle      │   (allow/deny broker)  ├─ Hindsight plugin (memory)
            ├─ SQLite history             ├─ Vault broker ◄────────┤   Drive MCP, Playwright MCP, …
-           ├─ Card-events.jsonl audit    │   (cron secrets, IPC)  └─ systemd (agent + cron timers)
+           ├─ Card-events.jsonl audit    │   (cron secrets, IPC)  └─ scheduled tasks across reboots
            ├─ Emoji reactions            │
            └─ Format conversion          └─ Watchdog + crash-pane capture
 ```
 
-See [`docs/architecture.md`](docs/architecture.md) for the process model, IPC layout, and how each layer maps to the `claude` CLI.
+See [`docs/architecture.md`](docs/architecture.md) for the process model, IPC layout, supervisor choice, and how each layer maps to the `claude` CLI.
 
 ## Approvals & safety
 
@@ -112,11 +112,11 @@ Switchroom never intercepts auth, never proxies inference, never patches the CLI
 
 ## Survives real life
 
-Agents are systemd user units running inside tmux sessions. They survive reboots, network drops, and your laptop closing. But "always on" isn't enough on its own. Things still die. The product has to handle that gracefully or the illusion breaks.
+Each agent is a long-running service. They survive reboots, network drops, and your laptop closing. But "always on" isn't enough on its own. Things still die. The product has to handle that gracefully or the illusion breaks.
 
-<p align="center"><img src="docs/diagrams/wake-audit-lifecycle.jpg" width="700" alt="Wake-audit lifecycle: kill, crash-pane snapshot, systemd restart, start.sh sets SWITCHROOM_PENDING_TURN, agent acks with three options"></p>
+<p align="center"><img src="docs/diagrams/wake-audit-lifecycle.jpg" width="700" alt="Wake-audit lifecycle: kill, crash-pane snapshot, auto-restart, agent boots with SWITCHROOM_PENDING_TURN, acks with three options"></p>
 
-- **Watchdog.** A user-level systemd unit watches every agent for stuck turns, dead bridges, and runaway resource use. When it has to act, it captures a **crash pane snapshot** of the tmux pty so you can see what the agent was looking at when it died.
+- **Watchdog.** A background watcher keeps an eye on every agent for stuck turns, dead bridges, and runaway resource use. When it has to act, it captures a **crash pane snapshot** so you can see what the agent was looking at when it died, then auto-recovers the agent with a full audit trail. No silent dropped work.
 - **Resume protocol.** When an agent reboots mid-turn, `start.sh` exports `SWITCHROOM_PENDING_TURN=true` plus the original chat / message ids. The agent's first action on boot is to acknowledge the gap and ask the user how to proceed (start over, summarise and continue, or drop it).
 - **Wake-audit.** On every fresh boot the agent checks for owed replies, orphan sub-agents, and stale in-progress todos. If everything's clean it stays quiet. If it owed you a reply, it tells you.
 - **Token refresh.** Runs unattended for weeks via a `refresh-tick` daemon. Multi-account fallback pool kicks in when the active slot hits its quota window.
@@ -134,9 +134,11 @@ Agents are systemd user units running inside tmux sessions. They survive reboots
 | Config | YAML with cascade | None | JSON/TOML | Env vars |
 | Setup | `switchroom setup` | Built-in (limited) | Docker compose | Docker compose |
 
+The wedge against OpenClaw and NanoClaw isn't the substrate — it's the stock `claude` CLI under your subscription, instead of a custom runtime under your API key.
+
 ## Install
 
-Ubuntu 24.04 LTS, 4GB RAM. Linux only.
+Runs on the box you already have. Today the supported install path is Ubuntu 24.04 LTS with 4GB RAM; other Linux distros work with minor tweaks. Container-host packaging is on the roadmap (see [RFC](reference/rfc-docker-multi-container.md)).
 
 > **Heads up on the package name.** The npm package was originally `switchroom-ai`. It's now just `switchroom`. The old name is deprecated and will stop receiving updates — `npm install -g switchroom` is the current path.
 

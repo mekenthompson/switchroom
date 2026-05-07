@@ -9,29 +9,19 @@
 [![Trigger evals](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fmekenthompson%2F002f3482b19111d35e57c1903b3733e2%2Fraw%2Fswitchroom-trigger-evals.json)](https://buildkite.com/ken-thompson/switchroom)
 [![Quality evals](https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fmekenthompson%2F002f3482b19111d35e57c1903b3733e2%2Fraw%2Fswitchroom-quality-evals.json)](https://buildkite.com/ken-thompson/switchroom)
 
-**Your Claude Pro or Max, as a fleet of always-on agents in Telegram. Opinionated UX, done properly.**
+**A switchboard for your Pro or Max.** Your Claude subscription, as a fleet of always-on specialist agents you talk to from Telegram. Opinionated UX, done properly.
 
 > *I loved OpenClaw + Telegram. I wanted my Claude subscription. And the UX done properly. So I built this.*
 
-**Compliance-by-design.** Switchroom leverages Claude Code natively — unmodified `claude` CLI, no Agent SDK, no direct API. It sets up the CLI the way you would, then gets out of the way. See the [Compliance Attestation](docs/compliance-attestation.md) for detail.
+[Latest release notes →](CHANGELOG.md)
 
-## Right, so what's this about
+## See what your agent is doing
 
-So you had the bright idea. Run Claude Code agents 24/7 on a cheap Linux box, talk to them from Telegram, use the Claude Pro or Max subscription you're already paying for. Sensible. Obvious, even.
+Every time an agent starts work, a **progress card** pins into its Telegram topic and updates in place as tools execute. Each Read, Bash, Edit, Grep is visible as it happens, with elapsed time so you can tell if something's stuck. Sub-agents surface in the same card. When the agent finishes, the card flips to Done and unpins.
 
-Then you tried OpenClaw. Followed the docs, spun it up, got it running, only to realise halfway through that you're pinging the Anthropic API on your own key and your token bill is quietly ticking over in the background. Bit of a bait and switch, that one. You signed up for "use your subscription," not "buy API credits on top of your subscription."
+No silent gaps. No ghosts. No squinting into a black box.
 
-So you gave Claude Code's built-in Telegram channel a crack instead. Sent a message. Waited. Something happened, maybe. Eventually a reply came back. What did the agent actually do? No idea. Which tools ran? No idea. Did it get stuck, crash, spawn a sub-agent, read half your repo? No idea. It's an MVP black box of death, and I got sick of squinting into it.
-
-So I built this.
-
-## What Switchroom is, and isn't
-
-Switchroom is an opinionated implementation of a Telegram plugin and agent lifecycle layer, sitting on top of the official `claude` CLI. No fork. No custom runtime in Docker. No API key interception. Your Claude Pro or Max subscription does the work, the same way it does on your desktop, authenticated via the same OAuth flow, fully compliant with Anthropic's terms.
-
-It is not trying to be a general-purpose LLM orchestrator. It doesn't care about OpenAI, Gemini, Llama, or swapping model providers. It is not a multi-channel bridge for Slack, Discord, Teams. It does one thing: makes Telegram the best possible interaction surface for Claude Code. Unashamedly.
-
-The whole thing is built around one idea. Every time an agent starts work, a **progress card** pops into Telegram and stays pinned while the task runs. It updates in place as tools execute, so you see each Read, Bash, Edit, Grep happen as it happens.
+<p align="center"><img src="docs/diagrams/progress-card-anatomy.svg" width="700" alt="Annotated progress card: pin badge, user quote, last 5 steps, collapsed older, in-flight pulse, elapsed timer, sub-agent indent"></p>
 
 ```
 ⚙️ Working… · ⏱ 12s
@@ -43,63 +33,112 @@ The whole thing is built around one idea. Every time an agent starts work, a **p
   🤖 Edit src/auth/jwt.ts · 4s
 ```
 
-When the agent finishes, the card flips to Done and unpins. Two agents working at the same time? Each gets its own card, labelled `(1/2)` and `(2/2)`, so you can follow both without losing the plot.
+The card is the headline UX. The rest of the product is in service of it.
 
-## The UX bits that matter
+- Cards update at most once every 5 seconds. Fast enough to follow, not so fast it floods.
+- Last 5 steps stay visible. Older ones collapse into `(+N more earlier steps)`.
+- Running steps show elapsed time so a stuck tool is obvious.
+- Tool labels are deterministic, written by a `PreToolUse` hook, so the card never lies about what's running.
+- Two agents working at once? Each gets its own card, labelled `(1/2)` and `(2/2)`.
 
-- Cards update at most once every 5 seconds. Fast enough to follow, not so fast it floods
-- Last 5 steps are always visible, older ones collapse into `(+N more earlier steps)`
-- Running steps show elapsed time so you can tell if something's stuck
-- Sub-agents get their own section in the card, so nested work is visible, not hidden
-- No silent gaps. No ghosts.
+### Sub-agent visibility
+
+When an agent delegates to a sub-agent — Opus plans, Sonnet implements — the sub-agent's work shows up indented inside the parent's pinned card. One pinned surface per task, however many processes it spawns underneath. Nothing gets buried in a side-channel you have to go look for.
+
+### Right, so what's this about
+
+So you had the bright idea. Run Claude Code agents 24/7 on a cheap Linux box, talk to them from Telegram, use the Claude Pro or Max subscription you're already paying for. Sensible. Obvious, even.
+
+Then you tried OpenClaw. Followed the docs, spun it up, got it running, only to realise halfway through that you're pinging the Anthropic API on your own key and your token bill is quietly ticking over in the background. Bit of a bait and switch, that one. You signed up for "use your subscription," not "buy API credits on top of your subscription."
+
+So you gave Claude Code's built-in Telegram channel a crack instead. Sent a message. Waited. Something happened, maybe. Eventually a reply came back. What did the agent actually do? No idea. Which tools ran? No idea. Did it get stuck, crash, spawn a sub-agent, read half your repo? No idea. It's an MVP black box of death, and I got sick of squinting into it.
+
+So I built this.
+
+## What you get
+
+| Feature | What it does |
+|---|---|
+| **Progress cards** | Pinned, in-place, every tool call visible. The headline UX. |
+| **Claude Pro/Max auth** | OAuth, not API keys. No per-token billing. Multi-account fallback pool per agent. |
+| **Approval kernel** | Inline allow/deny cards in Telegram for every gated tool. TTL'd grants, full audit trail. |
+| **Sub-agents** | Opus plans, Sonnet implements. Sub-agent work surfaces in the parent card. |
+| **Config cascade** | Defaults, then profiles, then per-agent YAML. Change one line, every agent updates. |
+| **Scheduled tasks** | Cron-based systemd timers. Survive reboots. Headless secret access via the vault broker. |
+| **Persistent memory** | Hindsight semantic memory with knowledge graphs and mental models. |
+| **Session continuity** | Resume across restarts with freshness gating and a wake-audit. |
+| **Encrypted vault** | AES-256-GCM for secrets. Optional auto-unlock keyed off `/etc/machine-id`. |
+| **Drive MCP** | Read Google Docs, Sheets, and Drive files inline. Per-agent OAuth, no shared key. |
+| **Card audit log** | Every progress-card edit appended to `card-events.jsonl` for retrospective debugging. |
+| **15 Telegram MCP tools** | Reply, stream replies, edit, pin, react, native checklists, sticker aliases, voice-in transcription, attachments, history. |
 
 ## Architecture
 
-One Claude Code REPL per agent, dressed up with systemd and a Telegram bot. Two systemd units per agent: the Claude process (`switchroom-<agent>.service`) and its Telegram gateway (`switchroom-<agent>-gateway.service`). See [`docs/architecture.md`](docs/architecture.md) for the process model, IPC layout, and how each layer maps to the `claude` CLI.
+One Claude Code REPL per agent, dressed up with systemd, a Telegram bot, and a couple of brokers. Each agent runs the unmodified `claude` binary, authenticated directly with Anthropic via official OAuth. No fork, no Agent SDK, no API key interception. The whole thing is scaffolding and lifecycle around the CLI you'd run by hand.
 
 ```
 You (Telegram)
     │
     ▼
-@YourBot ──── switchroom-telegram MCP ──── Claude Code CLI
-                  │                        │
-                  ├─ Progress cards         ├─ .claude/agents/*.md (sub-agents)
-                  ├─ Pin / unpin lifecycle  ├─ settings.json (tools, hooks, MCP)
-                  ├─ SQLite history         ├─ Hindsight plugin (memory)
-                  ├─ Emoji reactions        └─ systemd (agent + cron timers)
-                  └─ Format conversion
+@YourBot ──┬── switchroom-telegram MCP ──┬── tmux supervisor ──── Claude Code CLI
+           │       (15 tools)            │     (per-agent)        │
+           │                             │                        ├─ .claude/agents/*.md (sub-agents)
+           ├─ Progress cards             ├─ Approval kernel ◄─────┤   settings.json (tools, hooks, MCP)
+           ├─ Pin / unpin lifecycle      │   (allow/deny broker)  ├─ Hindsight plugin (memory)
+           ├─ SQLite history             ├─ Vault broker ◄────────┤   Drive MCP, Playwright MCP, …
+           ├─ Card-events.jsonl audit    │   (cron secrets, IPC)  └─ systemd (agent + cron timers)
+           ├─ Emoji reactions            │
+           └─ Format conversion          └─ Watchdog + crash-pane capture
 ```
 
-Switchroom is **not a harness**. Each agent runs the unmodified `claude` binary, authenticated directly with Anthropic via official OAuth. No credential interception, no API key routing.
+See [`docs/architecture.md`](docs/architecture.md) for the process model, IPC layout, and how each layer maps to the `claude` CLI.
 
-## Everything else you get
+## Approvals & safety
 
-| Feature | What it does |
-|---------|-------------|
-| **Claude Pro/Max auth** | OAuth, not API keys. No per-token billing. |
-| **Multi-agent** | Opus plans, Sonnet implements in the background. Sub-agent work surfaces in the card. |
-| **Config cascade** | Defaults, then profiles, then per-agent YAML. Change one line, every agent updates. |
-| **Scheduled tasks** | Cron-based systemd timers. Survive reboots. |
-| **Persistent memory** | Hindsight semantic memory with knowledge graphs. |
-| **Session continuity** | Resume sessions across restarts with freshness gating. |
-| **Encrypted vault** | AES-256-GCM for secrets. |
-| **12 Telegram MCP tools** | Reply, stream replies, pin, react, history, attachments, native checklists, all of it. |
+Tools that touch the world — Bash, Edit, Write, anything not on an agent's pre-approved allowlist — pause for explicit approval. Switchroom's **approval kernel** (shipped in v0.5.1) routes every gated tool call through an inline Telegram card with the actual diff or command shown. Tap Allow and the tool resumes. Tap Deny and the agent gets a clean refusal it can recover from.
 
-## How it stacks up against the alternatives
+<p align="center"><img src="docs/diagrams/approval-grant-flow.svg" width="700" alt="Approval grant flow: agent tool call pauses at the kernel, broker writes pending grant to sqlite, user taps Allow on the Telegram card, broker releases the gate, tool resumes"></p>
+
+- **Inline cards.** Allow / Deny / Allow once / Allow for 1h. No leaving Telegram.
+- **TTL'd grants.** "Allow Bash for 1h" expires automatically. No silent permanent escalation.
+- **Audit trail.** Every grant, denial, and expiry written to a per-agent log you can replay.
+- **Per-agent allowlist.** `switchroom agent grant <name> <tool>` for the boring ones you don't want to be asked about.
+
+The kernel runs as an out-of-process broker over a unix socket. The agent process never decides its own permissions; it asks and waits.
+
+### Compliance posture
+
+Switchroom never intercepts auth, never proxies inference, never patches the CLI. The `claude` binary you run is the one Anthropic ships. See the [Compliance Attestation](docs/compliance-attestation.md) for the full analysis against Anthropic's April 2026 third-party policy.
+
+## Survives real life
+
+Agents are systemd user units running inside tmux sessions. They survive reboots, network drops, and your laptop closing. But "always on" isn't enough on its own. Things still die. The product has to handle that gracefully or the illusion breaks.
+
+<p align="center"><img src="docs/diagrams/wake-audit-lifecycle.svg" width="700" alt="Wake-audit lifecycle: kill, crash-pane snapshot, systemd restart, start.sh sets SWITCHROOM_PENDING_TURN, agent acks with three options"></p>
+
+- **Watchdog.** A user-level systemd unit watches every agent for stuck turns, dead bridges, and runaway resource use. When it has to act, it captures a **crash pane snapshot** of the tmux pty so you can see what the agent was looking at when it died.
+- **Resume protocol.** When an agent reboots mid-turn, `start.sh` exports `SWITCHROOM_PENDING_TURN=true` plus the original chat / message ids. The agent's first action on boot is to acknowledge the gap and ask the user how to proceed (start over, summarise and continue, or drop it).
+- **Wake-audit.** On every fresh boot the agent checks for owed replies, orphan sub-agents, and stale in-progress todos. If everything's clean it stays quiet. If it owed you a reply, it tells you.
+- **Token refresh.** Runs unattended for weeks via a `refresh-tick` daemon. Multi-account fallback pool kicks in when the active slot hits its quota window.
+
+## How it stacks up
 
 | | Switchroom | Claude Code channels | OpenClaw | NanoClaw |
 |---|---|---|---|---|
-| Progress visibility | Live progress cards, pinned | None, black box | None | None |
+| Progress visibility | Live cards, pinned | Black box | None | None |
 | Runtime | Claude Code CLI | Claude Code CLI | Custom runtime | Agents SDK |
 | Auth | Pro/Max OAuth | Pro/Max OAuth | API key | API key |
-| Sub-agent tracking | Yes, visible in card | No | No | No |
+| Sub-agent tracking | Yes, in card | No | No | No |
 | Parallel task display | Labelled cards `(1/N)` | No | No | No |
+| Approval UX | Inline Telegram cards | None | None | None |
 | Config | YAML with cascade | None | JSON/TOML | Env vars |
 | Setup | `switchroom setup` | Built-in (limited) | Docker compose | Docker compose |
 
 ## Install
 
 Ubuntu 24.04 LTS, 4GB RAM. Linux only.
+
+> **Heads up on the package name.** The npm package was originally `switchroom-ai`. It's now just `switchroom`. The old name is deprecated and will stop receiving updates — `npm install -g switchroom` is the current path.
 
 ### From inside Claude Code (the on-ramp)
 
@@ -111,7 +150,7 @@ If you already use Claude Code, this is the shortest path. Inside any session:
 /switchroom:setup
 ```
 
-`/switchroom:setup` walks you through deps, `switchroom setup` (Telegram + vault + first agent), and `switchroom agent start`. Once it's done you have `/switchroom:start`, `/switchroom:stop`, and `/switchroom:status` for day-to-day. See [`docs/publishing.md`](docs/publishing.md).
+`/switchroom:setup` walks you through deps, `switchroom setup` (Telegram + vault + first agent), and `switchroom agent start`. Day-to-day: `/switchroom:start`, `/switchroom:stop`, `/switchroom:status`. See [`docs/publishing.md`](docs/publishing.md).
 
 ### One-liner (fresh box)
 
@@ -139,7 +178,7 @@ npm install -g @anthropic-ai/claude-code switchroom
 switchroom setup
 ```
 
-Node 20.11+. `switchroom setup` is the interactive first-time wizard — scaffolds config, handles Telegram wiring, sets up the vault.
+Node 20.11+. `switchroom setup` is the interactive first-time wizard. Scaffolds config, handles Telegram wiring, sets up the vault.
 
 ### One-shot happy path (no wizard)
 
@@ -151,7 +190,7 @@ switchroom auth login coach
 switchroom agent start coach
 ```
 
-## Example Configuration
+## Example configuration
 
 ```yaml
 switchroom:
@@ -195,11 +234,7 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
 
 ## Vault broker (cron secrets)
 
-Scheduled tasks run headless via `systemd --user` timers, so they cannot prompt
-for the vault passphrase. The vault broker is a long-running user-level systemd
-unit that holds the vault decrypted in memory after a one-time interactive
-unlock. Cron tasks fetch the specific keys they declare via a unix socket; the
-passphrase never sits on disk.
+Scheduled tasks run headless via `systemd --user` timers, so they can't prompt for the vault passphrase. The vault broker is a long-running user-level systemd unit that holds the vault decrypted in memory after a one-time interactive unlock. Cron tasks fetch the specific keys they declare via a unix socket. The passphrase never sits on disk.
 
 **Declare per-cron secrets in `switchroom.yaml`:**
 
@@ -221,60 +256,29 @@ switchroom update                       # installs the broker systemd unit
 switchroom vault broker unlock          # prompt for passphrase, primes broker
 ```
 
-Or just run `switchroom vault get <key>` from a TTY — the broker offers to
-take the unlocked state with `[Y/n]` so you don't have to remember a separate
-unlock command.
+Or just run `switchroom vault get <key>` from a TTY. The broker offers to take the unlocked state with `[Y/n]` so you don't have to remember a separate unlock command.
 
-**Identity model.** On Linux, the broker reads `/proc/<pid>/cgroup` to find
-the connecting cron's systemd unit (`switchroom-<agent>-cron-<i>.service`).
-Cgroup membership is set by systemd as root and is unspoofable from
-userspace, so a compromised agent cannot pose as another agent's cron and
-read its keys. macOS and other platforms degrade to UID-only via the socket
-file mode 0600 — fine for desktop use, not recommended for production cron.
+**Identity model.** On Linux, the broker reads `/proc/<pid>/cgroup` to find the connecting cron's systemd unit (`switchroom-<agent>-cron-<i>.service`). Cgroup membership is set by systemd as root and is unspoofable from userspace, so a compromised agent cannot pose as another agent's cron and read its keys. macOS and other platforms degrade to UID-only via the socket file mode 0600. Fine for desktop use, not recommended for production cron.
 
-The broker locks on `SIGTERM` (so a `restart` zeros the in-memory state)
-and on demand via `switchroom vault broker lock`. Use
-`switchroom vault get <key> --no-broker` to bypass and prompt locally.
+The broker locks on `SIGTERM` (so a `restart` zeros the in-memory state) and on demand via `switchroom vault broker lock`. Use `switchroom vault get <key> --no-broker` to bypass and prompt locally.
 
 Unit installed at `~/.config/systemd/user/switchroom-vault-broker.service`.
 
 ### Auto-unlock on boot (opt-in)
 
-By default, the broker holds the unlocked state in memory only — every
-restart (host reboot, service crash, reconcile that re-renders the unit)
-wipes it and requires `switchroom vault broker unlock` again. For
-unattended hosts where this is too painful, switchroom can encrypt the
-passphrase with a key derived from `/etc/machine-id` and have the broker
-unlock itself at boot:
+By default, the broker holds the unlocked state in memory only. Every restart (host reboot, service crash, reconcile that re-renders the unit) wipes it and requires `switchroom vault broker unlock` again. For unattended hosts where this is too painful, switchroom can encrypt the passphrase with a key derived from `/etc/machine-id` and have the broker unlock itself at boot:
 
 ```bash
 switchroom vault broker enable-auto-unlock   # one-time setup, prompts for passphrase
 ```
 
-Done. The wizard prompts for your vault passphrase, encrypts it with
-AES-256-GCM keyed off `/etc/machine-id`, writes the result to
-`~/.config/switchroom/auto-unlock.bin` (mode 0600), flips
-`vault.broker.autoUnlock: true` in `switchroom.yaml`, restarts the
-broker, and verifies the vault came up unlocked. Every subsequent boot
-the broker reads + decrypts + unlocks itself.
+Done. The wizard prompts for your vault passphrase, encrypts it with AES-256-GCM keyed off `/etc/machine-id`, writes the result to `~/.config/switchroom/auto-unlock.bin` (mode 0600), flips `vault.broker.autoUnlock: true` in `switchroom.yaml`, restarts the broker, and verifies the vault came up unlocked. Every subsequent boot the broker reads + decrypts + unlocks itself.
 
 Disable with `switchroom vault broker disable-auto-unlock`.
 
-**Security tradeoff — read this before enabling.** The encrypted blob
-lives at mode 0600 in your home directory; the encryption key is
-derived from `/etc/machine-id` plus a per-file random salt. This means
-disk theft is safe (the blob doesn't decrypt on any other machine) and
-other UNIX users on the same box can't read it — but root on the host
-*can* read both the blob and the machine-id, so once root is on the
-machine the passphrase is recoverable. Same blast radius as the
-running broker process (anything with code-exec as you can already
-attach to the broker socket and exfiltrate secrets), but it shifts the
-convenience-vs-security knob: auto-unlock means a lost laptop is a lost
-vault even if the vault file itself is encrypted at rest. Use only on
-hosts you trust. See [docs/auto-unlock.md](docs/auto-unlock.md) for the
-full threat model and recovery instructions.
+**Security tradeoff. Read this before enabling.** The encrypted blob lives at mode 0600 in your home directory; the encryption key is derived from `/etc/machine-id` plus a per-file random salt. Disk theft is safe (the blob doesn't decrypt on any other machine) and other UNIX users on the same box can't read it. But root on the host *can* read both the blob and the machine-id, so once root is on the machine the passphrase is recoverable. Same blast radius as the running broker process (anything with code-exec as you can already attach to the broker socket and exfiltrate secrets), but it shifts the convenience-vs-security knob: auto-unlock means a lost laptop is a lost vault even if the vault file itself is encrypted at rest. Use only on hosts you trust. See [docs/auto-unlock.md](docs/auto-unlock.md) for the full threat model and recovery instructions.
 
-## CLI Reference
+## CLI reference
 
 ```bash
 switchroom setup                              # Interactive wizard
@@ -313,10 +317,7 @@ Model aliases: the bare names `opus`, `sonnet`, `haiku` are accepted alongside t
 
 ### Authentication (multi-account slot pool)
 
-Each agent has a pool of Claude OAuth slots. The **active** slot is what
-the agent uses; other slots are automatic fallbacks when the active slot
-hits its quota window. Every `<slot>` option defaults to the active slot
-if omitted.
+Each agent has a pool of Claude OAuth slots. The **active** slot is what the agent uses; other slots are automatic fallbacks when the active slot hits its quota window. Every `<slot>` option defaults to the active slot if omitted.
 
 ```bash
 switchroom auth status                            # All agents, one table
@@ -333,15 +334,11 @@ switchroom auth list <agent> [--json]             # Show slots: health, quota st
 switchroom auth rm <agent> <slot> [--force]       # Remove a slot (refuses active/last slot)
 ```
 
-The fallback pool also works from Telegram. The switchroom MCP plugin
-exposes the same verbs as `/auth add|use|list|rm` inside the chat.
+The fallback pool also works from Telegram. The switchroom MCP plugin exposes the same verbs as `/auth add|use|list|rm` inside the chat.
 
 ### Workspace (agent bootstrap layer)
 
-Each agent has a workspace directory (`~/.switchroom/agents/<name>/workspace/`)
-with editable stable files (`AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`,
-`TOOLS.md`) and dynamic files (`MEMORY.md`, `memory/YYYY-MM-DD.md`,
-`HEARTBEAT.md`) that are injected into the model's context at turn time.
+Each agent has a workspace directory (`~/.switchroom/agents/<name>/workspace/`) with editable stable files (`AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`) and dynamic files (`MEMORY.md`, `memory/YYYY-MM-DD.md`, `HEARTBEAT.md`) that are injected into the model's context at turn time.
 
 ```bash
 switchroom workspace path <agent>                 # Print the workspace dir
@@ -361,6 +358,8 @@ switchroom debug turn <agent>                     # Dump the exact prompt layeri
 switchroom memory setup|search|stats|reflect      # Hindsight memory
 ```
 
+The progress card driver also writes a per-agent `card-events.jsonl` audit log: every edit, pin, unpin, and tool-label transition the user sees in Telegram, captured locally so a debug session doesn't depend on Telegram's history. Tail it like any other journal.
+
 ### Other
 
 ```bash
@@ -374,7 +373,7 @@ switchroom web                                    # Web dashboard
 
 `scripts/import-openclaw-credentials.ts` is a one-shot migration script that lifts `/data/openclaw-config/credentials/` into the Switchroom vault. It ships with a small set of default mappings for filenames OpenClaw documents out of the box.
 
-User-specific credential filenames (your custom bot tokens, SSH keys, and so on) belong in a local overlay file — not in the source repository. Create `~/.switchroom/import-openclaw.yaml`:
+User-specific credential filenames (your custom bot tokens, SSH keys, and so on) belong in a local overlay file, not the source repository. Create `~/.switchroom/import-openclaw.yaml`:
 
 ```yaml
 # ~/.switchroom/import-openclaw.yaml
@@ -395,10 +394,11 @@ Overlay entries win on collision with built-in defaults. Unknown files that appe
 ## Documentation
 
 | Guide | Description |
-|-------|-------------|
+|---|---|
+| **[Changelog](CHANGELOG.md)** | Release notes, every version |
 | **[Configuration](docs/configuration.md)** | Full field reference, cascade semantics, profiles |
 | **[Vault](docs/vault.md)** | Architecture, per-cron secrets, ACL, audit log, threat model |
-| **[Telegram Plugin](docs/telegram-plugin.md)** | Progress cards, 10 MCP tools, emoji reactions |
+| **[Telegram Plugin](docs/telegram-plugin.md)** | Progress cards, 15 MCP tools, native checklists, sticker aliases, voice-in |
 | **[Sub-Agents](docs/sub-agents.md)** | Model routing, delegation patterns, frontmatter spec |
 | **[Scheduling](docs/scheduling.md)** | Cron tasks, systemd timers, model selection |
 | **[Session Management](docs/session-optimization.md)** | Continuity, compaction, freshness policy |
@@ -409,7 +409,7 @@ Overlay entries win on collision with built-in defaults. Unknown files that appe
 
 ## Telemetry
 
-Switchroom reports anonymous usage events and errors to PostHog so we can spot regressions and understand which commands are used. **No personal data, code, or message content leaves your machine.** The anonymous ID lives at `~/.switchroom/analytics-id` and is a random UUID. Not tied to your username, email, IP, or machine identifier (we pass `disableGeoip: true` on every event).
+Switchroom reports anonymous usage events and errors to PostHog so I can spot regressions and understand which commands are used. **No personal data, code, or message content leaves your machine.** The anonymous ID lives at `~/.switchroom/analytics-id` and is a random UUID. Not tied to your username, email, IP, or machine identifier (we pass `disableGeoip: true` on every event).
 
 To opt out, set this in your shell profile:
 
@@ -431,7 +431,7 @@ The built-in channel is message in, message out, with zero visibility into what 
 Yes. Each agent gets its own Telegram forum topic. When multiple agents are working simultaneously, each has its own pinned progress card labelled `(1/N)`, `(2/N)` and so on.
 
 **Can I see what sub-agents are doing?**
-Yes. When an agent delegates to a sub-agent (a worker, a researcher), the sub-agent's activity shows up in its own section of the progress card. You see the full hierarchy, not just the top-level agent.
+Yes. When an agent delegates to a sub-agent (a worker, a researcher), the sub-agent's activity shows up in its own indented section of the parent's progress card. You see the full hierarchy, not just the top-level agent.
 
 **What does it cost to run?**
 A cheap Linux VPS (around $6/mo on Hetzner, DigitalOcean, wherever), plus your existing Claude Pro ($20/mo) or Max ($100/mo) subscription. Switchroom itself is MIT-licensed, free.

@@ -84,26 +84,87 @@ The OpenClaw wedge — stock `claude` CLI under your Pro/Max subscription, not a
                  │   └────────────────┘  │ container   │  │
                  │                       │ (singleton) │  │
                  │   ┌────────────────┐  └─────────────┘  │
-                 │   │ agent-…        │                   │
-                 │   └────────────────┘                   │
+                 │   │ agent-…        │  ┌─────────────┐  │
+                 │   └────────────────┘  │ switchroom- │  │
+                 │                       │ cron        │  │
+                 │                       │ (singleton, │  │
+                 │                       │  docker.sock)│ │
+                 │                       └─────────────┘  │
                  └────────────────────────────────────────┘
 ```
 
-### Per-agent container
+### Per-agent container internals
 
-PID 1 is `tini`. tini reaps zombies, forwards signals, and exits clean. Under tini, `start.sh` (rendered from `profiles/_base/start.sh.hbs`, today 383 lines) does what it does now: env setup, tmux session spawn, claude attach. Inside tmux, `claude --continue` runs against `CLAUDE_CONFIG_DIR=/state/.claude/<agent>`. The telegram gateway runs as a sibling process inside the same container — same as today's per-agent `telegram-plugin/server.ts` (171 lines). Same FIFO queue, same stream-reply path, same tmux-send-keys interrupt handler.
+PID 1 is `tini`. tini reaps zombies, forwards signals, and exits clean. The process tree under it is single-spine — there is no separate "supervisor process" doing 4-way fan-out. The actual shape, mirroring today's host-native unit (`bin/start.sh.hbs:373` and the systemd unit's `ExecStart`):
 
-The per-agent container is the only place we need to keep tmux. The `!` interrupt path stays local: gateway and claude are in the same container, same tmux socket at `/tmp/tmux-<uid>/<agent>`. `tmux send-keys C-c` works exactly as it does today. We do not cross a container boundary for the interrupt.
+```
+tini (PID 1)
+└── tmux (daemonised, listening on /tmp/tmux-1000/<agent>)
+    └── start.sh           (rendered from profiles/_base/start.sh.hbs)
+        └── claude --continue
+            ├── MCP child: telegram gateway (telegram-plugin/server.ts)
+            ├── MCP child: hindsight
+            └── MCP child: ... (per-agent .mcp.json)
+```
 
-### Vault broker container (singleton)
+`start.sh` does env setup, then `exec`s into `claude --continue` inside the tmux pane. The telegram gateway is an MCP child of `claude`, not a sibling — it inherits claude's stdio and shares its lifecycle. There is no userland supervisor: tini handles signal forwarding and zombie reaping, tmux handles the pane, and claude's own MCP supervisor handles the gateway and hindsight children. The previous draft's "tini supervises start.sh + tmux + claude + gateway" framing was wrong; nothing in this tree is doing 4-way supervision and we should not introduce a 50-line process supervisor where none is needed.
 
-Today: `src/vault/broker/server.ts` (1440 lines), peercred-authenticated unix socket at `~/.switchroom/vault-broker.sock`, ACL-driven, audit-logged. The broker authenticates by SO_PEERCRED — kernel-vouched (uid, pid, gid) of the connecting process.
+Inside the container `CLAUDE_CONFIG_DIR=/state/.claude` (per-agent bind-mount, see Volume layout). The container is the only place we need tmux. The `!` interrupt path stays local: the gateway (an MCP child of claude) and claude itself share a single tmux socket at `/tmp/tmux-1000/<agent>` — same socket family as today. `tmux send-keys C-c` is a local IPC call. No container boundary is crossed for the interrupt.
 
-In Docker: one broker container, one named volume (`switchroom-broker-sock`) mounted at the broker socket directory, every agent container also mounts the same volume read-write. Peercred over unix sockets in Docker works as long as the namespaces line up — see Risks. The broker's SQLite (audit log + grants DB) lives on a persistent volume.
+### Container identity model — per-agent socket directories
+
+This subsection is the load-bearing security redesign. Today's broker authenticates connecting clients by reading `/proc/<pid>/cgroup` to extract a systemd unit name like `switchroom-klanker-cron-3.service`, then cross-checking via `systemctl --user show <unit>` to defend against same-UID cgroup spoofing (`src/vault/broker/peercred.ts:196-302`). The broker's ACL (`src/vault/broker/acl.ts:159-209`) **only serves callers whose `peer.systemdUnit` parses as a switchroom cron unit**; anything else is rejected with "caller is not a switchroom cron unit". Both the cgroup parse and the `systemctl --user show` cross-check are structurally absent inside a container — there is no host systemd to consult, and the cgroup path inside the container's namespace says nothing about which agent the connection came from.
+
+We need a different way to bind a connection to an agent identity. **Picked: per-agent unix socket directories, with OS file permissions as the gatekeeper.** Rationale: it requires no token storage, no token rotation, no replay-window reasoning, no new crypto. The kernel-vouched property the broker's threat model relies on (only the right principal can connect) is preserved by filesystem permissions, which is a substitution the broker already trusts for its on-disk audit log and SQLite. HMAC tokens were the obvious alternative; rejected because they widen the secret surface (one more thing to provision, leak, rotate, audit) when filesystem permissions already give us the same property.
+
+Layout:
+
+```
+broker container:
+  /run/switchroom/broker/
+    klanker/sock        mode 0700, owned by uid:gid 1100:1100
+    coach/sock          mode 0700, owned by uid:gid 1101:1101
+    finn/sock           mode 0700, owned by uid:gid 1102:1102
+    ...
+```
+
+Per-agent UIDs are allocated deterministically from the agent name at compose-generation time (e.g. `1100 + stable_hash(agent_name) % 800`, collision-checked across the fleet). Each agent container runs as its own UID. The compose generator emits per-agent volumes:
+
+```yaml
+agent-klanker:
+  user: "1100:1100"
+  volumes:
+    - broker-klanker-sock:/run/switchroom/broker        # read-write, klanker only
+    # NOT mounted: broker-coach-sock, broker-finn-sock, etc.
+
+vault-broker:
+  user: "0:0"                                            # broker needs to chown per-agent dirs
+  volumes:
+    - broker-klanker-sock:/run/switchroom/broker/klanker
+    - broker-coach-sock:/run/switchroom/broker/coach
+    - broker-finn-sock:/run/switchroom/broker/finn
+```
+
+On startup the broker `mkdir`s `/run/switchroom/broker/<agent>/`, `chown`s it to that agent's UID, `chmod`s `0700`, and `bind()`s a socket at `<agent>/sock`. An agent container only mounts its own subdirectory — agent-klanker has no path, no descriptor, no namespace through which it can reach `/run/switchroom/broker/coach/sock`. Compose is the gatekeeper; the compose generator enforces the invariant (one agent's broker volume mounts into exactly one agent's container) and a unit test asserts it on every regenerated file.
+
+Identity resolution inside the broker:
+
+- Replace `peer.systemdUnit` with `peer.agentName`, derived at `accept()` time from the **socket the connection arrived on**. The broker calls `getsockname(connFd)` to read the listening socket's path (`/run/switchroom/broker/<agent>/sock`), and parses `<agent>` out of the path. This is broker-controlled input — the agent has no way to influence it.
+- ACL becomes: "this connection came in on the klanker socket, therefore caller is `klanker`; check `config.agents.klanker.schedule[*].secrets` for the requested key." `parseCronUnit` and the `(agentName, index)` pair go away — under containers, every grant is agent-scoped, not schedule-entry-scoped (the scheduler is now a separate container; see Scheduler architecture below).
+- `peer.uid` is still consulted as a defence-in-depth check (does it match the expected UID for that agent's socket directory?), but the primary identity binding is path-derived, not credential-derived. SO_PEERCRED becomes confirmatory, not authoritative — which is exactly what we want, because it removes the userns / virtiofs peercred-regression risk that dominated the prior draft's Phase 0 matrix.
+- The "non-cron callers are not served" rule (`acl.ts:204-208`) is dropped under containers — every connection on a per-agent socket *is* an agent caller by construction. Interactive `vault get` continues to use the `--no-broker` direct-read path.
+
+What the agent sees: `SWITCHROOM_BROKER_SOCKET=/run/switchroom/broker/sock` (the in-container path; agent doesn't know its own UID is special). One env var. One socket. No tokens. No client-side crypto.
+
+What the broker code change costs: about 80 lines net. `peercred.ts` keeps the SO_PEERCRED reader for defence-in-depth and grows a `socketPathToAgent()` helper. `acl.ts` grows a `checkAclByAgent(agentName, key)` path that runs alongside the existing cron-unit path; on host-native both still work, on Docker only the new path runs. The cron-unit path stays untouched — host-native scheduling is unchanged.
+
+**Phase 0 acceptance for this section (replacing the previous peercred matrix):** end-to-end ACL resolution through `acl.ts`-equivalent — both deny and allow paths — on every target environment. Specifically: (a) klanker's container connects to its socket and successfully resolves a key in its allow-list; (b) klanker's container connects to its socket and is denied a key NOT in its allow-list; (c) klanker's container, with the compose file hand-edited to also mount coach's socket volume, successfully connects to coach's socket — and the doctor check catches the cross-mount before this is reachable. `getsockopt(SO_PEERCRED)` return values are recorded for forensics but are no longer pass/fail for the matrix.
 
 ### Approval kernel container (singleton)
 
-`src/vault/approvals/kernel.ts` (564 lines), today an in-process module the broker server talks to. In Docker: separate container, IPC over a shared volume (same model as the broker socket) or via the broker as a proxy. The kernel's SQLite must survive container restart — that's a volume too.
+`src/vault/approvals/kernel.ts` (564 lines), today an in-process module the broker server talks to. In Docker: separate container, same identity model as the broker. Per-agent socket directories under `/run/switchroom/kernel/<agent>/sock` with the same UID/permission discipline; `kernel.ts` derives the requesting agent from the listening socket path at `accept()` time. There is no token, no shared secret, no cross-agent reachability.
+
+The kernel's SQLite (`kernel.db`) lives on a persistent named volume (`approvals-data`), bind-mounted only into the kernel container. Agent containers reach approvals only through the kernel socket — they have no path to `kernel.db` itself.
 
 ### Image layering
 
@@ -142,6 +203,17 @@ Per-agent customisation (skills, profile, telegram tokens) lives in bind-mounted
 
 Volumes that are shared between containers (broker socket, kernel IPC) are Docker-managed named volumes, not host bind mounts — that avoids the macOS bind-mount perf trap for everything except the things that genuinely need to be on the host filesystem (logs, audit trail, agent config the operator edits).
 
+### Host UID alignment for bind-mounts
+
+Agent containers run as a per-agent UID (1100, 1101, …) — see Container identity model. Bind-mounted host paths (`~/.switchroom/agents/<agent>/`, `~/.claude/projects/<agent>/`, `~/.switchroom/logs/<agent>/`) need to be readable and writable by the matching in-container UID, otherwise `start.sh` fails on first write.
+
+Convention:
+
+- **`SWITCHROOM_HOST_UID`** env var, sourced from `~/.switchroom/.env` written by `switchroom setup`. Linux default: the operator's own UID (the output of `id -u` at setup time, typically `1000`). Mac/Windows: explicit, no default — `switchroom setup` prompts and writes whatever the operator confirms.
+- The compose generator sets `user: "${SWITCHROOM_HOST_UID}:${SWITCHROOM_HOST_GID}"` on every agent container that mounts host paths, **plus** an in-container supplementary group binding for the per-agent identity used inside `/run/switchroom/broker/<agent>/`. The two-UID story is: outside-mounted host files are owned as the host operator; inside-only sockets are owned as the per-agent UID. Compose's `user:` directive sets the primary UID; supplementary groups are added at start.sh entry.
+- **Docker Desktop caveat (Mac/Windows):** the LinuxKit VM's virtiofs translates host UIDs so that *every* host file appears owned by container UID 1000 inside the VM, regardless of the host operator's actual UID. Per-agent isolation between bind-mounted host paths therefore cannot rely on UID separation on Mac/Win — it can only rely on the **compose generator never mounting agent-A's host path into agent-B's container**. This invariant is enforced by `src/agents/compose.ts` (a single agent's `~/.switchroom/agents/<name>` and `~/.claude/projects/<name>` paths only ever appear under that agent's service block) and audited by a doctor check `switchroom doctor --check cross-agent-mounts` that grep-asserts the rendered compose has no host path appearing under more than one service.
+- The doctor check runs on every `switchroom reconcile`, every `switchroom up`, and as a CI gate on the compose generator's snapshot tests. Operator hand-edits that violate it fail the next doctor invocation with a hard error and a pointer to the offending lines.
+
 ### Compose skeleton
 
 ```yaml
@@ -152,15 +224,13 @@ x-agent-defaults: &agent-defaults
   image: ghcr.io/switchroom/agent:0.7.0
   init: false                            # tini is PID 1 inside
   restart: unless-stopped
+  stop_grace_period: 45s                 # gateway needs ~35s to drain — see note below
   depends_on:
     vault-broker: { condition: service_healthy }
     approval-kernel: { condition: service_healthy }
-  volumes:
-    - broker-sock:/run/switchroom
-    - kernel-sock:/run/switchroom-kernel
-    - ~/.claude/projects:/state/.claude
   environment:
-    SWITCHROOM_BROKER_SOCKET: /run/switchroom/broker.sock
+    SWITCHROOM_BROKER_SOCKET: /run/switchroom/broker/sock
+    SWITCHROOM_KERNEL_SOCKET: /run/switchroom/kernel/sock
 
 services:
   vault-broker:
@@ -185,11 +255,12 @@ services:
     <<: *agent-defaults
     container_name: switchroom-klanker
     hostname: klanker
-    mem_limit: 2g
+    user: "${SWITCHROOM_HOST_UID}:${SWITCHROOM_HOST_GID}"
+    mem_limit: 6g                        # klanker (Opus 4.7, sub-agent fan-out) — see Resource defaults
     cpus: 2.0
     volumes:
-      - broker-sock:/run/switchroom
-      - kernel-sock:/run/switchroom-kernel
+      - broker-klanker-sock:/run/switchroom/broker     # ONLY klanker's broker socket dir
+      - kernel-klanker-sock:/run/switchroom/kernel     # ONLY klanker's kernel socket dir
       - ~/.switchroom/agents/klanker:/state/agent
       - ~/.claude/projects/klanker:/state/.claude
       - ~/.switchroom/logs/klanker:/var/log/switchroom
@@ -197,16 +268,73 @@ services:
   agent-coach:
     <<: *agent-defaults
     container_name: switchroom-coach
-    mem_limit: 1g
+    user: "${SWITCHROOM_HOST_UID}:${SWITCHROOM_HOST_GID}"
+    mem_limit: 1.5g                      # conversational default — see Resource defaults
     cpus: 1.0
-    # ...
+    volumes:
+      - broker-coach-sock:/run/switchroom/broker
+      - kernel-coach-sock:/run/switchroom/kernel
+      - ~/.switchroom/agents/coach:/state/agent
+      - ~/.claude/projects/coach:/state/.claude
+      - ~/.switchroom/logs/coach:/var/log/switchroom
 
 volumes:
-  broker-sock:
-  kernel-sock:
+  broker-klanker-sock:
+  broker-coach-sock:
+  kernel-klanker-sock:
+  kernel-coach-sock:
+  # ... one pair per agent, generated
 ```
 
 `switchroom reconcile` regenerates this whole file from `switchroom.yaml`, the same way it regenerates systemd units today. Hand edits get clobbered. There's a `# generated by` warning at the top.
+
+**Why `stop_grace_period: 45s`.** Docker's default SIGTERM-to-SIGKILL window is 10s. The telegram gateway's drain path (`telegram-plugin/gateway/gateway.ts` shutdown handler) needs ~35s in the worst case to flush in-flight stream-replies, finalise the progress card, persist the FIFO queue tail, and let claude write its session JSONL. Without `stop_grace_period`, every `docker compose restart` becomes a SIGKILL crash mid-flush, which is precisely the failure mode the watchdog exists to detect — and would make routine restarts indistinguishable from real wedges in the audit log. 45s gives a 10s safety margin over observed peak.
+
+### Scheduler architecture
+
+Compose has no native scheduler. Today, scheduled tasks declared in `switchroom.yaml` (`src/config/schema.ts:757`, the `schedule:` cascade) become per-agent systemd `.timer` units generated by `src/agents/systemd.ts:794-864` via `cronToOnCalendar`. Under Docker, those timer units don't exist — and the cron-unit identity model the broker's old ACL relied on doesn't either (see Container identity model).
+
+**Picked: singleton scheduler container reading the cascade and dispatching via `docker exec`.** Rationale: per-agent ofelia sidecars would multiply container count by 1.x and require their own bind-mounts to read cascade state; host-side cron (cron on the host calling `docker compose exec`) breaks the "same install path on Mac/Win/Linux" wedge because Mac and Windows-WSL2 don't have host cron stories that match. A singleton scheduler container is one new image, reads the same `switchroom.yaml` the rest of the fleet reads, owns its own audit trail, and has exactly one place to put the "did this fire" SQLite. It's also the shape that maps cleanly back to today's "every cron is a switchroom-managed entity," which keeps the operator mental model unchanged.
+
+```
+                ┌──────────────────────┐
+                │   switchroom-cron    │
+                │   container          │
+                │  (singleton)         │
+                │                      │
+                │  • reads switchroom.yaml from
+                │    /state/config (bind)
+                │  • node-cron loop, OnCalendar parity
+                │  • on fire: docker exec agent-<name> \
+                │      claude -p "<prompt>"
+                │  • writes to scheduler.db (audit)
+                └──────────────────────┘
+```
+
+Compose snippet:
+
+```yaml
+switchroom-cron:
+  image: ghcr.io/switchroom/scheduler:0.7.0
+  restart: unless-stopped
+  user: "0:0"                            # needs docker.sock access
+  volumes:
+    - /var/run/docker.sock:/var/run/docker.sock:ro
+    - ~/.switchroom:/state/config:ro
+    - ~/.switchroom/scheduler:/state/scheduler   # scheduler.db
+  environment:
+    SWITCHROOM_CONFIG: /state/config/switchroom.yaml
+```
+
+Implementation:
+
+- `src/scheduler/` (new, target ~500 lines + tests). Reads the cascade via the existing `src/config/loader.ts`, walks `agents.<name>.schedule[]`, registers each entry with `node-cron` against the same cron expression `cronToOnCalendar` parses today (so Phase 2 reuses the same cron-spec test fixtures).
+- On fire, dispatches the prompt via `docker exec -i agent-<name> claude -p "<prompt>"` with the per-task env (vault refs already injected via `SWITCHROOM_BROKER_SOCKET` from the agent container's compose entry — the scheduler doesn't materialise secrets, the agent does). The scheduler is **not** a vault-broker client — it never sees the secret values, only fires the task.
+- Writes a row per fire to `scheduler.db` (timestamp, agent, schedule index, prompt hash, exit code). `journalctl -t switchroom-cron` (Linux) / `docker compose logs switchroom-cron` (Mac/Win) for live observation.
+- Authenticates to the vault broker (if it ever needs to — reserved): same per-agent socket model, but the scheduler container is special — it has its own `/run/switchroom/scheduler/sock` mount. For now, the scheduler does not call the broker; agents resolve their own secrets at task-start time, which is the same flow as host-native today.
+- Identity model reflection: under containers, the broker's ACL no longer scopes by `(agentName, scheduleIndex)` because the scheduler-container-firing-an-agent-container path doesn't preserve `scheduleIndex` through `docker exec`. ACL becomes per-agent, with allowed keys flattening to the union of all `schedule[*].secrets` for that agent in the cascade. Documented loss of granularity; acceptable because (a) the audit log captures the firing schedule entry by index in `scheduler.db`, (b) host-native mode keeps the per-index ACL for operators who need it, (c) per-agent secret partitioning is the security boundary that matters in practice.
+
+This is an architecture change, not a Phase 1 detail. The architecture diagram at the top of the doc gains one box. Effort lands in Phase 1 (compose generator emits the scheduler service) and Phase 2 (broker ACL gains the per-agent path).
 
 ## Code-change footprint
 
@@ -243,32 +371,38 @@ Total touched: maybe 6000 lines of new/changed TS, 2000 lines deleted bash, 4 Do
 
 ## Phased plan
 
-Estimates assume Opus 4.7, supervised by a separate-process reviewer. Total budget across phases ≈ **2000 agent-minutes** (Phase 3 reweighted from 300 → 500-600 to reflect the 967-line bash port plus 5 grace windows, fixture suite, and parallel-run comparison).
+Estimates assume Opus 4.7, supervised by a separate-process reviewer. Total budget across phases ≈ **2770 agent-minutes** (P0 180, P1 600, P2 280, P3 750, P4 360, P5 600). Rebaselined upward from the prior draft's ~2000 to reflect: container identity model design + spike (P0), scheduler design + implementation (P1), 30+ watchdog fixtures + log hygiene audit (P3), update rolling-restart spec + cross-platform log shim + doctor checks (P4), migration tool + chown handling + round-trip e2e (P5).
 
-### Phase 0 — spike, agent-minutes ≈ 120
+### Phase 0 — spike, agent-minutes ≈ 180
 
-Files: `Dockerfile.base`, throwaway compose, `docs/phase0-peercred-matrix.md` (deliverable). Goal: prove three things, in this order:
+Files: `Dockerfile.base`, throwaway compose, `docs/phase0-identity-matrix.md` (deliverable), prototype `acl.checkAclByAgent()` and `socketPathToAgent()`. Goal: prove four things, in this order:
 
-1. claude CLI runs in `linux/amd64` and `linux/arm64` images, OAuth headless flow completes. (#793 q4)
-2. Two agent containers can both connect to a single broker container's unix socket via shared named volume, peercred works, ACL-gated grants resolve. **Produce a written test matrix** covering all four target environments below.
-3. tmux send-keys C-c from the gateway process inside the container reaches claude in the same container's tmux pane. `!` interrupt loop end-to-end.
+1. **Docker Desktop installable and functional** on Mac (Apple Silicon), Windows (WSL2 backend), Linux rootful, Linux rootless. Four real installs, not paper checks. Time-to-running-fleet recorded for each.
+2. claude CLI runs in `linux/amd64` and `linux/arm64` images, OAuth headless flow completes. (#793 q4)
+3. **Container identity model end-to-end.** Per-agent socket directory layout works in practice: broker chowns `/run/switchroom/broker/<agent>/` to per-agent UIDs, agent container only mounts its own subdirectory, ACL resolves correctly via path-derived agent identity. Test matrix below.
+4. tmux send-keys C-c from the gateway (claude's MCP child) inside the container reaches claude in the same container's tmux pane. `!` interrupt loop end-to-end.
 
-**Peercred test matrix (deliverable, not optional).** For each environment, run `getsockopt(SO_PEERCRED)` from the broker against a connection from an agent container and capture the actual `(uid, pid, gid)` returned. Also record the Docker Desktop version and the virtiofs version on Mac/Windows rows — peercred has historically regressed on specific virtiofs releases, and pinning the working/broken pairs is the only way to detect a future Docker Desktop update silently breaking us. Record values verbatim in `docs/phase0-peercred-matrix.md`:
+**Identity-model test matrix (deliverable, not optional).** For each environment, run all three ACL paths through a prototype broker:
 
-| Environment | Docker Desktop ver | virtiofs ver | uid returned | pid returned | gid returned | ACL resolves correctly? |
-|---|---|---|---|---|---|---|
-| Docker Desktop Mac (latest, virtiofs) | | | | | | |
-| Docker Desktop Windows / WSL2 backend | | | | | | |
-| Linux rootless Docker, userns-remap ON | n/a | n/a | | | | |
-| Linux rootful Docker, default config | n/a | n/a | | | | |
+| Environment | Allow path resolves? | Deny path rejects? | Cross-mount detection? | SO_PEERCRED uid (forensics) |
+|---|---|---|---|---|
+| Docker Desktop Mac (latest, virtiofs) | | | | |
+| Docker Desktop Windows / WSL2 backend | | | | |
+| Linux rootless Docker, userns-remap ON | | | | |
+| Linux rootful Docker, default config | | | | |
 
-Acceptance criteria: every row produces a non-zero, non-garbage `(uid, pid)` AND the broker's ACL check resolves to the correct agent identity. If any row returns `0`, an unspecified value, or a uid that doesn't map to a known agent, the HMAC token fallback (see Risks) **must undergo an explicit ACL-narrowing security review before it lands** — peercred's "kernel-vouched" property is exactly what the broker's threat model relies on, and a token-handshake fallback weakens it. The review covers: token issuance flow, token storage (where on disk, what permissions), revocation on agent restart, and per-agent ACL scoping.
+- **Allow path:** `agent-klanker` connects to `/run/switchroom/broker/sock` (mapped from `broker-klanker-sock` volume), requests a key in its `secrets` allow-list, broker resolves agent identity from `getsockname()`, ACL check passes, value returned.
+- **Deny path:** same agent, different key not in allow-list. Broker returns typed error with reason `"key '<k>' not in ACL for klanker"`.
+- **Cross-mount detection:** compose hand-edited to additionally mount `broker-coach-sock` into agent-klanker. `switchroom doctor --check cross-agent-mounts` flags the mount with a hard error pointing at the offending compose lines, before the fleet comes up.
+- **SO_PEERCRED forensics column** (informational only, not pass/fail): record the uid returned for sanity. Under the new model it's defence-in-depth, not authoritative.
 
-Abort criteria: (a) any of (1)(2)(3) doesn't work and the workaround is `--privileged` or host-level UID remap — non-starters. (b) Two or more matrix rows return broken peercred AND the security review concludes the HMAC fallback can't preserve the current ACL granularity — pivot to a different IPC design or pause the RFC.
+Acceptance criteria: every row passes all three pass/fail columns. SO_PEERCRED column captured for the trouble-shooting record but does not gate Phase 0.
 
-### Phase 1 — Dockerfiles + compose generator, agent-minutes ≈ 360
+Abort criteria: (a) any of (1)–(4) fails and the workaround is `--privileged` or host-level UID remap — non-starters. (b) Per-agent socket directories cannot be made to work on one of the four target environments — pivot to HMAC tokens with a full lifecycle spec (issuance, storage at `/run/secrets/<agent>-broker-token`, revocation on broker restart, scoped ACL) and re-run Phase 0 against the token design. The HMAC fallback is documented in Risks but should not be needed; the per-agent socket design has no known blockers on any target environment.
 
-Files: 4 Dockerfiles, `src/agents/compose.ts`, tests. Generate compose from the existing config cascade. Cover defaults, profiles, per-agent overrides, vault refs, mem/cpu limits.
+### Phase 1 — Dockerfiles + compose generator + scheduler, agent-minutes ≈ 600
+
+Files: 5 Dockerfiles (base, agent, broker, kernel, scheduler), `src/agents/compose.ts`, `src/scheduler/`, tests. Generate compose from the existing config cascade. Cover defaults, profiles, per-agent overrides, vault refs, mem/cpu limits, per-agent socket volumes, scheduler service generation. Scheduler implementation (node-cron loop, `docker exec` dispatch, audit DB) lands here so Phase 2's broker ACL changes have a working consumer.
 
 Success: `switchroom reconcile` writes a compose file that `docker compose config` validates and `docker compose up -d` runs. Three agents up, all responding in Telegram.
 
@@ -276,9 +410,9 @@ Success: `switchroom reconcile` writes a compose file that `docker compose confi
 
 Abort: if compose generation can't cleanly express the cascade and we end up with post-render shell munging, stop and rethink.
 
-### Phase 2 — volume + IPC contract, agent-minutes ≈ 240
+### Phase 2 — broker + kernel IPC port, agent-minutes ≈ 280
 
-Files: `src/vault/broker/peercred.ts` Docker branch, `src/vault/approvals/client.ts` socket-path resolver. Goal: vault refs + approval grants work identically inside-Docker and host-native, exercised by the existing test suite.
+Files: `src/vault/broker/peercred.ts` (add `socketPathToAgent` + container code branch), `src/vault/broker/acl.ts` (add `checkAclByAgent`), `src/vault/approvals/client.ts` socket-path resolver, kernel-side mirrors. Goal: vault refs + approval grants work identically inside-Docker and host-native, exercised by the existing test suite. Path here depends on the identity model that landed in Phase 0 — this phase is the production implementation of whatever Phase 0 proved.
 
 Success: every existing vault + approval test passes against a live broker container via testcontainers.
 
@@ -286,7 +420,7 @@ Success: every existing vault + approval test passes against a live broker conta
 
 Abort: if peercred-in-Docker requires user namespace remapping that breaks rootless setups, fall back to a token-based broker auth path. Document the security tradeoff (see Phase 0 ACL-narrowing review).
 
-### Phase 3 — watchdog port, agent-minutes ≈ 550
+### Phase 3 — watchdog port, agent-minutes ≈ 750
 
 Files: `src/watchdog/` from scratch, fixture suite under `src/watchdog/__fixtures__/`. Source: Docker events stream (`docker events --filter type=container`) for restart triggers, `docker logs --since` + `docker stats` for liveness probes, `docker inspect` for config sanity.
 
@@ -305,32 +439,85 @@ Applied to every service on Linux. Without this, `journalctl` has no signal unde
 
 Validation strategy:
 - **Parallel dry-run, two weeks — Linux hosts only.** Bash watchdog continues to source from `journalctl -t switchroom-watchdog`. TS watchdog sources from `docker events`. Both run in dry-run mode (log intended action, don't execute). Compare action streams nightly; any divergence files an issue and blocks cutover. This check is gated on Linux — Mac/Win don't participate.
-- **Fixture suite — every platform.** Every documented restart reason gets a recorded `(docker events stream + docker logs tail + docker stats sample)` triple plus an expected action. Fixtures live in tree, run on every PR across Linux/Mac/Win CI matrices. Targets: 5 grace windows × at minimum 3 trigger paths each = 15+ fixtures.
+- **Fixture suite — every platform.** Every documented restart reason gets a recorded `(docker events stream + docker logs tail + docker stats sample)` triple plus an expected action. Fixtures live in tree, run on every PR across Linux/Mac/Win CI matrices. **Target: 30+ fixtures**, derived from an honest inventory of the bash watchdog's behaviour:
+
+  Trigger surface (6 distinct restart reasons): `service-failed`, `service-inactive`, `bridge-disconnect`, `bridge-socket-flap`, `journal-silence`, `turn-hang`. Each has a "fires" path and a "deferred" path.
+
+  Grace-window surface (10+ thresholds the bash code threads through together): `UPTIME_GRACE_SECS=90`, `DISCONNECT_GRACE_SECS=600`, `LIVENESS_GRACE_SECS=30`, `JOURNAL_SILENCE_SECS=4000`, `JOURNAL_SILENCE_HARD_SECS=4000`, `RECENT_ACTIVITY_WINDOW_SECS=3600`, `TURN_HANG_SECS=300`, `JSONL_LIVENESS_SECS=60`, `MAX_RESTARTS_PER_WINDOW=5`, `RESTART_RATE_WINDOW_SECS=1800`, `AUTH_REFRESH_INTERVAL_SECS=600`.
+
+  Required fixtures (minimum): each trigger × (fires / deferred-by-uptime-grace / deferred-by-progress-fresh) = 18 base. Plus interaction edges: trap-zone fixture covering `JOURNAL_SILENCE_SECS × RECENT_ACTIVITY_WINDOW_SECS` interaction (silence age between the two thresholds → no marker; silence age past both → marker → restart after hard window). Rate-cap window fixture (5 restarts inside 1800s → 6th attempt blocks with `restart-rate-capped`). Progress-fingerprint OR-defence fixture (silence-detected AND turn-hang-detected, but JSONL touched within `JSONL_LIVENESS_SECS` → both deferred). `find -mmin` minute-rounding edge fixture (mtime exactly 60s old vs 59s vs 61s, guarding against the 1-min granularity bash uses). Service-state fixtures across `failed`, `inactive`, `activating`, `active`. That lands at ~30 fixtures with explicit named coverage; PR review can grow it from there.
 
 Success: parallel dry-run shows zero divergence for 14 consecutive days **on Linux** AND every fixture passes **on every platform**. Audit trail (`journalctl -t switchroom-watchdog`) preserved bit-for-bit on Linux so existing operator `grep`s keep working there; on Mac/Win, operators read logs via `docker compose logs` or the `switchroom agent logs` shim (Phase 4), which abstracts the platform difference.
 
+**Log hygiene audit — gating acceptance for the journald commit.** Before Phase 3 ships and locks in `--log-driver=journald`, audit every container's stdout/stderr for secret content with a recorded run sheet:
+
+- **Broker:** confirm no vault-key values, no agent OAuth tokens, no full grant rows leak to stdout — only redacted audit-line equivalents (key name + reason + agent + decision). Inspect `src/vault/broker/server.ts` log-call sites; any `logger.info(grant)` style call that includes the resolved value gets redacted before this phase closes.
+- **Kernel:** approval prompts and approval bodies must NOT hit stdout — they're potentially sensitive (the prompts users see in approval-required dialogs). Stdout gets the kernel decision (allow/deny) plus the request hash, nothing more.
+- **Agent:** claude-side stdout already excludes user message bodies by default, but verify that the gateway's debug logs (when `DEBUG=switchroom:*` is set) don't print full user message contents. The `--log-driver=journald` invariant assumes "no secrets to stdout under any debug flag operators would routinely set."
+- **MCP servers:** out of our control — third-party MCP servers may print arbitrary content. Documented mitigation: operators with sensitive-MCP setups can per-service override `logging.driver: local` (file-based, not journald-forwarded) for the affected agent. The compose generator exposes `logging_driver_override:` in the agent stanza for this. Doctor warns when an MCP-emitting agent is on the default `journald` driver and points at the override.
+
+Document the **"no secrets to stdout"** invariant in `reference/operators-guide.md`. Failing the audit blocks the journald commit; we either fix the offending log site or add `logging_driver_override` to default for that container class.
+
 Abort: if porting introduces regressions we can't catch in tests because they're timing-dependent, keep the bash watchdog running against the Docker engine via journald-sourced events on Linux. Ugly but workable, and the journald commitment guarantees that fallback path exists on Linux. Mac/Win have no equivalent fallback — for those, fixture coverage is the only safety net, which is one more reason the fixture suite must be exhaustive.
 
-### Phase 4 — CLI shim, agent-minutes ≈ 240
+### Phase 4 — CLI shim + log abstraction + update flow, agent-minutes ≈ 360
 
-Files: `src/cli/*.ts` for every command that today shells to systemctl. Detect runtime mode at startup. Map verbs:
+Files: `src/cli/*.ts` for every command that today shells to systemctl, `src/logs/` (new — stdout-tailing shim for non-Linux). Detect runtime mode at startup. Map verbs:
 
 - `switchroom agent restart klanker` → `docker compose restart agent-klanker`
-- `switchroom agent logs klanker` → `docker compose logs -f agent-klanker`
-- `switchroom update` → `docker compose pull && docker compose up -d`
+- `switchroom agent logs klanker` → on Linux, `journalctl --user CONTAINER_NAME=switchroom-klanker -f`; on Mac/Win, reads from the rotated bind-mount path (see below).
+- `switchroom update` → rolling restart, see below.
 - `switchroom hindsight shell` (new) → `docker exec -it agent-<name> sqlite3 /state/agent/.switchroom/hindsight/bank.db`. Preserves the today-UX of `sqlite3 ~/.switchroom/hindsight/bank.db` for operators who poke the bank directly. Without this, `principles.md §1` ("if they need the docs we've failed") fails — because anyone who already has muscle memory for the host-native path now needs to learn `docker exec` invocations. Sibling verb `switchroom bank sqlite` aliases to the same thing for discoverability. The wrapper resolves the right container by agent name, picks the right path inside the container, and falls through transparently to a host `sqlite3` invocation when running in host-native mode.
 
-Success: every documented switchroom CLI verb works identically in both modes. Doctor checks pass. `switchroom hindsight shell <agent>` drops into an interactive sqlite prompt against the right bank in both modes without the operator knowing or caring which.
+**Update flow — rolling restart commitment.** `switchroom update` does not bounce the whole fleet at once. Sequence:
+
+```bash
+docker compose pull                          # all images, atomic
+for agent in $(switchroom list-agents); do
+  docker compose up -d --no-deps --force-recreate agent-$agent
+  sleep "${SWITCHROOM_UPDATE_GRACE:-30}"     # let the agent settle, broker reconnect, gateway warm
+done
+docker compose up -d --no-deps vault-broker approval-kernel switchroom-cron  # shared services last
+```
+
+The serial loop means at most one agent is down at any moment; the rest of the fleet keeps responding to Telegram throughout. The 30s sleep is configurable per-fleet via `~/.switchroom/.env`; doctor warns if it's set below 15s (gateway re-handshake margin).
+
+**Phase 4 acceptance test for update:** 5-agent fleet running, send a message to each agent every 5s during the update, verify (a) no agent is unresponsive for more than `SWITCHROOM_UPDATE_GRACE` seconds, (b) at no point are 2+ agents simultaneously down, (c) shared services are restarted exactly once at the tail, (d) all 5 agents respond on the new image within `5 × (grace + restart_time)` seconds total. Distinct from the Phase 1 `add agent` acceptance — that one tested non-disturbance during scale-up; this one tests bounded disruption during update.
+
+**Cross-platform log abstraction (`src/logs/`).** Wake-audit and operator log-grep currently rely on `journalctl -t switchroom-watchdog` and `journalctl --user CONTAINER_NAME=...`. Mac/Win Docker Desktop has no host journald (the journal lives in the LinuxKit VM and isn't exposed to host tooling). Spec:
+
+- Each agent container gets a stdout-tailing sidecar baked into `start.sh` — a `node` shim that reads claude/gateway stdout and appends rotated jsonl to `/var/log/switchroom/agent.jsonl` (bind-mounted to `~/.switchroom/logs/<agent>/agent.jsonl` on the host). Rotation: 50 MB × 10 files. Same writer used on Linux too — operators get a consistent jsonl format alongside journald.
+- Wake-audit's `journalctl -t switchroom-watchdog` calls become reads against `~/.switchroom/logs/watchdog/audit.jsonl` on non-Linux. The `src/watchdog/` audit writer (Phase 3) emits to both journald (Linux) and the bind-mounted jsonl (every platform).
+- `switchroom agent logs` and `switchroom agent logs --since <duration>` route to journalctl on Linux, jsonl tail on Mac/Win. Same UX, two backends.
+- Documented in `reference/operators-guide.md`: "logs live at `~/.switchroom/logs/<agent>/agent.jsonl` on every platform; on Linux, the same content is also in journald."
+
+Success: every documented switchroom CLI verb works identically in both modes. Doctor checks pass. `switchroom hindsight shell <agent>` drops into an interactive sqlite prompt against the right bank in both modes without the operator knowing or caring which. `switchroom agent logs` works on Mac/Win/Linux with a single CLI surface.
 
 Abort: if a verb has no Docker equivalent, write the missing command. Don't paper over.
 
-### Phase 5 — migration tooling + e2e, agent-minutes ≈ 300
+### Phase 5 — migration tooling + e2e, agent-minutes ≈ 600
 
-Files: `src/cli/migrate-to-docker.ts`, e2e suite. Migration tool reads the existing `~/.switchroom/`, generates compose, validates, prompts user to switch.
+Files: `src/cli/migrate-to-docker.ts`, `src/cli/migrate-to-host.ts`, e2e suite. Migration tool reads the existing `~/.switchroom/`, generates compose, validates, performs UID alignment, prompts user to switch.
 
 README install instructions cover both paths side by side: Docker (the default for new installs because it works on every supported OS) and host-native (still fully supported, no behavioural difference, picked by operators who prefer it or already have it). Both deliver the same product promise. The CLI auto-detects which mode it's in by looking for `~/.switchroom/compose/docker-compose.yml`.
 
-Success: clean migration from host-native to Docker on a real fleet. e2e: cold install on Mac (Docker Desktop), Windows (WSL2 + Docker Desktop), RasPi 4 (arm64). All three to "first agent reply in Telegram" in under 5 minutes.
+**UID alignment in migration.** Host-native files are owned by the operator's host UID (typically `1000`). Under Docker, agents may run as a different UID (e.g. `1100` per the identity model on Mac/Win where virtiofs translates everything to `1000` regardless, or as `${SWITCHROOM_HOST_UID}` for bind-mounted host paths). Migration must `chown -R` session JSONLs, hindsight banks, and per-agent state to match the destination UID:
+
+- **`migrate to-docker`:** read `SWITCHROOM_HOST_UID` from `~/.switchroom/.env` (prompt and write if absent on Mac/Win). `chown -R $SWITCHROOM_HOST_UID:$SWITCHROOM_HOST_GID ~/.switchroom/agents/ ~/.claude/projects/ ~/.switchroom/logs/`. Fail loudly if any path can't be chowned (likely indicates the operator is on a multi-user box and needs `sudo`).
+- **`migrate to-host`:** inverse. `chown -R $(id -u):$(id -g) ~/.switchroom/agents/ ~/.claude/projects/ ~/.switchroom/logs/`. Same fail-loud discipline.
+- Both modes write a `migration.log` with timestamps + chown summary, kept under `~/.switchroom/migrations/`.
+
+**Phase 5 acceptance — round-trip e2e.** Beyond cold-install, the migration round-trip is gating:
+
+1. Start on host-native, write a session in agent-klanker (send a message, get a reply, confirm the JSONL has at least 4 turns).
+2. `switchroom migrate to-docker`. Verify chown completed, fleet comes up, klanker resumes the same session (`--continue` reads the same JSONL).
+3. Send another message to klanker, confirm the session JSONL grew (turn 5+ written under Docker UID).
+4. `switchroom migrate to-host`. Verify chown reverses, host-native fleet comes up, klanker continues the same session.
+5. Send turn 6+. Confirm continuity end-to-end across both directions.
+
+Failure to complete the round-trip = Phase 5 incomplete.
+
+Success: clean migration from host-native to Docker on a real fleet, AND clean rollback. e2e: cold install on Mac (Docker Desktop), Windows (WSL2 + Docker Desktop), RasPi 4 (arm64). All three to "first agent reply in Telegram" in under 5 minutes. Round-trip migration test passes on Linux (the only platform where host-native ever ran).
 
 Abort: if Mac Docker Desktop file performance makes the bind-mounted Hindsight SQLite IO unusable (>3x slower than host), reshape volumes to put hot SQLite on Docker-managed volumes and only the user-edited config on bind mounts. Document the layout.
 
@@ -338,14 +525,13 @@ Abort: if Mac Docker Desktop file performance makes the bind-mounted Hindsight S
 
 ### Vault broker IPC across container boundaries
 
-The broker authenticates connecting clients via SO_PEERCRED. In Docker, when both client and server containers share a named volume containing a unix socket, peercred returns **the `(uid, pid)` the broker process observes via its own `getsockopt(SO_PEERCRED, ...)` call against the agent-side connection** — which works as long as both containers run as the same UID inside their own user namespaces (or both share the host user namespace, which is the default). The Phase 0 matrix captures ground truth per environment; this paragraph is just framing.
+Resolved by the per-agent socket directory design (see §"Container identity model"). The broker no longer relies on SO_PEERCRED for primary identity — agent identity is derived from the listening socket path, which is broker-controlled and compose-enforced. Peercred remains as a defence-in-depth UID match.
 
-Mitigations:
-- Default: both containers run as UID 1000, no user namespace remapping. Simple, works on every Docker engine I've checked.
-- Rootless Docker (Mac Docker Desktop, Linux rootless): both containers share the same remapped UID. Peercred still works because they're in the same user namespace.
-- Hard mode: if user namespace remapping is enabled per-container, peercred values are meaningless. Add a fallback to a HMAC token handshake (broker issues per-agent tokens at start, agents present them on connect). This is not the default path.
+What's left as a risk:
 
-If the broker container is unhealthy: every agent's vault resolution fails fast with a clear error ("vault broker unavailable, retry in N seconds"). Health check + `restart: unless-stopped` keeps the broker bouncing. Agents don't crash — they degrade to "vault refs return errors" until the broker is back. This is acceptable degradation; vault-using calls were already going to fail.
+- **Compose-generator correctness.** The whole model collapses if the generator ever mounts agent-A's broker socket volume into agent-B. Mitigation: unit test on `src/agents/compose.ts` asserts the per-agent-volume-mounts-into-one-service invariant for every generated compose. Doctor check `--check cross-agent-mounts` greps the live compose. CI gate. Operator hand-edits that violate it fail doctor.
+- **HMAC fallback (only if Phase 0 surfaces something we didn't predict).** If per-agent socket directories prove unworkable on one of the four target environments, fall back to HMAC tokens with a full lifecycle: broker generates a token bundle on startup (rotating per-agent tokens, written to `/run/secrets/<agent>-broker-token` mode 0400 owned by that agent's UID), agents read at connect time, broker revokes all tokens on its own restart (forcing agents to re-fetch on first 401). Token replay across broker restarts: by construction impossible — broker startup invalidates the prior bundle. No design work needed up-front, but the spec is here so Phase 0 has a known fallback to argue against if the primary design fails.
+- **Broker container unhealthy.** Every agent's vault resolution fails fast with a typed error ("vault broker unavailable, retry in N seconds"). Health check + `restart: unless-stopped` keeps the broker bouncing. Agents don't crash — they degrade to "vault refs return errors" until the broker is back. Acceptable degradation; vault-using calls were already going to fail.
 
 ### tmux interrupt path
 
@@ -375,12 +561,18 @@ Mitigation: default mem_limit per agent should be calibrated. See "resource limi
 
 Set the limit too low: agents get OOM-killed mid-turn, user sees "agent restarted" cards way too often. Set it too high: defeats the point.
 
-Defaults proposal:
-- coding/worker/researcher agents: `mem_limit: 2g`, `cpus: 2.0`
-- conversational/coach/exec-assistant: `mem_limit: 1g`, `cpus: 1.0`
-- klanker (Opus 4.7, agentic, sub-agents): `mem_limit: 4g`, `cpus: 2.0`
+Defaults proposal, derived from observed RSS on the current production fleet plus 50% headroom over peak:
 
-These come from `docker stats` against the current host fleet under typical load + 50% headroom. Numbers go in `profiles/<profile>/profile.yaml`, override at the agent level. `switchroom doctor` warns if a 24h watchdog window shows OOM kills — that's the signal to bump the limit.
+| Class | Observed RSS (typical) | `mem_limit` | `cpus` |
+|---|---|---|---|
+| klanker (Opus 4.7, sub-agent fan-out) | 648 MB idle, peak ~3.8 GB | `6g` | 2.0 |
+| conversational (clerk, finn, carrie) | 370–420 MB | `1.5g` | 1.0 |
+| lightweight (gymbro, reggie, ziggy) | 290–330 MB | `1g` | 0.5 |
+| coding/worker/researcher | 400–700 MB under load | `2g` | 2.0 |
+
+Klanker's 6 GB is **not** a typo — the previous draft's 4 GB was based on idle measurement and would have OOM-killed the container during routine sub-agent fan-outs (observed peak ~3.8 GB plus dispatch overhead lands well above 4 GB). Conversational's 1.5 GB likewise gives ~3x headroom over typical, accommodating the spikes during long stream-replies and progress-card edits.
+
+Numbers go in `profiles/<profile>/profile.yaml`, override at the agent level. `switchroom doctor` warns if a 24h watchdog window shows OOM kills — that's the signal to bump the limit. Operators on tight-memory hosts (RasPi 4 with 4 GB total) can lower limits explicitly; the doctor also warns if `sum(mem_limit) > 0.8 * host_total`.
 
 ### Docker Desktop on Mac and Windows
 

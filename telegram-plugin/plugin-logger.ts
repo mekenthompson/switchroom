@@ -24,7 +24,13 @@ import { homedir } from 'os'
 import { dirname, join } from 'path'
 
 const DEFAULT_LOG_PATH = join(homedir(), '.switchroom', 'logs', 'telegram-plugin.log')
-const ROTATE_AT_BYTES = 5 * 1024 * 1024 // 5 MB
+// Retention bump (#card-audit-log): the new structured `card-events.jsonl`
+// is the durable audit trail; this file is the freeform freestream. Bump
+// from 5 MB × 1 backup to 50 MB × 5 backups so a multi-day card-render
+// regression is still grep-able from the raw log when the operator goes
+// looking days later.
+const ROTATE_AT_BYTES = 50 * 1024 * 1024 // 50 MB
+const ROTATION_BACKUPS = 5
 
 export interface PluginLoggerHandle {
   /** Stop intercepting and restore the original stderr.write. */
@@ -59,6 +65,18 @@ function rotateIfNeeded(path: string): void {
   try {
     const st = statSync(path)
     if (st.size < ROTATE_AT_BYTES) return
+    // Shift backups: .N-1 → .N, .N-2 → .N-1, ..., .1 → .2, current → .1.
+    // Best-effort: any rename that fails (missing intermediate, permission)
+    // is swallowed so logging never throws.
+    for (let i = ROTATION_BACKUPS - 1; i >= 1; i--) {
+      const src = `${path}.${i}`
+      const dst = `${path}.${i + 1}`
+      try {
+        if (existsSync(src)) renameSync(src, dst)
+      } catch {
+        // ignore
+      }
+    }
     const backup = `${path}.1`
     renameSync(path, backup)
   } catch {
@@ -133,4 +151,5 @@ export function _resetForTests(): void {
 export const _internals = {
   DEFAULT_LOG_PATH,
   ROTATE_AT_BYTES,
+  ROTATION_BACKUPS,
 }

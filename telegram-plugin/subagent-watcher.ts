@@ -171,6 +171,27 @@ export interface SubagentWatcherConfig {
    * the same sub-agent across subsequent poll ticks.
    */
   onStall?: (agentId: string, idleMs: number, description: string) => void
+  /**
+   * Called exactly once per sub-agent when its watcher observes a terminal
+   * transition (`done` or `failed`). Mirrors the existing `sub_agent_started`
+   * surface (emitted from session-tail) so the audit trail is symmetric.
+   *
+   * `outcome`:
+   *   - 'completed' — the JSONL contained a `turn_duration` line.
+   *   - 'failed'    — reserved (no caller flips state to 'failed' today).
+   *   - 'orphan'    — the entry was historical at boot and its terminal
+   *                   transition fires after watcher startup. (Pre-existing
+   *                   `done` files at boot do NOT fire — see registerAgent.)
+   * Background-vs-foreground classification is the gateway's call (it owns
+   * the registry DB); the watcher just reports the lifecycle.
+   */
+  onFinish?: (args: {
+    agentId: string
+    state: WorkerState
+    outcome: 'completed' | 'failed' | 'orphan'
+    toolCount: number
+    durationMs: number
+  }) => void
   /** `Date.now` override for tests. */
   now?: () => number
   /** `setInterval` override for tests. */
@@ -619,11 +640,43 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
       } catch (err) {
         log?.(`subagent-watcher: completion notification error: ${(err as Error).message}`)
       }
+      // Symmetric `sub_agent_finished` surface (#card-audit-log). Emit
+      // before the deferred cleanup runs so the callback always sees a
+      // live registry entry. Historical entries that already-completed at
+      // boot get their `completionNotified=true` shortcut in registerAgent
+      // and skip this path entirely — only post-boot transitions fire.
+      if (config.onFinish) {
+        try {
+          config.onFinish({
+            agentId,
+            state: entry.state,
+            outcome: entry.historical ? 'orphan' : 'completed',
+            toolCount: entry.toolCount,
+            durationMs: nowFn() - entry.dispatchedAt,
+          })
+        } catch (cbErr) {
+          log?.(`subagent-watcher: onFinish callback error ${agentId}: ${(cbErr as Error).message}`)
+        }
+      }
       scheduleTerminalCleanup(agentId)
     }
     // Defensive: if state ever flips to 'failed' (currently no caller
     // sets this, but the type allows it), still clean up the FSWatcher.
     if (entry.state === 'failed') {
+      if (config.onFinish && !entry.completionNotified) {
+        entry.completionNotified = true
+        try {
+          config.onFinish({
+            agentId,
+            state: entry.state,
+            outcome: 'failed',
+            toolCount: entry.toolCount,
+            durationMs: nowFn() - entry.dispatchedAt,
+          })
+        } catch (cbErr) {
+          log?.(`subagent-watcher: onFinish callback error ${agentId}: ${(cbErr as Error).message}`)
+        }
+      }
       scheduleTerminalCleanup(agentId)
     }
   }

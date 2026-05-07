@@ -36,6 +36,7 @@ import { homedir } from 'os'
 import { basename, join } from 'path'
 import { isMultiAgentEnabled } from './progress-card.js'
 import { classifyClaudeError, type OperatorEventKind } from './operator-events.js'
+import { createToolLabelSidecar, type ToolLabelSidecar } from './tool-label-sidecar.js'
 
 /** Match Claude Code's cli.js VX() function. */
 export function sanitizeCwdToProjectName(cwd: string): string {
@@ -86,7 +87,7 @@ export type SessionEvent =
   | { kind: 'enqueue'; chatId: string | null; messageId: string | null; threadId: string | null; rawContent: string; isSync?: boolean }
   | { kind: 'dequeue' }
   | { kind: 'thinking' }
-  | { kind: 'tool_use'; toolName: string; toolUseId?: string | null; input?: Record<string, unknown> }
+  | { kind: 'tool_use'; toolName: string; toolUseId?: string | null; input?: Record<string, unknown>; precomputedLabel?: string }
   | { kind: 'text'; text: string }
   | { kind: 'tool_result'; toolUseId: string; toolName: string | null; isError?: boolean; errorText?: string }
   | { kind: 'turn_end'; durationMs: number }
@@ -94,7 +95,7 @@ export type SessionEvent =
   // filename stem (e.g. "aac6f1…"). Routed through the same ingest path
   // as parent events; the reducer fans them out to per-sub-agent state.
   | { kind: 'sub_agent_started'; agentId: string; firstPromptText: string; subagentType?: string }
-  | { kind: 'sub_agent_tool_use'; agentId: string; toolUseId: string | null; toolName: string; input?: Record<string, unknown> }
+  | { kind: 'sub_agent_tool_use'; agentId: string; toolUseId: string | null; toolName: string; input?: Record<string, unknown>; precomputedLabel?: string }
   | { kind: 'sub_agent_text'; agentId: string; text: string }
   | { kind: 'sub_agent_narrative'; agentId: string; text: string }
   | { kind: 'sub_agent_tool_result'; agentId: string; toolUseId: string; isError?: boolean; errorText?: string }
@@ -499,10 +500,52 @@ export function startSessionTail(config: SessionTailConfig): SessionTailHandle {
   const projectsDir = getProjectsDirForCwd(cwd, claudeHome)
   const rescanMs = config.rescanIntervalMs ?? 500
   const log = config.log
-  const onEvent = config.onEvent
+  const rawOnEvent = config.onEvent
   const onOperatorEvent = config.onOperatorEvent
 
   log?.(`session-tail: projectsDir=${projectsDir}`)
+
+  // PreToolUse sidecar readers (#783) keyed by sessionId. Created lazily
+  // the first time we observe a tool_use / sub_agent_tool_use whose
+  // toolUseId could be looked up. The hook writes to
+  // $TELEGRAM_STATE_DIR/tool-labels-<session_id>.jsonl. Each sub-agent
+  // has its OWN sessionId (its jsonl filename stem), so we key by that.
+  const sidecars = new Map<string, ToolLabelSidecar>()
+  const stateDirForSidecar = process.env.TELEGRAM_STATE_DIR ?? null
+  function sessionIdForFile(file: string | null): string | null {
+    if (!file) return null
+    const b = file.endsWith('.jsonl') ? basename(file, '.jsonl') : null
+    return b && b.length > 0 ? b : null
+  }
+  function ensureSidecar(sessionId: string): ToolLabelSidecar | null {
+    if (!stateDirForSidecar) return null
+    const existing = sidecars.get(sessionId)
+    if (existing) return existing
+    try {
+      const s = createToolLabelSidecar({ stateDir: stateDirForSidecar, sessionId })
+      sidecars.set(sessionId, s)
+      return s
+    } catch (err) {
+      log?.(`session-tail: sidecar create failed: ${(err as Error).message}`)
+      return null
+    }
+  }
+  function decorate(ev: SessionEvent, sessionId: string | null): SessionEvent {
+    if (!sessionId) return ev
+    if (ev.kind !== 'tool_use' && ev.kind !== 'sub_agent_tool_use') return ev
+    if (!ev.toolUseId) return ev
+    const s = ensureSidecar(sessionId)
+    if (!s) return ev
+    // One quick poll attempt before lookup — the hook is synchronous from
+    // Claude Code's perspective and the sidecar line is typically on disk
+    // before the JSONL row is appended, but the file watcher is on a
+    // 250ms tick. Forcing a poll closes the race for the common case.
+    s.poll()
+    const label = s.getLabel(ev.toolUseId)
+    if (!label) return ev
+    return { ...ev, precomputedLabel: label }
+  }
+  const onEvent = (ev: SessionEvent): void => rawOnEvent(ev)
 
   let currentFile: string | null = null
   let cursor = 0 // byte offset of next read
@@ -550,9 +593,10 @@ export function startSessionTail(config: SessionTailConfig): SessionTailHandle {
       for (const line of lines) {
         if (!line) continue
         const events = projectTranscriptLine(line)
+        const sid = sessionIdForFile(currentFile)
         for (const ev of events) {
           try {
-            onEvent(ev)
+            onEvent(decorate(ev, sid))
           } catch (err) {
             log?.(`session-tail: onEvent threw: ${(err as Error).message}`)
           }
@@ -721,7 +765,12 @@ export function startSessionTail(config: SessionTailConfig): SessionTailHandle {
             t.hasSeenTerminal = true
           }
           try {
-            onEvent(ev)
+            // Sub-agent JSONLs have their own sessionId (the file's stem
+            // — sub-agent files are typically named agent-<id>.jsonl).
+            // Hook fires inside the sub-agent process with that
+            // session_id, so we look up the sidecar by it.
+            const subSid = sessionIdForFile(t.file)
+            onEvent(decorate(ev, subSid))
           } catch (err) {
             log?.(`session-tail: sub onEvent threw: ${(err as Error).message}`)
           }
@@ -872,6 +921,10 @@ export function startSessionTail(config: SessionTailConfig): SessionTailHandle {
         }
       }
       subTails.clear()
+      for (const s of sidecars.values()) {
+        try { s.stop() } catch { /* ignore */ }
+      }
+      sidecars.clear()
       if (pollTimer) {
         clearInterval(pollTimer)
         pollTimer = null

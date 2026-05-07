@@ -11,10 +11,10 @@ audience: anyone deciding whether a feature, PR, or release belongs in switchroo
 > already pay for.
 
 Switchroom turns your Claude Pro or Max subscription into a fleet of
-always-on specialist agents you talk to from Telegram. One Linux box,
-one Telegram forum, one bot per agent, every session officially
-authenticated through the same OAuth flow you use on the desktop. No
-API keys. No harness. No second invoice.
+always-on specialist agents you talk to from Telegram. One box you
+already own, one Telegram forum, one bot per agent, every session
+officially authenticated through the same OAuth flow you use on the
+desktop. No API keys. No harness. No second invoice.
 
 It is **not** a general-purpose LLM orchestrator, **not** a multi-channel
 bridge, **not** a hosted service, **not** multi-tenant. It does one
@@ -76,20 +76,22 @@ specialist without leaving the topic.
 > protocol, doesn't forge tokens."*
 
 Switchroom is scaffolding and lifecycle management. It creates
-directories, generates systemd units, manages OAuth, routes Telegram
-messages — and gets out of the way. Each agent runs the unmodified
-`claude` binary, authenticated directly with Anthropic. No Agent SDK,
-no API-key routing, no credential interception. Fully compliant with
-Anthropic's April 2026 third-party policy.
+directories, stands up a long-running service per agent, manages
+OAuth, routes Telegram messages, and gets out of the way. Each agent
+runs the unmodified `claude` binary, authenticated directly with
+Anthropic. No Agent SDK, no API-key routing, no credential
+interception. Fully compliant with Anthropic's April 2026 third-party
+policy.
 
 One bill. The one you already pay.
 
 ### 4. Always-on — *runs while you sleep or work offline*
 
-Agents are systemd user units inside tmux sessions. They survive
-reboots, network drops, and your laptop closing. Scheduled tasks fire
-as systemd user timers. Token refresh runs unattended for weeks. The
-fleet comes back on its own after a cold boot.
+Each agent is a long-running service. They survive reboots, network
+drops, and your laptop closing. Scheduled tasks fire across reboots.
+Token refresh runs unattended for weeks. Crashed agents auto-recover
+with an audit trail. The fleet comes back on its own after a cold
+boot.
 
 Telegram IS the mobile interface. Anywhere your phone has signal, your
 fleet is reachable.
@@ -100,14 +102,14 @@ fleet is reachable.
 
 - **Solo developers** who want Claude in Telegram across devices,
   without giving up their subscription.
-- **Home-lab operators** comfortable with `systemd`, YAML, and a Linux
-  box they already own.
+- **Home-lab operators** comfortable with YAML and a box they already
+  own.
 - **Founder-operators** running a personal fleet of specialists —
   health coach, executive assistant, coding agent, research agent —
   each with its own persona and persistent memory.
 
 Built for people who already run things themselves. Configuration over
-code. Native Linux. Transparency over abstraction.
+code. Transparency over abstraction.
 
 ---
 
@@ -129,8 +131,7 @@ code. Native Linux. Transparency over abstraction.
 Technical, direct, opinionated. Speaks to builders with agency.
 Casual punctuation, assumes infrastructure literacy. Emphasises what
 the product *doesn't* do as much as what it does — because the
-absences (no harness, no API key, no fork, no Docker requirement) are
-the differentiation.
+absences (no harness, no API key, no fork) are the differentiation.
 
 This voice carries into the product surface: CLI output, error
 messages, progress cards, setup wizard. Switchroom should sound like

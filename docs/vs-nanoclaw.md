@@ -1,12 +1,12 @@
 # Switchroom vs NanoClaw: a NanoClaw alternative for Claude Code subscribers
 
-NanoClaw is built on the Anthropic Agents SDK and runs agents in containers. Switchroom takes a different approach: use the actual `claude` CLI, authenticate with your Claude Pro/Max subscription, and manage lifecycle with systemd.
+NanoClaw is built on the Anthropic Agents SDK. Switchroom takes a different approach: use the stock `claude` CLI under your Claude Pro/Max subscription, with all the Claude Code features that come with it.
 
 ## TL;DR
 
-- **Switchroom uses the Claude Code CLI with subscription OAuth.** NanoClaw uses the Agents SDK with an API key.
-- **Switchroom runs on systemd.** NanoClaw runs in containers.
+- **Switchroom uses the stock `claude` CLI with subscription OAuth.** NanoClaw uses the Agents SDK with an API key.
 - **Switchroom's agents are interactive Claude Code sessions** with full CLI features. NanoClaw's agents are SDK-driven loops.
+- **Switchroom inherits every upstream Claude Code feature the day it ships.** NanoClaw is its own ecosystem.
 
 ## Side-by-side
 
@@ -14,11 +14,10 @@ NanoClaw is built on the Anthropic Agents SDK and runs agents in containers. Swi
 |---|---|---|
 | Auth | Claude Pro/Max OAuth | Anthropic API key |
 | Billing | Your existing subscription | Per-token API billing |
-| Runtime | Official `claude` CLI | Anthropic Agents SDK |
-| Isolation | systemd unit per agent | Container per agent |
+| Runtime | Stock `claude` CLI | Anthropic Agents SDK |
 | Channels | Telegram (enhanced) | WhatsApp, Telegram, Slack |
 | Memory | Hindsight (semantic) | Per-container |
-| Scheduling | systemd timers | Built-in scheduler |
+| Scheduling | Cron syntax in YAML, fires across reboots | Built-in scheduler |
 | Sub-agents | Native Claude Code sub-agents | N/A |
 | Config | YAML with cascade | ENV vars |
 | License | MIT | n/a |
@@ -57,7 +56,6 @@ Change the default model once, every agent inherits it. Create an `advisor` prof
 ## When NanoClaw might be the right call
 
 - You want the Agents SDK specifically, not Claude Code.
-- You need to deploy to a managed container platform that doesn't run systemd.
 - You need channels (WhatsApp, Slack) that Switchroom hasn't shipped yet.
 
 ## Migrating from NanoClaw

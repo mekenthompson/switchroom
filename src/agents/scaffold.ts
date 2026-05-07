@@ -2298,6 +2298,17 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
       timeout: 5,
       async: false,
     });
+    // Reaper for the PreToolUse tool-label sidecar files (#783).
+    // Runs on every Stop; idempotent age + count rotation.
+    stopHooks.push({
+      type: "command",
+      command: wrap(
+        "hook:tool-label-stop",
+        `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "tool-label-stop.mjs")}"`,
+      ),
+      timeout: 5,
+      async: true,
+    });
   }
   const switchroomStop = stopHooks.length > 0 ? [{ hooks: stopHooks }] : [];
 
@@ -2330,6 +2341,21 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
                 `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "subagent-tracker-pretool.mjs")}"`,
               ),
               timeout: 10,
+            },
+          ],
+        },
+        {
+          // Catch-all PreToolUse: deterministic tool-call labels (#783).
+          // Hook always exits 0; never emits stdout JSON; writes one line
+          // to $TELEGRAM_STATE_DIR/tool-labels-${session_id}.jsonl.
+          hooks: [
+            {
+              type: "command",
+              command: wrap(
+                "hook:tool-label-pretool",
+                `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "tool-label-pretool.mjs")}"`,
+              ),
+              timeout: 5,
             },
           ],
         },

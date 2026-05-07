@@ -1,103 +1,171 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 520" width="800" height="520" font-family="Caveat, 'Bradley Hand', 'Segoe Print', cursive">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" role="img" aria-label="Anatomy of a Switchroom progress card.">
   <defs>
-    <style>
-      @import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&amp;display=swap');
-      .ink { fill: none; stroke: #14171C; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
-      .ink-thin { fill: none; stroke: #14171C; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
-      .brass { fill: none; stroke: #B8873A; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
-      .label { font-size: 22px; fill: #14171C; }
-      .label-sm { font-size: 18px; fill: #14171C; }
-      .arrow { fill: #B8873A; }
-      .body { font-family: 'Menlo', 'Consolas', monospace; font-size: 14px; fill: #14171C; }
-      .pin-fill { fill: #E8B657; }
-      .pulse { fill: #C8302C; }
-    </style>
-    <marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
-      <path d="M0,0 L10,5 L0,10 z" class="arrow"/>
-    </marker>
+    <style><![CDATA[
+      .sans   { font-family: 'Inter', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif; }
+      .mono   { font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
+      .label  { font-family: 'Inter', system-ui, sans-serif; font-size: 16px; font-weight: 600; fill: #14171C; }
+      .sub    { font-family: 'Inter', system-ui, sans-serif; font-size: 13px; fill: #5A6069; }
+      .num    { font-family: 'Inter', system-ui, sans-serif; font-size: 13px; font-weight: 700; fill: #FAF7EF; }
+      .caption { font-family: 'Inter', system-ui, sans-serif; font-style: italic; font-size: 16px; fill: #5A6069; }
+      .stroke-conn { fill: none; stroke: #B8BCC3; stroke-width: 1.4; stroke-linecap: round; }
+      .pulse { animation: pulse 1.6s ease-in-out infinite; }
+      @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+    ]]></style>
+    <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#14171C" flood-opacity="0.18"/>
+    </filter>
   </defs>
 
-  <rect width="800" height="520" fill="#FAF7EF"/>
+  <rect fill="#FAF7EF" width="1200" height="800"/>
 
-  <!-- Phone frame (the card) -->
-  <g transform="translate(230,40) rotate(-0.6)">
-    <rect x="0" y="0" width="340" height="380" rx="18" ry="18" fill="#F5F1E8" class="ink"/>
-    <!-- pin badge -->
-    <g transform="translate(20,22)">
-      <circle cx="10" cy="10" r="11" class="pin-fill"/>
-      <circle cx="10" cy="10" r="11" class="ink"/>
-      <path d="M5,7 L15,7 L13,13 L7,13 z M10,13 L10,18" class="ink-thin"/>
-    </g>
-    <text x="50" y="36" class="body" style="font-weight:700;">📌 Pinned · ⚙️ Working… · ⏱ 12s</text>
-
-    <!-- pulse dot -->
-    <circle cx="316" cy="30" r="6" class="pulse"/>
-    <circle cx="316" cy="30" r="11" fill="none" stroke="#C8302C" stroke-width="1.4" opacity="0.5"/>
-
-    <!-- user quote line -->
-    <line x1="20" y1="58" x2="320" y2="58" class="ink-thin"/>
-    <text x="20" y="80" class="body">💬 refactor the auth module to use JWT</text>
-    <line x1="20" y1="96" x2="320" y2="96" class="ink-thin"/>
-
-    <!-- collapsed older -->
-    <text x="20" y="124" class="body" fill="#5A6069">… (+3 more earlier steps)</text>
-
-    <!-- step list -->
-    <text x="20" y="156" class="body">✅ Read src/auth/session.ts</text>
-    <text x="20" y="180" class="body">✅ Grep "cookie" (in src/)</text>
-    <text x="20" y="204" class="body">✅ Read src/auth/jwt.ts</text>
-    <text x="20" y="228" class="body">✅ Bash bun test auth/</text>
-    <text x="20" y="252" class="body" style="font-weight:700;">🤖 Edit src/auth/jwt.ts · 4s</text>
-
-    <!-- sub-agent indent -->
-    <line x1="40" y1="276" x2="40" y2="338" class="brass"/>
-    <text x="56" y="284" class="body" fill="#B8873A">└─ @worker (sub-agent)</text>
-    <text x="56" y="306" class="body">   ✅ Read tests/auth.test.ts</text>
-    <text x="56" y="328" class="body">   🤖 Write tests/jwt.test.ts</text>
-
-    <!-- footer timer -->
-    <line x1="20" y1="350" x2="320" y2="350" class="ink-thin"/>
-    <text x="20" y="370" class="body" fill="#5A6069">elapsed 12s · 5 of 8 steps · last update 1s ago</text>
+  <!-- accent dots -->
+  <g fill="#E8B657" opacity="0.55">
+    <circle cx="80"  cy="80"  r="4"/>
+    <circle cx="1120" cy="120" r="4"/>
+    <circle cx="60"  cy="720" r="4"/>
+    <circle cx="1140" cy="700" r="4"/>
+  </g>
+  <g fill="#C8302C" opacity="0.5">
+    <circle cx="160" cy="140" r="3"/>
+    <circle cx="1080" cy="640" r="3"/>
   </g>
 
-  <!-- Annotations: arrows + labels -->
-  <!-- pin badge -->
-  <text x="40" y="56" class="label">pin badge</text>
-  <path d="M120,60 Q180,68 248,72" class="brass" marker-end="url(#arrowhead)"/>
+  <!-- THE CARD (center, slightly rotated) -->
+  <g transform="translate(350,150) rotate(-1.2)" filter="url(#cardShadow)">
+    <rect fill="#14171C" x="0" y="0" width="500" height="500" rx="14"/>
+    <rect fill="#C8302C" x="0" y="0" width="4" height="500" rx="2"/>
 
-  <!-- user quote -->
-  <text x="40" y="96" class="label">user's prompt</text>
-  <path d="M150,98 Q200,92 250,86" class="brass" marker-end="url(#arrowhead)"/>
+    <!-- pin badge row -->
+    <g transform="translate(20,22)">
+      <g fill="#E8B657">
+        <path d="M10 0 L14 0 L15 8 L19 10 L19 14 L13 14 L12 22 L10 22 L10 14 L4 14 L4 10 L9 8 Z"/>
+      </g>
+      <text class="sans" x="30" y="16" font-size="14" font-weight="600" fill="#E8B657">Working</text>
+      <circle cx="92" cy="11" r="2" fill="#5A6069"/>
+      <text class="mono" x="102" y="16" font-size="12" fill="#B8BCC3">switchroom · klanker</text>
+    </g>
 
-  <!-- pulse -->
-  <text x="610" y="62" class="label">in-flight pulse</text>
-  <path d="M608,58 Q580,46 558,42" class="brass" marker-end="url(#arrowhead)"/>
+    <!-- user prompt header -->
+    <g transform="translate(20,58)">
+      <rect x="0" y="0" width="460" height="44" rx="6" fill="#23282F"/>
+      <rect fill="#E8B657" x="0" y="0" width="3" height="44" rx="1.5"/>
+      <text class="mono" x="14" y="18" font-size="11" fill="#8A8F98">YOU · 09:24</text>
+      <text class="mono" x="14" y="36" font-size="12" fill="#DADDE2">Triage the overnight checkout-timeout crash.</text>
+    </g>
 
-  <!-- elapsed timer (top) -->
-  <text x="610" y="106" class="label">elapsed timer</text>
-  <path d="M608,102 Q540,86 478,72" class="brass" marker-end="url(#arrowhead)"/>
+    <!-- separator -->
+    <line x1="20" y1="120" x2="480" y2="120" stroke="#2E343D" stroke-width="1"/>
 
-  <!-- collapsed older -->
-  <text x="40" y="166" class="label">older steps,</text>
-  <text x="40" y="186" class="label">collapsed</text>
-  <path d="M150,168 Q200,162 250,162" class="brass" marker-end="url(#arrowhead)"/>
+    <!-- earlier-steps fold line -->
+    <text class="mono" x="20" y="142" font-size="11" font-style="italic" fill="#5A6069">(+3 more earlier steps)</text>
 
-  <!-- last 5 visible -->
-  <text x="610" y="210" class="label">last 5 steps,</text>
-  <text x="610" y="230" class="label">always visible</text>
-  <path d="M608,222 Q580,212 558,208" class="brass" marker-end="url(#arrowhead)"/>
+    <!-- last 5 visible steps -->
+    <g transform="translate(20,158)" font-family="JetBrains Mono, monospace" font-size="12">
+      <g transform="translate(0,0)">
+        <circle cx="6" cy="8" r="4" fill="#4A9B8E"/>
+        <g transform="translate(20,2) scale(0.6)" fill="none" stroke="#B8BCC3" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 4 h12 a3 3 0 0 1 3 3 v14 a3 3 0 0 1 -3 3 h-12 a3 3 0 0 1 -3 -3 v-14 a3 3 0 0 1 3 -3 z"/>
+          <line x1="6" y1="10" x2="14" y2="10"/>
+          <line x1="6" y1="14" x2="14" y2="14"/>
+          <line x1="6" y1="18" x2="12" y2="18"/>
+        </g>
+        <text x="48" y="12" fill="#DADDE2">Read src/checkout/session.ts</text>
+        <text x="380" y="12" fill="#5A6069">0.4s</text>
+      </g>
+      <g transform="translate(0,28)">
+        <circle cx="6" cy="8" r="4" fill="#4A9B8E"/>
+        <g transform="translate(20,2) scale(0.6)" fill="none" stroke="#B8BCC3" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="11" cy="11" r="7"/>
+          <line x1="16" y1="16" x2="22" y2="22"/>
+        </g>
+        <text x="48" y="12" fill="#DADDE2">Grep "timeout" across 12 files</text>
+        <text x="380" y="12" fill="#5A6069">0.9s</text>
+      </g>
+      <g transform="translate(0,56)">
+        <circle cx="6" cy="8" r="4" fill="#E8B657"/>
+        <g transform="translate(20,2) scale(0.6)" fill="none" stroke="#E8B657" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="6" width="18" height="14" rx="2"/>
+          <line x1="12" y1="2" x2="12" y2="6"/>
+        </g>
+        <text x="48" y="12" fill="#E8B657">Agent · researcher</text>
+        <text x="380" y="12" fill="#5A6069">1.2s</text>
+      </g>
+      <g transform="translate(28,82)">
+        <line x1="-8" y1="-12" x2="-8" y2="6" stroke="#5A6069" stroke-width="1"/>
+        <line x1="-8" y1="6" x2="-2" y2="6" stroke="#5A6069" stroke-width="1"/>
+        <circle cx="6" cy="6" r="3" fill="#4A9B8E"/>
+        <text x="18" y="10" font-size="11" fill="#8A8F98">found: missing await on Promise.race</text>
+      </g>
+      <g transform="translate(0,108)">
+        <circle class="pulse" cx="6" cy="8" r="5" fill="#C8302C"/>
+        <circle cx="6" cy="8" r="2" fill="#FAF7EF"/>
+        <g transform="translate(20,2) scale(0.6)" fill="none" stroke="#C8302C" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M14 4 l6 6 l-12 12 h-6 v-6 z"/>
+        </g>
+        <text x="48" y="12" fill="#FAF7EF" font-weight="500">Edit src/checkout/timeout-guard.ts</text>
+        <text x="380" y="12" fill="#E8B657">…</text>
+      </g>
+    </g>
 
-  <!-- in-flight tool -->
-  <text x="610" y="288" class="label">running step,</text>
-  <text x="610" y="308" class="label">w/ duration</text>
-  <path d="M608,294 Q570,286 538,290" class="brass" marker-end="url(#arrowhead)"/>
+    <!-- footer -->
+    <line x1="20" y1="438" x2="480" y2="438" stroke="#2E343D" stroke-width="1"/>
+    <g transform="translate(20,452)">
+      <g fill="none" stroke="#8A8F98" stroke-width="1.5" stroke-linecap="round">
+        <circle cx="6" cy="8" r="5"/>
+        <line x1="6" y1="5" x2="6" y2="8"/>
+        <line x1="6" y1="8" x2="9" y2="9"/>
+      </g>
+      <text class="mono" x="18" y="12" font-size="11" fill="#8A8F98">elapsed 12s</text>
+      <circle cx="100" cy="8" r="1.5" fill="#5A6069"/>
+      <text class="mono" x="112" y="12" font-size="11" fill="#8A8F98">5 of 8 steps</text>
+      <rect x="240" y="4" width="220" height="6" rx="3" fill="#23282F"/>
+      <rect x="240" y="4" width="138" height="6" rx="3" fill="#E8B657"/>
+    </g>
+  </g>
 
-  <!-- sub-agent -->
-  <text x="40" y="338" class="label">sub-agent,</text>
-  <text x="40" y="358" class="label">indented inline</text>
-  <path d="M150,340 Q200,332 256,326" class="brass" marker-end="url(#arrowhead)"/>
+  <!-- CALLOUTS -->
+  <g>
+    <circle cx="200" cy="170" r="13" fill="#C8302C"/>
+    <text class="num" x="200" y="175" text-anchor="middle">1</text>
+    <text class="label" x="60" y="148">pin badge</text>
+    <text class="sub"   x="60" y="166">flips Working → Done</text>
+    <path class="stroke-conn" d="M214 170 C 260 168, 320 175, 365 178"/>
+  </g>
+  <g>
+    <circle cx="200" cy="240" r="13" fill="#C8302C"/>
+    <text class="num" x="200" y="245" text-anchor="middle">2</text>
+    <text class="label" x="60" y="218">user prompt</text>
+    <text class="sub"   x="60" y="236">what triggered this turn</text>
+    <path class="stroke-conn" d="M214 240 C 260 240, 320 230, 370 222"/>
+  </g>
+  <g>
+    <circle cx="1000" cy="340" r="13" fill="#E8B657"/>
+    <text class="num" x="1000" y="345" text-anchor="middle">3</text>
+    <text class="label" x="1020" y="318">last 5 visible</text>
+    <text class="sub"   x="1020" y="336">older steps fold up</text>
+    <path class="stroke-conn" d="M988 340 C 940 340, 900 332, 870 326"/>
+  </g>
+  <g>
+    <circle cx="200" cy="450" r="13" fill="#4A9B8E"/>
+    <text class="num" x="200" y="455" text-anchor="middle">4</text>
+    <text class="label" x="60" y="428">sub-agent indent</text>
+    <text class="sub"   x="60" y="446">delegated work, in line</text>
+    <path class="stroke-conn" d="M214 450 C 280 450, 340 446, 388 440"/>
+  </g>
+  <g>
+    <circle cx="1000" cy="490" r="13" fill="#C8302C"/>
+    <text class="num" x="1000" y="495" text-anchor="middle">5</text>
+    <text class="label" x="1020" y="468">in-flight pulse</text>
+    <text class="sub"   x="1020" y="486">current tool, animated</text>
+    <path class="stroke-conn" d="M988 490 C 940 490, 900 478, 866 466"/>
+  </g>
+  <g>
+    <circle cx="200" cy="600" r="13" fill="#E8B657"/>
+    <text class="num" x="200" y="605" text-anchor="middle">6</text>
+    <text class="label" x="60" y="578">footer timer</text>
+    <text class="sub"   x="60" y="596">tells you if it's stuck</text>
+    <path class="stroke-conn" d="M214 600 C 280 600, 340 612, 396 624"/>
+  </g>
 
-  <!-- footer caption -->
-  <text x="400" y="468" text-anchor="middle" class="label" style="font-size:24px; font-weight:700;">one pinned card per task. updates in place. nothing buried.</text>
-  <line x1="160" y1="478" x2="640" y2="482" class="brass"/>
+  <text class="caption" x="600" y="730" text-anchor="middle">one pinned card per task. updates in place. nothing buried.</text>
 </svg>

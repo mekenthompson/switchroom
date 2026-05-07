@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 420" width="900" height="420" font-family="Caveat, 'Bradley Hand', 'Segoe Print', cursive">
+  <defs>
+    <style>
+      @import url('https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&amp;display=swap');
+      .ink { fill: none; stroke: #14171C; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+      .ink-thin { fill: none; stroke: #14171C; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+      .brass { fill: none; stroke: #B8873A; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+      .cord { fill: none; stroke: #C8302C; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+      .label { font-size: 22px; fill: #14171C; }
+      .label-sm { font-size: 18px; fill: #14171C; }
+      .num { font-size: 22px; font-weight: 700; fill: #C8302C; }
+      .body { font-family: 'Menlo', 'Consolas', monospace; font-size: 13px; fill: #14171C; }
+      .btn-allow { fill: #E8B657; }
+      .btn-deny { fill: #FAF7EF; }
+    </style>
+    <marker id="arrowhead-brass" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#B8873A"/>
+    </marker>
+  </defs>
+
+  <rect width="900" height="420" fill="#FAF7EF"/>
+
+  <!-- Phone with approval card (left) -->
+  <g transform="translate(40,55) rotate(-1)">
+    <rect x="0" y="0" width="220" height="320" rx="22" ry="22" fill="#F5F1E8" class="ink"/>
+    <text x="20" y="34" class="body" style="font-weight:700;">⚠ approval requested</text>
+    <line x1="20" y1="42" x2="200" y2="42" class="ink-thin"/>
+    <text x="20" y="64" class="body">tool: Bash</text>
+    <text x="20" y="84" class="body">agent: coder</text>
+    <text x="20" y="110" class="body" style="font-weight:700;">$ rm -rf node_modules</text>
+    <text x="20" y="130" class="body">$ bun install</text>
+    <line x1="20" y1="148" x2="200" y2="148" class="ink-thin"/>
+    <!-- buttons -->
+    <rect x="20" y="170" width="80" height="34" rx="6" class="btn-allow"/>
+    <rect x="20" y="170" width="80" height="34" rx="6" class="ink"/>
+    <text x="60" y="192" text-anchor="middle" class="body" style="font-weight:700;">Allow</text>
+
+    <rect x="110" y="170" width="80" height="34" rx="6" class="btn-deny"/>
+    <rect x="110" y="170" width="80" height="34" rx="6" class="ink"/>
+    <text x="150" y="192" text-anchor="middle" class="body">Deny</text>
+
+    <rect x="20" y="216" width="170" height="30" rx="6" class="btn-deny"/>
+    <rect x="20" y="216" width="170" height="30" rx="6" class="ink"/>
+    <text x="105" y="236" text-anchor="middle" class="body">Allow Bash for 1h</text>
+
+    <text x="20" y="276" class="body" fill="#5A6069">grant expires automatically</text>
+    <text x="20" y="294" class="body" fill="#5A6069">tap to allow once or for 1h</text>
+  </g>
+  <text x="150" y="395" text-anchor="middle" class="label" style="font-weight:700;">Telegram approval card</text>
+
+  <!-- Broker (middle) -->
+  <g transform="translate(395,140) rotate(0.6)">
+    <rect x="0" y="0" width="160" height="140" rx="10" fill="#F5F1E8" class="ink"/>
+    <text x="80" y="32" text-anchor="middle" class="label" style="font-weight:700;">approval</text>
+    <text x="80" y="56" text-anchor="middle" class="label" style="font-weight:700;">kernel</text>
+    <line x1="20" y1="70" x2="140" y2="70" class="ink-thin"/>
+    <!-- sqlite icon -->
+    <ellipse cx="80" cy="92" rx="36" ry="8" class="ink"/>
+    <path d="M44,92 L44,108 Q44,116 80,116 Q116,116 116,108 L116,92" class="ink"/>
+    <ellipse cx="80" cy="108" rx="36" ry="8" fill="none" class="ink-thin"/>
+    <text x="80" y="135" text-anchor="middle" class="body">grants.sqlite</text>
+  </g>
+  <text x="475" y="310" text-anchor="middle" class="label">IPC broker (unix socket)</text>
+
+  <!-- Agent process (right) -->
+  <g transform="translate(685,140) rotate(-0.5)">
+    <rect x="0" y="0" width="170" height="140" rx="10" fill="#F5F1E8" class="ink"/>
+    <text x="85" y="36" text-anchor="middle" class="label" style="font-weight:700;">claude</text>
+    <text x="85" y="60" text-anchor="middle" class="label" style="font-weight:700;">agent process</text>
+    <line x1="20" y1="74" x2="150" y2="74" class="ink-thin"/>
+    <text x="85" y="96" text-anchor="middle" class="body">paused at gate</text>
+    <text x="85" y="116" text-anchor="middle" class="body">waiting…</text>
+    <!-- spinner-ish -->
+    <circle cx="85" cy="128" r="4" fill="#C8302C"/>
+  </g>
+  <text x="770" y="310" text-anchor="middle" class="label">agent (tmux + systemd)</text>
+
+  <!-- Arrows with numbers -->
+  <!-- 1: tool call (agent → broker, but reading right-to-left) -->
+  <path d="M680,200 Q620,180 565,200" class="brass" marker-end="url(#arrowhead-brass)"/>
+  <text x="620" y="170" text-anchor="middle" class="num">1</text>
+  <text x="620" y="148" text-anchor="middle" class="label-sm">tool call</text>
+
+  <!-- 2: kernel pause notify → phone -->
+  <path d="M395,225 Q330,250 270,235" class="brass" marker-end="url(#arrowhead-brass)"/>
+  <text x="335" y="270" text-anchor="middle" class="num">2</text>
+  <text x="335" y="290" text-anchor="middle" class="label-sm">push card to user</text>
+
+  <!-- 3: user taps Allow → broker -->
+  <path d="M270,160 Q330,130 395,170" class="brass" marker-end="url(#arrowhead-brass)"/>
+  <text x="335" y="118" text-anchor="middle" class="num">3</text>
+  <text x="335" y="98" text-anchor="middle" class="label-sm">user taps Allow</text>
+
+  <!-- 4: tool resumes → agent -->
+  <path d="M560,180 Q620,200 680,210" class="brass" marker-end="url(#arrowhead-brass)"/>
+  <text x="620" y="252" text-anchor="middle" class="num">4</text>
+  <text x="620" y="272" text-anchor="middle" class="label-sm">tool resumes</text>
+
+  <!-- footer -->
+  <line x1="200" y1="408" x2="700" y2="410" class="cord"/>
+  <text x="450" y="34" text-anchor="middle" class="label" style="font-size:26px; font-weight:700;">approval kernel — out of process, every grant logged</text>
+</svg>

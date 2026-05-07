@@ -1,0 +1,22 @@
+# Phase 0 agent spike. tini as PID 1 supervises a daemonised tmux server
+# and a long-lived sleep so we can exercise the C-c interrupt path.
+# A small Node client exercises the broker.
+FROM node:22-alpine
+
+RUN apk add --no-cache tini tmux bash coreutils procps
+
+# Two agent users baked in so we can flip AGENT_NAME via env.
+RUN addgroup -g 10001 alice && adduser -D -u 10001 -G alice alice \
+ && addgroup -g 10002 bob   && adduser -D -u 10002 -G bob   bob
+
+WORKDIR /opt/agent
+COPY agent-client.mjs /opt/agent/agent-client.mjs
+COPY test-tmux-interrupt.sh /opt/agent/test-tmux-interrupt.sh
+RUN chmod +x /opt/agent/test-tmux-interrupt.sh \
+ && chown -R alice:alice /opt/agent
+
+# tini reaps zombies; the container CMD just blocks so docker exec can
+# drive the in-container tests. We do NOT run as root; the compose
+# `user:` directive selects alice or bob.
+ENTRYPOINT ["/sbin/tini", "--"]
+CMD ["sleep", "infinity"]

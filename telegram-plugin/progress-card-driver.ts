@@ -26,6 +26,8 @@ import {
   type SubAgentState,
 } from './progress-card.js'
 import { isTelegramReplyTool } from './tool-names.js'
+import { emitCardEvent } from './card-event-log.js'
+import { createHash } from 'crypto'
 import {
   applyCapped as fleetApplyCapped,
   applyToolResult as fleetApplyToolResult,
@@ -985,6 +987,13 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     }
     if (config.onTurnComplete) {
       process.stderr.write(`telegram gateway: progress-card: onTurnComplete firing turnKey=${cs.turnKey}\n`)
+      emitCardEvent({
+        agent: process.env.SWITCHROOM_AGENT_NAME ?? '',
+        chatId: cs.chatId ?? '',
+        turnKey: cs.turnKey,
+        event: 'finalized',
+        reason: 'onTurnComplete',
+      })
       try {
         config.onTurnComplete({
           chatId: cs.chatId,
@@ -1050,6 +1059,13 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     if (hasAnyRunningSubAgent(cs.state)) return
     if (hasLiveBackground(cs.fleet)) return
     process.stderr.write(`telegram gateway: progress-card: deferred completion firing turnKey=${cs.turnKey} (last sub-agent finished)\n`)
+    emitCardEvent({
+      agent: process.env.SWITCHROOM_AGENT_NAME ?? '',
+      chatId: cs.chatId ?? '',
+      turnKey: cs.turnKey,
+      event: 'force-completed',
+      reason: 'deferred-completion: last sub-agent finished',
+    })
     // Route through the unified close path (turn-end reason) so the
     // prelude (silentEnd suppression, final flush, tail cleanup) matches
     // every other completion site.
@@ -1513,6 +1529,13 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
           chatState.deferredFirstEmitTimer = null
         }
         process.stderr.write(`telegram gateway: progress-card: fast-turn suppression turnKey=${chatState.turnKey} (turn ended before initialDelayMs=${initialDelayMs}ms)\n`)
+        emitCardEvent({
+          agent: process.env.SWITCHROOM_AGENT_NAME ?? '',
+          chatId: chatState.chatId ?? '',
+          turnKey: chatState.turnKey,
+          event: 'suppressed',
+          reason: `fast-turn: ended before initialDelayMs=${initialDelayMs}`,
+        })
         return
       }
       // Defer the first emit — schedule it for initialDelayMs from now
@@ -1612,6 +1635,18 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       ...(isFirst && chatState.replyToMessageId != null
         ? { replyToMessageId: chatState.replyToMessageId }
         : {}),
+    })
+    // #card-audit-log: structured lifecycle entry for retroactive audit.
+    // Mirrors the existing free-text traces but is grep-able by turnKey.
+    emitCardEvent({
+      agent: process.env.SWITCHROOM_AGENT_NAME ?? '',
+      chatId: chatState.chatId ?? '',
+      turnKey: chatState.turnKey,
+      event: isFirst ? 'rendered' : (terminal ? 'finalized' : 'edited'),
+      reason: terminal ? 'flush-terminal' : (isFirst ? 'flush-first' : 'flush-edit'),
+      htmlHash: html.length > 0
+        ? createHash('sha1').update(html).digest('hex').slice(0, 12)
+        : undefined,
     })
   }
 
@@ -2255,6 +2290,14 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
               if (m.status === 'background' && m.terminalAt == null) background.push(k)
             }
             process.stderr.write(`telegram gateway: progress-card: turn_end deferred turnKey=${chatState.turnKey} reason=in-flight-sub-agents correlated=${correlated.length} orphans=${orphans.length} background=${background.length} correlatedAgentIds=[${correlated.join(',')}] orphanAgentIds=[${orphans.join(',')}] backgroundAgentIds=[${background.join(',')}]\n`)
+            emitCardEvent({
+              agent: process.env.SWITCHROOM_AGENT_NAME ?? '',
+              chatId: chatState.chatId ?? '',
+              turnKey: chatState.turnKey,
+              event: 'deferred',
+              reason: `turn_end: in-flight-sub-agents correlated=${correlated.length} orphans=${orphans.length} background=${background.length}`,
+              subagents: [...correlated, ...orphans, ...background],
+            })
             return
           }
           closePerChat(chatState, 'turn-end')
@@ -2368,6 +2411,13 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
       // running sub-agents just because the final reply was sent.
       if (target.completionFired) return
       process.stderr.write(`telegram gateway: progress-card: forceCompleteTurn turnKey=${target.turnKey} (external completion signal, e.g. stream_reply done=true)\n`)
+      emitCardEvent({
+        agent: process.env.SWITCHROOM_AGENT_NAME ?? '',
+        chatId: target.chatId ?? '',
+        turnKey: target.turnKey,
+        event: 'force-completed',
+        reason: 'external completion signal (stream_reply done=true)',
+      })
       const durationMs = Math.max(0, now() - target.state.turnStartedAt)
       beginTurnEnd(target, durationMs)
       target.lastEventAt = now()

@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.5.2 — 2026-05-07
+
+Patch release. Unblocks `npm publish` (the v0.5.1 prepublish hook
+failed on pre-existing tsc errors that masked stale field reads in the
+approvals-list command).
+
+### Fixed
+
+- **Type-system catch-up to runtime usage (#779)** — declare
+  `experimental` (`{ legacy_pty?, legacy_autoaccept_expect? }`),
+  `telegram.webhook_dispatch`, and `WebhookHandlerArgs.dispatchConfig`
+  on the config schema. Purely additive; no behaviour change. Follow-up
+  #780 tracks extracting `ExperimentalSchema` with the
+  `tmux_supervisor` → `legacy_pty` migration transform.
+- **`/approvals list` field renames (#779)** — bring
+  `telegram-plugin/gateway/approvals-commands.ts` field reads in line
+  with the real `ApprovalDecisionMeta` shape (`agent_unit`, `action`,
+  `ttl_expires_at`). Was silently rendering `undefined` for those
+  columns.
+
 ## v0.5.1 — 2026-05-07
 
 Twenty commits since v0.5.0. Headlines: approval-kernel RFC B

@@ -68,13 +68,13 @@ function configWith(agent: { name: string; accounts?: string[] }): SwitchroomCon
 
 describe("handleGetAccounts", () => {
   it("returns empty array when no accounts exist", () => {
-    expect(handleGetAccounts(home)).toEqual([]);
+    expect(handleGetAccounts(undefined, home)).toEqual([]);
   });
 
   it("returns AccountInfo for each account in the global store", () => {
     seedAccount("alpha");
     seedAccount("beta", { expired: true });
-    const out = handleGetAccounts(home);
+    const out = handleGetAccounts(undefined, home);
     expect(out.map((a) => a.label).sort()).toEqual(["alpha", "beta"]);
     const alpha = out.find((a) => a.label === "alpha");
     const beta = out.find((a) => a.label === "beta");
@@ -84,7 +84,7 @@ describe("handleGetAccounts", () => {
 
   it("reflects quota-exhausted health when quotaExhaustedUntil is in the future", () => {
     seedAccount("gamma", { quotaUntil: Date.now() + 60_000 });
-    const out = handleGetAccounts(home);
+    const out = handleGetAccounts(undefined, home);
     expect(out[0].health).toBe("quota-exhausted");
   });
 });

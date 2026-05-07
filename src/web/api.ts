@@ -13,6 +13,14 @@ import { captureEvent, captureException } from "../analytics/posthog.js";
 import { resolveAgentsDir } from "../config/loader.js";
 import { resolveAgentConfig } from "../config/merge.js";
 import { getAccountInfos, type AccountInfo } from "../auth/account-store.js";
+import {
+  readAccountQuota,
+  type AccountQuotaSnapshot,
+} from "../auth/account-quota-store.js";
+import {
+  promoteAccountToPrimary,
+  type PromoteOutcome,
+} from "../auth/account-promote.js";
 import { openTurnsDb, listTurnsForAgent, type Turn } from "../../telegram-plugin/registry/turns-schema.js";
 import { applySubagentsSchema, listSubagents, type Subagent } from "../../telegram-plugin/registry/subagents-schema.js";
 
@@ -163,8 +171,104 @@ export function handleGetSubagents(
   }
 }
 
-export function handleGetAccounts(home?: string): AccountInfo[] {
-  return getAccountInfos(Date.now(), home);
+/**
+ * Per-account dashboard view: stock AccountInfo + cached quota snapshot
+ * + which agents have this label at slot 0 (primary) vs as a fallback.
+ *
+ * Quota source is the on-disk snapshot at
+ * `~/.switchroom/accounts/<label>/quota.json` (#708) — never a live API
+ * call. Snapshots are populated by the gateway/boot card flow.
+ */
+export interface AccountDashboardInfo extends AccountInfo {
+  /** Cached quota snapshot, null when no snapshot has been written. */
+  quota: AccountQuotaSnapshot | null;
+  /** Agents whose `auth.accounts:[0]` is this label (primary). */
+  primaryFor: string[];
+  /** Agents that list this label at index >= 1 (fallback only). */
+  fallbackFor: string[];
+}
+
+export function handleGetAccounts(
+  config?: SwitchroomConfig,
+  home?: string,
+): AccountDashboardInfo[] {
+  const infos = getAccountInfos(Date.now(), home);
+  return infos.map((info) => {
+    const primaryFor: string[] = [];
+    const fallbackFor: string[] = [];
+    if (config) {
+      for (const [name, agent] of Object.entries(config.agents)) {
+        const resolved = resolveAgentConfig(
+          config.defaults,
+          config.profiles,
+          agent,
+        );
+        const list = resolved.auth?.accounts ?? [];
+        const idx = list.indexOf(info.label);
+        if (idx === 0) primaryFor.push(name);
+        else if (idx > 0) fallbackFor.push(name);
+      }
+      primaryFor.sort();
+      fallbackFor.sort();
+    }
+    return {
+      ...info,
+      quota: readAccountQuota(info.label, home),
+      primaryFor,
+      fallbackFor,
+    };
+  });
+}
+
+export interface PromoteAccountResult {
+  ok: boolean;
+  error?: string;
+  /** Agents whose YAML primary changed; the caller should restart these. */
+  promoted?: string[];
+  alreadyPrimary?: string[];
+  fanned?: string[];
+  fanFails?: Array<{ agent: string; error: string }>;
+}
+
+/**
+ * Promote an account to primary on one or more agents. Mirrors
+ * `switchroom auth promote` exactly — no shell-out, same code path.
+ */
+export function handlePromoteAccount(
+  config: SwitchroomConfig,
+  configPath: string,
+  label: string,
+  agents: string[],
+  home?: string,
+): PromoteAccountResult {
+  try {
+    const outcome: PromoteOutcome = promoteAccountToPrimary({
+      label,
+      agents,
+      config,
+      configPath,
+      home,
+    });
+    void captureEvent("account_promoted", {
+      account: label,
+      agents: agents.join(","),
+      promoted_count: outcome.promoted.length,
+      source: "web_api",
+    });
+    return {
+      ok: true,
+      promoted: outcome.promoted,
+      alreadyPrimary: outcome.alreadyPrimary,
+      fanned: outcome.fanned,
+      fanFails: outcome.fanFails,
+    };
+  } catch (err) {
+    void captureException(err, { action: "promote_account", account: label });
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 export interface AgentAccountsResponse {

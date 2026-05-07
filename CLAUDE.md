@@ -122,6 +122,11 @@ globally. During local work on src/, prefer `bun run dev` over rebuilding.
 - **Commit style:** Conventional Commits (`feat(scope):`, `fix(scope):`,
   `docs(scope):`, `test(scope):`, `chore(scope):`). Recent history is a
   good reference — `git log --oneline -20`.
+- **Effort estimates:** in **agent minutes** (wall-clock for a
+  current-generation Claude agent doing the work end-to-end including
+  tests), not human dev hours. "12 dev hours" is the wrong unit;
+  "~25 agent minutes" is the right one. Reserve human-time estimates
+  only for work that explicitly needs the user's review or input.
 
 ## Repo model & dev flow
 

@@ -116,6 +116,15 @@ When operating in a group chat (more than one person in the room):
 Quality > quantity. If you wouldn't send it in a real group chat with
 friends, don't send it.
 
+## Effort estimates
+
+When estimating implementation, research, or refactor work, estimate in
+**agent minutes** — wall-clock time for a current-generation Claude
+agent (the actual worker, not a human) to complete the work end-to-end
+including tests. A "12 dev hours" plan is the wrong unit; "~25 agent
+minutes" is the right one. Reserve human-time estimates only for work
+that explicitly requires the user's review or input.
+
 ## Scope
 
 {{#if agentConfig.purpose}}

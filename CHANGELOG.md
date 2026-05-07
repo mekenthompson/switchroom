@@ -1,5 +1,57 @@
 # Changelog
 
+## v0.5.1 — 2026-05-07
+
+Twenty commits since v0.5.0. Headlines: approval-kernel RFC B
+Phase 1 lands (IPC broker + SQLite kernel + Telegram card primitive),
+Google Drive MCP integration ships end-to-end (RFC C — full
+integration, desktop-loopback OAuth tier, `drive:` config block, CLI
+connect/disconnect), gateway gains a card audit log + structured
+`card-events.jsonl` tagging, and operational fixes for vault preflight,
+self-restart UX, cron DM routing, and the bg-agent silent-card bug.
+
+### Added
+
+- **Approval kernel RFC B Phase 1 (#762)** — IPC broker + SQLite kernel
+  + Telegram card primitive; the substrate for human-in-the-loop
+  approval flows.
+- **`waitForApproval` short-poll helper (#765)** — ergonomic agent-side
+  API on top of the kernel.
+- **Google Drive MCP integration — RFC C full landing (#763)**.
+- **Drive CLI: `switchroom drive connect` / `disconnect` (#766)**.
+- **Drive desktop-loopback OAuth tier (#767)** — RFC C tier 3, no
+  service-account JSON required.
+- **`drive:` config block (#768)** — first-class config, replaces /
+  supplements env-var wiring.
+- **Vault pre-flight check on `agent restart` (#773)** — fails fast
+  with a clear message instead of looping on a locked vault.
+- **Self-restart on non-admin commands + warn on admin cmds (#775)** —
+  better UX when the gateway needs to bounce itself.
+- **Card audit log (#777)** — `card-events.jsonl`, `tg-post` tagging
+  with `turnKey` / `cardMessageId`, `sub_agent_finished` events, and
+  50 MB × 5 file rotation for forensic replay.
+
+### Changed
+
+- **RFC docs land for the approval kernel (#756, #764)** — three RFCs
+  (A bot-token, B kernel, C gdrive) and a follow-up alignment of RFC B
+  with the shipped implementation (TTL default, schema columns, audit
+  split).
+- **`bun.lock` workspace name reconciled `clerk-ai` → `switchroom`
+  (#750)**.
+
+### Fixed
+
+- **Bg-agent progress card goes silent (#759, fixes #757)**.
+- **`approval-callback` signature alignment + `materializeBotToken`
+  catch tightened (#770, #771)**.
+- **Cron DM routing for `dm_only` agents (#774)**.
+- **`materialize TELEGRAM_BOT_TOKEN` from vault at startup (#758/#761)**.
+- **Webhook dispatch: prepend nvm node bin to spawn PATH (#754)**.
+- **`handleWebhookIngest` now receives `dispatchConfig` (#753)**.
+- **Autoaccept new `dev-channels` prompt + reconcile systemd-unit drift
+  (#749)**.
+
 ## v0.5.0 — 2026-05-06
 
 Initial release of `switchroom` (npm package renamed from

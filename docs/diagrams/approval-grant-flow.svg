@@ -1,171 +1,142 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 700" width="1400" height="700" role="img" aria-label="Approval kernel grant flow.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" role="img" aria-label="Approval grant flow: agent pauses, kernel asks phone, you tap allow, agent resumes.">
   <defs>
     <style><![CDATA[
-      .sans  { font-family: 'Inter', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif; }
-      .mono  { font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
-      .ttl   { font-family: 'Inter', system-ui, sans-serif; font-size: 22px; font-weight: 700; fill: #14171C; }
-      .lbl   { font-family: 'Inter', system-ui, sans-serif; font-size: 15px; font-weight: 600; fill: #14171C; }
-      .sub   { font-family: 'Inter', system-ui, sans-serif; font-size: 13px; fill: #5A6069; }
-      .num   { font-family: 'Inter', system-ui, sans-serif; font-size: 14px; font-weight: 700; fill: #FAF7EF; }
-      .step  { font-family: 'Inter', system-ui, sans-serif; font-size: 14px; font-weight: 600; fill: #14171C; }
-      .stepsub{ font-family: 'Inter', system-ui, sans-serif; font-size: 12px; fill: #5A6069; }
-      .caption{ font-family: 'Inter', system-ui, sans-serif; font-style: italic; font-size: 16px; fill: #5A6069; }
+      .sans { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+      .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+      .h    { font: 700 18px 'Inter', system-ui, sans-serif; fill: #23282F; }
+      .body { font: 500 14px 'Inter', system-ui, sans-serif; fill: #23282F; }
+      .cap  { font: italic 500 11px 'Inter', system-ui, sans-serif; fill: #5A6069; }
+      .num  { font: 700 13px 'Inter', system-ui, sans-serif; fill: #FAF7EF; }
+      .flow { fill: none; stroke: #C8302C; stroke-width: 2.5; stroke-linecap: round; }
+      .lead { fill: none; stroke: #8A8F98; stroke-width: 1.4; stroke-dasharray: 2 4; }
     ]]></style>
     <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#14171C" flood-opacity="0.16"/>
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#14171C" flood-opacity="0.18"/>
     </filter>
-    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#14171C" flood-opacity="0.10"/>
-    </filter>
-    <marker id="arrCord" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M0 0 L10 5 L0 10 z" fill="#C8302C"/>
+    <marker id="arrowCord" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C8302C"/>
     </marker>
   </defs>
 
-  <rect fill="#FAF7EF" width="1400" height="700"/>
+  <rect fill="#FAF7EF" width="1200" height="800"/>
 
-  <!-- accent dots -->
   <g fill="#E8B657" opacity="0.55">
-    <circle cx="80" cy="80" r="4"/>
-    <circle cx="1320" cy="100" r="4"/>
-    <circle cx="100" cy="640" r="4"/>
-    <circle cx="1300" cy="620" r="4"/>
+    <circle cx="80" cy="80" r="4"/><circle cx="1120" cy="120" r="4"/>
+    <circle cx="60" cy="720" r="4"/><circle cx="1140" cy="700" r="4"/>
   </g>
   <g fill="#C8302C" opacity="0.5">
-    <circle cx="700" cy="60" r="3"/>
-    <circle cx="700" cy="650" r="3"/>
+    <circle cx="160" cy="140" r="3"/><circle cx="1080" cy="640" r="3"/>
   </g>
 
-  <!-- ============== PHONE (left) ============== -->
-  <g transform="translate(80,180) rotate(-2)" filter="url(#cardShadow)">
-    <!-- phone frame -->
-    <rect x="0" y="0" width="260" height="380" rx="32" fill="#14171C"/>
-    <rect x="6" y="6" width="248" height="368" rx="28" fill="#FAF7EF"/>
-    <!-- speaker -->
-    <rect x="106" y="20" width="48" height="6" rx="3" fill="#23282F"/>
-    <!-- approval card mock inside screen -->
-    <g transform="translate(20,46)">
-      <rect x="0" y="0" width="220" height="300" rx="10" fill="#F5F1E8"/>
-      <!-- header strip -->
-      <rect x="0" y="0" width="220" height="32" rx="10" fill="#C8302C"/>
-      <rect x="0" y="22" width="220" height="10" fill="#C8302C"/>
-      <text class="sans" x="14" y="22" fill="#FAF7EF" font-size="13" font-weight="700">APPROVAL NEEDED</text>
-      <!-- tool name -->
-      <text class="mono" x="14" y="56" font-size="12" fill="#5A6069">Edit</text>
-      <text class="mono" x="14" y="74" font-size="12" fill="#14171C" font-weight="600">src/auth.ts</text>
-      <!-- diff snippet -->
-      <g transform="translate(14,90)">
-        <rect x="0" y="0" width="192" height="60" rx="6" fill="#14171C"/>
-        <text class="mono" x="10" y="18" font-size="10" fill="#E99A9E">- skipAuth(req)</text>
-        <text class="mono" x="10" y="34" font-size="10" fill="#98E4B6">+ requireAuth(req)</text>
-        <text class="mono" x="10" y="50" font-size="10" fill="#98E4B6">+ audit.log(req)</text>
+  <text class="h" x="60" y="76">Approval grant flow</text>
+  <text class="cap" x="60" y="96">agent pauses · kernel asks · you tap · agent resumes</text>
+
+  <!-- CARD A: Agent (left) -->
+  <g transform="translate(80,250) rotate(-1.2)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="300" height="320" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5"/>
+    <text class="sans" x="20" y="34" font-size="14" font-weight="700" fill="#23282F">@worker</text>
+    <text class="cap" x="20" y="52">claude REPL · paused</text>
+    <g transform="translate(20,72)">
+      <rect x="0" y="0" width="260" height="220" rx="8" fill="#14171C"/>
+      <g transform="translate(10,10)">
+        <circle cx="6" cy="6" r="4" fill="#C8302C"/>
+        <circle cx="20" cy="6" r="4" fill="#E8B657"/>
+        <circle cx="34" cy="6" r="4" fill="#4A9B8E"/>
       </g>
-      <!-- buttons -->
-      <g transform="translate(14,168)">
-        <rect x="0" y="0" width="88" height="36" rx="8" fill="#4A9B8E"/>
-        <text class="sans" x="44" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#FAF7EF">Allow</text>
-        <!-- check icon -->
-        <path d="M14 18 l4 4 l8 -8" fill="none" stroke="#FAF7EF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <g font-family="'JetBrains Mono', monospace" font-size="11">
+        <text x="12" y="48" fill="#8A8F98">$ Edit src/auth/login.ts</text>
+        <text x="12" y="68" fill="#E8B657">paused — awaiting approval</text>
+        <text x="12" y="96" fill="#5A6069">tool:    Edit</text>
+        <text x="12" y="112" fill="#5A6069">file:    src/auth/login.ts</text>
+        <text x="12" y="128" fill="#5A6069">+12 -8 lines</text>
+        <text x="12" y="160" fill="#B8BCC3">blocked on kernel</text>
+        <text x="12" y="180" fill="#B8BCC3">elapsed 12s</text>
       </g>
-      <g transform="translate(110,168)">
-        <rect x="0" y="0" width="88" height="36" rx="8" fill="#FAF7EF" stroke="#C8302C" stroke-width="1.5"/>
-        <text class="sans" x="44" y="22" text-anchor="middle" font-size="14" font-weight="700" fill="#C8302C">Deny</text>
-        <path d="M16 14 l12 12 M28 14 l-12 12" fill="none" stroke="#C8302C" stroke-width="2" stroke-linecap="round"/>
+    </g>
+  </g>
+  <text class="cap" x="230" y="610" text-anchor="middle">agent (claude REPL)</text>
+
+  <!-- CARD B: Kernel (center) -->
+  <g transform="translate(450,250) rotate(0.8)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="300" height="320" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5"/>
+    <text class="sans" x="20" y="34" font-size="14" font-weight="700" fill="#23282F">approval kernel</text>
+    <text class="cap" x="20" y="52">SQLite · IPC broker</text>
+    <g transform="translate(20,72)">
+      <rect x="0" y="0" width="260" height="220" rx="8" fill="#F5F1E8" stroke="#EDE7D7" stroke-width="1"/>
+      <rect x="0" y="0" width="260" height="26" rx="8" fill="#EDE7D7"/>
+      <text class="sans" x="12" y="18" font-size="11" font-weight="700" fill="#23282F">id</text>
+      <text class="sans" x="64" y="18" font-size="11" font-weight="700" fill="#23282F">tool</text>
+      <text class="sans" x="140" y="18" font-size="11" font-weight="700" fill="#23282F">state</text>
+      <text class="sans" x="210" y="18" font-size="11" font-weight="700" fill="#23282F">ttl</text>
+      <g font-family="'JetBrains Mono', monospace" font-size="10" fill="#23282F">
+        <text x="12" y="50">a91</text><text x="64" y="50">Edit</text>
+        <text x="140" y="50" fill="#B8873A">pending</text><text x="210" y="50">—</text>
+        <text x="12" y="74">a90</text><text x="64" y="74">Bash</text>
+        <text x="140" y="74" fill="#4A9B8E">granted</text><text x="210" y="74">15m</text>
+        <text x="12" y="98">a89</text><text x="64" y="98">Write</text>
+        <text x="140" y="98" fill="#C8302C">denied</text><text x="210" y="98">—</text>
+        <text x="12" y="122">a88</text><text x="64" y="122">Edit</text>
+        <text x="140" y="122" fill="#4A9B8E">granted</text><text x="210" y="122">5m</text>
       </g>
-      <!-- TTL -->
-      <text class="mono" x="110" y="234" text-anchor="middle" font-size="11" fill="#8A8F98">TTL · 10 min</text>
+      <rect x="2" y="34" width="256" height="22" fill="#E8B657" opacity="0.18" rx="3"/>
+      <text class="cap" x="12" y="172">grants are TTL'd · one Allow ≠ forever</text>
+      <text class="mono" x="12" y="196" font-size="10" fill="#5A6069">~/.switchroom/kernel.db</text>
     </g>
   </g>
-  <text class="lbl" x="210" y="600" text-anchor="middle">your phone</text>
-  <text class="sub" x="210" y="620" text-anchor="middle">Telegram approval card</text>
+  <text class="cap" x="600" y="610" text-anchor="middle">approval kernel (SQLite + IPC)</text>
 
-  <!-- ============== KERNEL (middle) ============== -->
-  <g transform="translate(560,260) rotate(1)" filter="url(#cardShadow)">
-    <rect x="0" y="0" width="280" height="200" rx="14" fill="#F5F1E8"/>
-    <rect x="0" y="0" width="280" height="46" rx="14" fill="#E8B657"/>
-    <rect x="0" y="32" width="280" height="14" fill="#E8B657"/>
-    <text class="sans" x="20" y="30" fill="#14171C" font-size="16" font-weight="700">approval kernel</text>
-    <text class="mono" x="20" y="68" font-size="12" fill="#5A6069">card-events.jsonl</text>
-    <!-- sqlite icon: 3 stacked rows -->
-    <g transform="translate(20,84)">
-      <rect x="0" y="0" width="240" height="22" rx="4" fill="#FAF7EF" stroke="#B8873A" stroke-width="1"/>
-      <circle cx="14" cy="11" r="3" fill="#4A9B8E"/>
-      <text class="mono" x="28" y="15" font-size="11" fill="#14171C">tool=Edit · path=src/auth.ts</text>
-      <rect x="0" y="28" width="240" height="22" rx="4" fill="#FAF7EF" stroke="#B8873A" stroke-width="1"/>
-      <circle cx="14" cy="39" r="3" fill="#E8B657"/>
-      <text class="mono" x="28" y="43" font-size="11" fill="#14171C">state=pending · ttl=600s</text>
-      <rect x="0" y="56" width="240" height="22" rx="4" fill="#FAF7EF" stroke="#B8873A" stroke-width="1"/>
-      <circle cx="14" cy="67" r="3" fill="#8A8F98"/>
-      <text class="mono" x="28" y="71" font-size="11" fill="#14171C">grant=null · audit=appended</text>
+  <!-- CARD C: Phone (right) -->
+  <g transform="translate(820,210) rotate(-0.6)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="260" height="380" rx="32" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5"/>
+    <rect x="100" y="16" width="60" height="6" rx="3" fill="#EDE7D7"/>
+    <text class="cap" x="130" y="44" text-anchor="middle">Telegram · @worker</text>
+    <g transform="translate(18,60)">
+      <rect x="0" y="0" width="224" height="300" rx="10" fill="#F5F1E8"/>
+      <g transform="translate(10,12)">
+        <rect x="0" y="0" width="204" height="216" rx="8" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1"/>
+        <rect x="0" y="0" width="3" height="216" rx="1.5" fill="#E8B657"/>
+        <text class="sans" x="14" y="22" font-size="11" font-weight="700" fill="#23282F">@worker wants to Edit</text>
+        <text class="mono" x="14" y="40" font-size="10" fill="#5A6069">src/auth/login.ts</text>
+        <g transform="translate(14,52)" font-family="'JetBrains Mono', monospace" font-size="9">
+          <rect x="-2" y="-10" width="180" height="76" rx="4" fill="#FAF7EF"/>
+          <text x="0" y="2" fill="#C8302C">- if (user.legacy)</text>
+          <text x="0" y="16" fill="#C8302C">-   useOldSession()</text>
+          <text x="0" y="30" fill="#4A9B8E">+ const s = kernel.start(</text>
+          <text x="0" y="44" fill="#4A9B8E">+   user.id, { ttl: 15 })</text>
+          <text x="0" y="58" fill="#5A6069">  return s</text>
+        </g>
+        <g transform="translate(14,140)">
+          <rect x="0" y="0" width="84" height="28" rx="6" fill="#4A9B8E"/>
+          <text class="sans" x="42" y="18" font-size="11" font-weight="700" fill="#FAF7EF" text-anchor="middle">Allow</text>
+          <rect x="92" y="0" width="84" height="28" rx="6" fill="#FFFFFF" stroke="#C8302C" stroke-width="1.5"/>
+          <text class="sans" x="134" y="18" font-size="11" font-weight="700" fill="#C8302C" text-anchor="middle">Deny</text>
+        </g>
+        <text class="cap" x="14" y="194">scope: this call · ttl 15m · always</text>
+      </g>
     </g>
   </g>
-  <text class="lbl" x="700" y="500" text-anchor="middle">approval kernel</text>
-  <text class="sub" x="700" y="520" text-anchor="middle">SQLite + JSONL audit</text>
+  <text class="cap" x="950" y="620" text-anchor="middle">your phone (Telegram)</text>
 
-  <!-- ============== AGENT (right) ============== -->
-  <g transform="translate(1060,240) rotate(-1.5)" filter="url(#cardShadow)">
-    <rect x="0" y="0" width="280" height="220" rx="12" fill="#14171C"/>
-    <!-- titlebar dots -->
-    <g transform="translate(14,14)">
-      <circle cx="0" cy="0" r="5" fill="#C8302C"/>
-      <circle cx="14" cy="0" r="5" fill="#E8B657"/>
-      <circle cx="28" cy="0" r="5" fill="#4A9B8E"/>
-    </g>
-    <text class="mono" x="60" y="18" font-size="11" fill="#8A8F98">agent · claude REPL</text>
-    <line x1="0" y1="32" x2="280" y2="32" stroke="#23282F"/>
-    <!-- code lines -->
-    <text class="mono" x="14" y="58" font-size="12" fill="#8A8F98">$ analysing auth flow…</text>
-    <text class="mono" x="14" y="80" font-size="12" fill="#B8BCC3">tool_call:</text>
-    <text class="mono" x="30" y="100" font-size="12" fill="#E8B657">Edit src/auth.ts</text>
-    <!-- pause indicator -->
-    <g transform="translate(14,118)">
-      <rect x="0" y="0" width="252" height="36" rx="6" fill="#23282F" stroke="#E8B657" stroke-width="1.2"/>
-      <!-- pause icon -->
-      <rect x="12" y="10" width="4" height="16" fill="#E8B657"/>
-      <rect x="20" y="10" width="4" height="16" fill="#E8B657"/>
-      <text class="mono" x="34" y="22" font-size="11" fill="#E8B657">paused — awaiting approval</text>
-    </g>
-    <text class="mono" x="14" y="178" font-size="12" fill="#5A6069">…</text>
-    <!-- blinking cursor -->
-    <rect x="14" y="190" width="8" height="14" fill="#4A9B8E"/>
-  </g>
-  <text class="lbl" x="1200" y="500" text-anchor="middle">agent · claude REPL</text>
-  <text class="sub" x="1200" y="520" text-anchor="middle">tool call held until grant</text>
+  <!-- Numbered flow arrows -->
+  <path class="flow" d="M 360 380 C 400 360, 430 360, 460 380" marker-end="url(#arrowCord)"/>
+  <circle cx="410" cy="354" r="16" fill="#C8302C"/>
+  <text class="num" x="410" y="358" text-anchor="middle">1</text>
+  <text class="cap" x="410" y="332" text-anchor="middle">pause + ask</text>
 
-  <!-- ============== FLOW ARROWS (numbered, curved) ============== -->
-  <!-- 1: agent → kernel  (right to middle) -->
-  <path d="M 1060 320 C 980 290, 900 290, 840 310" fill="none" stroke="#C8302C" stroke-width="2.4" marker-end="url(#arrCord)"/>
-  <g transform="translate(950,260)">
-    <circle r="16" fill="#C8302C" filter="url(#softShadow)"/>
-    <text class="num" text-anchor="middle" y="5">1</text>
-  </g>
-  <text class="step" x="950" y="240" text-anchor="middle">tool call</text>
+  <path class="flow" d="M 730 380 C 770 360, 800 360, 830 380" marker-end="url(#arrowCord)"/>
+  <circle cx="780" cy="354" r="16" fill="#E8B657"/>
+  <text class="num" x="780" y="358" text-anchor="middle">2</text>
+  <text class="cap" x="780" y="332" text-anchor="middle">push approval card</text>
 
-  <!-- 2: kernel → phone  (middle to left) -->
-  <path d="M 560 360 C 480 380, 400 380, 340 360" fill="none" stroke="#C8302C" stroke-width="2.4" marker-end="url(#arrCord)"/>
-  <g transform="translate(450,395)">
-    <circle r="16" fill="#C8302C" filter="url(#softShadow)"/>
-    <text class="num" text-anchor="middle" y="5">2</text>
-  </g>
-  <text class="step" x="450" y="430" text-anchor="middle">kernel pause · post card</text>
+  <path class="flow" d="M 830 470 C 800 500, 770 500, 730 470" marker-end="url(#arrowCord)"/>
+  <circle cx="780" cy="510" r="16" fill="#4A9B8E"/>
+  <text class="num" x="780" y="514" text-anchor="middle">3</text>
+  <text class="cap" x="780" y="540" text-anchor="middle">Allow tapped</text>
 
-  <!-- 3: phone → kernel (left to middle, lower curve) -->
-  <path d="M 340 460 C 420 490, 500 490, 560 440" fill="none" stroke="#4A9B8E" stroke-width="2.4" marker-end="url(#arrCord)" stroke-opacity="0.95"/>
-  <path d="M 340 460 C 420 490, 500 490, 560 440" fill="none" stroke="#4A9B8E" stroke-width="2.4" marker-end="url(#arrCord)"/>
-  <g transform="translate(450,500)">
-    <circle r="16" fill="#4A9B8E" filter="url(#softShadow)"/>
-    <text class="num" text-anchor="middle" y="5">3</text>
-  </g>
-  <text class="step" x="450" y="535" text-anchor="middle">user taps Allow</text>
+  <path class="flow" d="M 460 470 C 430 500, 400 500, 360 470" marker-end="url(#arrowCord)"/>
+  <circle cx="410" cy="510" r="16" fill="#4A9B8E"/>
+  <text class="num" x="410" y="514" text-anchor="middle">4</text>
+  <text class="cap" x="410" y="540" text-anchor="middle">grant + resume</text>
 
-  <!-- 4: kernel → agent (middle to right, lower curve) -->
-  <path d="M 840 420 C 920 460, 1000 460, 1060 410" fill="none" stroke="#4A9B8E" stroke-width="2.4" marker-end="url(#arrCord)"/>
-  <g transform="translate(950,470)">
-    <circle r="16" fill="#4A9B8E" filter="url(#softShadow)"/>
-    <text class="num" text-anchor="middle" y="5">4</text>
-  </g>
-  <text class="step" x="950" y="505" text-anchor="middle">tool resumes</text>
-
-  <!-- caption -->
-  <text class="caption" x="700" y="650" text-anchor="middle">every gated tool call. user-confirmed in Telegram. TTL'd. audited.</text>
+  <text class="cap" x="600" y="752" text-anchor="middle">grants are TTL'd — a one-off Allow does not silently become forever</text>
 </svg>

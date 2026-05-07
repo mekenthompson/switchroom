@@ -1,124 +1,176 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 500" width="1600" height="500" role="img" aria-label="Wake-audit lifecycle.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" role="img" aria-label="Wake-audit lifecycle: from crash through fresh boot to silent-or-explicit acknowledgement.">
   <defs>
     <style><![CDATA[
-      .sans  { font-family: 'Inter', system-ui, -apple-system, 'Helvetica Neue', Arial, sans-serif; }
-      .mono  { font-family: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace; }
-      .ttl   { font-family: 'Inter', system-ui, sans-serif; font-size: 22px; font-weight: 700; fill: #14171C; }
-      .lbl   { font-family: 'Inter', system-ui, sans-serif; font-size: 16px; font-weight: 700; fill: #14171C; }
-      .sub   { font-family: 'Inter', system-ui, sans-serif; font-size: 12px; fill: #5A6069; }
-      .caption { font-family: 'Inter', system-ui, sans-serif; font-style: italic; font-size: 17px; fill: #5A6069; }
+      .sans { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+      .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; }
+      .h    { font: 700 18px 'Inter', system-ui, sans-serif; fill: #23282F; }
+      .ch   { font: 700 14px 'Inter', system-ui, sans-serif; fill: #23282F; }
+      .body { font: 500 13px 'Inter', system-ui, sans-serif; fill: #23282F; }
+      .cap  { font: italic 500 11px 'Inter', system-ui, sans-serif; fill: #5A6069; }
+      .num  { font: 700 13px 'Inter', system-ui, sans-serif; fill: #FAF7EF; }
+      .flow { fill: none; stroke: #C8302C; stroke-width: 2.5; stroke-linecap: round; }
+      .icon { fill: none; stroke: #23282F; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
     ]]></style>
     <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="5" stdDeviation="9" flood-color="#14171C" flood-opacity="0.14"/>
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#14171C" flood-opacity="0.18"/>
     </filter>
+    <marker id="arrowCord" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C8302C"/>
+    </marker>
   </defs>
 
-  <rect fill="#FAF7EF" width="1600" height="500"/>
+  <rect fill="#FAF7EF" width="1200" height="800"/>
 
-  <!-- accent dots -->
   <g fill="#E8B657" opacity="0.55">
-    <circle cx="60" cy="60" r="4"/>
-    <circle cx="1540" cy="80" r="4"/>
-    <circle cx="80" cy="450" r="4"/>
-    <circle cx="1520" cy="440" r="4"/>
+    <circle cx="80" cy="80" r="4"/><circle cx="1120" cy="120" r="4"/>
+    <circle cx="60" cy="720" r="4"/><circle cx="1140" cy="700" r="4"/>
   </g>
   <g fill="#C8302C" opacity="0.5">
-    <circle cx="200" cy="40" r="3"/>
-    <circle cx="1400" cy="460" r="3"/>
+    <circle cx="160" cy="140" r="3"/><circle cx="1080" cy="640" r="3"/>
   </g>
 
-  <!-- caption (above) -->
-  <text class="caption" x="800" y="80" text-anchor="middle">things die. switchroom comes back, with receipts.</text>
+  <text class="h" x="60" y="76">Wake-audit lifecycle</text>
+  <text class="cap" x="60" y="96">five-stage timeline · crash → boot → audit → silent or explicit</text>
 
-  <!-- DASHED TIMELINE (behind cards) -->
-  <line x1="160" y1="280" x2="1440" y2="280" stroke="#B8BCC3" stroke-width="2" stroke-dasharray="2 8" stroke-linecap="round"/>
-  <!-- accent dots on the line, between stations -->
-  <g fill="#E8B657">
-    <circle cx="320" cy="280" r="3.5"/>
-    <circle cx="600" cy="280" r="3.5"/>
-    <circle cx="880" cy="280" r="3.5"/>
-    <circle cx="1160" cy="280" r="3.5"/>
-  </g>
+  <!-- Reusable card recipe: 200×260, light fill, slight rotation -->
 
-  <!-- =========== 5 STATIONS =========== -->
-  <!-- Station 1: agent killed (skull) -->
-  <g transform="translate(160,180) rotate(-1.5)" filter="url(#cardShadow)">
-    <rect x="0" y="0" width="200" height="200" rx="14" fill="#FAF7EF" stroke="#EDE7D7" stroke-width="1.5"/>
-    <rect x="0" y="0" width="200" height="6" rx="3" fill="#C8302C"/>
-    <!-- skull icon (SVG path) -->
-    <g transform="translate(70,28)" fill="none" stroke="#C8302C" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M30 4 C 14 4, 4 16, 4 30 C 4 40, 10 47, 14 50 L14 56 C 14 58, 16 60, 18 60 L20 60 L20 54 L24 54 L24 60 L36 60 L36 54 L40 54 L40 60 L42 60 C 44 60, 46 58, 46 56 L46 50 C 50 47, 56 40, 56 30 C 56 16, 46 4, 30 4 z"/>
-      <circle cx="20" cy="30" r="4" fill="#C8302C"/>
-      <circle cx="40" cy="30" r="4" fill="#C8302C"/>
-      <path d="M26 42 L30 46 L34 42"/>
+  <!-- Stage 1: crash -->
+  <g transform="translate(70,220) rotate(-1.2)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="200" height="280" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5"/>
+    <text class="ch" x="20" y="34">crash / kill</text>
+    <!-- icon: lightning bolt -->
+    <g transform="translate(76,54)">
+      <path class="icon" d="M14 2 L4 18 L11 18 L9 30 L20 12 L13 12 Z"/>
     </g>
-    <text class="lbl" x="100" y="124" text-anchor="middle">agent killed</text>
-    <text class="sub" x="100" y="148" text-anchor="middle">watchdog · SIGTERM</text>
-    <text class="sub" x="100" y="166" text-anchor="middle">crash · timeout</text>
+    <text class="cap" x="20" y="118" >watchdog · SIGTERM</text>
+    <text class="cap" x="20" y="134">timeout · OOM · restart</text>
+    <g font-family="'JetBrains Mono', monospace" font-size="10" fill="#5A6069">
+      <text x="20" y="170">in-flight turn</text>
+      <text x="20" y="186">interrupted</text>
+      <text x="20" y="208" fill="#C8302C">stamp written:</text>
+      <text x="20" y="222">.wake-audit-pending</text>
+      <text x="20" y="238">clean-shutdown.json</text>
+    </g>
+  </g>
+  <g>
+    <circle cx="170" cy="208" r="16" fill="#C8302C"/>
+    <text class="num" x="170" y="212" text-anchor="middle">1</text>
   </g>
 
-  <!-- Station 2: crash-pane snapshot (camera) -->
-  <g transform="translate(440,200) rotate(1.5)" filter="url(#cardShadow)">
-    <rect x="0" y="0" width="200" height="200" rx="14" fill="#FAF7EF" stroke="#EDE7D7" stroke-width="1.5"/>
-    <rect x="0" y="0" width="200" height="6" rx="3" fill="#E8B657"/>
-    <!-- camera icon -->
-    <g transform="translate(70,30)" fill="none" stroke="#B8873A" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M4 18 h12 l4 -6 h20 l4 6 h12 a4 4 0 0 1 4 4 v28 a4 4 0 0 1 -4 4 h-52 a4 4 0 0 1 -4 -4 v-28 a4 4 0 0 1 4 -4 z"/>
-      <circle cx="30" cy="36" r="10"/>
-      <circle cx="30" cy="36" r="4" fill="#E8B657"/>
-      <rect x="48" y="22" width="6" height="3" rx="1" fill="#B8873A"/>
+  <!-- Stage 2: boot -->
+  <g transform="translate(290,220) rotate(0.8)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="200" height="280" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5"/>
+    <text class="ch" x="20" y="34">fresh boot</text>
+    <!-- icon: power -->
+    <g transform="translate(76,54)">
+      <path class="icon" d="M16 4 L16 16"/>
+      <path class="icon" d="M9 9 A 10 10 0 1 0 23 9"/>
     </g>
-    <text class="lbl" x="100" y="124" text-anchor="middle">crash snapshot</text>
-    <text class="sub" x="100" y="148" text-anchor="middle">tmux scrollback</text>
-    <text class="sub" x="100" y="166" text-anchor="middle">dumped to disk</text>
+    <text class="cap" x="20" y="118">start.sh sources env</text>
+    <text class="cap" x="20" y="134">SWITCHROOM_PENDING_*</text>
+    <g font-family="'JetBrains Mono', monospace" font-size="10" fill="#5A6069">
+      <text x="20" y="170">claude --continue</text>
+      <text x="20" y="186">hindsight recall fires</text>
+      <text x="20" y="208" fill="#23282F">env vars cleared</text>
+      <text x="20" y="222">after first read</text>
+    </g>
+  </g>
+  <g>
+    <circle cx="390" cy="208" r="16" fill="#E8B657"/>
+    <text class="num" x="390" y="212" text-anchor="middle">2</text>
   </g>
 
-  <!-- Station 3: systemd restart (circular arrows) -->
-  <g transform="translate(720,180) rotate(-1)" filter="url(#cardShadow)">
-    <rect x="0" y="0" width="200" height="200" rx="14" fill="#FAF7EF" stroke="#EDE7D7" stroke-width="1.5"/>
-    <rect x="0" y="0" width="200" height="6" rx="3" fill="#4A9B8E"/>
-    <!-- circular arrow icon -->
-    <g transform="translate(70,30)" fill="none" stroke="#4A9B8E" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M52 30 a22 22 0 1 1 -7 -16"/>
-      <polyline points="44,4 45,16 33,17"/>
-      <path d="M8 30 a22 22 0 0 0 7 16" stroke-opacity="0.4"/>
+  <!-- Stage 3: audit -->
+  <g transform="translate(510,220) rotate(-0.6)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="200" height="280" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5"/>
+    <text class="ch" x="20" y="34">wake audit</text>
+    <!-- icon: checklist -->
+    <g transform="translate(74,54)">
+      <rect class="icon" x="2" y="2" width="28" height="28" rx="3"/>
+      <path class="icon" d="M8 11 L12 15 L20 7"/>
+      <path class="icon" d="M8 22 L24 22"/>
     </g>
-    <text class="lbl" x="100" y="124" text-anchor="middle">systemd restart</text>
-    <text class="sub" x="100" y="148" text-anchor="middle">exit-code recovery</text>
-    <text class="sub" x="100" y="166" text-anchor="middle">unit comes back up</text>
+    <text class="cap" x="20" y="118">three checks run</text>
+    <g font-family="'JetBrains Mono', monospace" font-size="10" fill="#23282F">
+      <text x="20" y="142">• owed replies</text>
+      <text x="20" y="158">• orphan sub-agents</text>
+      <text x="20" y="174">• stale todos</text>
+    </g>
+    <text class="cap" x="20" y="208">dedup via marker mtime</text>
+    <text class="cap" x="20" y="224">vs latest user msg ts</text>
+  </g>
+  <g>
+    <circle cx="610" cy="208" r="16" fill="#E8B657"/>
+    <text class="num" x="610" y="212" text-anchor="middle">3</text>
   </g>
 
-  <!-- Station 4: wake-audit fires (clipboard) -->
-  <g transform="translate(1000,200) rotate(1.5)" filter="url(#cardShadow)">
-    <rect x="0" y="0" width="200" height="200" rx="14" fill="#FAF7EF" stroke="#EDE7D7" stroke-width="1.5"/>
-    <rect x="0" y="0" width="200" height="6" rx="3" fill="#E8B657"/>
-    <!-- clipboard icon -->
-    <g transform="translate(72,28)" fill="none" stroke="#B8873A" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="6" y="8" width="44" height="56" rx="4"/>
-      <rect x="18" y="2" width="20" height="10" rx="2" fill="#B8873A"/>
-      <line x1="14" y1="24" x2="42" y2="24"/>
-      <line x1="14" y1="36" x2="42" y2="36"/>
-      <line x1="14" y1="48" x2="34" y2="48"/>
+  <!-- Stage 4a: clean (top branch) -->
+  <g transform="translate(750,140) rotate(-1.2)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="200" height="220" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5"/>
+    <text class="ch" x="20" y="34">all clean</text>
+    <!-- icon: check -->
+    <g transform="translate(76,54)">
+      <circle class="icon" cx="16" cy="16" r="13"/>
+      <path class="icon" d="M9 16 L14 21 L23 11"/>
     </g>
-    <text class="lbl" x="100" y="124" text-anchor="middle">wake-audit fires</text>
-    <text class="sub" x="100" y="148" text-anchor="middle">owed reply? orphan</text>
-    <text class="sub" x="100" y="166" text-anchor="middle">sub-agent? open todo?</text>
+    <text class="cap" x="20" y="118">no owed replies</text>
+    <text class="cap" x="20" y="134">no orphans · no stale</text>
+    <text class="body" x="20" y="170" fill="#4A9B8E">→ stay silent</text>
+    <text class="cap" x="20" y="190">answer the new prompt</text>
+  </g>
+  <g>
+    <circle cx="850" cy="128" r="16" fill="#4A9B8E"/>
+    <text class="num" x="850" y="132" text-anchor="middle">4</text>
   </g>
 
-  <!-- Station 5: first turn acknowledges (speech bubble) -->
-  <g transform="translate(1280,180) rotate(-1.5)" filter="url(#cardShadow)">
-    <rect x="0" y="0" width="200" height="200" rx="14" fill="#FAF7EF" stroke="#EDE7D7" stroke-width="1.5"/>
-    <rect x="0" y="0" width="200" height="6" rx="3" fill="#C8302C"/>
-    <!-- speech bubble icon -->
-    <g transform="translate(70,30)" fill="none" stroke="#C8302C" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M6 14 a8 8 0 0 1 8 -8 h36 a8 8 0 0 1 8 8 v22 a8 8 0 0 1 -8 8 h-22 l-12 10 v-10 h-2 a8 8 0 0 1 -8 -8 z"/>
-      <line x1="16" y1="20" x2="46" y2="20"/>
-      <line x1="16" y1="28" x2="40" y2="28"/>
-      <line x1="16" y1="36" x2="34" y2="36"/>
+  <!-- Stage 4b: explicit (bottom branch) -->
+  <g transform="translate(750,440) rotate(0.8)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="200" height="220" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5"/>
+    <text class="ch" x="20" y="34">found work</text>
+    <!-- icon: alert -->
+    <g transform="translate(76,54)">
+      <path class="icon" d="M16 4 L30 28 L2 28 Z"/>
+      <path class="icon" d="M16 13 L16 20"/>
+      <circle cx="16" cy="24" r="1.4" fill="#23282F" stroke="none"/>
     </g>
-    <text class="lbl" x="100" y="124" text-anchor="middle">first turn acknowledges</text>
-    <text class="sub" x="100" y="148" text-anchor="middle">(a) start over</text>
-    <text class="sub" x="100" y="164" text-anchor="middle">(b) summarize + continue</text>
-    <text class="sub" x="100" y="180" text-anchor="middle">(c) drop</text>
+    <text class="cap" x="20" y="118">owed reply · orphan</text>
+    <text class="cap" x="20" y="134">sub-agent · stale todo</text>
+    <text class="body" x="20" y="170" fill="#C8302C">→ Issue accent</text>
+    <text class="cap" x="20" y="190">surface + ask user</text>
   </g>
+  <g>
+    <circle cx="850" cy="660" r="16" fill="#C8302C"/>
+    <text class="num" x="850" y="664" text-anchor="middle">4</text>
+  </g>
+
+  <!-- Stage 5: stamp -->
+  <g transform="translate(990,300) rotate(-0.6)" filter="url(#cardShadow)">
+    <rect x="0" y="0" width="180" height="200" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5"/>
+    <text class="ch" x="20" y="34">stamp + clear</text>
+    <!-- icon: clock -->
+    <g transform="translate(70,54)">
+      <circle class="icon" cx="16" cy="16" r="13"/>
+      <path class="icon" d="M16 8 L16 16 L22 19"/>
+    </g>
+    <text class="cap" x="20" y="118">touch last-completed</text>
+    <text class="cap" x="20" y="134">rm pending sentinel</text>
+    <text class="cap" x="20" y="158">future --continue</text>
+    <text class="cap" x="20" y="174">respawns won't refire</text>
+  </g>
+  <g>
+    <circle cx="1080" cy="288" r="16" fill="#E8B657"/>
+    <text class="num" x="1080" y="292" text-anchor="middle">5</text>
+  </g>
+
+  <!-- Flow arrows -->
+  <path class="flow" d="M 268 360 L 292 360" marker-end="url(#arrowCord)"/>
+  <path class="flow" d="M 488 360 L 512 360" marker-end="url(#arrowCord)"/>
+  <!-- branch from stage 3 to 4a (up) and 4b (down) -->
+  <path class="flow" d="M 712 340 C 730 280, 740 260, 748 250" marker-end="url(#arrowCord)"/>
+  <path class="flow" d="M 712 380 C 730 440, 740 530, 748 550" marker-end="url(#arrowCord)"/>
+  <!-- 4a → 5 and 4b → 5 -->
+  <path class="flow" d="M 952 290 C 970 320, 980 360, 988 380" marker-end="url(#arrowCord)"/>
+  <path class="flow" d="M 952 510 C 970 480, 980 440, 988 420" marker-end="url(#arrowCord)"/>
+
+  <text class="cap" x="600" y="752" text-anchor="middle">guardrail against silent dropped work — fires less than once a week on a healthy system</text>
 </svg>

@@ -25,6 +25,7 @@ import {
   handleGetAccounts,
   handleGetAgentAccounts,
   handleGetAgentConfig,
+  handlePromoteAccount,
 } from "./api.js";
 import { handleWebhookIngest } from "./webhook-handler.js";
 
@@ -335,6 +336,18 @@ function parseRoute(
     return { handler: "getAccounts", params: {} };
   }
 
+  // POST /api/accounts/:label/promote
+  // NOTE: account labels accept `[A-Za-z0-9._@+-]+` (validated server-side),
+  // so the regex deliberately mirrors that character class. The web layer
+  // re-runs `validateAccountLabel` so the inert characters can't sneak past.
+  const promoteMatch = pathname.match(/^\/api\/accounts\/([A-Za-z0-9._@+-]+)\/promote$/);
+  if (method === "POST" && promoteMatch) {
+    return {
+      handler: "promoteAccount",
+      params: { label: decodeURIComponent(promoteMatch[1]) },
+    };
+  }
+
   // GET /api/agents/:name/accounts
   const agentAccountsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/accounts$/);
   if (method === "GET" && agentAccountsMatch) {
@@ -354,6 +367,7 @@ export function startWebServer(
   config: SwitchroomConfig,
   port: number,
   hostname = "127.0.0.1",
+  configPath?: string,
 ): { token: string } {
   const uiDirRaw = resolve(import.meta.dirname, "ui");
   // Resolve symlinks once at startup so the traversal check compares real paths.
@@ -498,7 +512,60 @@ export function startWebServer(
           }
 
           case "getAccounts":
-            return jsonResponse(handleGetAccounts());
+            return jsonResponse(handleGetAccounts(config));
+
+          case "promoteAccount": {
+            if (!configPath) {
+              return jsonResponse(
+                { ok: false, error: "Server started without a config path; promote is unavailable." },
+                500,
+              );
+            }
+            const label = route.params.label;
+            // Body shape: { agent: string } | { agent: "all" } | { agents: string[] }
+            return (async () => {
+              let body: { agent?: string; agents?: string[] };
+              try {
+                body = (await req.json()) as { agent?: string; agents?: string[] };
+              } catch {
+                return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400);
+              }
+              let agents: string[];
+              if (Array.isArray(body.agents) && body.agents.length > 0) {
+                agents = body.agents.map(String);
+              } else if (typeof body.agent === "string" && body.agent.length > 0) {
+                if (body.agent === "all") {
+                  agents = Object.entries(config.agents)
+                    .filter(([, a]) => (a as { claude?: boolean }).claude !== false)
+                    .map(([n]) => n)
+                    .sort();
+                } else {
+                  agents = [body.agent];
+                }
+              } else {
+                return jsonResponse(
+                  { ok: false, error: "Body must include `agent` (string or 'all') or `agents` (string[])." },
+                  400,
+                );
+              }
+              for (const name of agents) {
+                if (!config.agents[name]) {
+                  return jsonResponse(
+                    { ok: false, error: `Unknown agent: ${name}` },
+                    404,
+                  );
+                }
+              }
+              const result = handlePromoteAccount(config, configPath, label, agents);
+              if (!result.ok) {
+                // Validation failures (label format, account missing,
+                // not-enabled-on-agent) surface as 400 — they're caller
+                // mistakes, not server errors.
+                return jsonResponse(result, 400);
+              }
+              return jsonResponse(result);
+            })();
+          }
 
           case "getAgentAccounts": {
             const agentName = route.params.name;

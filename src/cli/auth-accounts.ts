@@ -37,6 +37,7 @@ import {
   fanoutAccountToAgents,
   refreshAllAccounts,
 } from "../auth/account-refresh.js";
+import { promoteAccountToPrimary } from "../auth/account-promote.js";
 import {
   appendAccountToAgent,
   getAccountsForAgent,
@@ -745,67 +746,16 @@ function registerPromote(authParent: Command, program: Command): void {
     )
     .action(
       withConfigError(async (label: string, agents: string[]) => {
-        validateAccountLabel(label);
-        if (!accountExists(label)) {
-          throw new Error(
-            `Account "${label}" does not exist. Add it first with 'switchroom auth account add ${label}'.`,
-          );
-        }
         const config = getConfig(program);
         agents = expandAllAgents(agents, config);
-        const agentsDir = resolveAgentsDir(config);
-        for (const name of agents) {
-          if (!config.agents[name]) {
-            throw new Error(
-              `agent '${name}' is not declared in switchroom.yaml`,
-            );
-          }
-        }
-
         const yamlPath = getConfigPath(program);
-        const before = readFileSync(yamlPath, "utf-8");
-        // Pre-validate every agent has the label in its list. Fail
-        // before mutating so we don't half-promote across the fleet.
-        for (const name of agents) {
-          const current = getAccountsForAgent(before, name);
-          if (!current.includes(label)) {
-            throw new Error(
-              `account '${label}' is not enabled on agent '${name}' — enable it first with 'switchroom auth enable ${label} ${name}'.`,
-            );
-          }
-        }
-
-        let after = before;
-        const promoted: string[] = [];
-        const alreadyPrimary: string[] = [];
-        for (const name of agents) {
-          const current = getAccountsForAgent(after, name);
-          if (current[0] === label) {
-            alreadyPrimary.push(name);
-            continue;
-          }
-          after = promoteAccountForAgent(after, name, label);
-          promoted.push(name);
-        }
-        if (after !== before) {
-          writeFileSync(yamlPath, after);
-        }
-
-        // Fan the (now-primary) label only to the agents we moved. The
-        // already-primary set is a no-op — their on-disk credentials
-        // already match the YAML head.
-        const fanTargets = promoted.map((name) => ({
-          name,
-          agentDir: resolve(agentsDir, name),
-        }));
-        const outcomes =
-          fanTargets.length > 0
-            ? fanoutAccountToAgents(label, fanTargets)
-            : [];
-        const fanned = outcomes
-          .filter((o) => o.kind === "fanned-out")
-          .map((o) => o.agent);
-        const fanFails = outcomes.filter((o) => o.kind === "fanout-failed");
+        const { promoted, alreadyPrimary, fanned, fanFails } =
+          promoteAccountToPrimary({
+            label,
+            agents,
+            config,
+            configPath: yamlPath,
+          });
 
         console.log();
         if (promoted.length === 0) {
@@ -826,11 +776,9 @@ function registerPromote(authParent: Command, program: Command): void {
           console.log(`  Credentials fanned out to: ${fanned.join(", ")}`);
         }
         for (const f of fanFails) {
-          if (f.kind === "fanout-failed") {
-            console.log(
-              chalk.yellow(`  ⚠ Fanout failed for ${f.agent}: ${f.error}`),
-            );
-          }
+          console.log(
+            chalk.yellow(`  ⚠ Fanout failed for ${f.agent}: ${f.error}`),
+          );
         }
         console.log();
         if (promoted.length > 0) {

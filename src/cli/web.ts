@@ -1,7 +1,7 @@
 import type { Command } from "commander";
 import chalk from "chalk";
 import { startWebServer } from "../web/server.js";
-import { withConfigError, getConfig } from "./helpers.js";
+import { withConfigError, getConfig, getConfigPath } from "./helpers.js";
 import { captureEvent } from "../analytics/posthog.js";
 
 export function registerWebCommand(program: Command): void {
@@ -32,7 +32,7 @@ export function registerWebCommand(program: Command): void {
           console.log();
         }
 
-        const { token } = startWebServer(config, port, hostname);
+        const { token } = startWebServer(config, port, hostname, getConfigPath(program));
 
         void captureEvent("web_server_started", {
           port,

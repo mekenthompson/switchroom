@@ -21,14 +21,17 @@ import { copyFileSync, existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { isVaultReference } from "../vault/resolver.js";
+import { resolvePath } from "../config/loader.js";
 import {
   loadConfig,
   resolveAgentsDir,
   findConfigFile,
   ConfigError,
 } from "../config/loader.js";
-import { scaffoldAgent } from "../agents/scaffold.js";
-import { generateCompose } from "../agents/compose.js";
+import { scaffoldAgent, alignAgentUid } from "../agents/scaffold.js";
+import { generateCompose, allocateAgentUid } from "../agents/compose.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { captureEvent, captureException } from "../analytics/posthog.js";
 
@@ -51,6 +54,19 @@ export interface ApplyOptions {
   outPath?: string;
   /** Optional example name to copy before applying (e.g. "minimal"). */
   example?: string;
+  /**
+   * When true, skip any prompts (e.g. the sudo-chown explainer in
+   * alignAgentUid) and assume yes. Required for CI / `apply` invoked
+   * non-interactively. Default: prompts when stdin is a TTY.
+   */
+  nonInteractive?: boolean;
+  /**
+   * When true, treat a chown failure during UID alignment as a soft
+   * warning instead of a hard error. Default false: an unaligned state
+   * dir will silently break the agent on first boot, so we fail loudly
+   * unless the operator opts into the unsafe path.
+   */
+  allowUnaligned?: boolean;
 }
 
 export interface ApplyDeps {
@@ -68,6 +84,72 @@ export interface ApplyResult {
 }
 
 /**
+ * Walk a value recursively and return true if any string property is a
+ * `vault:<key>` reference. Used by the preflight check below so we can
+ * fail fast when the config wants vault-resolved secrets but the
+ * vault hasn't been initialised yet.
+ */
+function hasVaultRefs(value: unknown): boolean {
+  if (typeof value === "string") return isVaultReference(value);
+  if (Array.isArray(value)) return value.some(hasVaultRefs);
+  if (value && typeof value === "object") {
+    return Object.values(value).some(hasVaultRefs);
+  }
+  return false;
+}
+
+/**
+ * Detect whether `docker compose` (the v2 plugin, not the deprecated
+ * `docker-compose` v1 binary) is installed. Returns a friendly error
+ * string explaining how to upgrade if it isn't, otherwise null.
+ */
+function detectComposeV2(): string | null {
+  try {
+    const out = execFileSync("docker", ["compose", "version"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+    });
+    // v2 output looks like: "Docker Compose version v2.27.0".
+    // v1 (`docker-compose`) wouldn't be invoked via this subcommand —
+    // `docker compose` exits non-zero if only v1 is on PATH — so any
+    // successful return here implies v2.
+    if (!/Docker Compose version v?\d/.test(out)) {
+      return `\`docker compose version\` returned unexpected output:\n${out.trim()}`;
+    }
+    return null;
+  } catch {
+    return (
+      "`docker compose` (v2) not found. switchroom requires the Docker " +
+      "Compose v2 plugin (the `docker compose` subcommand), not the " +
+      "deprecated standalone `docker-compose` v1 binary.\n" +
+      "Upgrade: https://docs.docker.com/compose/install/linux/"
+    );
+  }
+}
+
+/**
+ * Run the preflight gate. Fail fast (throws) when the config requires
+ * vault-resolved secrets but ~/.switchroom/vault.enc is missing, or
+ * when `docker compose` v2 is unavailable. Both conditions would have
+ * surfaced as cryptic mid-apply / mid-up failures otherwise.
+ */
+export function runApplyPreflight(config: SwitchroomConfig): void {
+  const vaultPath = resolvePath(
+    config.vault?.path ?? "~/.switchroom/vault.enc",
+  );
+  if (hasVaultRefs(config) && !existsSync(vaultPath)) {
+    throw new Error(
+      `Config references vault keys (vault:<name>) but ${vaultPath} is missing. ` +
+      `Run \`switchroom setup\` first to initialise the vault.`,
+    );
+  }
+  const composeErr = detectComposeV2();
+  if (composeErr) {
+    throw new Error(composeErr);
+  }
+}
+
+/**
  * Pure orchestrator. Exported for unit tests and the deprecation aliases
  * (`switchroom up`, `switchroom init`) which forward straight to here.
  *
@@ -82,6 +164,11 @@ export async function runApply(
 ): Promise<ApplyResult> {
   const writeOut = deps.writeOut ?? ((s) => process.stdout.write(s));
 
+  // Fail-fast on missing prerequisites before we touch anything.
+  // Both checks throw with operator-actionable messages; the action
+  // wrapper catches and prints them red.
+  runApplyPreflight(config);
+
   const agentsDir = resolveAgentsDir(config);
   const agentNames = Object.keys(config.agents);
 
@@ -89,6 +176,10 @@ export async function runApply(
 
   // ── 1. Scaffold each agent ────────────────────────────────────────
   let scaffolded = 0;
+  // Sentinel-typed error class so the outer per-agent try/catch can
+  // re-raise UID alignment failures without swallowing them as a soft
+  // `x ${name}` log line.
+  class UidAlignmentAbort extends Error {}
   for (const name of agentNames) {
     const agentConfig = config.agents[name];
     try {
@@ -109,8 +200,40 @@ export async function runApply(
         chalk.green(`  + ${name}`) +
           chalk.gray(` (${agentConfig.extends ?? "default"}) — ${detail}\n`),
       );
+      // Align per-agent dir ownership with the container UID assigned
+      // by compose.ts. Without this the bind-mount lands read-only
+      // for the in-container UID and the agent fails on first write.
+      try {
+        const uid = allocateAgentUid(name);
+        alignAgentUid(name, join(agentsDir, name), uid, {
+          confirm: !options.nonInteractive,
+          writeOut,
+        });
+      } catch (alignErr) {
+        const msg = (alignErr as Error).message;
+        if (options.allowUnaligned) {
+          writeOut(
+            chalk.yellow(
+              `    ! could not chown ${name} state dir: ${msg}\n` +
+              `      continuing because --allow-unaligned was passed; agent may fail on first write.\n`,
+            ),
+          );
+        } else {
+          writeOut(
+            chalk.red(
+              `    x could not chown ${name} state dir: ${msg}\n` +
+              `      The bind-mounted state dir must be owned by the container's UID or the agent will fail on first write.\n` +
+              `      Fix: run \`switchroom apply\` from a TTY so it can prompt for sudo, OR run the suggested chown manually, OR re-run with --allow-unaligned to skip this check.\n`,
+            ),
+          );
+          throw new UidAlignmentAbort(
+            `UID alignment failed for agent ${name}; aborting apply (pass --allow-unaligned to override).`,
+          );
+        }
+      }
       scaffolded++;
     } catch (err) {
+      if (err instanceof UidAlignmentAbort) throw err;
       writeOut(chalk.red(`  x ${name}: ${(err as Error).message}\n`));
     }
   }
@@ -121,6 +244,9 @@ export async function runApply(
     config,
     buildMode: options.buildLocal ? "local" : "pull",
     buildContext: options.buildContext,
+    // Bake the operator's HOME absolute path into volume sources at
+    // apply time. Avoids `${HOME}` resolving to /root under sudo.
+    homeDir: homedir(),
   });
   await mkdir(dirname(composePath), { recursive: true });
   await writeFile(composePath, composeContent, {
@@ -208,11 +334,21 @@ export function registerApplyCommand(program: Command): void {
       "--example <name>",
       "Copy an example config into cwd before applying (e.g., 'switchroom' or 'minimal').",
     )
+    .option(
+      "--non-interactive",
+      "Skip prompts (e.g. sudo-chown explainer for UID alignment). Use in CI / scripts.",
+    )
+    .option(
+      "--allow-unaligned",
+      "Treat UID-alignment chown failures as warnings instead of hard errors. Unsafe: an unaligned state dir will break the agent on first write. Use only if you know you'll fix ownership out-of-band.",
+    )
     .action(
       async (opts: {
         buildLocal?: boolean | string;
         out?: string;
         example?: string;
+        nonInteractive?: boolean;
+        allowUnaligned?: boolean;
       }) => {
         try {
           if (opts.example) {
@@ -237,6 +373,8 @@ export function registerApplyCommand(program: Command): void {
               buildContext: buildLocal ? buildContext : undefined,
               outPath: opts.out,
               example: opts.example,
+              nonInteractive: opts.nonInteractive ?? false,
+              allowUnaligned: opts.allowUnaligned ?? false,
             },
             {},
             switchroomConfigPath,

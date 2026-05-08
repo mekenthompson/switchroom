@@ -170,10 +170,13 @@ describe("generateCompose", () => {
     expect(matches.length).toBe(2);
   });
 
-  it("emits scheduler service with docker.sock mount", () => {
+  it("emits scheduler service with docker.sock mount (read-write)", () => {
     const out = generateCompose({ config: makeConfig({}) });
     expect(out).toContain("switchroom-cron:");
-    expect(out).toContain("/var/run/docker.sock:/var/run/docker.sock:ro");
+    // RW, NOT :ro — `docker exec` is a write op against the daemon
+    // API. A :ro bind silently breaks dispatch.
+    expect(out).toContain("/var/run/docker.sock:/var/run/docker.sock\n");
+    expect(out).not.toContain("/var/run/docker.sock:/var/run/docker.sock:ro");
   });
 
   it("emits per-agent named volumes for broker AND kernel", () => {
@@ -204,12 +207,37 @@ describe("generateCompose", () => {
     expect(tildeLines).toEqual([]);
   });
 
-  it("uses ${HOME} for host-path bind mounts", () => {
+  it("uses ${HOME} for host-path bind mounts when no homeDir is given", () => {
     const out = generateCompose({ config: makeConfig({ a: {} }) });
     expect(out).toContain("${HOME}/.switchroom/vault:/state/vault");
     expect(out).toContain("${HOME}/.switchroom/approvals:/state/approvals");
     expect(out).toContain("${HOME}/.switchroom:/state/config:ro");
     expect(out).toContain("${HOME}/.switchroom/agents/a:/state/agent");
+  });
+
+  it("bakes the absolute homeDir into bind sources when given (sudo-safe)", () => {
+    // Why: under `sudo docker compose`, ${HOME} resolves to /root, not
+    // the operator's home. apply.ts passes os.homedir() so the YAML
+    // captures the right path independent of who runs compose.
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+      homeDir: "/home/op",
+    });
+    expect(out).toContain("/home/op/.switchroom/vault:/state/vault");
+    expect(out).toContain("/home/op/.switchroom/approvals:/state/approvals");
+    expect(out).toContain("/home/op/.switchroom:/state/config:ro");
+    expect(out).toContain("/home/op/.switchroom/agents/a:/state/agent");
+    expect(out).toContain("/home/op/.switchroom/logs/a:/var/log/switchroom");
+    expect(out).toContain("/home/op/.claude/projects/a:/state/.claude");
+    expect(out).not.toContain("${HOME}");
+  });
+
+  it("emits top-level project name 'switchroom' for collision protection", () => {
+    // Belt-and-braces vs Coolify-managed (or other) compose stacks on
+    // the same host. Pinning name: at file scope means
+    // `docker compose -f <path>` always targets the same project.
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    expect(out).toMatch(/^name: switchroom$/m);
   });
 
   // ── security hardening defaults ────────────────────────────────────

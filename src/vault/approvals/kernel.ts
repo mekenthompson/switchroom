@@ -30,6 +30,21 @@ export interface ApprovalRequestInput {
   approver_set: string[];   // current allowFrom; canonicalized + stored on grant
   why?: string;
   ttl_ms?: number;          // nonce expiry; defaults to 5 minutes per §8.1
+  /**
+   * Phase 2b — optional informational fields populated by the kernel-server
+   * IPC entrypoint (kernel-server.ts). Both flow into the `approval_audit`
+   * row's `context` JSON blob — additive, NO schema migration.
+   *
+   * `peer_uid` — SO_PEERCRED UID captured at accept(2). Forensic only;
+   * never used to gate ACL (agent identity is the listener's socket path).
+   *
+   * `agent_name` — agent slug derived from the listener's socket-dir,
+   * matching what the kernel-server bound at startup. When present, this
+   * is the trusted identity used for the ACL decision; any mismatch with
+   * agent_unit is rejected upstream by checkApprovalAclByAgent.
+   */
+  peer_uid?: number;
+  agent_name?: string;
 }
 
 export interface RequestApprovalResult {
@@ -217,7 +232,13 @@ export function requestApproval(
     agent_unit: input.agent_unit,
     scope: input.scope,
     action: input.action,
-    context: { request_id, why: input.why },
+    context: {
+      request_id,
+      why: input.why,
+      // Phase 2b additive fields — only present on the docker IPC path.
+      ...(input.peer_uid !== undefined ? { peer_uid: input.peer_uid } : {}),
+      ...(input.agent_name !== undefined ? { agent_name: input.agent_name } : {}),
+    },
   });
 
   return { request_id, expires_at };

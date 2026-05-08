@@ -15,6 +15,22 @@ each Telegram topic while an agent works.
 
 See `README.md` for the user-facing description.
 
+## Docker test discipline (HARD RULES)
+
+This branch's tests run on a host that ALSO runs Coolify, hindsight, nginx-tunnel-gateway, and every Coolify-managed app. Treat the host as production.
+
+- Every test container MUST be created with the label `switchroom.test=phase1c`. Add a per-run UUID label too (e.g. `switchroom.test.run=<uuid>`).
+- Every `docker run` MUST use `--rm` so containers self-clean on exit.
+- The ONLY sanctioned bulk-teardown command is filtered by label:
+
+  ```
+  docker rm -f $(docker ps -aq --filter label=switchroom.test=phase1c) 2>/dev/null || true
+  ```
+
+- ABSOLUTE BAN: `docker ps -a | xargs docker rm`. Bare `docker rm $(docker ps -aq)`. `docker system prune`. `docker container prune`. `docker volume prune`. None of these. Ever. On any host.
+- Per-container removal by explicit name is fine and is the pattern the existing tests use (see `tests/docker/per-agent-isolation.test.ts:248`, `tests/docker/e2e.test.ts:172`).
+- If you find yourself wanting to "just clean everything up", STOP and ask.
+
 ## Design contract
 
 `reference/` is the design contract for any non-trivial change. Three

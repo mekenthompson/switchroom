@@ -18,7 +18,7 @@
  *
  * Phase 1.2 (handoff token injection) and Phase 1.3 (heal CLI) ship
  * resilience at READ-time. This module ships resilience at WRITE-time:
- * a tick the operator runs from cron / a systemd timer that proactively
+ * a tick the operator runs from cron / the docker scheduler that proactively
  * rotates `.credentials.json` BEFORE expiry.
  *
  * Design contract

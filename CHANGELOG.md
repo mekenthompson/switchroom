@@ -1,5 +1,44 @@
 # Changelog
 
+## v0.7.0 — BREAKING: lifecycle CLI consolidated to setup/apply
+
+The lifecycle surface now collapses to two verbs: `switchroom setup`
+(interactive wizard, run once) and `switchroom apply` (idempotent
+scaffold + compose-file generate, run any time switchroom.yaml changes).
+
+**Breaking changes:**
+
+- `switchroom up` is removed. The thin shim that remains warns and
+  forwards to `switchroom apply`; slated for full removal in v0.8.
+- `switchroom init` is removed. Same shim treatment as `up`.
+- `switchroom update` is removed. The shim accepts and silently swallows
+  the legacy flags (`--force`, `--check`, `--no-restart`, `--resume`,
+  `--phase`) so a v0.6 → v0.7 in-flight self-reexec parses; every other
+  invocation prints the upgrade hint and exits 1.
+- `switchroom apply` does NOT shell out to `docker`. Operators run the
+  bring-up themselves so the CLI never has to second-guess docker
+  daemon, rootless mode, or sudo policy.
+- The interactive wizard no longer prompts for a Telegram forum group.
+  Per-agent bot DM-only is the default; the still-required
+  `telegram.forum_chat_id` schema field gets a sentinel "0" matching
+  the existing user-id sentinel pattern. Existing configs with a real
+  `forum_chat_id` keep working.
+
+**Migration (v0.6 → v0.7):**
+
+```sh
+cd ~/code/switchroom
+git pull
+bun install
+bun run build
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml pull
+switchroom apply
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
+```
+
+`switchroom update` keeps working through v0.7 as a deprecation shim
+that prints the same hint.
+
 ## v0.6.0 — Docker substrate (Linux), single-host
 
 **Adds:**

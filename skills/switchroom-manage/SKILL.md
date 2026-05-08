@@ -19,7 +19,7 @@ When the user invokes `/switchroom` or asks to add, create, remove, reinstall, r
 | `/switchroom start <name>` | `switchroom agent start <name>` |
 | `/switchroom stop <name>` | `switchroom agent stop <name>` |
 | `/switchroom restart <name>` | `switchroom restart <name>` |
-| `/switchroom reinstall <name>` or "reinstall my agents" | `switchroom update` |
+| `/switchroom reinstall <name>` or "reinstall my agents" | `switchroom apply && docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d` |
 | `/switchroom status` | `switchroom auth status` |
 | `/switchroom memory <query>` | `switchroom memory search "<query>"` |
 | `/switchroom memory <query> --agent <name>` | `switchroom memory search "<query>" --agent <name>` |
@@ -34,7 +34,7 @@ When the user says "add a new agent", "add an agent to my switchroom setup", or 
 
 ### Reinstall / reprovision agents
 
-"Reinstall my agents" is a fleet-level reprovisioning operation, **not** a fresh switchroom install. It means: pull the latest code, re-apply `switchroom.yaml`, and restart the agents. Run `switchroom update` for the full fleet. Ask the user to confirm before running if the scope is ambiguous.
+"Reinstall my agents" is a fleet-level reprovisioning operation, **not** a fresh switchroom install. It means: pull the latest code, re-apply `switchroom.yaml`, and restart the agents. Run `switchroom apply` (scaffold + write compose), then `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d` to bring the fleet back up. Ask the user to confirm before running if the scope is ambiguous.
 
 ### Anthropic accounts (one OAuth, many agents)
 
@@ -84,7 +84,7 @@ Switchroom commands:
   /switchroom topics         List Telegram topics
 
 Fleet operations (run directly, not via /switchroom <sub>):
-  switchroom update          Pull latest + reconcile + restart everything
+  switchroom apply           Reconcile + (re)write compose; bring up via `docker compose ... up -d`
   switchroom version         Show versions + running agent health summary
   switchroom auth refresh-accounts  Refresh OAuth tokens + fan out (cron entrypoint)
 ```

@@ -339,10 +339,61 @@
     .toast.ok { border-color: var(--green); }
     .toast.err { border-color: var(--red); }
 
+    .accounts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 1rem;
+    }
+
+    .account-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem 1.25rem;
+      transition: border-color 0.15s;
+    }
+
+    .account-card:hover { border-color: #3a3e4e; }
+
+    .account-card-header {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .account-label {
+      font-weight: 600;
+      font-size: 1rem;
+      color: var(--text);
+    }
+
+    .account-usage {
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      margin-bottom: 0.75rem;
+    }
+
+    .accounts-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    @media (max-width: 700px) {
+      .accounts-table-wrap { display: none; }
+    }
+
+    @media (min-width: 701px) {
+      .accounts-grid { display: none; }
+    }
+
     @media (max-width: 600px) {
       header { padding: 1rem; }
       main { padding: 1rem; }
       .agents-grid { grid-template-columns: 1fr; }
+      .accounts-grid { grid-template-columns: 1fr; }
       .card-meta { gap: 0.3rem 1rem; }
       nav.tabs { padding: 0 1rem; overflow-x: auto; }
     }
@@ -555,18 +606,26 @@
         container.innerHTML = '<div class="loading">No accounts. Run <code>switchroom auth account add &lt;label&gt;</code>.</div>';
         return;
       }
-      const rows = accounts.map(a => {
+      const enriched = accounts.map(a => {
         const capturedMs = a.quota && a.quota.capturedAt ? new Date(a.quota.capturedAt).getTime() : null;
-        const fiveH = renderQuotaPct(a.quota && a.quota.fiveHourPct, capturedMs);
-        const sevenD = renderQuotaPct(a.quota && a.quota.sevenDayPct, capturedMs);
         const captured = a.quota && a.quota.capturedAt ? new Date(a.quota.capturedAt).toLocaleString() : 'never';
-        const usageTitle = `Quota captured: ${captured}`;
-        const primaryFor = a.primaryFor || [];
-        const fallbackFor = a.fallbackFor || [];
+        return {
+          a,
+          capturedMs,
+          fiveH: renderQuotaPct(a.quota && a.quota.fiveHourPct, capturedMs),
+          sevenD: renderQuotaPct(a.quota && a.quota.sevenDayPct, capturedMs),
+          usageTitle: `Quota captured: ${captured}`,
+          primaryFor: a.primaryFor || [],
+          fallbackFor: a.fallbackFor || [],
+          refreshed: capturedMs ? formatTimestamp(capturedMs) : '<span style="color:var(--text-dim)">—</span>',
+          fiveReset: a.quota && a.quota.fiveHourResetAt ? formatTimestamp(a.quota.fiveHourResetAt) : '<span style="color:var(--text-dim)">—</span>',
+          sevenReset: a.quota && a.quota.sevenDayResetAt ? formatTimestamp(a.quota.sevenDayResetAt) : '<span style="color:var(--text-dim)">—</span>',
+          expires: formatTimestamp(a.expiresAt),
+        };
+      });
+      const rows = enriched.map(e => {
+        const { a, fiveH, sevenD, usageTitle, primaryFor, fallbackFor, refreshed, fiveReset, sevenReset, expires } = e;
         const usageCell = renderUsageCell(primaryFor, fallbackFor);
-        const refreshed = capturedMs ? formatTimestamp(capturedMs) : '<span style="color:var(--text-dim)">—</span>';
-        const fiveReset = a.quota && a.quota.fiveHourResetAt ? formatTimestamp(a.quota.fiveHourResetAt) : '<span style="color:var(--text-dim)">—</span>';
-        const sevenReset = a.quota && a.quota.sevenDayResetAt ? formatTimestamp(a.quota.sevenDayResetAt) : '<span style="color:var(--text-dim)">—</span>';
         return `
         <tr>
           <td>${escapeHtml(a.label)}</td>
@@ -577,21 +636,48 @@
           <td title="${escapeHtml(usageTitle)}">${refreshed}</td>
           <td>${fiveReset}</td>
           <td>${sevenReset}</td>
-          <td>${formatTimestamp(a.expiresAt)}</td>
+          <td>${expires}</td>
           <td><button class="btn" onclick="openPromoteModal('${escapeHtml(a.label)}')">Make primary…</button></td>
         </tr>
       `;
       }).join('');
+      const cards = enriched.map(e => {
+        const { a, fiveH, sevenD, usageTitle, primaryFor, fallbackFor, refreshed, fiveReset, sevenReset, expires } = e;
+        const usageCell = renderUsageCell(primaryFor, fallbackFor);
+        return `
+        <div class="account-card">
+          <div class="account-card-header">
+            <div class="account-label">${escapeHtml(a.label)}</div>
+            <span class="health-badge ${escapeHtml(a.health)}" style="margin-left:auto">${escapeHtml(a.health)}</span>
+          </div>
+          <div class="account-usage">${usageCell}</div>
+          <div class="card-meta" style="padding:0">
+            <div class="meta-item" title="${escapeHtml(usageTitle)}"><label>5h% </label><span>${fiveH}</span></div>
+            <div class="meta-item" title="${escapeHtml(usageTitle)}"><label>7d% </label><span>${sevenD}</span></div>
+            <div class="meta-item" title="${escapeHtml(usageTitle)}"><label>Refreshed </label><span>${refreshed}</span></div>
+            <div class="meta-item"><label>5h reset </label><span>${fiveReset}</span></div>
+            <div class="meta-item"><label>7d reset </label><span>${sevenReset}</span></div>
+            <div class="meta-item"><label>Expires </label><span>${expires}</span></div>
+          </div>
+          <div style="margin-top:0.75rem">
+            <button class="btn" onclick="openPromoteModal('${escapeHtml(a.label)}')">Make primary…</button>
+          </div>
+        </div>
+      `;
+      }).join('');
       container.innerHTML = `
-        <table class="accounts-table">
-          <thead><tr>
-            <th>Label</th><th>Health</th><th>Used by</th>
-            <th>5h%</th><th>7d%</th>
-            <th>Refreshed</th><th>5h reset</th><th>7d reset</th>
-            <th>Expires</th><th></th>
-          </tr></thead>
-          <tbody>${rows}</tbody>
-        </table>
+        <div class="accounts-table-wrap">
+          <table class="accounts-table">
+            <thead><tr>
+              <th>Label</th><th>Health</th><th>Used by</th>
+              <th>5h%</th><th>7d%</th>
+              <th>Refreshed</th><th>5h reset</th><th>7d reset</th>
+              <th>Expires</th><th></th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>
+        <div class="accounts-grid">${cards}</div>
       `;
     }
 

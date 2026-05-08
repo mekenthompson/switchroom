@@ -52,6 +52,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateCompose } from "../../src/agents/compose.js";
 import type { SwitchroomConfig } from "../../src/config/schema.js";
+import {
+  newRunId,
+  injectLabelsIntoCompose,
+  safeLabelTeardown,
+} from "./_label-helpers.js";
+
+const RUN_ID = newRunId();
 
 const TAG = "phase1b-test";
 const IMAGES = ["base", "agent", "broker", "kernel", "scheduler"].map(
@@ -190,7 +197,10 @@ function buildTestCompose(agents: string[], cfgPath: string): string {
   yml += "  agent-state:\n";
   yml += "  claude-state:\n";
 
-  return yml;
+  // Inject `switchroom.test=phase1c` + per-run UUID labels onto every
+  // service so a label-filtered teardown cannot miss anything this
+  // file spawned (see CLAUDE.md "Docker test discipline" HARD RULES).
+  return injectLabelsIntoCompose(yml, RUN_ID);
 }
 
 interface FleetCtx {
@@ -363,6 +373,10 @@ beforeAll(() => {
 
 afterAll(() => {
   composeDown();
+  // Belt-and-braces: label-filtered safety net catches any stragglers
+  // that escaped the compose-down (mid-test crash, orphaned exec, ...).
+  // Strictly scoped to this test run via the per-run UUID label.
+  safeLabelTeardown(RUN_ID);
   if (ctx) {
     try { rmSync(ctx.workdir, { recursive: true, force: true }); } catch { /* */ }
   }

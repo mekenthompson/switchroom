@@ -45,6 +45,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateCompose, allocateAgentUid } from "../../src/agents/compose.js";
 import type { SwitchroomConfig } from "../../src/config/schema.js";
+import {
+  newRunId,
+  injectLabelsIntoCompose,
+  safeLabelTeardown,
+} from "./_label-helpers.js";
+
+const RUN_ID = newRunId();
 
 const TAG = "phase1b-test";
 const IMAGES = ["base", "agent", "broker", "kernel", "scheduler"].map(
@@ -159,7 +166,11 @@ function buildTestCompose(agents: string[], cfgPath: string): string {
   yml = yml.replace(/(  vault-broker:[\s\S]*?volumes:\n)/, `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`);
   yml = yml.replace(/(  approval-kernel:[\s\S]*?volumes:\n)/, `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`);
   yml += "  vault-state:\n  approvals-state:\n  scheduler-state:\n  agent-state:\n  claude-state:\n";
-  return yml;
+  // CLAUDE.md HARD RULES: every test container carries the
+  // `switchroom.test=phase1c` label + per-run UUID. Note this fires
+  // before appendAdversarialServices() so we re-inject after that
+  // step too (see beforeAll).
+  return injectLabelsIntoCompose(yml, RUN_ID);
 }
 
 /** Append two extra agent services to the generated compose:
@@ -270,6 +281,9 @@ beforeAll(() => {
   );
   let yml = buildTestCompose(["alice", "bob", "carol"], cfgPath);
   yml = appendAdversarialServices(yml);
+  // Re-run label injection so evil-twin / evil-cross also carry the
+  // phase1c labels (idempotent on the already-labeled services).
+  yml = injectLabelsIntoCompose(yml, RUN_ID);
   const composePath = join(workdir, "compose.yml");
   writeFileSync(composePath, yml);
   ctx = { workdir, composePath, cfgPath };
@@ -280,6 +294,9 @@ beforeAll(() => {
 afterAll(() => {
   if (!imagesOk) return;
   try { execSync(`docker compose -p ${PROJECT} down -v --remove-orphans`, { stdio: "pipe" }); } catch { /* */ }
+  // Belt-and-braces label-filtered safety net (CLAUDE.md HARD RULE).
+  // Cannot touch unrelated containers — strictly per-run-id scoped.
+  safeLabelTeardown(RUN_ID);
   if (ctx) { try { rmSync(ctx.workdir, { recursive: true, force: true }); } catch { /* */ } }
   releaseFleetLock();
 }, 60_000);

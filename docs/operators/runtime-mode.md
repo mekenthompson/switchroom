@@ -17,6 +17,14 @@ switchroom up --legacy  # always systemd
 That's it. There is no marker file, no advisory, no `switchroom migrate`
 command. The flag is read fresh on every invocation.
 
+## Installing from GHCR
+
+The Docker runtime pulls its 5 fleet images from
+`ghcr.io/switchroom/switchroom-{base,agent,broker,kernel,scheduler}`.
+See [`install.md`](./install.md) for the operator install flow
+(`git clone` + `bun install` + `switchroom setup` + `switchroom up`),
+upgrade procedure, and the dev-time `--build-local` mode.
+
 ## Production runtime declaration (v0.6)
 
 Linux is the only supported production runtime. macOS and Windows can

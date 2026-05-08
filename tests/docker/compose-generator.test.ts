@@ -333,6 +333,74 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
   });
 });
 
+describe("generateCompose — GHCR digest-pin mode", () => {
+  const goodDigest = "sha256:" + "a".repeat(64);
+  const otherDigest = "sha256:" + "b".repeat(64);
+
+  it("default (no digest map) preserves tag-based image refs", () => {
+    const out = generateCompose({ config: makeConfig({ alice: {} }) });
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-broker:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-kernel:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-scheduler:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-agent:latest");
+    // The "@" digest separator must NOT appear when unpinned.
+    expect(out).not.toMatch(/image: ghcr\.io\/switchroom\/[^:]+@sha256:/);
+  });
+
+  it("with full digest map, every image ref pins to a digest", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+      ghcrDigests: {
+        agent: goodDigest,
+        broker: goodDigest,
+        kernel: goodDigest,
+        scheduler: goodDigest,
+      },
+    });
+    expect(out).toContain(`image: ghcr.io/switchroom/switchroom-broker@${goodDigest}`);
+    expect(out).toContain(`image: ghcr.io/switchroom/switchroom-kernel@${goodDigest}`);
+    expect(out).toContain(`image: ghcr.io/switchroom/switchroom-scheduler@${goodDigest}`);
+    expect(out).toContain(`image: ghcr.io/switchroom/switchroom-agent@${goodDigest}`);
+    // No tag-style refs remain for the four pinned images.
+    expect(out).not.toMatch(/image: ghcr\.io\/switchroom\/switchroom-(broker|kernel|scheduler|agent):/);
+  });
+
+  it("partial digest map — pinned services use digest, others fall back to tag", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {} }),
+      ghcrDigests: { agent: goodDigest },
+    });
+    expect(out).toContain(`image: ghcr.io/switchroom/switchroom-agent@${goodDigest}`);
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-broker:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-kernel:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-scheduler:latest");
+  });
+
+  it("each image gets its own digest when distinct values supplied", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {} }),
+      ghcrDigests: { broker: goodDigest, kernel: otherDigest },
+    });
+    expect(out).toContain(`image: ghcr.io/switchroom/switchroom-broker@${goodDigest}`);
+    expect(out).toContain(`image: ghcr.io/switchroom/switchroom-kernel@${otherDigest}`);
+  });
+
+  it("rejects malformed digests", () => {
+    expect(() =>
+      generateCompose({
+        config: makeConfig({ alice: {} }),
+        ghcrDigests: { agent: "not-a-digest" },
+      }),
+    ).toThrow(/sha256:/);
+    expect(() =>
+      generateCompose({
+        config: makeConfig({ alice: {} }),
+        ghcrDigests: { agent: "sha256:tooshort" },
+      }),
+    ).toThrow(/sha256:/);
+  });
+});
+
 describe("describeAgents", () => {
   it("returns sorted agents with allocated UIDs", () => {
     const agents = describeAgents(makeConfig({ zebra: {}, alpha: {} }));

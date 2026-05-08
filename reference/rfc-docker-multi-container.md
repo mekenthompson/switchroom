@@ -10,7 +10,7 @@ source: research output for issue #793, "Option 3" of the comparison
 
 ## Summary
 
-Switchroom today is a Linux-only host install. Multi-OS reach is the point of #793 and Docker is the obvious substrate. This RFC picks Option 3 from the comparison: **one container per agent, plus a small set of shared-service containers (vault broker, approval kernel, telegram bridge), all wired together by a generated `docker-compose.yml`**. The user-visible end state is `switchroom setup` produces a compose file, `docker compose up -d` brings the fleet alive, and the README install path is one block of shell on Mac, Windows-WSL2, Synology, Unraid, RasPi, and Linux. The host-native install stays supported alongside it. Both deliver the same product promise.
+Switchroom today is a Linux-only host install. Multi-OS reach is the point of #793 and Docker is the obvious substrate. This RFC picks Option 3 from the comparison: **one container per agent, plus a small set of shared-service containers (vault broker, approval kernel, telegram bridge), all wired together by a generated `docker-compose.yml`**. The user-visible end state is `switchroom setup` produces a compose file, `docker compose up -d` brings the fleet alive, and the README install path is one block of shell on Linux and Mac. Windows-WSL2, Synology, Unraid, and RasPi work in principle on the same compose file, but they aren't formally validated for v1.0 — best-effort, community-tested, no support promise. The host-native install stays supported on Linux alongside Docker. Both deliver the same product promise.
 
 ## Motivation
 
@@ -36,13 +36,13 @@ The watchdog's job is to detect a wedged agent and bounce it. The current implem
 
 PR #796 already landed the positioning shift this RFC implements: switchroom's product promise is the JTBD outcomes, not the substrate. Long-running service per agent, survives reboots, auto-recovery with audit trail, per-agent isolated logs, OAuth under your existing subscription, stock `claude` CLI. None of those say "systemd" and none of them say "Docker." The substrate is an internal engineering detail.
 
-The user-visible change is reach. Today switchroom installs cleanly on Linux. After this RFC it installs cleanly on Mac, Windows-WSL2, Synology, Unraid, RasPi, and Linux — same product promise on every box. That's the JTBD win. Whether the agent runs under a systemd unit or a Docker container is the CLI's problem, not the user's.
+The user-visible change is reach, tiered. Today switchroom installs cleanly on Linux only. After this RFC, the supported install targets for v1.0 are **Linux and Mac** — same product promise on both. Windows-WSL2, Synology, Unraid, and RasPi run on the same architecture and compose file and are expected to work; they just aren't formally validated or release-gated. Operators on those platforms can install and most things will work; what they don't get is a "we tested this and signed it off" stamp. The architecture supports them; the test/release matrix is the thing that's tiered. Whether the agent runs under a systemd unit or a Docker container is the CLI's problem, not the user's.
 
 The OpenClaw wedge — stock `claude` CLI under your Pro/Max subscription, not a custom runtime against your API key — is unchanged. The container runs the unmodified `claude` CLI against the user's OAuth, exactly as the systemd unit does today. The substrate swap is invisible to that wedge.
 
 ## Goals
 
-- One install command on Mac, Windows-WSL2, Linux, and ARM homelab boxes (Synology, RasPi 4/5, Apple Silicon).
+- One install command on Linux and Mac as the supported v1.0 targets. Same command works on Windows-WSL2 and ARM homelab boxes (Synology, Unraid, RasPi 4/5) on a best-effort basis — expected to work, not formally validated.
 - Per-agent resource isolation — memory and CPU caps as first-class config, enforced by the kernel, not advisory.
 - Watchdog rewritten in TypeScript against Docker's event stream. Smaller, testable, restorable to "actually catches wedges" thresholds.
 - Product-promise-preserving: stock `claude` CLI inside the container, official OAuth, no API-key interception, vault and approval kernel work identically inside and out. Same JTBD outcomes as host-native, same wedge against OpenClaw.
@@ -371,7 +371,7 @@ Total touched: maybe 6000 lines of new/changed TS, 2000 lines deleted bash, 4 Do
 
 ## Phased plan
 
-Estimates assume Opus 4.7, supervised by a separate-process reviewer. Total budget across phases ≈ **2770 agent-minutes** (P0 180, P1 600, P2 280, P3 750, P4 360, P5 600). Rebaselined upward from the prior draft's ~2000 to reflect: container identity model design + spike (P0), scheduler design + implementation (P1), 30+ watchdog fixtures + log hygiene audit (P3), update rolling-restart spec + cross-platform log shim + doctor checks (P4), migration tool + chown handling + round-trip e2e (P5).
+Estimates assume Opus 4.7, supervised by a separate-process reviewer. Total budget across phases ≈ **2570 agent-minutes** (P0 180, P1 600, P2 280, P3 750, P4 360, P5 400). P5 dropped ~200 minutes after re-scoping cross-platform e2e to Linux + Mac mandatory and treating Windows/Synology/Unraid/RasPi as best-effort, not release-gating. Earlier rebaseline from ~2000 covered: container identity model design + spike (P0), scheduler design + implementation (P1), 30+ watchdog fixtures + log hygiene audit (P3), update rolling-restart spec + cross-platform log shim + doctor checks (P4), migration tool + chown handling + round-trip e2e (P5).
 
 ### Phase 0 — spike, agent-minutes ≈ 180
 
@@ -382,23 +382,30 @@ Files: `Dockerfile.base`, throwaway compose, `docs/phase0-identity-matrix.md` (d
 3. **Container identity model end-to-end.** Per-agent socket directory layout works in practice: broker chowns `/run/switchroom/broker/<agent>/` to per-agent UIDs, agent container only mounts its own subdirectory, ACL resolves correctly via path-derived agent identity. Test matrix below.
 4. tmux send-keys C-c from the gateway (claude's MCP child) inside the container reaches claude in the same container's tmux pane. `!` interrupt loop end-to-end.
 
-**Identity-model test matrix (deliverable, not optional).** For each environment, run all three ACL paths through a prototype broker:
+**Identity-model test matrix (deliverable, not optional).** Tiered. The two Linux rows are mandatory PASS to unblock Phase 1. Mac is mandatory before v1.0 ships but runs as a parallel-track spike when hardware lands (next-week ETA), so it does not gate Phase 1 entry. Windows/WSL2 and the homelab platforms (Synology, Unraid, RasPi) are optional/best-effort — capture results if convenient, don't block on them.
 
-| Environment | Allow path resolves? | Deny path rejects? | Cross-mount detection? | SO_PEERCRED uid (forensics) |
-|---|---|---|---|---|
-| Docker Desktop Mac (latest, virtiofs) | | | | |
-| Docker Desktop Windows / WSL2 backend | | | | |
-| Linux rootless Docker, userns-remap ON | | | | |
-| Linux rootful Docker, default config | | | | |
+| Environment | Tier | Allow path resolves? | Deny path rejects? | Cross-mount detection? | SO_PEERCRED uid (forensics) |
+|---|---|---|---|---|---|
+| Linux rootful Docker, default config | **mandatory (Phase 1 gate)** | | | | |
+| Linux rootless Docker, userns-remap ON | **mandatory (Phase 1 gate)** | | | | |
+| Docker Desktop Mac (latest, virtiofs) | **mandatory before v1.0 ship** | | | | |
+| Docker Desktop Windows / WSL2 backend | optional / best-effort | | | | |
+| Synology DSM (Container Manager) | optional / best-effort | | | | |
+| Unraid (Docker tab) | optional / best-effort | | | | |
+| RasPi 4/5 (arm64, Linux rootful) | optional / best-effort | | | | |
 
 - **Allow path:** `agent-klanker` connects to `/run/switchroom/broker/sock` (mapped from `broker-klanker-sock` volume), requests a key in its `secrets` allow-list, broker resolves agent identity from `getsockname()`, ACL check passes, value returned.
 - **Deny path:** same agent, different key not in allow-list. Broker returns typed error with reason `"key '<k>' not in ACL for klanker"`.
 - **Cross-mount detection:** compose hand-edited to additionally mount `broker-coach-sock` into agent-klanker. `switchroom doctor --check cross-agent-mounts` flags the mount with a hard error pointing at the offending compose lines, before the fleet comes up.
 - **SO_PEERCRED forensics column** (informational only, not pass/fail): record the uid returned for sanity. Under the new model it's defence-in-depth, not authoritative.
 
-Acceptance criteria: every row passes all three pass/fail columns. SO_PEERCRED column captured for the trouble-shooting record but does not gate Phase 0.
+Acceptance criteria: **both Linux rows pass all three pass/fail columns** — that's the gate to start Phase 1. Mac runs as a parallel-track spike when hardware arrives (next-week ETA); it must pass all three columns before v1.0 ships, but does not gate Phase 1 entry. Optional rows are recorded if exercised, ignored if not. SO_PEERCRED column captured for the trouble-shooting record but does not gate anything.
 
-Abort criteria: (a) any of (1)–(4) fails and the workaround is `--privileged` or host-level UID remap — non-starters. (b) Per-agent socket directories cannot be made to work on one of the four target environments — pivot to HMAC tokens with a full lifecycle spec (issuance, storage at `/run/secrets/<agent>-broker-token`, revocation on broker restart, scoped ACL) and re-run Phase 0 against the token design. The HMAC fallback is documented in Risks but should not be needed; the per-agent socket design has no known blockers on any target environment.
+Abort criteria:
+- **Linux rootful OR Linux rootless fails** and the workaround is `--privileged` or host-level UID remap — pause the RFC. The whole plan rests on these two passing.
+- **Mac fails** when validated — does NOT pause Linux build-out. Redesign virtiofs UID handling on the parallel track. Linux v1.0 can ship without Mac if the redesign slips past the v1.0 date (see Decision criteria); Mac then becomes a v1.1 deliverable.
+- Per-agent socket directories cannot be made to work on Linux — pivot to HMAC tokens with a full lifecycle spec (issuance, storage at `/run/secrets/<agent>-broker-token`, revocation on broker restart, scoped ACL) and re-run Phase 0 against the token design. The HMAC fallback is documented in Risks but should not be needed; the per-agent socket design has no known blockers on Linux.
+- Optional-tier failures are notes, not aborts.
 
 ### Phase 1 — Dockerfiles + compose generator + scheduler, agent-minutes ≈ 600
 
@@ -495,11 +502,11 @@ Success: every documented switchroom CLI verb works identically in both modes. D
 
 Abort: if a verb has no Docker equivalent, write the missing command. Don't paper over.
 
-### Phase 5 — migration tooling + e2e, agent-minutes ≈ 600
+### Phase 5 — migration tooling + e2e, agent-minutes ≈ 400
 
 Files: `src/cli/migrate-to-docker.ts`, `src/cli/migrate-to-host.ts`, e2e suite. Migration tool reads the existing `~/.switchroom/`, generates compose, validates, performs UID alignment, prompts user to switch.
 
-README install instructions cover both paths side by side: Docker (the default for new installs because it works on every supported OS) and host-native (still fully supported, no behavioural difference, picked by operators who prefer it or already have it). Both deliver the same product promise. The CLI auto-detects which mode it's in by looking for `~/.switchroom/compose/docker-compose.yml`.
+README install path messaging: **Docker is the default install path for Mac and Linux.** The bare-metal/host-native install path stays fully supported on Linux for operators who prefer it or already have it — no behavioural difference, same product promise. Other platforms (Windows-WSL2, Synology, Unraid, RasPi) work via the same Docker compose file but are best-effort: expected to work, not formally tested or release-gated. Migration tooling and CLI verbs work on those platforms when Docker Desktop or Docker Engine is functional, they're just not part of the validated release matrix. The CLI auto-detects which mode it's in by looking for `~/.switchroom/compose/docker-compose.yml`.
 
 **UID alignment in migration.** Host-native files are owned by the operator's host UID (typically `1000`). Under Docker, agents may run as a different UID (e.g. `1100` per the identity model on Mac/Win where virtiofs translates everything to `1000` regardless, or as `${SWITCHROOM_HOST_UID}` for bind-mounted host paths). Migration must `chown -R` session JSONLs, hindsight banks, and per-agent state to match the destination UID:
 
@@ -517,7 +524,12 @@ README install instructions cover both paths side by side: Docker (the default f
 
 Failure to complete the round-trip = Phase 5 incomplete.
 
-Success: clean migration from host-native to Docker on a real fleet, AND clean rollback. e2e: cold install on Mac (Docker Desktop), Windows (WSL2 + Docker Desktop), RasPi 4 (arm64). All three to "first agent reply in Telegram" in under 5 minutes. Round-trip migration test passes on Linux (the only platform where host-native ever ran).
+Success: clean migration from host-native to Docker on a real fleet, AND clean rollback. e2e cold-install matrix is tiered:
+
+- **Mandatory (release gate):** Linux (Docker Engine, bare metal) and Mac (Docker Desktop). Both to "first agent reply in Telegram" in under 5 minutes.
+- **Best-effort, not blocking:** Windows-WSL2 (Docker Desktop), Synology DSM, Unraid, RasPi 4 (arm64). These platforms aren't unsupported — they're "expected to work, not formally tested." Migration tooling, the compose file, and the CLI verbs all work on those platforms when Docker is functional; we just don't run them through the release-gate e2e suite. Community-validated bug reports get triaged like any other issue, but they don't block ship.
+
+Round-trip migration test passes on Linux (the only platform where host-native ever ran).
 
 Abort: if Mac Docker Desktop file performance makes the bind-mounted Hindsight SQLite IO unusable (>3x slower than host), reshape volumes to put hot SQLite on Docker-managed volumes and only the user-edited config on bind mounts. Document the layout.
 
@@ -725,13 +737,19 @@ These need spike-validation in Phase 0, not paper analysis.
 
 Abandon this plan and pivot if any of these hit:
 
-- Phase 0 spike fails on tmux interrupt or peercred. Both are load-bearing. No acceptable workaround = no project.
-- Mac Docker Desktop file IO on the Hindsight bank is more than 3x slower than host-native and named volumes don't fix it. The product is sub-usable on Mac and that's half the audience.
-- Multi-arch image build is unstable on arm64 in CI for >2 weeks. We can't ship a "works on Pi" promise we can't honour.
-- Watchdog port falls behind the bash watchdog in detected-incident parity for >3 weeks. We cannot regress reliability for a refactor.
+- Phase 0 spike fails on tmux interrupt or peercred on Linux (rootful or rootless). Both are load-bearing. No acceptable workaround = no project.
+- Mac Docker Desktop file IO on the Hindsight bank is more than 3x slower than host-native and named volumes don't fix it. Mac is a supported v1.0 target; sub-usable Mac performance is a ship blocker for the v1.0 release matrix, not just a Mac-only concern.
+- Watchdog port falls behind the bash watchdog in detected-incident parity for >3 weeks on Linux. We cannot regress reliability for a refactor.
 
-If none of those hit, the plan ships.
+Tradeoff calls (decide, don't pivot):
+
+- **Mac validation slips past the v1.0 ship date.** Hardware delays, virtiofs redesign drags, peercred fails on Mac and the workaround needs more time — any of these. Decision: either (a) **slip Mac to v1.1** and ship Linux-only as v1.0 (Mac install path documented as "coming, beta"), or (b) **hold v1.0** until Mac passes. Default lean is (a) — Linux is the substrate the existing fleet runs on and Mac users are not currently served by switchroom anyway, so shipping Linux-on-Docker without Mac is still a strict improvement over today. Pick at the time based on how close Mac is.
+- Multi-arch image build instability on arm64 in CI for >2 weeks. RasPi/homelab is best-effort, not release-gating, so this doesn't pause the plan — it just means the arm64 image stays "build it yourself" until CI stabilises. Document, move on.
+
+If none of the abandon criteria hit, the plan ships.
 
 ## Vision and product copy
 
-Already done. PR #796 rewrote `reference/vision.md`, `reference/principles.md`, the README, and `docs/vs-openclaw.md` to be substrate-agnostic — the product promise is the JTBD outcomes (long-running service, survives reboots, auto-recovery, OAuth under your subscription, stock `claude` CLI), with no commitment to systemd or Docker either way. This RFC implements the substrate change behind that copy. No further doc edits required from this RFC.
+Already done. PR #796 rewrote `reference/vision.md`, `reference/principles.md`, the README, and `docs/vs-openclaw.md` to be substrate-agnostic — the product promise is the JTBD outcomes (long-running service, survives reboots, auto-recovery, OAuth under your subscription, stock `claude` CLI), with no commitment to systemd or Docker either way. This RFC implements the substrate change behind that copy.
+
+Light touch needed: the substrate-agnostic copy already squares with the tiered-platform reality. The JTBD framing "runs on the box you already have" remains accurate — Linux and Mac are the supported install targets for v1.0; Windows, Synology, Unraid, and RasPi work in principle and may work for you, but aren't formally validated. Don't rewrite vision.md to enumerate the tiers — the substrate-agnostic framing is correct and shouldn't list operating systems by name. The release notes for v1.0 are where the supported-vs-best-effort split gets stated explicitly. No further RFC-driven edits to vision/principles/README.

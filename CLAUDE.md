@@ -17,14 +17,14 @@ See `README.md` for the user-facing description.
 
 ## Docker test discipline (HARD RULES)
 
-This branch's tests run on a host that ALSO runs Coolify, hindsight, nginx-tunnel-gateway, and every Coolify-managed app. Treat the host as production.
+These rules are permanent guidance for every phase of the docker migration, not phase-1c-scoped commentary. Tests run on a host that ALSO runs Coolify, hindsight, nginx-tunnel-gateway, and every Coolify-managed app. Treat the host as production.
 
-- Every test container MUST be created with the label `switchroom.test=phase1c`. Add a per-run UUID label too (e.g. `switchroom.test.run=<uuid>`).
+- Every test container MUST be created with the label `switchroom.test=<phase>` — substitute the phase you're working in (e.g. `phase1c`, `phase2c`, `phase3a`). Add a per-run UUID label too (e.g. `switchroom.test.run=<uuid>`).
 - Every `docker run` MUST use `--rm` so containers self-clean on exit.
-- The ONLY sanctioned bulk-teardown command is filtered by label:
+- The ONLY sanctioned bulk-teardown command is filtered by label — same `<phase>` value as the create label:
 
   ```
-  docker rm -f $(docker ps -aq --filter label=switchroom.test=phase1c) 2>/dev/null || true
+  docker rm -f $(docker ps -aq --filter label=switchroom.test=<phase>) 2>/dev/null || true
   ```
 
 - **Exception — detached for inter-call inspection:** if a test genuinely needs `docker run -d` (no `--rm`) because it `docker exec`s into the container between assertions, that's allowed BUT the callsite must (a) carry the standard labels, (b) have an explicit per-name `docker rm -f` in `finally`, AND (c) be covered by `safeLabelTeardown` in `afterAll`. All three. No exceptions to the exception.

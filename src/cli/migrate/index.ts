@@ -15,6 +15,7 @@ import { join } from "node:path";
 import { withConfigError, getConfig } from "../helpers.js";
 import { runPreflight, type MigrateVerb } from "./preflight.js";
 import { buildPlan, formatPlanJsonl, formatPlanText, type PlanState } from "./plan.js";
+import { executePlan } from "./executor.js";
 
 interface DryRunOpts {
   dryRun?: boolean;
@@ -29,6 +30,47 @@ function notImplemented(verb: MigrateVerb): never {
     ),
   );
   process.exit(2);
+}
+
+async function runToDocker(opts: DryRunOpts, program: Command): Promise<void> {
+  const config = getConfig(program);
+  const agents = Object.keys(config.agents ?? {}).sort();
+  const preflight = await runPreflight("to-docker", { sharedHost: !!opts.sharedHost });
+  if (!preflight.ok) {
+    const r = preflight.refusal!;
+    console.error(chalk.red(`Pre-flight refused at check: ${r.name}`));
+    console.error(`  reason: ${r.reason}`);
+    if (r.fixHint) console.error(chalk.gray(`  fix:    ${r.fixHint}`));
+    process.exit(1);
+  }
+  const composeProject = "switchroom-fleet";
+  const composePath = join(homedir(), ".switchroom", "compose", "docker-compose.yml");
+  const state: PlanState = {
+    agents,
+    composeProject,
+    composePath,
+    targetUid: process.getuid?.(),
+  };
+  const plan = buildPlan("to-docker", state);
+  const result = await executePlan(plan, {
+    composeProject,
+    composePath,
+    onProgress: (m) => process.stderr.write(chalk.gray(`[migrate] ${m}\n`)),
+  });
+  if (!result.ok) {
+    console.error(
+      chalk.red(
+        `migrate to-docker FAILED at step ${result.failed!.index + 1}: ${result.failed!.error}`,
+      ),
+    );
+    console.error(
+      chalk.gray(
+        `Rolled back ${result.rolledBack.length} step(s); see ~/.switchroom/migration.log for details.`,
+      ),
+    );
+    process.exit(1);
+  }
+  console.log(chalk.green(`migrate to-docker complete (${result.completed.length} steps).`));
 }
 
 async function runDryRun(
@@ -95,8 +137,11 @@ export function registerMigrateCommand(program: Command): void {
     )
     .action(
       withConfigError(async (opts: DryRunOpts) => {
-        if (!opts.dryRun) notImplemented("to-docker");
-        await runDryRun("to-docker", opts, program);
+        if (opts.dryRun) {
+          await runDryRun("to-docker", opts, program);
+          return;
+        }
+        await runToDocker(opts, program);
       }),
     );
 

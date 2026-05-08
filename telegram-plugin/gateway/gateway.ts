@@ -9708,7 +9708,29 @@ if (streamMode === 'checklist') {
     return { code: 0, description: msg, kind: 'transient' }
   }
 
+  // #842: progress-card first-render gating. Read the per-agent
+  // overrides from switchroom.yaml; fall back to driver defaults
+  // (45000 ms / 0 ms) when absent, unreadable, or not present in the
+  // cascade (defaults → profile → per-agent).
+  let progressCardDelayMs: number | undefined
+  let progressCardDelayMsBackground: number | undefined
+  try {
+    const swConfig = loadSwitchroomConfig()
+    const agentSlugForCfg = process.env.SWITCHROOM_AGENT_NAME
+    const agentCfg = agentSlugForCfg ? swConfig.agents?.[agentSlugForCfg] : undefined
+    const pc = agentCfg?.channels?.telegram?.progress_card
+    if (pc) {
+      if (typeof pc.delay_ms === 'number') progressCardDelayMs = pc.delay_ms
+      if (typeof pc.delay_ms_background === 'number') progressCardDelayMsBackground = pc.delay_ms_background
+    }
+  } catch {
+    // Best-effort — gateway may run in dirs where loadSwitchroomConfig
+    // fails. Driver defaults apply.
+  }
+
   progressDriver = createProgressDriver({
+    ...(progressCardDelayMs != null ? { initialDelayMs: progressCardDelayMs } : {}),
+    ...(progressCardDelayMsBackground != null ? { initialDelayMsBackground: progressCardDelayMsBackground } : {}),
     emit: ({ chatId, threadId, turnKey, html, done, isFirstEmit, replyToMessageId, agentId }) => {
       // Tag the outbound API calls so `tg-post` log lines carry turnKey
       // (and cardMessageId when known) — lets us audit days-old session

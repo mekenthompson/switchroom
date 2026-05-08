@@ -219,9 +219,26 @@ export interface ProgressDriverConfig {
    * starts (see `promoteOnSubAgent`) — long-running tool work and
    * background dispatches stay visible without waiting the full delay.
    *
-   * Default 60000 (60 seconds, #553 PR 4). Set to 0 to disable.
+   * Default 45000 (45 seconds, #842). Set to 0 to disable.
    */
   initialDelayMs?: number
+  /**
+   * First-render delay (ms) override for explicit background sub-agent
+   * dispatches (#842). When the agent calls
+   * `Agent({ run_in_background: true })`, the card is promoted out of
+   * the suppression window using this delay instead of `initialDelayMs`.
+   * Default 0 (immediate render — backgrounded work should be visible
+   * right away).
+   *
+   * Implementation: at `tool_use` ingest time the driver detects the
+   * background flag (existing `cs.backgroundParentToolUseIds` book-
+   * keeping). If `initialDelayMsBackground` is 0 the card promotes
+   * immediately via `promoteFirstEmit`. If positive, the deferred timer
+   * is rescheduled to fire that many ms from turn start (or now, if
+   * already past) — but only when shorter than what's currently
+   * scheduled. Never lengthens an in-flight delay.
+   */
+  initialDelayMsBackground?: number
   /**
    * Promote the first emit immediately when a sub-agent transitions to
    * running during the suppression window, when the watcher fires
@@ -419,6 +436,16 @@ interface PerChatState {
   isFirstEmit: boolean
   /** Timer for the deferred first emit (initial-delay suppression). */
   deferredFirstEmitTimer: unknown
+  /**
+   * #842: per-chat first-emit delay budget in ms. Initialised to
+   * `config.initialDelayMs`; lowered to `config.initialDelayMsBackground`
+   * the first time the parent dispatches an Agent/Task with
+   * `run_in_background: true`. Never increases. flush() reads this
+   * (instead of the closure-level `initialDelayMs`) when scheduling the
+   * deferred first-emit timer so the background bypass takes effect on
+   * the next scheduling pass.
+   */
+  effectiveInitialDelayMs: number
   /**
    * F3 fix (#553): timer for the time-based first-emit promotion.
    * Scheduled on the first ingest event; fires after `promoteAfterMs`
@@ -801,20 +828,29 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
   const editBudgetThreshold = config.editBudgetThreshold ?? 18
   const editBudgetCoalesceMs = config.editBudgetCoalesceMs ?? 3000
   const maxIdleMs = config.maxIdleMs ?? 30 * 60_000
-  // v2 card-gate (#553 PR 4): card visibility is `(elapsed >= 60s) OR
-  // (any sub-agent appeared)`. Tools alone never trigger the card.
-  //   - initialDelayMs: 60s (was 30s) — pushes the time-based gate to
-  //     the spec value.
+  // v2 card-gate (#553 PR 4 / #842): card visibility is `(elapsed >= 45s)
+  // OR (any sub-agent appeared) OR (explicit background dispatch)`.
+  // Tools alone never trigger the card.
+  //   - initialDelayMs: 45s (was 60s, #842) — pushes the time-based gate
+  //     to the spec value. The lower threshold means more turns flash a
+  //     card; the explicit-background bypass below offsets that for the
+  //     "fire-and-forget" case where the user always wants to see the
+  //     card immediately.
+  //   - initialDelayMsBackground: 0 (#842) — explicit
+  //     `Agent({run_in_background:true})` dispatches promote the card
+  //     immediately. Lets backgrounded work be visible right away
+  //     without waiting for any other promotion path.
   //   - promoteOnParentToolCount: 0 (was 3) — disabled. The check below
   //     treats 0 (and Infinity) as "never promote on tool count".
   //   - promoteAfterMs: 0 (was 5_000) — disabled. ensureTimePromoteScheduled
   //     no-ops when this is 0, so the timer never schedules. The PR #570
   //     time-promote was a stop-gap when initialDelayMs was 30s; with
-  //     initialDelayMs=60s and the sub-agent promote intact, it is no
+  //     initialDelayMs=45s and the sub-agent promote intact, it is no
   //     longer needed.
   //   - promoteOnSubAgent: true (unchanged) — sub-agents/background workers
   //     break the suppression immediately.
-  const initialDelayMs = config.initialDelayMs ?? 60_000
+  const initialDelayMs = config.initialDelayMs ?? 45_000
+  const initialDelayMsBackground = config.initialDelayMsBackground ?? 0
   const promoteOnSubAgent = config.promoteOnSubAgent ?? true
   const promoteOnParentToolCount = config.promoteOnParentToolCount ?? 0
   const promoteAfterMs = config.promoteAfterMs ?? 0
@@ -1521,34 +1557,45 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     // Suppress the card entirely if the turn ends before the initial
     // delay has elapsed — no point flashing a "Working…" card for a
     // turn that completed in under initialDelayMs.
-    if (chatState.isFirstEmit && initialDelayMs > 0 && chatState.deferredFirstEmitTimer !== DELAY_ELAPSED) {
+    const effectiveDelayMs = chatState.effectiveInitialDelayMs
+    if (chatState.isFirstEmit && effectiveDelayMs > 0 && chatState.deferredFirstEmitTimer !== DELAY_ELAPSED) {
       if (forceDone || chatState.state.stage === 'done') {
         // Turn ended before the card was ever shown — suppress it.
         if (chatState.deferredFirstEmitTimer != null) {
           clearT(chatState.deferredFirstEmitTimer)
           chatState.deferredFirstEmitTimer = null
         }
-        process.stderr.write(`telegram gateway: progress-card: fast-turn suppression turnKey=${chatState.turnKey} (turn ended before initialDelayMs=${initialDelayMs}ms)\n`)
+        process.stderr.write(`telegram gateway: progress-card: fast-turn suppression turnKey=${chatState.turnKey} (turn ended before initialDelayMs=${effectiveDelayMs}ms)\n`)
         emitCardEvent({
           agent: process.env.SWITCHROOM_AGENT_NAME ?? '',
           chatId: chatState.chatId ?? '',
           turnKey: chatState.turnKey,
           event: 'suppressed',
-          reason: `fast-turn: ended before initialDelayMs=${initialDelayMs}`,
+          reason: `fast-turn: ended before initialDelayMs=${effectiveDelayMs}`,
         })
         return
       }
-      // Defer the first emit — schedule it for initialDelayMs from now
-      // if not already scheduled.
+      // Defer the first emit — schedule it for the per-chat budget from
+      // turn start if not already scheduled. Uses
+      // `chatState.effectiveInitialDelayMs` so the #842 background-
+      // dispatch bypass (which lowers this number on tool_use) takes
+      // effect on the very next flush.
       if (chatState.deferredFirstEmitTimer == null) {
         const capturedTurnKey = chatState.turnKey
-        process.stderr.write(`telegram gateway: progress-card: scheduled initial-delay timer turnKey=${capturedTurnKey} delay=${initialDelayMs}ms\n`)
+        // Schedule from turn start, not from now — multiple flush
+        // attempts during the buffering window must not push the
+        // first-emit clock back.
+        const elapsed = chatState.state.turnStartedAt > 0
+          ? Math.max(0, now() - chatState.state.turnStartedAt)
+          : 0
+        const remaining = Math.max(0, effectiveDelayMs - elapsed)
+        process.stderr.write(`telegram gateway: progress-card: scheduled initial-delay timer turnKey=${capturedTurnKey} delay=${remaining}ms budget=${effectiveDelayMs}ms\n`)
         chatState.deferredFirstEmitTimer = setT(() => {
           if (!chats.has(capturedTurnKey)) return
           chatState.deferredFirstEmitTimer = DELAY_ELAPSED
           process.stderr.write(`telegram gateway: progress-card: initial-delay timer fired turnKey=${capturedTurnKey}\n`)
           flush(chatState, false)
-        }, initialDelayMs)
+        }, remaining)
       }
       return
     }
@@ -2019,6 +2066,7 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
           pendingTimer: null,
           isFirstEmit: true,
           deferredFirstEmitTimer: null,
+          effectiveInitialDelayMs: initialDelayMs,
           timePromoteTimer: null,
           lastEventAt: now(),
           pendingCompletion: false,
@@ -2163,6 +2211,60 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         && !chatState.apiFailures.terminal
       ) {
         promoteFirstEmit(chatState, 'sub_agent_started')
+      }
+
+      // #842: explicit background dispatch bypass. When the parent calls
+      // `Agent({ run_in_background: true })`, swap the active delay
+      // budget over to `initialDelayMsBackground` instead of the longer
+      // `initialDelayMs`. Detection: an Agent/Task tool_use whose
+      // `event.input.run_in_background === true` (the same flag
+      // `updateFleetForEvent` uses to populate
+      // `cs.backgroundParentToolUseIds` for fleet membership).
+      //
+      // - `initialDelayMsBackground === 0` (default) → promote now.
+      // - `initialDelayMsBackground > 0` → set
+      //   `cs.effectiveInitialDelayMs` so the next flush() schedules
+      //   (or reschedules) the deferred timer at the lower budget.
+      //   Never lengthens an existing budget.
+      if (
+        event.kind === 'tool_use'
+        && (event.toolName === 'Agent' || event.toolName === 'Task')
+        && event.toolUseId != null
+        && event.input?.run_in_background === true
+        && chatState.isFirstEmit
+        && chatState.deferredFirstEmitTimer !== DELAY_ELAPSED
+        && !chatState.apiFailures.terminal
+      ) {
+        if (initialDelayMsBackground <= 0) {
+          promoteFirstEmit(chatState, 'background_dispatch')
+        } else if (initialDelayMsBackground < chatState.effectiveInitialDelayMs) {
+          chatState.effectiveInitialDelayMs = initialDelayMsBackground
+          // If a longer-budget timer is already scheduled, cancel and
+          // reschedule against the new budget. Compute the remaining
+          // gap from turn start; if we're already past it, promote.
+          if (chatState.deferredFirstEmitTimer != null) {
+            const elapsed = now() - chatState.state.turnStartedAt
+            const remaining = initialDelayMsBackground - elapsed
+            clearT(chatState.deferredFirstEmitTimer)
+            if (remaining <= 0) {
+              chatState.deferredFirstEmitTimer = null
+              promoteFirstEmit(chatState, 'background_dispatch_elapsed')
+            } else {
+              const capturedTurnKey = chatState.turnKey
+              process.stderr.write(
+                `telegram gateway: progress-card: rescheduled initial-delay timer turnKey=${capturedTurnKey} delay=${remaining}ms reason=background_dispatch\n`,
+              )
+              chatState.deferredFirstEmitTimer = setT(() => {
+                if (!chats.has(capturedTurnKey)) return
+                chatState.deferredFirstEmitTimer = DELAY_ELAPSED
+                process.stderr.write(
+                  `telegram gateway: progress-card: initial-delay timer fired turnKey=${capturedTurnKey} reason=background_dispatch\n`,
+                )
+                flush(chatState, false)
+              }, remaining)
+            }
+          }
+        }
       }
 
       // #478 / #553 PR 4: promote the card when the agent has issued

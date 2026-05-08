@@ -40,15 +40,26 @@ agents using capability tokens, and the kernel is the read path for
 
 ## 3. ask_user dispatch (`aq:` callbacks)
 
-**Where:** `telegram-plugin/gateway/gateway.ts:8321` (dispatch) and
-`ask-user.ts` (callback shape).
+**Where:** `telegram-plugin/gateway/gateway.ts` (dispatch + `pendingAskUser`
+in-process map) and `telegram-plugin/ask-user.ts` (callback shape).
 
-**Plan:** `aq:` is already kernel-shaped — it has a request_id, a card
-with allow/deny choices, and a result that flows back to a waiting agent.
-The migration is mostly cosmetic: rename the prefix to `apv:`, route the
-tap through `approvalConsume` + `recordDecision`, and surface the
-decision via `approvalLookup` to the waiting agent. The reaction
-lifecycle and topic routing in `aq:` should be preserved verbatim.
+**Plan: do not migrate.** `aq:` and the approval kernel solve different
+problems and the schemas don't line up:
+
+- `aq:` is an **N-choice question primitive** — 2–8 arbitrary option
+  strings, callback shape `aq:<idx>:<askId>`, result returned to the
+  agent as `{ kind: 'answered', choice: string, idx: number }`.
+- The approval kernel (`apv:`) is a **binary grant/deny primitive** —
+  `parseApprovalCallback` only recognizes `once|always|deny|ttl`, and
+  `ApprovalDecisionModeSchema` only encodes `allow_once|allow_always|
+  allow_ttl|deny|deny_perm`. There is no field on `approvalRecord` /
+  `approvalLookup` to carry "user picked option idx 4 of 7".
+
+`aq:` therefore stays on the existing in-process `pendingAskUser` map
+in the gateway. The kernel handles only binary approvals (secrets,
+vault grants, MCP requests). If a future RFC needs multi-choice
+approvals, that's a kernel-schema extension, not a rename — see
+issue #769 for the decision (option B).
 
 ## 4. Permission-rule prompts (`perm:more`, `perm:allow`, `perm:deny`)
 

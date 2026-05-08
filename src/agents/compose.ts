@@ -219,6 +219,10 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`  vault-broker:`);
   lines.push(`    image: ${brokerImage}`);
   lines.push(`    container_name: switchroom-vault-broker`);
+  // Phase 3b-1: fleet labels for the watchdog (selects on switchroom.role).
+  lines.push(`    labels:`);
+  lines.push(`      switchroom.role: "broker"`);
+  lines.push(`      switchroom.fleet: "switchroom"`);
   lines.push(`    restart: unless-stopped`);
   lines.push(`    user: "0:0"`);
   lines.push(`    stop_grace_period: 10s`);
@@ -243,6 +247,9 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`  approval-kernel:`);
   lines.push(`    image: ${kernelImage}`);
   lines.push(`    container_name: switchroom-approval-kernel`);
+  lines.push(`    labels:`);
+  lines.push(`      switchroom.role: "kernel"`);
+  lines.push(`      switchroom.fleet: "switchroom"`);
   lines.push(`    restart: unless-stopped`);
   lines.push(`    user: "0:0"`);
   lines.push(`    stop_grace_period: 10s`);
@@ -266,6 +273,9 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`  switchroom-cron:`);
   lines.push(`    image: ${schedulerImage}`);
   lines.push(`    container_name: switchroom-cron`);
+  lines.push(`    labels:`);
+  lines.push(`      switchroom.role: "scheduler"`);
+  lines.push(`      switchroom.fleet: "switchroom"`);
   lines.push(`    restart: unless-stopped`);
   lines.push(`    user: "0:0"`);
   lines.push(`    stop_grace_period: 15s`);
@@ -314,6 +324,10 @@ function emitAgentService(
   lines.push(`    image: ${agentImage}`);
   lines.push(`    container_name: switchroom-${a.name}`);
   lines.push(`    hostname: ${a.name}`);
+  lines.push(`    labels:`);
+  lines.push(`      switchroom.role: "agent"`);
+  lines.push(`      switchroom.fleet: "switchroom"`);
+  lines.push(`      switchroom.agent: "${a.name}"`);
   lines.push(`    restart: unless-stopped`);
   lines.push(`    init: false`);
   lines.push(`    stop_grace_period: 45s`);

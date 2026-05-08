@@ -421,6 +421,19 @@ Success: `switchroom reconcile` writes a compose file that `docker compose confi
 
 Abort: if compose generation can't cleanly express the cascade and we end up with post-render shell munging, stop and rethink.
 
+**Test fleet teardown contract.** Phase 1 (and every later phase that spins up a fleet for tests) must follow these rules — the test host is shared with Coolify and hindsight in many environments; treat it as production unless you provisioned it yourself for this run.
+
+- Every test container MUST carry the label `switchroom.test=<phase>` (e.g. `phase1c`) AND a per-run UUID label (e.g. `switchroom.test.run=<uuid>`).
+- Use `--rm` on every `docker run`.
+- Sanctioned teardown shape only:
+
+  ```
+  docker rm -f $(docker ps -aq --filter label=switchroom.test=<phase>) 2>/dev/null || true
+  ```
+
+- Banned: bulk teardown over `docker ps -a` (`docker ps -a | xargs docker rm`, bare `docker rm $(docker ps -aq)`). Banned: any `prune` command in test scripts (`docker system prune`, `docker container prune`, `docker volume prune`).
+- Per-container removal by explicit name is fine.
+
 ### Phase 2 — broker + kernel IPC port, agent-minutes ≈ 280
 
 Files: `src/vault/broker/peercred.ts` (add `socketPathToAgent` + container code branch), `src/vault/broker/acl.ts` (add `checkAclByAgent`), `src/vault/approvals/client.ts` socket-path resolver, kernel-side mirrors. Goal: vault refs + approval grants work identically inside-Docker and host-native, exercised by the existing test suite. Path here depends on the identity model that landed in Phase 0 — this phase is the production implementation of whatever Phase 0 proved.

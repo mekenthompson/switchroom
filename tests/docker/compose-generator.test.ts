@@ -265,6 +265,74 @@ describe("generateCompose", () => {
   });
 });
 
+describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
+  // Phase 2a (broker IPC) and Phase 2b (kernel IPC) both expect agent
+  // containers to receive these env vars at boot — without them an agent
+  // can't find its broker or kernel socket and silently falls back to
+  // legacy / disabled paths. Neither phase included a generator-level
+  // assertion, so this test pins the contract.
+  //
+  // Path shape MUST match the kernel-server / broker-server bind shape
+  // (`/run/switchroom/<broker|kernel>/<agent>/sock`) — same as the per-
+  // agent volume mount the generator already emits.
+  function envBlockFor(yml: string, agent: string): string {
+    const re = new RegExp(
+      `  agent-${agent}:[\\s\\S]*?    environment:([\\s\\S]*?)\\n    volumes:`,
+    );
+    return re.exec(yml)?.[1] ?? "";
+  }
+
+  it("sets SWITCHROOM_RUNTIME=docker on each agent container", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    for (const a of ["alice", "bob"]) {
+      const env = envBlockFor(out, a);
+      expect(env).toMatch(/SWITCHROOM_RUNTIME:\s*"docker"/);
+    }
+  });
+
+  it("sets SWITCHROOM_KERNEL_SOCKET to the per-agent kernel-server bind path", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    for (const a of ["alice", "bob"]) {
+      const env = envBlockFor(out, a);
+      expect(env).toMatch(
+        new RegExp(
+          `SWITCHROOM_KERNEL_SOCKET:\\s*"/run/switchroom/kernel/${a}/sock"`,
+        ),
+      );
+    }
+  });
+
+  it("sets SWITCHROOM_BROKER_SOCKET to the per-agent broker-server bind path", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    for (const a of ["alice", "bob"]) {
+      const env = envBlockFor(out, a);
+      expect(env).toMatch(
+        new RegExp(
+          `SWITCHROOM_BROKER_SOCKET:\\s*"/run/switchroom/broker/${a}/sock"`,
+        ),
+      );
+    }
+  });
+
+  it("sets SWITCHROOM_AGENT_NAME identity on each agent container", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    for (const a of ["alice", "bob"]) {
+      const env = envBlockFor(out, a);
+      expect(env).toMatch(
+        new RegExp(`SWITCHROOM_AGENT_NAME:\\s*"${a}"`),
+      );
+    }
+  });
+});
+
 describe("describeAgents", () => {
   it("returns sorted agents with allocated UIDs", () => {
     const agents = describeAgents(makeConfig({ zebra: {}, alpha: {} }));

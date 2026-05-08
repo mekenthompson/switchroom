@@ -1482,7 +1482,21 @@ export async function main(): Promise<void> {
   );
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Entry guard — only run main() when this file is invoked directly as the
+// broker server bundle (dist/vault/broker/server.js or src/vault/broker/
+// server.ts). The naive `import.meta.url === file://${process.argv[1]}`
+// guard fires spuriously when this module is bundled INTO another entry
+// point (e.g. dist/cli/switchroom.js): bun's bundler rewrites
+// `import.meta.url` to point at the OUTPUT bundle, so the comparison
+// matches argv[1] for any CLI invocation and the broker tries to boot
+// from random verbs like `issues list`. We additionally require the
+// bundle filename to look like the broker entry. See PR #807 / CI fix.
+if (
+  import.meta.url === `file://${process.argv[1]}` &&
+  /(?:^|[/\\])(?:vault[/\\]broker[/\\])?server\.(?:js|ts)$/.test(
+    process.argv[1] ?? "",
+  )
+) {
   main().catch((err) => {
     process.stderr.write(
       `vault-broker fatal: ${err instanceof Error ? err.stack : err}\n`,

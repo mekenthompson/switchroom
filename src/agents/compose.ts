@@ -217,6 +217,10 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`      - \${HOME}/.switchroom/scheduler:/state/scheduler`);
   lines.push(`    environment:`);
   lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);
+  // SQLite audit sink for scheduler fires (Phase 1b — wires
+  // SqliteAuditSink that better-sqlite3 was already installed for).
+  // Without this env var the scheduler falls back to JsonlAuditSink.
+  lines.push(`      SWITCHROOM_SCHEDULER_DB_PATH: /state/scheduler/scheduler.db`);
   lines.push(``);
 
   // ── per-agent services ─────────────────────────────────────────────

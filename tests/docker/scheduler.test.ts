@@ -17,7 +17,12 @@ import {
   InMemoryAuditSink,
   SCHEDULER_DB_DDL,
 } from "../../src/scheduler/audit.js";
-import { registerSchedule, type CronLib } from "../../src/scheduler/index.js";
+import { registerSchedule, pickSink, type CronLib } from "../../src/scheduler/index.js";
+import { InMemoryAuditSink as _InMem, JsonlAuditSink as _Jsonl } from "../../src/scheduler/audit.js";
+import { SqliteAuditSink } from "../../src/scheduler/audit-sqlite.js";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SwitchroomConfig } from "../../src/config/schema.js";
 
 function makeConfig(scheduleByAgent: Record<string, Array<{ cron: string; prompt: string }>>): SwitchroomConfig {
@@ -130,6 +135,43 @@ describe("registerSchedule", () => {
     expect(sink.fires.length).toBe(1);
     expect(sink.fires[0]!.exitCode).toBe(-1);
     expect(sink.fires[0]!.outputSummary).toContain("docker daemon down");
+  });
+});
+
+describe("pickSink (env-flag sink selection)", () => {
+  it("returns InMemoryAuditSink when inMemory=true", () => {
+    const sink = pickSink({ inMemory: true, sqliteDbPath: undefined, jsonlPath: "/dev/null" });
+    expect(sink).toBeInstanceOf(_InMem);
+  });
+  it("returns SqliteAuditSink when sqliteDbPath is set (production telemetry path)", () => {
+    // Use the stub-ctor injection so we don't need better-sqlite3 at the
+    // repo root. Phase 1b scheduler image installs the native dep inside
+    // the container; tests just verify the dispatch picked the SQLite branch.
+    const stubCtor = function (_p: string) {
+      return {
+        exec(_sql: string) {},
+        prepare(_sql: string) {
+          return { run() { return { changes: 0, lastInsertRowid: 0 }; } };
+        },
+        close() {},
+      };
+    } as unknown as ConstructorParameters<typeof SqliteAuditSink>[0]["sqliteCtor"];
+    const sink = pickSink({
+      inMemory: false,
+      sqliteDbPath: ":memory:",
+      jsonlPath: "/dev/null",
+      _testSqliteCtor: stubCtor,
+    });
+    expect(sink).toBeInstanceOf(SqliteAuditSink);
+  });
+  it("returns JsonlAuditSink as default", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "scheduler-pick-"));
+    const sink = pickSink({
+      inMemory: false,
+      sqliteDbPath: undefined,
+      jsonlPath: join(tmp, "fires.jsonl"),
+    });
+    expect(sink).toBeInstanceOf(_Jsonl);
   });
 });
 

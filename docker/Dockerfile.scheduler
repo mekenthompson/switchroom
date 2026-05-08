@@ -23,6 +23,25 @@ RUN mkdir -p /state/scheduler
 # Config bind-mount target (the host's switchroom.yaml + cascade).
 RUN mkdir -p /state/config
 
+# Phase 1b: copy the bundled scheduler entrypoint. scripts/build.mjs
+# emits dist/scheduler/index.js with native deps (better-sqlite3) and
+# node-cron marked external — those are installed inside the image so
+# the prebuilt better-sqlite3 binary matches the linux/glibc runtime,
+# not whatever host ran `npm run build`.
+COPY dist/scheduler/index.js /opt/switchroom/dist/scheduler/index.js
+
+# Install runtime deps inside the image. better-sqlite3 prefers the
+# prebuilt binary that ships in its npm tarball; if the platform isn't
+# covered we'd need build-essential + python3 to compile from source —
+# adding those falls back to /etc/Dockerfile.scheduler.from-source as
+# the iteration target. node-cron is pure JS so always installs cleanly.
+WORKDIR /opt/switchroom
+RUN npm init -y >/dev/null \
+ && node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.type='module';fs.writeFileSync('package.json',JSON.stringify(p,null,2));" \
+ && npm install --omit=dev --build-from-source=false \
+      better-sqlite3@^11.5.0 \
+      node-cron@^3.0.3
+
 USER 0:0
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

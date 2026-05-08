@@ -39,6 +39,26 @@ RUN apt-get update \
 RUN npm install -g @anthropic-ai/claude-code@latest \
  && claude --version >&2 || true
 
+# Phase 1b: install bun. The broker server (src/vault/broker/server.ts)
+# imports `bun:sqlite` and `bun:ffi` directly; those modules don't exist
+# in plain Node. Rather than refactor the broker to better-sqlite3 +
+# napi-ffi (a separate slice with its own surface-area review), we ship
+# the bun runtime alongside node in every server image and invoke
+# broker / kernel-server with `bun` instead of `node`. Agent containers
+# don't run bun — they shell out to claude (via tmux) which has its
+# own runtime.
+# Pin the bun version so a `docker build` next month produces the same
+# runtime as today. `bun.sh/install` accepts an explicit tag via `bash -s
+# "bun-vX.Y.Z"`. Override at build time with --build-arg BUN_VERSION=…
+# when bumping. Host stable as of this PR is 1.3.13.
+ARG BUN_VERSION=1.3.13
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends unzip \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
+ && mv /root/.bun/bin/bun /usr/local/bin/bun \
+ && bun --version >&2
+
 # Default workdir; overridden by per-image Dockerfile if needed.
 WORKDIR /opt/switchroom
 

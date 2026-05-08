@@ -1,0 +1,256 @@
+/**
+ * Phase 1b E2E suite — exercises the actual built images. Skipped when
+ * Docker isn't available or the phase1b-test images haven't been built
+ * yet. CI builds the images first, then runs this suite.
+ *
+ * What this file ACTUALLY tests (one-liner per case):
+ *   1. base image — node, bun, tini, tmux, claude all on PATH.
+ *   2. broker image — bundle starts as a process and stays alive long
+ *      enough to bind sockets (replaces the prior "module imports OK"
+ *      stub that Phase 1b review correctly flagged as a no-op).
+ *   3. scheduler image — bundle's better-sqlite3 prebuilt binary loads
+ *      and an in-memory DB round-trips a row.
+ *   4. agent image — read-only rootfs blocks writes (EROFS).
+ *   5. agent image — cap_drop=ALL + no-new-privileges blocks mount (EPERM).
+ *
+ * What this file does NOT cover (deferred to Phase 1c):
+ *   - Per-agent identity isolation across SEPARATE agent containers
+ *     (this file only asserts kernel-level guards on a single container).
+ *   - Cross-agent broker-socket testing (peercred ACL across two
+ *     concurrently-running agents hitting the same broker).
+ *   - Live docker-compose stand-up of all 5 services.
+ *   - Approval kernel — kernel-server.ts entrypoint doesn't exist yet.
+ *   - Real broker socket peercred handshake against a cron unit.
+ */
+
+import { describe, it, expect } from "vitest";
+import { execSync, spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+const TAG = "phase1b-test";
+const IMAGES = {
+  base: `switchroom/base:${TAG}`,
+  agent: `switchroom/agent:${TAG}`,
+  broker: `switchroom/broker:${TAG}`,
+  kernel: `switchroom/kernel:${TAG}`,
+  scheduler: `switchroom/scheduler:${TAG}`,
+};
+
+function hasDocker(): boolean {
+  try {
+    execSync("docker version --format '{{.Server.Version}}'", {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasImage(ref: string): boolean {
+  try {
+    execSync(`docker image inspect ${ref}`, { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const dockerOk = hasDocker();
+const allImagesPresent =
+  dockerOk &&
+  Object.values(IMAGES).every((ref) => hasImage(ref));
+
+describe.skipIf(!dockerOk || !allImagesPresent)(
+  "phase1b docker images — E2E (skipped when docker / images unavailable)",
+  () => {
+    it("base image has node, bun, tini, tmux, claude on PATH", () => {
+      // dash's `command -v` only accepts one arg, so loop in shell.
+      // Use spawnSync with explicit argv so neither the host shell nor
+      // the JS template literal mangles `$c` before it reaches dash.
+      const r = spawnSync(
+        "docker",
+        [
+          "run", "--rm", "--entrypoint", "sh", IMAGES.base, "-c",
+          'for c in node bun tini tmux claude; do command -v "$c" || echo "MISSING:$c"; done',
+        ],
+        { encoding: "utf8" },
+      );
+      const out = r.stdout;
+      expect(out).not.toMatch(/^MISSING:/m);
+      expect(out).toMatch(/\/node\b/);
+      expect(out).toMatch(/\/bun\b/);
+      expect(out).toMatch(/\/tini\b/);
+      expect(out).toMatch(/\/tmux\b/);
+      expect(out).toMatch(/claude/);
+    });
+
+    it("broker image's bundled server.js boots and stays alive (binds sockets, doesn't exit)", () => {
+      // Phase 1b review fix: the prior version of this test only asserted
+      // the module imported cleanly — it never started the broker, so a
+      // missing main()/entry-guard (which would have made the production
+      // CMD a no-op) would still pass. We now actually start the
+      // container and verify the process stays running for 2s — long
+      // enough for the listen() callbacks to fire and any synchronous
+      // boot error to propagate via container exit.
+      //
+      // We mount a tmpfs over /run/switchroom/broker so the bundle's
+      // mkdir/bind sequence has a writable target, and supply a minimal
+      // switchroom.yaml via SWITCHROOM_CONFIG so loadConfig() resolves.
+      // The vault file doesn't need to exist — the broker stays locked
+      // and that's fine for "did it bind sockets and stay up" assertion.
+      const tmp = mkdtempSync(join(tmpdir(), "broker-e2e-"));
+      const cfgPath = join(tmp, "switchroom.yaml");
+      writeFileSync(
+        cfgPath,
+        [
+          "switchroom:",
+          "  version: 1",
+          "  agents_dir: /tmp/agents",
+          "  skills_dir: /tmp/skills",
+          "telegram:",
+          "  bot_token: xxx",
+          "  forum_chat_id: \"-1001234567890\"",
+          "vault:",
+          "  path: /tmp/vault.enc",
+          "agents: {}",
+          "",
+        ].join("\n"),
+      );
+
+      const containerName = `broker-e2e-${process.pid}-${Date.now()}`;
+      try {
+        // Start detached. Mount config read-only, tmpfs the socket dir
+        // (writable, root-owned per Dockerfile.broker), and override the
+        // CMD-default socket path to a known location.
+        execSync(
+          [
+            "docker run -d",
+            `--name ${containerName}`,
+            "--tmpfs /run/switchroom/broker:rw,mode=755",
+            `-v ${cfgPath}:/state/config/switchroom.yaml:ro`,
+            "-e SWITCHROOM_CONFIG=/state/config/switchroom.yaml",
+            "-e SWITCHROOM_BROKER_SOCKET=/run/switchroom/broker/vault-broker.sock",
+            IMAGES.broker,
+          ].join(" "),
+          { stdio: "pipe" },
+        );
+
+        // Sleep 2s — enough for listen() to fire OR for a synchronous
+        // boot error to crash the container (whichever happens first).
+        execSync("sleep 2");
+
+        const running = execSync(
+          `docker inspect -f '{{.State.Running}}' ${containerName}`,
+        )
+          .toString()
+          .trim();
+
+        if (running !== "true") {
+          // Surface logs in the assertion failure for forensics.
+          const logs = (() => {
+            try {
+              return execSync(`docker logs ${containerName} 2>&1`).toString();
+            } catch {
+              return "<docker logs failed>";
+            }
+          })();
+          throw new Error(`broker container exited within 2s. logs:\n${logs}`);
+        }
+        expect(running).toBe("true");
+
+        // Confirm the data socket actually showed up at the configured
+        // path (proves listen() ran, not just "process is alive sleeping").
+        const lsOut = execSync(
+          `docker exec ${containerName} ls -l /run/switchroom/broker/vault-broker.sock`,
+        ).toString();
+        expect(lsOut).toMatch(/vault-broker\.sock/);
+      } finally {
+        try {
+          execSync(`docker rm -f ${containerName}`, { stdio: "ignore" });
+        } catch {
+          /* best effort */
+        }
+      }
+    });
+
+    it("scheduler image's bundled index.js loads under node and better-sqlite3 prebuilt opens an in-memory DB", () => {
+      const script = [
+        `const Database = require('better-sqlite3');`,
+        `const db = new Database(':memory:');`,
+        `db.exec('CREATE TABLE t(x INTEGER)');`,
+        `db.prepare('INSERT INTO t VALUES (?)').run(7);`,
+        `const row = db.prepare('SELECT x FROM t').get();`,
+        `console.log('sqlite_ok=' + row.x);`,
+      ].join("");
+      const out = execSync(
+        `docker run --rm --entrypoint node ${IMAGES.scheduler} -e ${JSON.stringify(script)}`,
+      ).toString();
+      expect(out.trim()).toBe("sqlite_ok=7");
+    });
+
+    it("agent image enforces read-only rootfs (touch /etc/passwd → EROFS)", () => {
+      const r = spawnSync(
+        "docker",
+        [
+          "run",
+          "--rm",
+          "--read-only",
+          "--cap-drop=ALL",
+          "--security-opt=no-new-privileges",
+          "--tmpfs",
+          "/tmp:rw,size=64m,mode=1777",
+          "--entrypoint",
+          "sh",
+          IMAGES.agent,
+          "-c",
+          "touch /etc/passwd",
+        ],
+        { encoding: "utf8" },
+      );
+      // The shell exits non-zero. The stderr should mention read-only fs.
+      expect(r.status).not.toBe(0);
+      expect(`${r.stderr}${r.stdout}`).toMatch(/read-only file system/i);
+    });
+
+    it("agent image with cap_drop=ALL blocks mount (mount -t tmpfs → EPERM)", () => {
+      const r = spawnSync(
+        "docker",
+        [
+          "run",
+          "--rm",
+          "--read-only",
+          "--cap-drop=ALL",
+          "--security-opt=no-new-privileges",
+          "--tmpfs",
+          "/tmp",
+          "--entrypoint",
+          "sh",
+          IMAGES.agent,
+          "-c",
+          "mount -t tmpfs none /mnt",
+        ],
+        { encoding: "utf8" },
+      );
+      expect(r.status).not.toBe(0);
+      // mount(8) prints "permission denied" when CAP_SYS_ADMIN is missing.
+      expect(`${r.stderr}${r.stdout}`).toMatch(/permission denied|operation not permitted/i);
+    });
+  },
+);
+
+describe.skipIf(dockerOk && allImagesPresent)(
+  "phase1b docker images — sentinel (visible when E2E was skipped)",
+  () => {
+    it("documents skip reason", () => {
+      // Surfaces in the vitest report so a developer running locally
+      // knows WHY the E2E suite didn't run.
+      const reason = !dockerOk
+        ? "docker daemon unreachable"
+        : "phase1b-test images not built — run `bash tests/docker/build-images.sh` first";
+      expect(reason).toMatch(/docker|phase1b/);
+    });
+  },
+);

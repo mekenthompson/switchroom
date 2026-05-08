@@ -32,7 +32,12 @@ RUN mkdir -p /state/vault
 RUN install -d -m 0755 /run/switchroom/broker
 
 # Broker runs as root by default (compose may pin user:"0:0" explicitly).
+# Phase 1b: copy the bundled broker server. scripts/build.mjs emits
+# dist/vault/broker/server.js with native deps marked external; the
+# broker has no native deps so no in-image npm install is required.
+COPY dist/vault/broker/server.js /opt/switchroom/dist/vault/broker/server.js
+
 USER 0:0
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "/opt/switchroom/dist/vault/broker/server.js"]
+CMD ["bun", "/opt/switchroom/dist/vault/broker/server.js"]

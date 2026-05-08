@@ -63,7 +63,10 @@ export interface UpDeps {
    * Bring up the docker fleet (compose generate + compose up). Default
    * shells out to `docker compose up -d`. Tests inject a stub.
    */
-  startDockerFleet?: (config: SwitchroomConfig) => Promise<void>;
+  startDockerFleet?: (
+    config: SwitchroomConfig,
+    options: { buildLocal?: boolean; buildContext?: string },
+  ) => Promise<void>;
   /**
    * Install + start systemd units. Default delegates to
    * `installAllUnits` + `agent start all` semantics. Tests inject.
@@ -75,6 +78,14 @@ export interface UpDeps {
 
 export interface UpOptions {
   legacy?: boolean;
+  /**
+   * Dev-only: emit `build:` blocks instead of GHCR `image:` refs so
+   * `docker compose up --build` rebuilds from the local Dockerfiles.
+   * Ignored on the systemd path. Requires `buildContext` (the absolute
+   * path to the switchroom checkout containing `docker/Dockerfile.*`).
+   */
+  buildLocal?: boolean;
+  buildContext?: string;
 }
 
 export interface UpResult {
@@ -82,14 +93,21 @@ export interface UpResult {
   runtime: "docker" | "host";
 }
 
-async function defaultStartDockerFleet(config: SwitchroomConfig): Promise<void> {
+async function defaultStartDockerFleet(
+  config: SwitchroomConfig,
+  options: { buildLocal?: boolean; buildContext?: string } = {},
+): Promise<void> {
   const { generateCompose } = await import("../agents/compose.js");
   const composePath = join(homedir(), ".switchroom", "compose", "docker-compose.yml");
   const project = "switchroom";
-  const content = generateCompose({ config });
+  const content = generateCompose({
+    config,
+    buildMode: options.buildLocal ? "local" : "pull",
+    buildContext: options.buildContext,
+  });
   await mkdir(dirname(composePath), { recursive: true });
   await writeFile(composePath, content, { encoding: "utf8", mode: 0o600 });
-  const r = await defaultRunCommand("docker", [
+  const upArgs = [
     "compose",
     "-p",
     project,
@@ -97,7 +115,9 @@ async function defaultStartDockerFleet(config: SwitchroomConfig): Promise<void> 
     composePath,
     "up",
     "-d",
-  ]);
+    ...(options.buildLocal ? ["--build"] : []),
+  ];
+  const r = await defaultRunCommand("docker", upArgs);
   if (r.exitCode !== 0) {
     throw new Error(
       `docker compose up failed (exit ${r.exitCode}): ${r.stderr.trim() || r.stdout.trim()}`,
@@ -146,8 +166,12 @@ export async function runUp(
   const useDocker = platform === "linux" && !options.legacy;
 
   if (useDocker) {
-    writeOut(chalk.bold("Bringing up Switchroom (docker runtime)...\n"));
-    await startDocker(config);
+    const modeNote = options.buildLocal ? " [build-local]" : "";
+    writeOut(chalk.bold(`Bringing up Switchroom (docker runtime)${modeNote}...\n`));
+    await startDocker(config, {
+      buildLocal: options.buildLocal,
+      buildContext: options.buildContext,
+    });
     return { runtime: "docker" };
   }
 
@@ -166,11 +190,21 @@ export function registerUpCommand(program: Command): void {
       "--legacy",
       "Force the legacy systemd runtime instead of Docker (Linux-only override).",
     )
+    .option(
+      "--build-local [context]",
+      "Dev-only: build images locally from in-tree Dockerfiles instead of pulling from GHCR. Optional context path (defaults to cwd).",
+    )
     .action(
-      withConfigError(async (opts: { legacy?: boolean }) => {
+      withConfigError(async (opts: { legacy?: boolean; buildLocal?: boolean | string }) => {
         const config = getConfig(program);
+        const buildLocal = !!opts.buildLocal;
+        const buildContext = typeof opts.buildLocal === "string" ? opts.buildLocal : process.cwd();
         try {
-          await runUp(config, { legacy: !!opts.legacy });
+          await runUp(config, {
+            legacy: !!opts.legacy,
+            buildLocal,
+            buildContext: buildLocal ? buildContext : undefined,
+          });
         } catch (err) {
           console.error(chalk.red(`switchroom up failed: ${(err as Error).message}`));
           process.exit(1);

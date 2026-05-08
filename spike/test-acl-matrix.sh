@@ -171,6 +171,28 @@ run_env() {
       record "$env_label" "hostile-cross-mount" 99
     fi
 
+    echo "### >>> SAME-UID HOSTILE TWIN TEST (operator UID-collision misconfiguration)"
+    # Spawn evil-twin (uid 10001, same as alice) and let it attack
+    # alice's dir. Expected outcome: attacks SUCCEED — proving the
+    # path-derived identity model assumes uid uniqueness across
+    # services. The doctor check in Phase 1 must enforce this.
+    if docker compose --profile hostile up -d agent-evil-twin 2>&1; then
+      sleep 1
+      echo "### evil-twin fs view (uid 10001 == alice's uid, can read alice's dir)"
+      docker compose exec -T agent-evil-twin ls -la /run/switchroom/broker/alice 2>&1 || true
+      echo "### evil-twin attack run (expects every attack to SUCCEED)"
+      docker compose exec -T agent-evil-twin node /opt/agent/agent-client.mjs 2>&1
+      local twin_rc=$?
+      echo "### evil-twin client exit=$twin_rc (0=PASS — attacks succeeded as documented model assumption)"
+      record "$env_label" "same-uid-twin-attacks-succeed" "$twin_rc"
+      # Tear down before broker-restart so the unlink/replace damage is healed.
+      docker compose --profile hostile stop agent-evil-twin 2>&1 | tail -5 || true
+      docker compose --profile hostile rm -f agent-evil-twin 2>&1 | tail -5 || true
+    else
+      echo "### evil-twin up failed"
+      record "$env_label" "same-uid-twin-attacks-succeed" 99
+    fi
+
     echo "### >>> BROKER RESTART PERSISTENCE TEST"
     # The findings doc claims chown/chmod persist across broker restart
     # because they're applied to the named-volume contents. Exercise it:
@@ -201,7 +223,7 @@ run_env() {
     echo "### compose down -v"
     docker compose --profile hostile down -v --remove-orphans 2>&1 || true
 
-    echo "### SUMMARY env=$env_label alice_rc=$alice_rc bob_rc=$bob_rc tmux_rc=$tmux_rc hostile_rc=${hostile_rc:-99} restart_rc=$restart_rc"
+    echo "### SUMMARY env=$env_label alice_rc=$alice_rc bob_rc=$bob_rc tmux_rc=$tmux_rc hostile_rc=${hostile_rc:-99} twin_rc=${twin_rc:-99} restart_rc=$restart_rc"
   } 2>&1 | tee "$out"
   echo "log: $out"
 }

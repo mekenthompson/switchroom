@@ -2,7 +2,15 @@
 
 ## Summary
 
-The path-derived per-agent socket identity model holds on Linux rootful AND rootless Docker 29.4.1 with no surprises. Allow-paths return allow, deny-paths return deny, and a hostile container that cross-mounts another agent's socket dir is stopped at `connect()`, `bind()`, `unlink()`, AND `open(O_CREAT)` by ordinary POSIX file-mode bits — the broker never sees the cross-agent attempt and a hostile agent can neither replace nor squat the other agent's socket. tmux send-keys C-c under tini reaches a supervised child cleanly. The broker's chown/chmod state on the per-agent dirs persists across broker restart (they live on the named volume, not in container-local state), so re-applying perms on every broker startup is safely idempotent. **Phase 0 is PASS on both Linux engine modes (20/20 tests)**; Mac / Windows are PENDING on host availability, not design.
+The path-derived per-agent socket identity model holds on Linux rootful AND rootless Docker 29.4.1 with no surprises **provided the operator-disjoint UID assumption holds** (see "Model assumption" below). Allow-paths return allow, deny-paths return deny, and a hostile container that cross-mounts another agent's socket dir is stopped at `connect()`, `bind()`, `unlink()`, AND `open(O_CREAT)` by ordinary POSIX file-mode bits — the broker never sees the cross-agent attempt and a hostile agent can neither replace nor squat the other agent's socket. tmux send-keys C-c under tini reaches a supervised child cleanly. The broker's chown/chmod state on the per-agent dirs persists across broker restart (they live on the named volume, not in container-local state), so re-applying perms on every broker startup is safely idempotent. **Phase 0 is PASS on both Linux engine modes (22/22 tests, including the same-UID-twin assumption row)**; Mac / Windows are PENDING on host availability, not design.
+
+## Model assumption: operator-disjoint UIDs (load-bearing)
+
+The path-derived identity model rests on a single unstated assumption that the spike makes explicit: **the compose generator MUST never assign the same UID to two services**. fs perms can distinguish "uid 10001" from "uid 10002", but they cannot distinguish "the legitimate uid 10001 (alice)" from "a hostile container the operator misconfigured to also run as uid 10001". With UID collision, alice's `0700`-mode dir is wide open to the colliding container — `connect()`, `bind()`, `unlink()`, and replace all succeed.
+
+The new `agent-evil-twin` row in the spike (compose `hostile` profile) exercises exactly this: a hostile container running `user: "10001:10001"` cross-mounts alice's socket dir and runs `agent-client.mjs` with `SAME_UID_TWIN=1`. The test inverts pass criteria: every attack is **expected to succeed**, and the row is green when they do. On both rootful and rootless this row is PASS — proving the assumption is load-bearing.
+
+**Mitigation (Phase 1 backlog item):** `switchroom doctor` must enforce UID uniqueness across the fleet's compose-generated services. Without that check, an operator typo silently collapses the security boundary. The fs-perm boundary alone cannot cover this case — it is a generator-level invariant, not a runtime defence. This finding does NOT undermine the model; it identifies the precise invariant the model depends on, and points at the Phase 1 deliverable that must enforce it.
 
 ## What was validated, in detail
 
@@ -55,8 +63,13 @@ The rootless row was the highest-risk in the matrix because userns remapping is 
 
 - **Docker Desktop Mac / Windows.** No host available locally. virtiofs (Mac) historically has been the source of mode-bit munging on bind-mounted host paths — but the spike uses *named volumes*, not bind mounts, so the in-VM ext4 fs holds the inodes and the host fs never sees them. The driver script now hard-asserts `drwx------` on the per-agent dir from inside each agent container, so a Mac virtiofs UID-collapse would surface as a `perms-alice` / `perms-bob` FAIL in the final tally rather than silently green. ~85% confidence Mac passes; Windows-WSL2 piggybacks on the same in-VM filesystem and should be equivalent. No paper finding substitutes for a real run.
 
+## Phase 1 backlog (carried out of Phase 0)
+
+- **TODO (security, load-bearing): `switchroom doctor` must enforce UID uniqueness across all services in the generated compose file.** A duplicate `user: "<uid>:<gid>"` between any two services collapses the path-derived identity boundary (see "Model assumption" above). Doctor should fail fleet startup with a precise error pointing at the colliding services. Block on Phase 1 RFC.
+- The `--check cross-agent-mounts` doctor flag from the original RFC remains valuable as defence-in-depth, but the UID-uniqueness check is strictly more important — without it the cross-mount check is an inadequate barrier.
+
 ## Phase 0 verdict
 
-PASS on both Linux rows currently runnable (rootful + rootless, 20/20 tests). Two PENDING rows (Mac, Windows) require operator-driven host access; methodology is locked in `phase0-peercred-matrix.md` and the driver hard-asserts dir mode/owner so silent failures on virtiofs / 9p will surface as red rows in the final tally.
+PASS on both Linux rows currently runnable (rootful + rootless, **22/22 tests** — adds one row each for same-UID-twin assumption). Two PENDING rows (Mac, Windows) require operator-driven host access; methodology is locked in `phase0-peercred-matrix.md` and the driver hard-asserts dir mode/owner so silent failures on virtiofs / 9p will surface as red rows in the final tally.
 
-**No Phase 0 abort condition is triggered.** Recommendation: unblock the Mac/Win rows in parallel with Phase 1 design.
+**No Phase 0 abort condition is triggered.** Recommendation: unblock the Mac/Win rows in parallel with Phase 1 design, and add the UID-uniqueness doctor check as a Phase 1 blocker.

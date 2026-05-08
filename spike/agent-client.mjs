@@ -25,6 +25,16 @@ const OTHER = process.env.OTHER_AGENT || (SELF === "alice" ? "bob" : "alice");
 // In that case cross-mount-attempt is a real fs-perms test and ENOENT
 // is a FAIL (the other dir is mounted; we expected EACCES, not "not mounted").
 const HOSTILE = process.env.HOSTILE === "1";
+// SAME_UID_TWIN: this container has been assigned (by operator
+// misconfiguration in compose) the SAME uid as the victim agent. The
+// path-derived identity model assumes uid uniqueness across services;
+// with that assumption violated, fs perms cannot tell us apart from
+// the legitimate agent. Every attack against the victim's dir is
+// expected to SUCCEED here. We invert each test's pass criterion so
+// the row exits 0 only when the attacks succeed — proving the model
+// assumption and motivating the doctor-level UID-uniqueness check
+// (Phase 1 backlog).
+const SAME_UID_TWIN = process.env.SAME_UID_TWIN === "1";
 
 const SELF_SOCK = `/run/switchroom/broker/${SELF}/sock`;
 const OTHER_SOCK = `/run/switchroom/broker/${OTHER}/sock`;
@@ -63,7 +73,66 @@ function inspect(p) {
   }
 }
 
-const out = { agent: SELF, other: OTHER, hostile: HOSTILE, uid: process.getuid(), gid: process.getgid(), tests: [] };
+const out = { agent: SELF, other: OTHER, hostile: HOSTILE, sameUidTwin: SAME_UID_TWIN, uid: process.getuid(), gid: process.getgid(), tests: [] };
+
+// SAME_UID_TWIN short-circuit: we ONLY run attacks against OTHER's
+// dir/socket and we EXPECT each one to succeed. The point of this row
+// is to document the model's assumption: path-derived identity with
+// fs-perm enforcement collapses if two services share a uid. We exit 0
+// when the attacks succeed (matching the documented expectation), so
+// this row is a positive assertion about the model's failure mode, not
+// a green-tee on a real defence.
+if (SAME_UID_TWIN) {
+  console.log(`# SAME_UID_TWIN mode — uid=${process.getuid()} colliding with victim '${OTHER}'`);
+  console.log(`# expected outcome: ALL attacks succeed; this proves the model's uid-uniqueness assumption`);
+  console.log(`# victim dir: ${OTHER_DIR} -> ${JSON.stringify(inspect(OTHER_DIR))}`);
+  console.log(`# victim sock: ${OTHER_SOCK} -> ${JSON.stringify(inspect(OTHER_SOCK))}`);
+
+  // a. connect() to victim's broker socket and attempt a privileged read.
+  const connectResult = await rpc(OTHER_SOCK, { op: "read", key: `${OTHER}-secret` });
+  // We expect the connect to succeed at the kernel layer — the broker
+  // resolves identity from PATH, not uid, so it will respond as if we
+  // were the legitimate victim (path-derived identity is the bug under
+  // this threat model). connect-pass means kind === "ok" with ok:true.
+  const connectPass = connectResult.kind === "ok" && connectResult.resp?.ok === true;
+  out.tests.push({ name: "same-uid-connect-as-victim", expect: "attack-succeeds", result: connectResult, pass: connectPass });
+  console.log(`# test same-uid-connect-as-victim: pass=${connectPass} (attack-succeeds expected) result=${JSON.stringify(connectResult)}`);
+
+  // b. bind() a fresh socket inside victim's dir.
+  const intruderPath = path.join(OTHER_DIR, "intruder-twin.sock");
+  const bindResult = await new Promise((resolve) => {
+    const srv = net.createServer(() => {});
+    srv.on("error", (e) => resolve({ kind: "error", code: e.code, message: e.message }));
+    try {
+      srv.listen(intruderPath, () => {
+        try { srv.close(); } catch {}
+        try { fs.unlinkSync(intruderPath); } catch {}
+        resolve({ kind: "ok-bound", path: intruderPath });
+      });
+    } catch (e) {
+      resolve({ kind: "error", code: e.code, message: e.message });
+    }
+  });
+  const bindPass = bindResult.kind === "ok-bound";
+  out.tests.push({ name: "same-uid-bind-into-victim-dir", expect: "attack-succeeds", result: bindResult, pass: bindPass });
+  console.log(`# test same-uid-bind-into-victim-dir: pass=${bindPass} (attack-succeeds expected) result=${JSON.stringify(bindResult)}`);
+
+  // c. unlink() the victim's broker socket.
+  let unlinkResult;
+  try {
+    fs.unlinkSync(OTHER_SOCK);
+    unlinkResult = { kind: "ok-unlinked" };
+  } catch (e) {
+    unlinkResult = { kind: "error", code: e.code, message: e.message };
+  }
+  const unlinkPass = unlinkResult.kind === "ok-unlinked";
+  out.tests.push({ name: "same-uid-unlink-victim-sock", expect: "attack-succeeds", result: unlinkResult, pass: unlinkPass });
+  console.log(`# test same-uid-unlink-victim-sock: pass=${unlinkPass} (attack-succeeds expected) result=${JSON.stringify(unlinkResult)}`);
+
+  const allPass = out.tests.every((t) => t.pass);
+  console.log(JSON.stringify({ summary: { agent: SELF, mode: "same-uid-twin", allPass, count: out.tests.length, passed: out.tests.filter(x=>x.pass).length, note: "row asserts model assumption: uid-uniqueness MUST hold; doctor enforces it in Phase 1" }, tests: out.tests }, null, 2));
+  process.exit(allPass ? 0 : 1);
+}
 
 console.log(`# agent-client running as ${SELF} (uid=${process.getuid()})`);
 console.log(`# self sock dir: ${path.dirname(SELF_SOCK)} -> ${JSON.stringify(inspect(path.dirname(SELF_SOCK)))}`);

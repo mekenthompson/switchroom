@@ -15,6 +15,13 @@ import path from "node:path";
 const ROOT = "/run/switchroom/broker";
 const AGENTS = (process.env.AGENTS || "alice,bob").split(",").map((s) => s.trim()).filter(Boolean);
 
+// Tighten umask broker-process-wide before any inode is created. Any
+// socket inode (created by net.Server.listen) and any directory we
+// create will be born at a maximally-restricted mode; the explicit
+// chmod calls then widen *only* to the intended mode. This closes the
+// mkdir→chmod race window flagged by the adversarial review.
+process.umask(0o077);
+
 // Stub secret store. Each secret is owned by exactly one agent.
 // ACL: agent X may read keys "<X>-*"; everything else is denied.
 const SECRETS = {
@@ -62,14 +69,22 @@ function lookupUid(name) {
 
 function ensureSocketDir(agent) {
   const dir = path.join(ROOT, agent);
-  fs.mkdirSync(dir, { recursive: true });
   const uid = lookupUid(agent);
-  // Per-agent dir is chowned to that agent's UID, mode 0700.
-  // The broker (root) can still write the socket inside it; the
-  // bind-mount of just this subdir into agent X's container means
-  // only agent X can `connect()` to the socket from inside the fleet.
-  fs.chownSync(dir, uid, uid);
+  // Create the dir already at mode 0700 so there is no umask-derived
+  // window (typically 0755) between mkdir and a follow-up chmod where
+  // a racing peer could open/connect/squat. mkdirSync's `mode` option
+  // is applied atomically at creation. We then chown — chown does not
+  // widen permissions, so the dir is never world-readable.
+  // recursive:true is fine here even with mode: parent dirs that
+  // already exist are not re-permed; only the final segment is created
+  // with this mode (Node ≥10 semantics).
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Belt-and-braces: if the dir already existed (e.g. across broker
+  // restart on a persistent named volume) mkdirSync won't re-apply the
+  // mode — re-assert it explicitly. chmod widens nothing if it was
+  // already 0700; if it was wider, this narrows it.
   fs.chmodSync(dir, 0o700);
+  fs.chownSync(dir, uid, uid);
   return dir;
 }
 
@@ -112,9 +127,15 @@ function listenForAgent(agent) {
   });
 
   server.listen(sockPath, () => {
-    // Make the socket inode itself accessible only to the owning agent.
-    fs.chmodSync(sockPath, 0o660);
+    // Order matters: chown FIRST (transferring ownership to the agent
+    // uid while the inode is still at the umask-tight 0700), THEN
+    // chmod to the intended 0660. With process umask 0o077 set at
+    // startup, the socket inode is born ≤0700 owned by root — so at
+    // every instant before the final chmod, no non-root peer can use
+    // it. After the final chmod the inode is 0660 owned by the agent
+    // uid, and the parent dir's 0700+agent-uid still gates access.
     fs.chownSync(sockPath, lookupUid(agent), lookupUid(agent));
+    fs.chmodSync(sockPath, 0o660);
     process.stdout.write(`broker: listening for ${agent} on ${sockPath} (bound=${server.address()})\n`);
   });
   return server;

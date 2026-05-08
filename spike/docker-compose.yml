@@ -70,6 +70,35 @@ services:
       - broker
     profiles: ["hostile"]    # only spawned when explicitly requested
 
+  # Same-UID hostile twin — the realistic operator-fat-finger threat:
+  # an attacker container is assigned `user: "10001:10001"`, the SAME
+  # uid as alice. The path-derived identity model assumes the compose
+  # generator never collides UIDs across services. With this collision
+  # in place, fs perms cannot distinguish the two — alice's dir is
+  # mode 0700 owned by uid 10001, and this container ALSO runs as
+  # uid 10001, so it can connect / bind / unlink / replace freely.
+  # The test for this row records "expected: attack succeeds (model
+  # assumption)" and surfaces the result as documentation, not a
+  # security regression. The mitigation is `switchroom doctor` UID
+  # uniqueness enforcement (Phase 1 backlog).
+  agent-evil-twin:
+    image: phase0-agent
+    container_name: phase0-agent-evil-twin
+    user: "10001:10001"   # SAME UID as alice — operator misconfiguration
+    environment:
+      AGENT_NAME: evil-twin   # claims its own identity, but uid==alice
+      OTHER_AGENT: alice      # the victim it attacks
+      HOSTILE: "1"
+      SAME_UID_TWIN: "1"      # client mode: expect attacks to SUCCEED
+    volumes:
+      # Cross-mounts BOTH dirs, like agent-bob-misconfigured, but with
+      # alice's UID — so fs perms do NOT block.
+      - alice-sock:/run/switchroom/broker/alice:rw
+      - bob-sock:/run/switchroom/broker/bob:rw
+    depends_on:
+      - broker
+    profiles: ["hostile"]
+
 volumes:
   alice-sock:
   bob-sock:

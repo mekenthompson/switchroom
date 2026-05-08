@@ -16,6 +16,7 @@ import type { FleetMember, FleetStatus } from './fleet-state.js'
 import { cap } from './fleet-state.js'
 import type { ProgressCardState, RenderOptions, TaskNum } from './progress-card.js'
 import { escapeHtml, formatDuration } from './card-format.js'
+import { mcpDisplayName, toolFallbackLabel } from './tool-labels.js'
 
 const PARENT_BULLET_CAP = 8
 const FLEET_ROW_CAP = 5
@@ -159,12 +160,20 @@ function renderParentZone(state: ProgressCardState): string {
   const lastIdx = visible.length - 1
   for (let i = 0; i < visible.length; i++) {
     const it = visible[i]
-    const tool = escapeHtml(it.tool || '')
-    const label = it.label ? ` <code>${escapeHtml(truncate(it.label, 80))}</code>` : ''
-    if (inFlight && i === lastIdx) {
-      lines.push(`◉ <b>${tool}</b>${label}`)
+    let text: string
+    if (it.label) {
+      text = escapeHtml(truncate(it.label, 80))
     } else {
-      lines.push(`● ${tool}${label}`)
+      const tool = it.tool || ''
+      const fallback = tool.startsWith('mcp__')
+        ? mcpDisplayName(tool) || toolFallbackLabel(tool)
+        : toolFallbackLabel(tool)
+      text = escapeHtml(fallback)
+    }
+    if (inFlight && i === lastIdx) {
+      lines.push(`◉ ${text}`)
+    } else {
+      lines.push(`● ${text}`)
     }
   }
   return lines.join('\n')

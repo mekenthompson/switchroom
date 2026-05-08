@@ -315,6 +315,53 @@ export function toolLabel(
  * labels, and otherwise capitalise the first letter and keep the rest
  * verbatim so unknown servers still render cleanly.
  */
+/**
+ * Public alias for `mcpBaseLabel` — the progress card uses this when an
+ * `mcp__*` tool fires with no human label so the row can still render
+ * something readable (e.g. "Telegram: reply") instead of the raw tool
+ * name.
+ */
+export function mcpDisplayName(tool: string): string {
+  return mcpBaseLabel(tool)
+}
+
+/**
+ * Human-readable fallback for a bare tool name when no label is
+ * available (TodoWrite, Task housekeeping, etc.). Returns the lowercased
+ * raw tool name when the tool isn't in the map.
+ */
+const TOOL_FALLBACK_LABELS: Record<string, string> = {
+  Bash: 'running command',
+  BashOutput: 'running command',
+  Edit: 'editing file',
+  Write: 'editing file',
+  NotebookEdit: 'editing file',
+  Read: 'reading file',
+  Grep: 'searching',
+  Glob: 'searching',
+  WebFetch: 'fetching',
+  WebSearch: 'searching the web',
+  Task: 'delegating',
+  Agent: 'delegating',
+  TodoWrite: 'updating tasks',
+  TaskCreate: 'updating tasks',
+  TaskUpdate: 'updating tasks',
+  TaskList: 'updating tasks',
+  TaskGet: 'updating tasks',
+  TaskStop: 'updating tasks',
+  TaskOutput: 'updating tasks',
+  Skill: 'running skill',
+  SlashCommand: 'running command',
+  KillShell: 'running command',
+  ToolSearch: 'searching',
+}
+
+export function toolFallbackLabel(tool: string): string {
+  if (!tool) return ''
+  if (TOOL_FALLBACK_LABELS[tool]) return TOOL_FALLBACK_LABELS[tool]
+  return tool.toLowerCase()
+}
+
 function mcpBaseLabel(tool: string): string {
   if (!tool.startsWith('mcp__')) return ''
   const parts = tool.slice('mcp__'.length).split('__')

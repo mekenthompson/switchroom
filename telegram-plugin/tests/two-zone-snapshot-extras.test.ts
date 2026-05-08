@@ -100,13 +100,16 @@ describe('PR-C2: two-zone card snapshot extras', () => {
     // 12 items, cap 8 → 4 hidden.
     expect(out).toContain('(+4 earlier)')
     // The visible bullets are the LAST 8 (slice(-8) → f4..f11).
-    expect(out).toContain('<code>f11.ts</code>')
-    expect(out).toContain('<code>f4.ts</code>')
-    // f3 (the latest hidden) must not appear as a bullet code block.
-    expect(out).not.toContain('<code>f3.ts</code>')
+    // f11 is the in-flight bullet (stage=run, last index) → ◉.
+    expect(out).toContain('◉ f11.ts')
+    expect(out).toContain('● f4.ts')
+    // f3 (the latest hidden) must not appear as a bullet.
+    expect(out).not.toContain('f3.ts')
+    // No <code> wrapping around row labels anymore.
+    expect(out).not.toContain('<code>f11.ts</code>')
   })
 
-  it('parent zone: in-flight last bullet uses ◉ <b>tool</b>; earlier use ● tool', () => {
+  it('parent zone: in-flight last bullet uses ◉ <plain>; earlier use ● <plain>', () => {
     const items = [
       { tool: 'Read', label: 'a.ts' },
       { tool: 'Read', label: 'b.ts' },
@@ -117,13 +120,16 @@ describe('PR-C2: two-zone card snapshot extras', () => {
       fleet: new Map(),
       now: NOW,
     })
-    // last item active
-    expect(out).toContain('◉ <b>Bash</b> <code>ls</code>')
-    // earlier items plain
-    expect(out).toContain('● Read <code>a.ts</code>')
-    expect(out).toContain('● Read <code>b.ts</code>')
-    // last item is NOT plain
-    expect(out).not.toContain('● Bash <code>ls</code>')
+    // last item active — plain text, no <b>, no <code>, no tool prefix
+    expect(out).toContain('◉ ls')
+    expect(out).not.toContain('◉ <b>')
+    // earlier items — plain text only, no tool prefix
+    expect(out).toContain('● a.ts')
+    expect(out).toContain('● b.ts')
+    expect(out).not.toContain('Read <code>')
+    // No <code> wrapping anywhere on parent rows.
+    expect(out).not.toContain('<code>ls</code>')
+    expect(out).not.toContain('<code>a.ts</code>')
   })
 
   it('parent zone: when stage=done all bullets render as ● (no active marker)', () => {
@@ -136,8 +142,46 @@ describe('PR-C2: two-zone card snapshot extras', () => {
       fleet: new Map(),
       now: NOW,
     })
-    expect(out).toContain('● Read <code>a.ts</code>')
-    expect(out).toContain('● Bash <code>ls</code>')
+    expect(out).toContain('● a.ts')
+    expect(out).toContain('● ls')
     expect(out).not.toContain('◉')
+  })
+
+  it('parent zone: row with no label falls back to humanised tool name', () => {
+    const items = [
+      { tool: 'TodoWrite', label: '' },
+      { tool: 'Edit', label: '' },
+    ]
+    const out = renderTwoZoneCard({
+      state: st({ stage: 'run', turnStartedAt: NOW - 5000, items }),
+      fleet: new Map(),
+      now: NOW,
+    })
+    expect(out).toContain('● updating tasks')
+    expect(out).toContain('◉ editing file')
+  })
+
+  it('parent zone: row with no label on mcp tool uses mcpDisplayName', () => {
+    const items = [
+      { tool: 'mcp__switchroom-telegram__reply', label: '' },
+    ]
+    const out = renderTwoZoneCard({
+      state: st({ stage: 'run', turnStartedAt: NOW - 5000, items }),
+      fleet: new Map(),
+      now: NOW,
+    })
+    expect(out).toContain('◉ Telegram: reply')
+  })
+
+  it('parent zone: HTML in label is escaped (no raw <code> styling)', () => {
+    const items = [
+      { tool: 'Bash', label: 'echo <hi>' },
+    ]
+    const out = renderTwoZoneCard({
+      state: st({ stage: 'done', turnStartedAt: NOW - 5000, items }),
+      fleet: new Map(),
+      now: NOW,
+    })
+    expect(out).toContain('● echo &lt;hi&gt;')
   })
 })

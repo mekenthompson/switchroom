@@ -1,43 +1,29 @@
 # Changelog
 
-## v0.7.0 — BREAKING: lifecycle CLI consolidated to setup/apply
-
-The lifecycle surface now collapses to two verbs: `switchroom setup`
-(interactive wizard, run once) and `switchroom apply` (idempotent
-scaffold + compose-file generate, run any time switchroom.yaml changes).
+## v0.7.0 — Docker-only (BREAKING)
 
 **Breaking changes:**
+- `switchroom up`, `switchroom init` now deprecation aliases for `switchroom apply`. Removed in v0.8.
+- `switchroom update` replaced with deprecation shim that prints the docker upgrade recipe and exits 1.
+- `switchroom systemd` verb tree removed entirely.
+- `--legacy` flag on `switchroom up` removed; switchroom is docker-only on Linux now.
+- Forum-mode prompts removed from `switchroom setup`; default is per-agent DM bots.
 
-- `switchroom up` is removed. The thin shim that remains warns and
-  forwards to `switchroom apply`; slated for full removal in v0.8.
-- `switchroom init` is removed. Same shim treatment as `up`.
-- `switchroom update` is removed. The shim accepts and silently swallows
-  the legacy flags (`--force`, `--check`, `--no-restart`, `--resume`,
-  `--phase`) so a v0.6 → v0.7 in-flight self-reexec parses; every other
-  invocation prints the upgrade hint and exits 1.
-- `switchroom apply` does NOT shell out to `docker`. Operators run the
-  bring-up themselves so the CLI never has to second-guess docker
-  daemon, rootless mode, or sudo policy.
-- The interactive wizard no longer prompts for a Telegram forum group.
-  Per-agent bot DM-only is the default; the still-required
-  `telegram.forum_chat_id` schema field gets a sentinel "0" matching
-  the existing user-id sentinel pattern. Existing configs with a real
-  `forum_chat_id` keep working.
+**Adds:**
+- Static CLI binary distribution via GitHub releases + `install.sh`.
+- GHCR image publishing on tag push.
+- Compose generator includes top-level `name: switchroom` and absolute HOME paths.
+- Vault preflight + compose-v2 detection in `apply`.
+- UID alignment for bind-mounted agent state dirs (fail-hard by default; `--allow-unaligned` opt-out).
 
-**Migration (v0.6 → v0.7):**
+**Removes:**
+- `bin/bridge-watchdog.sh` — Docker `restart: unless-stopped` + per-service healthchecks supersede.
+- `src/agents/systemd.ts` and the entire systemd unit-template + reconcile machinery.
+- 5 unit-targeted test files; 4 watchdog integration tests.
 
-```sh
-cd ~/code/switchroom
-git pull
-bun install
-bun run build
-docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml pull
-switchroom apply
-docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
-```
+**Migration:** see [`docs/operators/migration-v0.7.md`](docs/operators/migration-v0.7.md).
 
-`switchroom update` keeps working through v0.7 as a deprecation shim
-that prints the same hint.
+**Scope:** Linux only. Mac (Docker Desktop) validation tracked as Phase 3.5.
 
 ## v0.6.0 — Docker substrate (Linux), single-host
 

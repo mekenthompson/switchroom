@@ -1,0 +1,104 @@
+# Phase 0 spike topology.
+#
+# Per-agent socket directories are exposed via NAMED VOLUMES, one per
+# agent. The broker mounts the parent dir (so it can chown all
+# subdirs); each agent container ONLY mounts its own subdir.
+#
+# This is the production identity model in miniature.
+
+services:
+  broker:
+    build:
+      context: .
+      dockerfile: Dockerfile.broker
+    image: phase0-broker
+    container_name: phase0-broker
+    # Broker runs as root inside the container so it can chown the
+    # per-agent dirs to the agent UIDs. Production parity.
+    user: "0:0"
+    volumes:
+      - alice-sock:/run/switchroom/broker/alice
+      - bob-sock:/run/switchroom/broker/bob
+
+  agent-alice:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    image: phase0-agent
+    container_name: phase0-agent-alice
+    user: "10001:10001"
+    environment:
+      AGENT_NAME: alice
+      OTHER_AGENT: bob
+    volumes:
+      # Alice ONLY mounts her own socket dir. No view of bob's.
+      - alice-sock:/run/switchroom/broker/alice:rw
+    depends_on:
+      - broker
+
+  agent-bob:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    image: phase0-agent
+    container_name: phase0-agent-bob
+    user: "10002:10002"
+    environment:
+      AGENT_NAME: bob
+      OTHER_AGENT: alice
+    volumes:
+      - bob-sock:/run/switchroom/broker/bob:rw
+    depends_on:
+      - broker
+
+  # Misconfigured agent — mounts BOTH socket dirs. Used to exercise
+  # the cross-mount detection path: even when the misconfiguration
+  # exists in compose, fs permissions on alice's dir (mode 0700,
+  # owned by uid 10001) MUST stop bob (uid 10002) from connecting.
+  agent-bob-misconfigured:
+    image: phase0-agent
+    container_name: phase0-agent-bob-misconfigured
+    user: "10002:10002"
+    environment:
+      AGENT_NAME: bob
+      OTHER_AGENT: alice
+      HOSTILE: "1"
+    volumes:
+      - bob-sock:/run/switchroom/broker/bob:rw
+      - alice-sock:/run/switchroom/broker/alice:rw   # cross-mount, hostile config
+    depends_on:
+      - broker
+    profiles: ["hostile"]    # only spawned when explicitly requested
+
+  # Same-UID hostile twin — the realistic operator-fat-finger threat:
+  # an attacker container is assigned `user: "10001:10001"`, the SAME
+  # uid as alice. The path-derived identity model assumes the compose
+  # generator never collides UIDs across services. With this collision
+  # in place, fs perms cannot distinguish the two — alice's dir is
+  # mode 0700 owned by uid 10001, and this container ALSO runs as
+  # uid 10001, so it can connect / bind / unlink / replace freely.
+  # The test for this row records "expected: attack succeeds (model
+  # assumption)" and surfaces the result as documentation, not a
+  # security regression. The mitigation is `switchroom doctor` UID
+  # uniqueness enforcement (Phase 1 backlog).
+  agent-evil-twin:
+    image: phase0-agent
+    container_name: phase0-agent-evil-twin
+    user: "10001:10001"   # SAME UID as alice — operator misconfiguration
+    environment:
+      AGENT_NAME: evil-twin   # claims its own identity, but uid==alice
+      OTHER_AGENT: alice      # the victim it attacks
+      HOSTILE: "1"
+      SAME_UID_TWIN: "1"      # client mode: expect attacks to SUCCEED
+    volumes:
+      # Cross-mounts BOTH dirs, like agent-bob-misconfigured, but with
+      # alice's UID — so fs perms do NOT block.
+      - alice-sock:/run/switchroom/broker/alice:rw
+      - bob-sock:/run/switchroom/broker/bob:rw
+    depends_on:
+      - broker
+    profiles: ["hostile"]
+
+volumes:
+  alice-sock:
+  bob-sock:

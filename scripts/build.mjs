@@ -157,11 +157,11 @@ execSync(`node ${JSON.stringify(pluginScript)}`, { stdio: "inherit", cwd: root }
 // runtime, not the host that ran `npm run build`.
 const serverEntries = [
   { src: "src/vault/broker/server.ts", out: "dist/vault/broker/server.js" },
-  // NOTE: src/vault/approvals/kernel-server.ts does NOT exist yet — kernel.ts
-  // is a library (requestApproval / recordDecision / etc.). The kernel
-  // image's CMD references /opt/switchroom/dist/vault/approvals/kernel-server.js
-  // and is broken until that entrypoint is written. Tracked in
-  // tests/docker/build-log.txt as a Phase 1b carry-forward.
+  // Phase 1c: kernel-server entrypoint. Closes the Phase 1b carry-forward
+  // ("kernel image's CMD points at a file that doesn't exist"). Same
+  // bundle discipline as the broker — bun:sqlite is bun-runtime-only so
+  // the image runs the bundle under `bun`.
+  { src: "src/vault/approvals/kernel-server.ts", out: "dist/vault/approvals/kernel-server.js" },
   { src: "src/scheduler/index.ts", out: "dist/scheduler/index.js" },
 ];
 for (const entry of serverEntries) {

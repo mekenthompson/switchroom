@@ -38,6 +38,10 @@ PR #796 already landed the positioning shift this RFC implements: switchroom's p
 
 The user-visible change is reach, tiered. Today switchroom installs cleanly on Linux only. After this RFC, the supported install targets for v1.0 are **Linux and Mac** — same product promise on both. Windows-WSL2, Synology, Unraid, and RasPi run on the same architecture and compose file and are expected to work; they just aren't formally validated or release-gated. Operators on those platforms can install and most things will work; what they don't get is a "we tested this and signed it off" stamp. The architecture supports them; the test/release matrix is the thing that's tiered. Whether the agent runs under a systemd unit or a Docker container is the CLI's problem, not the user's.
 
+**"Community-tested / best-effort" defined operationally.** Issues filed against best-effort platforms get the `platform:best-effort` label and are accepted but not release-blocking; bug reports are welcome, fixes via PR are welcome, but maintainers make no commitment to reproduce on those platforms or to gate releases on their state. Linux (and Mac under the default ship plan) get the inverse: maintainer-reproduced, release-gated, regressions block ship.
+
+**JTBD narrowing acknowledged.** v1.0 narrows the "runs on the box you already have" claim to Linux + Mac boxes. Synology / Unraid / RasPi / Windows-WSL2 become bonus surface, not headline coverage — the install path is documented for them but they are not part of the v1.0 promise. The substrate-agnostic vision copy already reads correctly under this narrowing; release-notes are the right surface for naming the tier explicitly.
+
 The OpenClaw wedge — stock `claude` CLI under your Pro/Max subscription, not a custom runtime against your API key — is unchanged. The container runs the unmodified `claude` CLI against the user's OAuth, exactly as the systemd unit does today. The substrate swap is invisible to that wedge.
 
 ## Goals
@@ -743,7 +747,7 @@ Abandon this plan and pivot if any of these hit:
 
 Tradeoff calls (decide, don't pivot):
 
-- **Mac validation slips past the v1.0 ship date.** Hardware delays, virtiofs redesign drags, peercred fails on Mac and the workaround needs more time — any of these. Decision: either (a) **slip Mac to v1.1** and ship Linux-only as v1.0 (Mac install path documented as "coming, beta"), or (b) **hold v1.0** until Mac passes. Default lean is (a) — Linux is the substrate the existing fleet runs on and Mac users are not currently served by switchroom anyway, so shipping Linux-on-Docker without Mac is still a strict improvement over today. Pick at the time based on how close Mac is.
+- **Mac validation slips past the v1.0 ship date.** Hardware delays, virtiofs redesign drags, peercred fails on Mac and the workaround needs more time — any of these. Decision: either (a) **slip Mac to v1.1** and ship Linux-only as v1.0 (Mac install path documented as "coming, beta"), or (b) **hold v1.0** until Mac passes. Default lean is (a) — Linux is the substrate the existing fleet runs on and Mac users are not currently served by switchroom anyway, so shipping Linux-on-Docker without Mac is still a strict improvement over today. Pick at the time based on how close Mac is. **If decision (a) fires, the supported-target language elsewhere in this RFC (Summary line, Goals, Motivation paragraph, the install-path README block) re-resolves to Linux-only for v1.0; the Mac language ships in v1.1 release notes when validation completes.** This RFC's "Linux + Mac" framing is the intent under the default ship plan — it is not a promise that survives a Mac slip.
 - Multi-arch image build instability on arm64 in CI for >2 weeks. RasPi/homelab is best-effort, not release-gating, so this doesn't pause the plan — it just means the arm64 image stays "build it yourself" until CI stabilises. Document, move on.
 
 If none of the abandon criteria hit, the plan ships.

@@ -207,3 +207,59 @@ export function checkAcl(
     reason: "caller is not a switchroom cron unit; use 'switchroom vault get --no-broker' for interactive access",
   };
 }
+
+/**
+ * Phase 2a — agent-name-keyed ACL for the socket-path-as-identity model.
+ *
+ * Where checkAcl() (above) is keyed on `peer.systemdUnit` (a cron-specific
+ * cgroup name like switchroom-<agent>-cron-<i>.service), this variant keys
+ * on a plain agent slug derived from the listener's socket path. The agent
+ * identity is established by the broker container at bind time — no
+ * peercred, no cgroup inspection. See peercred.socketPathToAgent.
+ *
+ * Allowlist semantics — fail-closed:
+ *   - If config.agents[agentName] is missing → deny.
+ *   - If the agent has no `schedule` array (or empty) → deny: there's no
+ *     declared per-cron secrets[] to consult. Long-running agent-direct
+ *     access is opted in only via populated `schedule[i].secrets`.
+ *   - If `key` appears in ANY schedule entry's secrets[] → allow. We
+ *     deliberately do not require the caller to identify which schedule
+ *     index they are; the broker container has no way to know that, and
+ *     the per-cron `secrets[]` allowlist is misconfiguration protection,
+ *     not a security boundary (see acl.ts header comment).
+ *   - Otherwise → deny.
+ */
+export function checkAclByAgent(
+  config: SwitchroomConfig,
+  agentName: string,
+  key: string,
+): AclResult {
+  if (!agentName) {
+    return { allow: false, reason: "agent name unresolved" };
+  }
+
+  const agentConfig = config.agents?.[agentName];
+  if (!agentConfig) {
+    return { allow: false, reason: `agent '${agentName}' not found in config` };
+  }
+
+  const schedule = agentConfig.schedule ?? [];
+  if (schedule.length === 0) {
+    return {
+      allow: false,
+      reason: `agent '${agentName}' has no schedule entries declaring 'secrets'; nothing is broker-accessible`,
+    };
+  }
+
+  for (const entry of schedule) {
+    const allowed: string[] = entry?.secrets ?? [];
+    if (allowed.includes(key)) {
+      return { allow: true };
+    }
+  }
+
+  return {
+    allow: false,
+    reason: `key '${key}' not in ACL for agent '${agentName}'`,
+  };
+}

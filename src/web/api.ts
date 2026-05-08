@@ -32,6 +32,7 @@ export interface AgentInfo {
   extends: string;
   topic_name: string;
   topic_emoji?: string;
+  primaryAccount?: string;
   auth: {
     authenticated: boolean;
     subscriptionType?: string;
@@ -50,6 +51,8 @@ export function handleGetAgents(config: SwitchroomConfig): AgentInfo[] {
     const status = statuses[name];
     const auth = authStatuses[name];
     const collection = getCollectionForAgent(name, config);
+    const resolved = resolveAgentConfig(config.defaults, config.profiles, agentConfig);
+    const primaryAccount = resolved.auth?.accounts?.[0];
 
     agents.push({
       name,
@@ -59,6 +62,7 @@ export function handleGetAgents(config: SwitchroomConfig): AgentInfo[] {
       extends: agentConfig.extends ?? "default",
       topic_name: agentConfig.topic_name,
       topic_emoji: agentConfig.topic_emoji,
+      primaryAccount,
       auth: {
         authenticated: auth?.authenticated ?? false,
         subscriptionType: auth?.subscriptionType,

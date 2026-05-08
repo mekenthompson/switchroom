@@ -108,6 +108,32 @@ describe("handleGetAgents", () => {
     expect(sage.memoryCollection).toBe("sage"); // Falls back to agent name
   });
 
+  it("includes primaryAccount from cascaded auth.accounts[0]", () => {
+    asMock(getAllAgentStatuses).mockReturnValue({
+      coach: { active: "active", uptime: null, memory: null, pid: null },
+      sage: { active: "inactive", uptime: null, memory: null, pid: null },
+    });
+    asMock(getAllAuthStatuses).mockReturnValue({
+      coach: { authenticated: true },
+      sage: { authenticated: false },
+    });
+    const cfg: SwitchroomConfig = {
+      ...mockConfig,
+      agents: {
+        coach: {
+          ...mockConfig.agents.coach,
+          auth: { accounts: ["work-max", "personal-pro"] },
+        },
+        sage: { ...mockConfig.agents.sage },
+      },
+    } as unknown as SwitchroomConfig;
+    const result = handleGetAgents(cfg);
+    expect(result.find((a) => a.name === "coach")?.primaryAccount).toBe("work-max");
+    // Sage has no auth.accounts → primaryAccount should be undefined/null.
+    const sage = result.find((a) => a.name === "sage")!;
+    expect(sage.primaryAccount == null).toBe(true);
+  });
+
   it("returns correct shape with all fields", () => {
     asMock(getAllAgentStatuses).mockReturnValue({
       coach: { active: "active", uptime: null, memory: null, pid: null },
@@ -121,7 +147,7 @@ describe("handleGetAgents", () => {
     const result = handleGetAgents(mockConfig);
     const expectedKeys: (keyof AgentInfo)[] = [
       "name", "active", "uptime", "memory", "extends",
-      "topic_name", "topic_emoji", "auth", "memoryCollection",
+      "topic_name", "topic_emoji", "auth", "primaryAccount", "memoryCollection",
     ];
 
     for (const agent of result) {

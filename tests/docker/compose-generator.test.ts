@@ -333,6 +333,51 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
   });
 });
 
+describe("generateCompose — buildMode (pull vs local)", () => {
+  it("default mode emits ghcr.io image refs and no build: blocks", () => {
+    const out = generateCompose({ config: makeConfig({ alice: {} }) });
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-broker:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-kernel:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-scheduler:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-agent:latest");
+    expect(out).not.toContain("build:");
+    expect(out).not.toMatch(/dockerfile: docker\/Dockerfile/);
+  });
+
+  it("buildMode=local emits build: blocks pointing at the supplied context", () => {
+    const ctx = "/abs/path/to/switchroom";
+    const out = generateCompose({
+      config: makeConfig({ alice: {} }),
+      buildMode: "local",
+      buildContext: ctx,
+    });
+    expect(out).not.toMatch(/image: ghcr\.io\//);
+    for (const df of ["agent", "broker", "kernel", "scheduler"]) {
+      expect(out).toContain(`dockerfile: docker/Dockerfile.${df}`);
+    }
+    expect(out).toContain(`context: ${ctx}`);
+    expect(out.match(/dockerfile: docker\/Dockerfile\.agent/g)?.length).toBe(1);
+  });
+
+  it("buildMode=local without buildContext throws", () => {
+    expect(() =>
+      generateCompose({
+        config: makeConfig({ alice: {} }),
+        buildMode: "local",
+      }),
+    ).toThrow(/buildContext/);
+  });
+
+  it("imageTag flows through in pull mode", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {} }),
+      imageTag: "v0.7.3",
+    });
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-broker:v0.7.3");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-agent:v0.7.3");
+  });
+});
+
 describe("describeAgents", () => {
   it("returns sorted agents with allocated UIDs", () => {
     const agents = describeAgents(makeConfig({ zebra: {}, alpha: {} }));

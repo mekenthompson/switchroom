@@ -1,0 +1,452 @@
+/**
+ * Approval kernel IPC server (Phase 1c).
+ *
+ * Standalone entrypoint for the `switchroom/kernel` container. Mirrors the
+ * broker's per-agent socket-dir identity model:
+ *
+ *   /run/switchroom/kernel/<agent>/sock          (mode 0660, owned by agent UID)
+ *   /run/switchroom/kernel/<agent>/               (mode 0700, owned by agent UID)
+ *
+ * Identity: the kernel never trusts the wire payload. Each connection is
+ * accepted on a server socket bound inside a per-agent directory; the agent
+ * identity is the directory name. We resolve it via getsockname() on the
+ * accepted socket — the same mechanism the broker uses (see
+ * src/vault/broker/server.ts). No HMAC fallback.
+ *
+ * Wire protocol: NDJSON, framed by `\n`. Reuses BrokerRequest/BrokerResponse
+ * encoding from `../broker/protocol.ts` so existing approval-client code
+ * (src/vault/approvals/client.ts) talks to the kernel unchanged.
+ *
+ * Socket race-safety: parent directory is created with {recursive:true,
+ * mode:0o700} in a single mkdir(2) under umask 0o077 — no mkdir-then-chmod
+ * window. Same discipline as the broker (Phase 0 spike fix).
+ *
+ * Env contract:
+ *   SWITCHROOM_KERNEL_SOCKET    Default base path for the kernel-socket
+ *                               parent. Default
+ *                               /run/switchroom/kernel/approval-kernel.sock
+ *                               — used as a fallback when no agents are
+ *                               declared in config (boot-time visibility).
+ *   SWITCHROOM_CONFIG           Path to switchroom.yaml; used to enumerate
+ *                               per-agent socket dirs to bind. If unset,
+ *                               loadConfig() auto-detects.
+ *   SWITCHROOM_KERNEL_DB_PATH   Path to kernel.db. Default
+ *                               /state/approvals/kernel.db.
+ */
+
+import * as net from "node:net";
+import { mkdirSync, chmodSync, chownSync, existsSync, unlinkSync, readdirSync, statSync } from "node:fs";
+import { dirname, resolve, basename } from "node:path";
+import { Database } from "bun:sqlite";
+
+import {
+  decodeRequest,
+  encodeResponse,
+  errorResponse,
+  MAX_FRAME_BYTES,
+  type BrokerRequest,
+} from "../broker/protocol.js";
+import {
+  requestApproval,
+  lookupDecision,
+  consumeNonce,
+  revokeDecision,
+  listDecisions,
+  recordDecision,
+  getNonce,
+  countPendingNonces,
+  computeRetryAfterMs,
+  MAX_PENDING_PER_AGENT,
+  MAX_PENDING_GLOBAL,
+} from "./kernel.js";
+import { migrateApprovalSchema } from "./schema.js";
+import { allocateAgentUid } from "../../agents/compose.js";
+
+const DEFAULT_SOCKET_PARENT = "/run/switchroom/kernel";
+const DEFAULT_DB_PATH = "/state/approvals/kernel.db";
+
+// ─── DB open ──────────────────────────────────────────────────────────────────
+
+/**
+ * Open (or create) the kernel approval DB. Standalone from openGrantsDb()
+ * — the kernel container does NOT carry vault grants; it only owns the
+ * approval-kernel tables (RFC B §5).
+ */
+export function openKernelDb(dbPath: string): Database {
+  const dir = dirname(dbPath);
+  mkdirSync(dir, { recursive: true });
+  const db = new Database(dbPath, { create: true });
+  try {
+    chmodSync(dbPath, 0o600);
+  } catch { /* may already be 0600, or FS ignores modes */ }
+  db.run("PRAGMA journal_mode=WAL");
+  db.run("PRAGMA foreign_keys=ON");
+  migrateApprovalSchema(db);
+  return db;
+}
+
+// ─── Per-agent listener ───────────────────────────────────────────────────────
+
+interface AgentListener {
+  agent: string;
+  socketPath: string;
+  server: net.Server;
+}
+
+/**
+ * Bind one server socket inside /run/switchroom/kernel/<agent>/. Race-safe:
+ * mkdirSync with mode option creates the dir at 0700 in a single syscall
+ * under the process umask 0o077 (set by main()). chmod is defence-in-depth.
+ */
+async function bindAgentSocket(
+  parentDir: string,
+  agent: string,
+  db: Database,
+): Promise<AgentListener> {
+  const dir = resolve(parentDir, agent);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { chmodSync(dir, 0o700); } catch { /* idempotent */ }
+  // Chown the per-agent dir to the agent's UID so non-root agent
+  // containers (running as user:<uid>:<uid> per compose) can traverse
+  // into it. This mirrors the broker's design: cap_add: [CHOWN, FOWNER]
+  // is granted in the compose service so this chown succeeds even
+  // under cap_drop=ALL. If chown fails (no CAP_CHOWN, e.g. running
+  // outside docker), we leave the dir root-owned — a non-root agent
+  // would be denied, but in non-docker dev/test environments the
+  // kernel-server typically runs as the same user as its callers.
+  const uid = allocateAgentUid(agent);
+  // IMPORTANT: chown the dir AFTER listen(), not before. Under
+  // cap_drop=ALL + cap_add=[CHOWN,FOWNER], root-in-container does NOT
+  // hold CAP_DAC_OVERRIDE; if we chown the dir to the agent UID first,
+  // root can no longer write into it (mode 0700 owned by 10116) and
+  // bind() fails with EACCES. Order:
+  //   1. mkdir with mode 0o700 under umask 0o077 (root-owned).
+  //   2. listen() — creates the socket file as root inside root-owned dir.
+  //   3. chown dir + sock to the agent UID (CAP_CHOWN granted).
+  //   4. chmod sock to 0o660 (FOWNER not strictly needed here since we
+  //      own the file, but the cap_add list includes it for the broker).
+  const socketPath = resolve(dir, "sock");
+  if (existsSync(socketPath)) {
+    try { unlinkSync(socketPath); } catch { /* ignore */ }
+  }
+  return new Promise((resolveP, rejectP) => {
+    const server = net.createServer((sock) => handleConnection(sock, agent, db));
+    server.on("error", (err) => {
+      process.stderr.write(`[kernel] listen error agent=${agent} sock=${socketPath}: ${err.message}\n`);
+      rejectP(err);
+    });
+    server.listen(socketPath, () => {
+      try { chmodSync(socketPath, 0o660); } catch { /* ignore */ }
+      try { chownSync(socketPath, uid, uid); } catch { /* see above */ }
+      // Now safe to lock the dir down to the agent.
+      try { chownSync(dir, uid, uid); } catch { /* see above */ }
+      resolveP({ agent, socketPath, server });
+    });
+  });
+}
+
+// ─── Connection handling ─────────────────────────────────────────────────────
+
+function handleConnection(
+  socket: net.Socket,
+  agent: string,
+  db: Database,
+): void {
+  // `agent` is the trusted identity — it came from the listener's directory
+  // name, established at bind time before the connection existed. No
+  // wire-payload field can override this.
+  let buffer = "";
+  socket.on("data", (chunk: Buffer) => {
+    buffer += chunk.toString("utf8");
+    if (Buffer.byteLength(buffer, "utf8") > MAX_FRAME_BYTES) {
+      socket.write(encodeResponse(errorResponse("BAD_REQUEST", "Frame exceeds 64 KiB limit")));
+      socket.destroy();
+      return;
+    }
+    let nl: number;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nl);
+      buffer = buffer.slice(nl + 1);
+      if (line.length === 0) continue;
+      let req: BrokerRequest;
+      try {
+        req = decodeRequest(line);
+      } catch (err) {
+        socket.write(encodeResponse(errorResponse("BAD_REQUEST", (err as Error).message)));
+        continue;
+      }
+      try {
+        handleRequest(socket, req, agent, db);
+      } catch (err) {
+        socket.write(encodeResponse(errorResponse("INTERNAL", (err as Error).message)));
+      }
+    }
+  });
+  socket.on("error", () => { /* peer dropped — best-effort */ });
+}
+
+function handleRequest(
+  socket: net.Socket,
+  req: BrokerRequest,
+  agent: string,
+  db: Database,
+): void {
+  // Only approval ops are served here. Anything else (vault_get, list_grants,
+  // etc.) is the broker's territory and gets a hard error.
+  if (req.op === "approval_request") {
+    // Identity guard: reject any wire claim that doesn't match this listener.
+    if (req.agent_unit !== agent) {
+      socket.write(encodeResponse(errorResponse("DENIED", `agent_unit mismatch: socket=${agent}, claim=${req.agent_unit}`)));
+      return;
+    }
+    const counts = countPendingNonces(db);
+    const perAgentN = counts.perAgent.get(req.agent_unit) ?? 0;
+    if (perAgentN >= MAX_PENDING_PER_AGENT || counts.global >= MAX_PENDING_GLOBAL) {
+      const retry_after_ms = computeRetryAfterMs(
+        db,
+        perAgentN >= MAX_PENDING_PER_AGENT ? req.agent_unit : null,
+      );
+      socket.write(encodeResponse({ ok: true, kind: "approval_request", state: "rate_limited", retry_after_ms }));
+      return;
+    }
+    const result = requestApproval(db, {
+      agent_unit: req.agent_unit,
+      scope: req.scope,
+      action: req.action,
+      approver_set: req.approver_set,
+      why: req.why,
+      ttl_ms: req.ttl_ms,
+    });
+    socket.write(encodeResponse({
+      ok: true,
+      kind: "approval_request",
+      state: "pending",
+      request_id: result.request_id,
+      expires_at: result.expires_at,
+    }));
+    return;
+  }
+  if (req.op === "approval_lookup") {
+    if (req.agent_unit !== agent) {
+      socket.write(encodeResponse(errorResponse("DENIED", `agent_unit mismatch`)));
+      return;
+    }
+    const r = lookupDecision(db, {
+      agent_unit: req.agent_unit,
+      scope: req.scope,
+      action: req.action,
+      current_approver_set: req.current_approver_set,
+    });
+    const decision = r.state === "granted" || r.state === "denied"
+      ? {
+          id: r.decision.id,
+          agent_unit: r.decision.agent_unit,
+          scope: r.decision.scope,
+          action: r.decision.action,
+          decision: r.decision.decision,
+          granted_at: r.decision.granted_at,
+          granted_by_user_id: r.decision.granted_by_user_id,
+          ttl_expires_at: r.decision.ttl_expires_at,
+          last_used_at: r.decision.last_used_at,
+          revoked_at: r.decision.revoked_at,
+          revoke_reason: r.decision.revoke_reason,
+        }
+      : null;
+    socket.write(encodeResponse({ ok: true, state: r.state, decision }));
+    return;
+  }
+  if (req.op === "approval_consume") {
+    const nonce = consumeNonce(db, req.request_id);
+    if (nonce === null) {
+      socket.write(encodeResponse({ ok: true, consumed: false }));
+      return;
+    }
+    socket.write(encodeResponse({
+      ok: true,
+      consumed: true,
+      agent_unit: nonce.agent_unit,
+      scope: nonce.scope,
+      action: nonce.action,
+      why: nonce.why,
+    }));
+    return;
+  }
+  if (req.op === "approval_revoke") {
+    const revoked = revokeDecision(db, req.decision_id, req.actor, req.reason);
+    socket.write(encodeResponse({ ok: true, revoked }));
+    return;
+  }
+  if (req.op === "approval_record") {
+    const nonce = getNonce(db, req.request_id);
+    if (nonce === null) {
+      socket.write(encodeResponse(errorResponse("BAD_REQUEST", "unknown request_id")));
+      return;
+    }
+    if (nonce.consumed_at === null) {
+      socket.write(encodeResponse(errorResponse("BAD_REQUEST", "nonce must be consumed before recording — call approval_consume first")));
+      return;
+    }
+    const decision_id = recordDecision(db, {
+      nonce,
+      decision: req.decision,
+      approver_set: req.approver_set,
+      granted_by_user_id: req.granted_by_user_id,
+      ttl_ms: req.ttl_ms ?? undefined,
+    });
+    socket.write(encodeResponse({ ok: true, decision_id }));
+    return;
+  }
+  if (req.op === "approval_list") {
+    const decisions = listDecisions(db, { agent_unit: req.agent_unit });
+    const meta = decisions.map((d) => ({
+      id: d.id,
+      agent_unit: d.agent_unit,
+      scope: d.scope,
+      action: d.action,
+      decision: d.decision,
+      granted_at: d.granted_at,
+      granted_by_user_id: d.granted_by_user_id,
+      ttl_expires_at: d.ttl_expires_at,
+      last_used_at: d.last_used_at,
+      revoked_at: d.revoked_at,
+      revoke_reason: d.revoke_reason,
+    }));
+    socket.write(encodeResponse({ ok: true, decisions: meta }));
+    return;
+  }
+  socket.write(encodeResponse(errorResponse("BAD_REQUEST", `kernel-server does not serve op: ${(req as { op: string }).op}`)));
+}
+
+// ─── Top-level entrypoint ─────────────────────────────────────────────────────
+
+interface KernelServerHandle {
+  listeners: AgentListener[];
+  db: Database;
+  stop(): void;
+}
+
+async function bootstrap(opts: {
+  socketParent: string;
+  agents: string[];
+  dbPath: string;
+}): Promise<KernelServerHandle> {
+  process.umask(0o077);
+  mkdirSync(opts.socketParent, { recursive: true, mode: 0o755 });
+  // The parent stays 0755 — agents need x-bit on the parent to traverse
+  // into their own 0700 subdir. Each subdir is locked down 0700.
+  try { chmodSync(opts.socketParent, 0o755); } catch { /* idempotent */ }
+  const db = openKernelDb(opts.dbPath);
+  const listeners: AgentListener[] = [];
+  for (const agent of opts.agents) {
+    const l = await bindAgentSocket(opts.socketParent, agent, db);
+    listeners.push(l);
+  }
+  return {
+    listeners,
+    db,
+    stop(): void {
+      for (const l of listeners) {
+        try { l.server.close(); } catch { /* ignore */ }
+        try { if (existsSync(l.socketPath)) unlinkSync(l.socketPath); } catch { /* ignore */ }
+      }
+      try { db.close(); } catch { /* ignore */ }
+    },
+  };
+}
+
+export async function main(): Promise<void> {
+  const socketEnv = process.env.SWITCHROOM_KERNEL_SOCKET ?? `${DEFAULT_SOCKET_PARENT}/approval-kernel.sock`;
+  // The env var is a socket path by historical convention; we treat its
+  // dirname as the parent under which we bind per-agent subdirs.
+  const socketParent = dirname(resolve(socketEnv));
+  const dbPath = process.env.SWITCHROOM_KERNEL_DB_PATH ?? DEFAULT_DB_PATH;
+  const configPath = process.env.SWITCHROOM_CONFIG;
+
+  let agents: string[] = [];
+  // Primary: enumerate per-agent socket dirs that compose mounted in.
+  // Each agent's compose declaration mounts its kernel-<name>-sock named
+  // volume at /run/switchroom/kernel/<name>; from the kernel container's
+  // POV those are subdirectories of the socket parent. This makes the
+  // kernel-server zero-config — no SWITCHROOM_CONFIG needed in the
+  // compose-generated environment block.
+  try {
+    if (existsSync(socketParent)) {
+      agents = readdirSync(socketParent)
+        .filter((name) => {
+          try {
+            const p = resolve(socketParent, name);
+            return statSync(p).isDirectory();
+          } catch { return false; }
+        })
+        .sort();
+    }
+  } catch (err) {
+    process.stderr.write(`approval-kernel: dir scan failed (${(err as Error).message})\n`);
+  }
+  // Secondary: if no mounted dirs, fall through to config (useful when
+  // running outside docker, e.g. unit tests or systemd-on-host).
+  if (agents.length === 0) {
+    try {
+      const { loadConfig } = await import("../../config/loader.js");
+      const config = loadConfig(configPath);
+      agents = Object.keys(config.agents ?? {}).sort();
+    } catch (err) {
+      process.stderr.write(`approval-kernel: loadConfig failed (${(err as Error).message}); falling back to single-socket mode\n`);
+    }
+  }
+
+  if (agents.length === 0) {
+    // Fallback single-socket mode: the legacy default path used by tests
+    // and by environments where config-driven enumeration isn't ready.
+    // Identity in this mode is "the agent name embedded in the socket
+    // basename" — i.e. /run/switchroom/kernel/<name>.sock or just the
+    // resolved socket path.
+    const fallbackName = basename(socketEnv).replace(/\.sock$/, "");
+    process.umask(0o077);
+    mkdirSync(socketParent, { recursive: true, mode: 0o755 });
+    try { chmodSync(socketParent, 0o755); } catch { /* idempotent */ }
+    const db = openKernelDb(dbPath);
+    const socketPath = resolve(socketEnv);
+    if (existsSync(socketPath)) { try { unlinkSync(socketPath); } catch { /* ignore */ } }
+    const server = net.createServer((sock) => handleConnection(sock, fallbackName, db));
+    await new Promise<void>((resolveP, rejectP) => {
+      server.on("error", rejectP);
+      server.listen(socketPath, () => {
+        try { chmodSync(socketPath, 0o660); } catch { /* ignore */ }
+        resolveP();
+      });
+    });
+    process.stdout.write(`approval-kernel: listening on ${socketPath} (fallback mode, no per-agent dirs)\n`);
+    registerShutdown(() => {
+      try { server.close(); } catch { /* ignore */ }
+      try { if (existsSync(socketPath)) unlinkSync(socketPath); } catch { /* ignore */ }
+      try { db.close(); } catch { /* ignore */ }
+    });
+    return;
+  }
+
+  const handle = await bootstrap({ socketParent, agents, dbPath });
+  for (const l of handle.listeners) {
+    process.stdout.write(`approval-kernel: listening agent=${l.agent} sock=${l.socketPath}\n`);
+  }
+  registerShutdown(() => handle.stop());
+}
+
+function registerShutdown(stop: () => void): void {
+  let shuttingDown = false;
+  const handler = (): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try { stop(); } catch { /* best-effort */ }
+    process.exit(0);
+  };
+  process.on("SIGTERM", handler);
+  process.on("SIGINT", handler);
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    process.stderr.write(`approval-kernel fatal: ${err instanceof Error ? err.stack : err}\n`);
+    process.exit(1);
+  });
+}

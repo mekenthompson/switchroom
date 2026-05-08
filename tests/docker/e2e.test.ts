@@ -23,11 +23,32 @@
  *   - Real broker socket peercred handshake against a cron unit.
  */
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterAll } from "vitest";
 import { execSync, spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  newRunId,
+  dockerRunLabels,
+  dockerRunLabelsArgv,
+  safeLabelTeardown,
+} from "./_label-helpers.js";
+
+// Per-run id — used to label every container this file creates so
+// that `docker ps --filter label=switchroom.test.run=<runId>` returns
+// only this file's containers and nothing else on the host.
+const RUN_ID = newRunId();
+const LABELS = dockerRunLabels(RUN_ID);
+const LABELS_ARGV = dockerRunLabelsArgv(RUN_ID);
+
+afterAll(() => {
+  // Belt-and-braces — primary teardown is per-container `docker rm
+  // -f <name>` and `--rm` self-cleanup. This catches any orphans from
+  // a crash mid-test. Strictly label-scoped; cannot touch unrelated
+  // containers (Coolify / hindsight / etc) on this host.
+  safeLabelTeardown(RUN_ID);
+});
 
 const TAG = "phase1b-test";
 const IMAGES = {
@@ -73,7 +94,7 @@ describe.skipIf(!dockerOk || !allImagesPresent)(
       const r = spawnSync(
         "docker",
         [
-          "run", "--rm", "--entrypoint", "sh", IMAGES.base, "-c",
+          "run", "--rm", ...LABELS_ARGV, "--entrypoint", "sh", IMAGES.base, "-c",
           'for c in node bun tini tmux claude; do command -v "$c" || echo "MISSING:$c"; done',
         ],
         { encoding: "utf8" },
@@ -129,6 +150,7 @@ describe.skipIf(!dockerOk || !allImagesPresent)(
           [
             "docker run -d",
             `--name ${containerName}`,
+            LABELS,
             "--tmpfs /run/switchroom/broker:rw,mode=755",
             `-v ${cfgPath}:/state/config/switchroom.yaml:ro`,
             "-e SWITCHROOM_CONFIG=/state/config/switchroom.yaml",
@@ -186,7 +208,7 @@ describe.skipIf(!dockerOk || !allImagesPresent)(
         `console.log('sqlite_ok=' + row.x);`,
       ].join("");
       const out = execSync(
-        `docker run --rm --entrypoint node ${IMAGES.scheduler} -e ${JSON.stringify(script)}`,
+        `docker run --rm ${LABELS} --entrypoint node ${IMAGES.scheduler} -e ${JSON.stringify(script)}`,
       ).toString();
       expect(out.trim()).toBe("sqlite_ok=7");
     });
@@ -197,6 +219,7 @@ describe.skipIf(!dockerOk || !allImagesPresent)(
         [
           "run",
           "--rm",
+          ...LABELS_ARGV,
           "--read-only",
           "--cap-drop=ALL",
           "--security-opt=no-new-privileges",
@@ -221,6 +244,7 @@ describe.skipIf(!dockerOk || !allImagesPresent)(
         [
           "run",
           "--rm",
+          ...LABELS_ARGV,
           "--read-only",
           "--cap-drop=ALL",
           "--security-opt=no-new-privileges",

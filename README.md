@@ -74,7 +74,7 @@ So I built this.
 
 ## Architecture
 
-One long-running service per agent. Each agent runs the stock `claude` CLI — not a fork, not the Agents SDK, not a wrapped harness — authenticated directly with Anthropic via official OAuth. Switchroom is scaffolding and lifecycle around the CLI you'd run by hand: a Telegram bot, an approval broker, a vault broker, a watchdog. See [`docs/architecture.md`](docs/architecture.md) for the process model and how each layer maps to the `claude` CLI.
+One long-running service per agent. Each agent runs the stock `claude` CLI — not a fork, not the Agents SDK, not a wrapped harness — authenticated directly with Anthropic via official OAuth. Switchroom is scaffolding and lifecycle around the CLI you'd run by hand: a Telegram bot, an approval broker, a vault broker, and either Docker Compose (default on Linux) or systemd + a watchdog (`--legacy`) for supervision. See [`docs/architecture.md`](docs/architecture.md) for the process model and how each layer maps to the `claude` CLI.
 
 ```
 You (Telegram)
@@ -88,7 +88,7 @@ You (Telegram)
            ├─ SQLite history             ├─ Vault broker ◄────────┤   Drive MCP, Playwright MCP, …
            ├─ Card-events.jsonl audit    │   (cron secrets, IPC)  └─ scheduled tasks across reboots
            ├─ Emoji reactions            │
-           └─ Format conversion          └─ Watchdog + crash-pane capture
+           └─ Format conversion          └─ Compose restart (Docker) / watchdog (--legacy)
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for the process model, IPC layout, supervisor choice, and how each layer maps to the `claude` CLI.
@@ -116,7 +116,7 @@ Each agent is a long-running service. They survive reboots, network drops, and y
 
 <p align="center"><img src="docs/diagrams/wake-audit-lifecycle.jpg" width="700" alt="Wake-audit lifecycle: kill, crash-pane snapshot, auto-restart, agent boots with SWITCHROOM_PENDING_TURN, acks with three options"></p>
 
-- **Watchdog.** A background watcher keeps an eye on every agent for stuck turns, dead bridges, and runaway resource use. When it has to act, it captures a **crash pane snapshot** so you can see what the agent was looking at when it died, then auto-recovers the agent with a full audit trail. No silent dropped work.
+- **Auto-restart.** Under the default Docker runtime, agent containers come up with `restart: unless-stopped` so a crashed agent comes straight back. Under `--legacy` (systemd), a background watchdog keeps an eye on every agent for stuck turns, dead bridges, and runaway resource use; when it has to act, it captures a **crash pane snapshot** so you can see what the agent was looking at when it died, then auto-recovers with a full audit trail. No silent dropped work.
 - **Resume protocol.** When an agent reboots mid-turn, `start.sh` exports `SWITCHROOM_PENDING_TURN=true` plus the original chat / message ids. The agent's first action on boot is to acknowledge the gap and ask the user how to proceed (start over, summarise and continue, or drop it).
 - **Wake-audit.** On every fresh boot the agent checks for owed replies, orphan sub-agents, and stale in-progress todos. If everything's clean it stays quiet. If it owed you a reply, it tells you.
 - **Token refresh.** Runs unattended for weeks via a `refresh-tick` daemon. Multi-account fallback pool kicks in when the active slot hits its quota window.

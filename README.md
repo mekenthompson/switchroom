@@ -154,13 +154,28 @@ If you already use Claude Code, this is the shortest path. Inside any session:
 
 `/switchroom:setup` walks you through deps, `switchroom setup` (Telegram + vault + first agent), and `switchroom agent start`. Day-to-day: `/switchroom:start`, `/switchroom:stop`, `/switchroom:status`. See [`docs/publishing.md`](docs/publishing.md).
 
-### One-liner (fresh box)
+### One-liner (static binary)
 
 ```bash
-curl -fsSL https://get.switchroom.ai | bash
+curl -fsSL https://github.com/switchroom/switchroom/raw/main/install.sh | sh
 ```
 
-Bootstraps bun, node 22, the claude CLI, and switchroom. Idempotent. Safe to re-run. Source is [`install.sh`](install.sh) in this repo.
+Auto-detects your platform (linux / macos) and arch (amd64 / arm64), downloads the matching pre-built binary from the latest [GitHub release](https://github.com/switchroom/switchroom/releases/latest), verifies its SHA256, and drops it in `/usr/local/bin` (or `~/.local/bin` if not writable). Source is [`install.sh`](install.sh).
+
+The static binary still needs the `claude` CLI to run agents: `npm i -g @anthropic-ai/claude-code` (Node 20.11+).
+
+**Manual install** if you'd rather not pipe to sh:
+
+```bash
+# Pick the artifact for your platform/arch from the latest release page
+curl -fsSL -o switchroom https://github.com/switchroom/switchroom/releases/latest/download/switchroom-linux-amd64
+chmod +x switchroom
+sudo mv switchroom /usr/local/bin/
+```
+
+Replace `switchroom-linux-amd64` with `switchroom-linux-arm64`, `switchroom-macos-amd64`, or `switchroom-macos-arm64` as needed. Verify against `switchroom-checksums.txt` from the same release.
+
+**macOS Gatekeeper note.** Releases are not yet Apple-code-signed. After installing on macOS you may need to clear the quarantine xattr so the binary will run: `xattr -d com.apple.quarantine /usr/local/bin/switchroom`. The `install.sh` one-liner handles this automatically.
 
 Then:
 

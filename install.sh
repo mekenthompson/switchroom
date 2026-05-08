@@ -1,133 +1,167 @@
 #!/usr/bin/env bash
-# Switchroom installer.
+# Switchroom static-binary installer.
 #
-# Bootstraps a fresh Ubuntu box to run switchroom agents:
-# apt deps, bun, node 22 via nvm, claude CLI, switchroom.
-# Does NOT configure anything — run `switchroom setup` after.
+# Detects platform/arch, fetches the matching pre-built `switchroom`
+# binary from the latest GitHub release, verifies its SHA256 checksum,
+# and installs it to /usr/local/bin (falls back to ~/.local/bin if
+# /usr/local/bin is not writable).
 #
 # Usage:
-#   curl -fsSL https://get.switchroom.ai | bash
-#   curl -fsSL https://raw.githubusercontent.com/switchroom/switchroom/main/install.sh | bash
+#   curl -fsSL https://github.com/switchroom/switchroom/raw/main/install.sh | sh
 #
-# Idempotent. Safe to re-run.
+# Environment overrides:
+#   SWITCHROOM_INSTALL_DIR   target dir (default: /usr/local/bin or ~/.local/bin)
+#   SWITCHROOM_VERSION       pin a specific tag (default: latest release)
+#
+# The binary is self-contained (bun runtime is bundled). You'll still
+# need the `claude` CLI installed separately to run agents — see
+# https://github.com/switchroom/switchroom for the full setup guide.
 
 set -euo pipefail
 
-BOLD=$(printf '\033[1m'); DIM=$(printf '\033[2m'); RED=$(printf '\033[31m')
-GREEN=$(printf '\033[32m'); YELLOW=$(printf '\033[33m'); BLUE=$(printf '\033[34m')
+REPO="switchroom/switchroom"
+
+BOLD=$(printf '\033[1m')
+RED=$(printf '\033[31m')
+GREEN=$(printf '\033[32m')
+YELLOW=$(printf '\033[33m')
+BLUE=$(printf '\033[34m')
 RESET=$(printf '\033[0m')
 
-log()   { printf '%s▸%s %s\n' "$BLUE" "$RESET" "$1"; }
-ok()    { printf '%s✓%s %s\n' "$GREEN" "$RESET" "$1"; }
-warn()  { printf '%s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
-die()   { printf '%s✗%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
-
-# ---- preflight ----
-
-[ "$(uname -s)" = "Linux" ] || die "This installer targets Linux. macOS and Windows hosts aren't supported by this script today (container packaging is on the roadmap — see reference/rfc-docker-multi-container.md)."
+log()  { printf '%s>%s %s\n' "$BLUE" "$RESET" "$1"; }
+ok()   { printf '%s+%s %s\n' "$GREEN" "$RESET" "$1"; }
+warn() { printf '%s!%s %s\n' "$YELLOW" "$RESET" "$1"; }
+die()  { printf '%sx%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-need_sudo() {
-  if ! have sudo; then
-    die "sudo not found. Install sudo or run as root."
-  fi
-}
+# ---- platform / arch detection ----
 
-printf '%s\n' "$BOLD"
-cat <<'BANNER'
-  Switchroom installer
-  Bootstraps bun, node, claude CLI, and switchroom.
-BANNER
-printf '%s\n' "$RESET"
+uname_s=$(uname -s)
+case "$uname_s" in
+  Linux)   platform=linux ;;
+  Darwin)  platform=macos ;;
+  *)       die "Unsupported OS: $uname_s. Switchroom static binaries ship for Linux and macOS only." ;;
+esac
 
-# ---- apt deps ----
+uname_m=$(uname -m)
+case "$uname_m" in
+  x86_64|amd64)   arch=amd64 ;;
+  aarch64|arm64)  arch=arm64 ;;
+  *)              die "Unsupported architecture: $uname_m. Switchroom static binaries ship for amd64 and arm64 only." ;;
+esac
 
-log "Checking apt dependencies (tmux, expect, sqlite3, curl, git)"
-need_apt=()
-for pkg in tmux expect sqlite3 curl git; do
-  if ! dpkg -s "$pkg" >/dev/null 2>&1; then
-    need_apt+=("$pkg")
-  fi
-done
+asset="switchroom-${platform}-${arch}"
 
-if [ ${#need_apt[@]} -gt 0 ]; then
-  warn "Installing: ${need_apt[*]} (requires sudo)"
-  need_sudo
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq "${need_apt[@]}"
-  ok "apt packages installed"
+log "Detected ${BOLD}${platform}/${arch}${RESET}, will fetch ${BOLD}${asset}${RESET}"
+
+# ---- prerequisites ----
+
+have curl || die "curl is required."
+
+# Either sha256sum (linux) or shasum (macos) works for verification.
+if have sha256sum; then
+  sha_cmd="sha256sum"
+elif have shasum; then
+  sha_cmd="shasum -a 256"
 else
-  ok "apt packages already present"
+  die "sha256sum or shasum is required for checksum verification."
 fi
 
-# tmux is the default agent supervisor as of #725 PR-1 — a hard prereq.
-# Hosts that genuinely cannot run tmux can opt agents into the legacy
-# PTY supervisor per-agent via `experimental.legacy_pty: true` in
-# switchroom.yaml, but the binary itself is required for the default
-# install path and to keep the unit template renderable.
-have tmux || die "tmux is required (or set experimental.legacy_pty: true per agent)"
+# ---- resolve version ----
 
-# ---- bun ----
-
-if have bun; then
-  ok "bun already installed ($(bun --version))"
-else
-  log "Installing bun"
-  curl -fsSL https://bun.sh/install | bash
-  # bun installs to ~/.bun/bin — surface it for this shell
-  export BUN_INSTALL="$HOME/.bun"
-  export PATH="$BUN_INSTALL/bin:$PATH"
-  have bun || die "bun install completed but 'bun' not on PATH. Re-source your shell and re-run."
-  ok "bun installed ($(bun --version))"
+version="${SWITCHROOM_VERSION:-}"
+if [ -z "$version" ]; then
+  log "Resolving latest release tag from github.com/${REPO}"
+  api_url="https://api.github.com/repos/${REPO}/releases/latest"
+  # Grep tag_name out of the JSON without needing jq.
+  version=$(curl -fsSL "$api_url" | grep '"tag_name"' | head -n 1 | sed -E 's/.*"tag_name"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/')
+  [ -n "$version" ] || die "Could not determine latest release tag from $api_url."
 fi
 
-# ---- node via nvm ----
+ok "Version: $version"
 
-NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
-need_node_install=0
+# ---- download binary + checksums ----
 
-if have node; then
-  node_major=$(node -v | sed 's/v//' | cut -d. -f1)
-  node_minor=$(node -v | sed 's/v//' | cut -d. -f2)
-  if [ "$node_major" -ge 21 ] || { [ "$node_major" -eq 20 ] && [ "$node_minor" -ge 11 ]; }; then
-    ok "node already installed ($(node -v))"
+base_url="https://github.com/${REPO}/releases/download/${version}"
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+log "Downloading $asset"
+curl -fsSL --retry 3 -o "$tmp/$asset" "$base_url/$asset" \
+  || die "Failed to download $base_url/$asset (does this release ship static binaries? need v-tag with the release workflow active)."
+
+log "Downloading checksums"
+curl -fsSL --retry 3 -o "$tmp/switchroom-checksums.txt" "$base_url/switchroom-checksums.txt" \
+  || die "Failed to download $base_url/switchroom-checksums.txt."
+
+# ---- verify checksum ----
+
+log "Verifying SHA256"
+expected=$(grep " $asset\$\| ${asset}$" "$tmp/switchroom-checksums.txt" | awk '{print $1}' | head -n 1)
+[ -n "$expected" ] || die "No checksum entry for $asset in switchroom-checksums.txt."
+
+actual=$($sha_cmd "$tmp/$asset" | awk '{print $1}')
+if [ "$expected" != "$actual" ]; then
+  die "Checksum mismatch for $asset. Expected $expected, got $actual."
+fi
+ok "Checksum verified ($expected)"
+
+chmod +x "$tmp/$asset"
+
+# ---- choose install dir ----
+
+install_dir="${SWITCHROOM_INSTALL_DIR:-}"
+if [ -z "$install_dir" ]; then
+  if [ -w /usr/local/bin ] || ([ -d /usr/local/bin ] && [ "$(id -u)" -eq 0 ]); then
+    install_dir="/usr/local/bin"
   else
-    warn "node $(node -v) is below required 20.11, installing 22 via nvm"
-    need_node_install=1
+    install_dir="$HOME/.local/bin"
+    mkdir -p "$install_dir"
+    case ":$PATH:" in
+      *":$install_dir:"*) ;;
+      *) warn "$install_dir is not on your PATH. Add it to your shell profile to run 'switchroom'." ;;
+    esac
   fi
+fi
+
+target="$install_dir/switchroom"
+
+log "Installing to $target"
+if [ -w "$install_dir" ]; then
+  mv "$tmp/$asset" "$target"
+elif have sudo; then
+  warn "$install_dir requires sudo"
+  sudo mv "$tmp/$asset" "$target"
 else
-  log "Installing node 22 via nvm"
-  need_node_install=1
+  die "$install_dir is not writable and sudo not available. Set SWITCHROOM_INSTALL_DIR to a writable directory."
 fi
 
-if [ "$need_node_install" = "1" ]; then
-  if [ ! -s "$NVM_DIR/nvm.sh" ]; then
-    curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-  fi
-  # shellcheck disable=SC1091
-  . "$NVM_DIR/nvm.sh"
-  nvm install 22
-  nvm use 22
-  ok "node installed ($(node -v))"
+# macOS Gatekeeper: unsigned binaries get the quarantine xattr from curl.
+# Strip it so the user doesn't have to right-click > Open the first time.
+if [ "$platform" = "macos" ] && have xattr; then
+  xattr -d com.apple.quarantine "$target" 2>/dev/null || true
 fi
 
-# ---- claude CLI + switchroom ----
+ok "Installed switchroom to $target"
 
-log "Installing @anthropic-ai/claude-code and switchroom globally via npm"
-npm install -g --silent @anthropic-ai/claude-code switchroom
-ok "CLIs installed"
+# ---- verify ----
 
-have claude     || warn "claude not on PATH — open a new shell or run: export PATH=\"$(npm prefix -g)/bin:\$PATH\""
-have switchroom || warn "switchroom not on PATH — open a new shell or run: export PATH=\"$(npm prefix -g)/bin:\$PATH\""
+if "$target" version >/dev/null 2>&1; then
+  printf '\n%s%sDone.%s ' "$BOLD" "$GREEN" "$RESET"
+  "$target" version
+else
+  warn "Installed but 'switchroom version' did not exit cleanly. Try running it manually."
+fi
 
-# ---- done ----
-
-printf '\n%s%sDone.%s\n\n' "$BOLD" "$GREEN" "$RESET"
 cat <<'NEXT'
-  Next:
-    switchroom setup            # interactive config + Telegram wiring
-    switchroom doctor           # sanity check the environment
 
-  Docs: https://switchroom.ai · https://github.com/switchroom/switchroom
+Next:
+  switchroom setup            # interactive config + Telegram wiring
+  switchroom doctor           # sanity check the environment
+
+Note: the static binary bundles its runtime, but you still need the
+`claude` CLI installed (npm i -g @anthropic-ai/claude-code) to run agents.
+
+Docs: https://switchroom.ai
 NEXT

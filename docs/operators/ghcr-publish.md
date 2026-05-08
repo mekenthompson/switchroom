@@ -73,7 +73,7 @@ const yaml = generateCompose({
 ```
 
 When provided, each service's `image:` is rewritten from
-`ghcr.io/switchroom/<name>:<tag>` to
+`ghcr.io/switchroom/switchroom-<name>:<tag>` to
 `ghcr.io/switchroom/switchroom-<name>@sha256:<digest>`. Partial maps
 are tolerated — any image without a pin falls back to the legacy
 tag-based ref.

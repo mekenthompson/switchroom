@@ -339,10 +339,10 @@ describe("generateCompose — GHCR digest-pin mode", () => {
 
   it("default (no digest map) preserves tag-based image refs", () => {
     const out = generateCompose({ config: makeConfig({ alice: {} }) });
-    expect(out).toContain("image: ghcr.io/switchroom/broker:latest");
-    expect(out).toContain("image: ghcr.io/switchroom/kernel:latest");
-    expect(out).toContain("image: ghcr.io/switchroom/scheduler:latest");
-    expect(out).toContain("image: ghcr.io/switchroom/agent:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-broker:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-kernel:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-scheduler:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-agent:latest");
     // The "@" digest separator must NOT appear when unpinned.
     expect(out).not.toMatch(/image: ghcr\.io\/switchroom\/[^:]+@sha256:/);
   });
@@ -362,7 +362,7 @@ describe("generateCompose — GHCR digest-pin mode", () => {
     expect(out).toContain(`image: ghcr.io/switchroom/switchroom-scheduler@${goodDigest}`);
     expect(out).toContain(`image: ghcr.io/switchroom/switchroom-agent@${goodDigest}`);
     // No tag-style refs remain for the four pinned images.
-    expect(out).not.toMatch(/image: ghcr\.io\/switchroom\/(broker|kernel|scheduler|agent):/);
+    expect(out).not.toMatch(/image: ghcr\.io\/switchroom\/switchroom-(broker|kernel|scheduler|agent):/);
   });
 
   it("partial digest map — pinned services use digest, others fall back to tag", () => {
@@ -371,9 +371,9 @@ describe("generateCompose — GHCR digest-pin mode", () => {
       ghcrDigests: { agent: goodDigest },
     });
     expect(out).toContain(`image: ghcr.io/switchroom/switchroom-agent@${goodDigest}`);
-    expect(out).toContain("image: ghcr.io/switchroom/broker:latest");
-    expect(out).toContain("image: ghcr.io/switchroom/kernel:latest");
-    expect(out).toContain("image: ghcr.io/switchroom/scheduler:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-broker:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-kernel:latest");
+    expect(out).toContain("image: ghcr.io/switchroom/switchroom-scheduler:latest");
   });
 
   it("each image gets its own digest when distinct values supplied", () => {

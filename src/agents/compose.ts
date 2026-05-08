@@ -146,7 +146,7 @@ function resolveImageRef(
     }
     return `ghcr.io/switchroom/switchroom-${name}@${digest}`;
   }
-  return `ghcr.io/switchroom/${name}:${imageTag}`;
+  return `ghcr.io/switchroom/switchroom-${name}:${imageTag}`;
 }
 
 interface AgentServiceData {

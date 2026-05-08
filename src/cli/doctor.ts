@@ -1491,48 +1491,11 @@ function runDockerSection(config: SwitchroomConfig): CheckResult[] {
   );
   try { dockerfileAgent = readFileSync(dockerfilePath, "utf8"); } catch { /* none */ }
 
-  // Phase 3b-3 — resolve runtime-mode marker + currently-enabled
-  // switchroom-* systemd units so the coexistence check can fire.
-  const markerPath = resolve(process.env.HOME ?? "", ".switchroom", "runtime-mode");
-  let marker: "host" | "docker" | null = null;
-  try {
-    const v = readFileSync(markerPath, "utf8").trim();
-    if (v === "host" || v === "docker") marker = v;
-  } catch { /* missing */ }
-  let enabledSystemdUnits: string[] = [];
-  try {
-    const r = spawnSync(
-      "systemctl",
-      [
-        "--user",
-        "list-unit-files",
-        "--type=service",
-        "--no-legend",
-        "--plain",
-        "switchroom-*",
-      ],
-      { encoding: "utf8" },
-    );
-    if (r.status === 0 && typeof r.stdout === "string") {
-      enabledSystemdUnits = r.stdout
-        .split("\n")
-        .map((l) => l.trim())
-        .filter(Boolean)
-        .filter((l) => {
-          const cols = l.split(/\s+/);
-          return cols[1] === "enabled" || cols[1] === "enabled-runtime";
-        })
-        .map((l) => l.split(/\s+/)[0]!);
-    }
-  } catch { /* no systemd */ }
-
   return runDockerChecks({
     config,
     composeYaml,
     dockerfileAgent,
     active,
-    marker,
-    enabledSystemdUnits,
   });
 }
 

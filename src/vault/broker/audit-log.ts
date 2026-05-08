@@ -61,6 +61,21 @@ export interface AuditEntry {
    * the secret half — only the ID prefix is logged.
    */
   grant_id?: string;
+  /**
+   * Phase 2a — informational SO_PEERCRED UID captured at accept(2) time.
+   * Recorded on the agent-bound (socket-path-as-identity) path so an
+   * operator forensically reviewing the audit log can correlate against
+   * the host's UID-allocation table. NEVER used to gate ACL — agent
+   * identity is the listener's socket path, full stop.
+   */
+  peer_uid?: number;
+  /**
+   * Phase 2a — agent slug derived from the listener's socket path
+   * (/run/switchroom/broker/<agent>.sock). When present, this is the
+   * trusted identity used for the ACL decision; cgroup is informational
+   * (and typically null on the agent-bound path).
+   */
+  agent_name?: string;
 }
 
 export interface AuditLogger {

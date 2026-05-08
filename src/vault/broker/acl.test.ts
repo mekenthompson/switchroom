@@ -17,7 +17,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { checkAcl } from "./acl.js";
+import { checkAcl, checkAclByAgent } from "./acl.js";
 import type { SwitchroomConfig } from "../../config/schema.js";
 import type { PeerInfo } from "./peercred.js";
 
@@ -228,5 +228,83 @@ describe("ACL: non-cron callers (systemdUnit=null) → denied", () => {
     if (!result.allow) {
       expect(result.reason).toContain("not a switchroom cron unit");
     }
+  });
+});
+
+describe("ACL: socket-path-as-identity (Phase 2a)", () => {
+  it("allows a key declared in the agent's schedule secrets", () => {
+    const config = makeConfig({
+      alice: [{ cron: "0 8 * * *", prompt: "hi", secrets: ["alice_key"] }],
+    });
+    expect(checkAclByAgent(config, "alice", "alice_key").allow).toBe(true);
+  });
+
+  it("denies a key not in the agent's schedule secrets", () => {
+    const config = makeConfig({
+      alice: [{ cron: "0 8 * * *", prompt: "hi", secrets: ["alice_key"] }],
+    });
+    const r = checkAclByAgent(config, "alice", "bob_key");
+    expect(r.allow).toBe(false);
+    if (!r.allow) expect(r.reason).toContain("not in ACL");
+  });
+
+  it("denies cross-agent — alice cannot read keys declared only on bob", () => {
+    const config = makeConfig({
+      alice: [{ cron: "0 8 * * *", prompt: "a", secrets: ["alice_key"] }],
+      bob: [{ cron: "0 9 * * *", prompt: "b", secrets: ["bob_key"] }],
+    });
+    expect(checkAclByAgent(config, "alice", "bob_key").allow).toBe(false);
+    expect(checkAclByAgent(config, "bob", "alice_key").allow).toBe(false);
+    // Sanity: each agent CAN read its own.
+    expect(checkAclByAgent(config, "alice", "alice_key").allow).toBe(true);
+    expect(checkAclByAgent(config, "bob", "bob_key").allow).toBe(true);
+  });
+
+  it("aggregates secrets across multiple schedule entries", () => {
+    // The broker container has no way to know which schedule index a
+    // long-running agent connection corresponds to (no cron context), so
+    // an agent declared with multiple schedule entries gets the union of
+    // their secrets[]. Documented in checkAclByAgent's header.
+    const config = makeConfig({
+      alice: [
+        { cron: "0 8 * * *", prompt: "morning", secrets: ["k1"] },
+        { cron: "0 18 * * *", prompt: "evening", secrets: ["k2"] },
+      ],
+    });
+    expect(checkAclByAgent(config, "alice", "k1").allow).toBe(true);
+    expect(checkAclByAgent(config, "alice", "k2").allow).toBe(true);
+    expect(checkAclByAgent(config, "alice", "k3").allow).toBe(false);
+  });
+
+  it("denies an unknown agent name", () => {
+    const config = makeConfig({
+      alice: [{ cron: "0 8 * * *", prompt: "a", secrets: ["k"] }],
+    });
+    const r = checkAclByAgent(config, "nonexistent", "k");
+    expect(r.allow).toBe(false);
+    if (!r.allow) expect(r.reason).toContain("not found in config");
+  });
+
+  it("denies an empty agent name", () => {
+    const config = makeConfig({
+      alice: [{ cron: "0 8 * * *", prompt: "a", secrets: ["k"] }],
+    });
+    expect(checkAclByAgent(config, "", "k").allow).toBe(false);
+  });
+
+  it("denies when the agent has no schedule entries at all", () => {
+    // makeConfig coerces every entry into schedule with secrets[]; bypass
+    // it here to construct an agent with an empty schedule.
+    const config = {
+      switchroom: { version: 1 },
+      telegram: { bot_token: "t", forum_chat_id: "1" },
+      vault: { path: "~/.switchroom/vault.enc" },
+      agents: {
+        alice: { topic_name: "alice", schedule: [] },
+      },
+    } as unknown as Parameters<typeof checkAclByAgent>[0];
+    const r = checkAclByAgent(config, "alice", "k");
+    expect(r.allow).toBe(false);
+    if (!r.allow) expect(r.reason).toContain("no schedule entries");
   });
 });

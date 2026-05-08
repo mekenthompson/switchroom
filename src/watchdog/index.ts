@@ -44,9 +44,13 @@ import {
   type WatchdogPolicy,
 } from "./policy.js";
 import { warnIfNotLinuxOnce } from "./journald.js";
+import { isWatchdogPaused, DEFAULT_PAUSE_SENTINEL } from "./pause.js";
 
 /** Default db path. */
 export const DEFAULT_DB_PATH = join(homedir(), ".switchroom", "watchdog.db");
+
+/** Re-exports for callers that imported these from watchdog/index.ts. */
+export { DEFAULT_PAUSE_SENTINEL, isWatchdogPaused } from "./pause.js";
 
 /** Default health-poll interval. */
 const HEALTH_POLL_INTERVAL_MS = 10_000;
@@ -61,6 +65,8 @@ export interface WatchdogOptions {
   dockerBin?: string;
   /** Override Date.now for deterministic tests. */
   now?: () => number;
+  /** Override pause-sentinel path (tests). */
+  pausePath?: string;
 }
 
 interface DockerEventJson {
@@ -90,6 +96,7 @@ export class Watchdog {
   private readonly policy: WatchdogPolicy;
   private readonly dockerBin: string;
   private readonly now: () => number;
+  private readonly pausePath: string;
   private eventsProc: ChildProcess | null = null;
   private healthTimer: NodeJS.Timeout | null = null;
   private stopped = false;
@@ -104,6 +111,7 @@ export class Watchdog {
     this.policy = opts.policy ?? DEFAULT_POLICY;
     this.dockerBin = opts.dockerBin ?? "docker";
     this.now = opts.now ?? (() => Date.now());
+    this.pausePath = opts.pausePath ?? DEFAULT_PAUSE_SENTINEL;
   }
 
   /** Begin watching. Resolves when the events subscription is up. */
@@ -246,6 +254,15 @@ export class Watchdog {
 
   // ── restart action ──────────────────────────────────────────────────
   private async attemptRestart(name: string, reason: string): Promise<void> {
+    if (isWatchdogPaused(this.pausePath)) {
+      this.events.emit({
+        ts: this.now(),
+        container: name,
+        type: "restart-skipped-escalated",
+        detail: { reason: `paused: ${reason}` },
+      });
+      return;
+    }
     if (this.state.isEscalated(name)) {
       this.events.emit({
         ts: this.now(),

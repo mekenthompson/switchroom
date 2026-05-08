@@ -263,9 +263,12 @@ afterAll(() => {
 
     // Production-host safety check.
     const after = snapshotProductionContainers();
+    // Filter out ALL switchroom phase-test containers (any phase), not just
+    // phase2b's — sibling-phase ephemerals running concurrently are normal
+    // cross-phase noise, not production drift. See phase2a for rationale.
     const filterPhase = (s: string): string =>
       s.split("\n")
-        .filter((l) => l && !l.includes("phase2b"))
+        .filter((l) => l && !/switchroom-phase\d/.test(l))
         .sort()
         .join("\n");
     const beforeFiltered = filterPhase(fx.prodSnapshot);

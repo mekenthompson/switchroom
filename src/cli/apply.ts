@@ -60,6 +60,13 @@ export interface ApplyOptions {
    * non-interactively. Default: prompts when stdin is a TTY.
    */
   nonInteractive?: boolean;
+  /**
+   * When true, treat a chown failure during UID alignment as a soft
+   * warning instead of a hard error. Default false: an unaligned state
+   * dir will silently break the agent on first boot, so we fail loudly
+   * unless the operator opts into the unsafe path.
+   */
+  allowUnaligned?: boolean;
 }
 
 export interface ApplyDeps {
@@ -169,6 +176,10 @@ export async function runApply(
 
   // ── 1. Scaffold each agent ────────────────────────────────────────
   let scaffolded = 0;
+  // Sentinel-typed error class so the outer per-agent try/catch can
+  // re-raise UID alignment failures without swallowing them as a soft
+  // `x ${name}` log line.
+  class UidAlignmentAbort extends Error {}
   for (const name of agentNames) {
     const agentConfig = config.agents[name];
     try {
@@ -199,14 +210,30 @@ export async function runApply(
           writeOut,
         });
       } catch (alignErr) {
-        writeOut(
-          chalk.yellow(
-            `    ! could not chown ${name} state dir: ${(alignErr as Error).message}\n`,
-          ),
-        );
+        const msg = (alignErr as Error).message;
+        if (options.allowUnaligned) {
+          writeOut(
+            chalk.yellow(
+              `    ! could not chown ${name} state dir: ${msg}\n` +
+              `      continuing because --allow-unaligned was passed; agent may fail on first write.\n`,
+            ),
+          );
+        } else {
+          writeOut(
+            chalk.red(
+              `    x could not chown ${name} state dir: ${msg}\n` +
+              `      The bind-mounted state dir must be owned by the container's UID or the agent will fail on first write.\n` +
+              `      Fix: run \`switchroom apply\` from a TTY so it can prompt for sudo, OR run the suggested chown manually, OR re-run with --allow-unaligned to skip this check.\n`,
+            ),
+          );
+          throw new UidAlignmentAbort(
+            `UID alignment failed for agent ${name}; aborting apply (pass --allow-unaligned to override).`,
+          );
+        }
       }
       scaffolded++;
     } catch (err) {
+      if (err instanceof UidAlignmentAbort) throw err;
       writeOut(chalk.red(`  x ${name}: ${(err as Error).message}\n`));
     }
   }
@@ -311,12 +338,17 @@ export function registerApplyCommand(program: Command): void {
       "--non-interactive",
       "Skip prompts (e.g. sudo-chown explainer for UID alignment). Use in CI / scripts.",
     )
+    .option(
+      "--allow-unaligned",
+      "Treat UID-alignment chown failures as warnings instead of hard errors. Unsafe: an unaligned state dir will break the agent on first write. Use only if you know you'll fix ownership out-of-band.",
+    )
     .action(
       async (opts: {
         buildLocal?: boolean | string;
         out?: string;
         example?: string;
         nonInteractive?: boolean;
+        allowUnaligned?: boolean;
       }) => {
         try {
           if (opts.example) {
@@ -342,6 +374,7 @@ export function registerApplyCommand(program: Command): void {
               outPath: opts.out,
               example: opts.example,
               nonInteractive: opts.nonInteractive ?? false,
+              allowUnaligned: opts.allowUnaligned ?? false,
             },
             {},
             switchroomConfigPath,

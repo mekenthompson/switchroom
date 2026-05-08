@@ -1,8 +1,9 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runApply, runApplyPreflight } from "./apply.js";
+import * as scaffoldModule from "../agents/scaffold.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 
 /**
@@ -61,6 +62,86 @@ describe("runApply", () => {
       telegram: { bot_token: "vault:telegram_bot_token" },
     } as unknown as SwitchroomConfig;
     expect(() => runApplyPreflight(cfg)).toThrow(/vault/i);
+  });
+
+  describe("UID alignment failure handling", () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let scaffoldSpy: any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let alignSpy: any;
+
+    beforeEach(() => {
+      // Force scaffoldAgent to look like it succeeded so we reach the
+      // alignAgentUid call site. The real scaffoldAgent needs a fully
+      // wired profile / telegram config which is out of scope here.
+      // Note: do NOT mockReset/mockClear these spies between tests —
+      // that wipes the implementation and the real function runs again.
+      scaffoldSpy = vi
+        .spyOn(scaffoldModule, "scaffoldAgent")
+        .mockImplementation(
+          () => ({ created: ["fake.txt"] }) as never,
+        );
+      alignSpy = vi
+        .spyOn(scaffoldModule, "alignAgentUid")
+        .mockImplementation(() => {
+          throw new Error("simulated chown EPERM");
+        });
+    });
+
+    afterEach(() => {
+      scaffoldSpy.mockRestore();
+      alignSpy.mockRestore();
+    });
+
+    it("fails hard by default when chown fails", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "switchroom-apply-fail-"));
+      const sink: string[] = [];
+      await expect(
+        runApply(
+          makeStubConfig(join(dir, "agents")),
+          { outPath: join(dir, "docker-compose.yml") },
+          { writeOut: (s) => sink.push(s), writeErr: (s) => sink.push(s) },
+        ),
+      ).rejects.toThrow(/UID alignment failed|allow-unaligned/i);
+      const all = sink.join("");
+      expect(all).toMatch(/could not chown/);
+      expect(all).toMatch(/--allow-unaligned/);
+    });
+
+    it("warns and continues when --allow-unaligned is passed", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "switchroom-apply-allow-"));
+      const sink: string[] = [];
+      const res = await runApply(
+        makeStubConfig(join(dir, "agents")),
+        {
+          outPath: join(dir, "docker-compose.yml"),
+          allowUnaligned: true,
+        },
+        { writeOut: (s) => sink.push(s), writeErr: (s) => sink.push(s) },
+      );
+      expect(res.scaffolded).toBe(1);
+      const all = sink.join("");
+      expect(all).toMatch(/could not chown/);
+      expect(all).toMatch(/continuing/i);
+    });
+  });
+
+  describe("compose v2 preflight", () => {
+    const realPath = process.env.PATH;
+
+    afterEach(() => {
+      process.env.PATH = realPath;
+    });
+
+    it("preflight throws with friendly message when `docker compose` v2 is missing", () => {
+      // Empty PATH so `docker` is not findable — execFileSync throws,
+      // detectComposeV2 returns the friendly error string.
+      process.env.PATH = "/nonexistent-switchroom-test-path";
+      const cfg = makeStubConfig("/tmp/agents");
+      expect(() => runApplyPreflight(cfg)).toThrow(
+        /docker compose.*v2|Compose v2 plugin/i,
+      );
+    });
   });
 
   it("returns the count of agents scaffolded", async () => {

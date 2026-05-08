@@ -1,49 +1,67 @@
 /**
- * `switchroom up` — Phase 3b-3 default flip.
+ * `switchroom up` — bring up the Switchroom fleet.
  *
- * On Linux with no prior runtime-mode marker, default to the Docker
- * runtime (Phase 3b's docker-compose-driven fleet). Hosts already
- * running the legacy systemd installation keep using systemd and see a
- * one-time advisory pointing to `switchroom migrate to-docker`. The
- * `--legacy` flag lets operators explicitly opt back into systemd
- * (silencing the advisory and pinning the marker so future invocations
- * route to systemd without re-checking).
+ * Linux + Docker is the default; `--legacy` is a plain branch selector
+ * for the systemd path (no marker write, no advisory). Non-Linux always
+ * uses the systemd path (Docker Desktop is best-effort on Mac/Win and
+ * not the production runtime — see Phase 3d declaration in README).
  *
  * The actual fleet bring-up primitives (compose generation, compose-up,
  * systemd unit install/start) all live in modules this file imports
  * from — `up` is purely the decision-and-orchestration layer. Every
  * side-effecting call is injected via `UpDeps` so the unit tests can
- * exercise the full decision matrix without docker or systemctl on the
- * host.
+ * exercise the decision tree without docker or systemctl on the host.
  */
 import type { Command } from "commander";
 import chalk from "chalk";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { withConfigError, getConfig } from "./helpers.js";
-import {
-  decideRuntime,
-  defaultRuntimeModePath,
-  hasActiveSystemdInstall,
-  legacyAdvisoryText,
-  readRuntimeMode,
-  type RunCommand,
-} from "./runtime-detection.js";
-import { defaultRunCommand } from "./migrate/preflight.js";
 import type { SwitchroomConfig } from "../config/schema.js";
+
+const execFileP = promisify(execFile);
+
+export interface RunCommandResult {
+  stdout: string;
+  stderr: string;
+  exitCode: number;
+}
+
+export type RunCommand = (
+  cmd: string,
+  args: readonly string[],
+) => Promise<RunCommandResult>;
+
+export const defaultRunCommand: RunCommand = async (cmd, args) => {
+  try {
+    const { stdout, stderr } = await execFileP(cmd, args, {
+      encoding: "utf8",
+      maxBuffer: 8 * 1024 * 1024,
+    });
+    return { stdout, stderr, exitCode: 0 };
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & {
+      stdout?: string;
+      stderr?: string;
+      code?: number | string;
+    };
+    return {
+      stdout: typeof e.stdout === "string" ? e.stdout : "",
+      stderr: typeof e.stderr === "string" ? e.stderr : String(err),
+      exitCode: typeof e.code === "number" ? e.code : 1,
+    };
+  }
+};
 
 export interface UpDeps {
   /** `process.platform` override for tests. */
   platform?: NodeJS.Platform;
-  /** Override the runtime-mode marker path. */
-  runtimeModePath?: string;
-  /** Subprocess runner (only used for systemctl probe). */
-  runCommand?: RunCommand;
   /**
    * Bring up the docker fleet (compose generate + compose up). Default
-   * shells out via the migrate executor's primitives. Tests inject a
-   * stub.
+   * shells out to `docker compose up -d`. Tests inject a stub.
    */
   startDockerFleet?: (config: SwitchroomConfig) => Promise<void>;
   /**
@@ -51,8 +69,6 @@ export interface UpDeps {
    * `installAllUnits` + `agent start all` semantics. Tests inject.
    */
   startSystemdFleet?: (config: SwitchroomConfig) => Promise<void>;
-  /** stderr writer; defaults to `process.stderr.write`. */
-  writeErr?: (s: string) => void;
   /** stdout writer; defaults to `process.stdout.write`. */
   writeOut?: (s: string) => void;
 }
@@ -64,10 +80,6 @@ export interface UpOptions {
 export interface UpResult {
   /** Which runtime was used. */
   runtime: "docker" | "host";
-  /** Did we print the legacy advisory this invocation? */
-  printedAdvisory: boolean;
-  /** What did we write the runtime-mode marker to (or null = unchanged)? */
-  markerWritten: "host" | "docker" | null;
 }
 
 async function defaultStartDockerFleet(config: SwitchroomConfig): Promise<void> {
@@ -77,8 +89,7 @@ async function defaultStartDockerFleet(config: SwitchroomConfig): Promise<void> 
   const content = generateCompose({ config });
   await mkdir(dirname(composePath), { recursive: true });
   await writeFile(composePath, content, { encoding: "utf8", mode: 0o600 });
-  const run = defaultRunCommand;
-  const r = await run("docker", [
+  const r = await defaultRunCommand("docker", [
     "compose",
     "-p",
     project,
@@ -97,10 +108,14 @@ async function defaultStartDockerFleet(config: SwitchroomConfig): Promise<void> 
 async function defaultStartSystemdFleet(config: SwitchroomConfig): Promise<void> {
   const { installAllUnits } = await import("../agents/systemd.js");
   installAllUnits(config);
-  const run = defaultRunCommand;
   for (const name of Object.keys(config.agents)) {
     const unit = `switchroom-${name}.service`;
-    const r = await run("systemctl", ["--user", "enable", "--now", unit]);
+    const r = await defaultRunCommand("systemctl", [
+      "--user",
+      "enable",
+      "--now",
+      unit,
+    ]);
     if (r.exitCode !== 0) {
       throw new Error(
         `systemctl --user enable --now ${unit} failed (exit ${r.exitCode}): ${r.stderr.trim() || r.stdout.trim()}`,
@@ -109,13 +124,14 @@ async function defaultStartSystemdFleet(config: SwitchroomConfig): Promise<void>
   }
 }
 
-async function writeMarker(path: string, mode: "host" | "docker"): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, mode + "\n", { encoding: "utf8", mode: 0o600 });
-}
-
 /**
  * Pure orchestrator — exported for tests. Does not parse CLI args.
+ *
+ * Decision tree:
+ *   - non-Linux        → systemd path (Docker Desktop is best-effort,
+ *                        not the production runtime; see README)
+ *   - Linux + --legacy → systemd path
+ *   - Linux (default)  → docker path
  */
 export async function runUp(
   config: SwitchroomConfig,
@@ -123,52 +139,21 @@ export async function runUp(
   deps: UpDeps = {},
 ): Promise<UpResult> {
   const platform = deps.platform ?? process.platform;
-  const markerPath = deps.runtimeModePath ?? defaultRuntimeModePath();
-  const run = deps.runCommand ?? defaultRunCommand;
-  const writeErr = deps.writeErr ?? ((s) => process.stderr.write(s));
   const writeOut = deps.writeOut ?? ((s) => process.stdout.write(s));
   const startDocker = deps.startDockerFleet ?? defaultStartDockerFleet;
   const startSystemd = deps.startSystemdFleet ?? defaultStartSystemdFleet;
 
-  const marker = readRuntimeMode(markerPath);
-  // Only probe systemd if the marker doesn't already pin us — saves a
-  // subprocess on docker-mode hosts.
-  const hasSystemd =
-    marker === null && platform === "linux"
-      ? await hasActiveSystemdInstall(run)
-      : false;
+  const useDocker = platform === "linux" && !options.legacy;
 
-  const decision = decideRuntime({
-    platform,
-    marker,
-    hasActiveSystemd: hasSystemd,
-    legacy: !!options.legacy,
-  });
-
-  let printedAdvisory = false;
-  if (decision.showLegacyAdvisory) {
-    writeErr(chalk.yellow("\n" + legacyAdvisoryText() + "\n\n"));
-    printedAdvisory = true;
-  }
-
-  if (decision.runtime === "docker") {
+  if (useDocker) {
     writeOut(chalk.bold("Bringing up Switchroom (docker runtime)...\n"));
     await startDocker(config);
-  } else {
-    writeOut(chalk.bold("Bringing up Switchroom (systemd runtime)...\n"));
-    await startSystemd(config);
+    return { runtime: "docker" };
   }
 
-  let markerWritten: "host" | "docker" | null = null;
-  if (decision.writeDockerMarkerAfter) {
-    await writeMarker(markerPath, "docker");
-    markerWritten = "docker";
-  } else if (decision.writeHostMarkerAfter) {
-    await writeMarker(markerPath, "host");
-    markerWritten = "host";
-  }
-
-  return { runtime: decision.runtime, printedAdvisory, markerWritten };
+  writeOut(chalk.bold("Bringing up Switchroom (systemd runtime)...\n"));
+  await startSystemd(config);
+  return { runtime: "host" };
 }
 
 export function registerUpCommand(program: Command): void {

@@ -163,9 +163,6 @@ const serverEntries = [
   // the image runs the bundle under `bun`.
   { src: "src/vault/approvals/kernel-server.ts", out: "dist/vault/approvals/kernel-server.js" },
   { src: "src/scheduler/index.ts", out: "dist/scheduler/index.js" },
-  // Phase 3b-1: fleet watchdog. Runs as a host bun process, supervises the
-  // Phase 1 fleet containers selected by the `switchroom.fleet` label.
-  { src: "src/watchdog/index.ts", out: "dist/watchdog/index.js" },
 ];
 for (const entry of serverEntries) {
   const srcAbs = resolve(root, entry.src);

@@ -1,3 +1,4 @@
+// Ask-user uses pendingAskUser, not the approval kernel — see #769 for rationale.
 /**
  * Pure helpers for the `ask_user` MCP tool.
  *

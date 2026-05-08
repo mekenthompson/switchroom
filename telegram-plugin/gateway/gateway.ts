@@ -1322,6 +1322,17 @@ type PendingVaultOp =
       expiresLabel?: string     // human-readable label for confirmation
       description?: string
       awaitingCustomDuration?: boolean  // true while waiting for text reply
+      /**
+       * Approval-kernel request_id minted at the wizard confirm step
+       * (MIGRATION.md §2, Phase 1 dual-dispatch — audit-only, advisory).
+       * When set, `vg:generate` ALSO consumes + records an `allow_once`
+       * decision on the kernel; `vg:cancel` records a `deny`. Cards in
+       * flight from before this PR landed have it `undefined` and the
+       * legacy `mintGrantViaBroker` runs alone — no kernel write. After
+       * 1-2 releases the legacy-only branch can be removed (#833 Phase 2
+       * is the enforcing flip).
+       */
+      kernel_request_id?: string
       startedAt: number
     }
   // Issue #228: waiting for confirmation before revoking a grant.
@@ -1427,6 +1438,83 @@ async function recordDeferredSecretKernelDecision(
 }
 function deferredKey(chat_id: string, message_id: number): string {
   return `${chat_id}:${message_id}`
+}
+
+/**
+ * Mint an approval-kernel decision row for a `/vault grant` wizard
+ * confirm step (MIGRATION.md §2, Phase 1 audit-only dual-dispatch).
+ *
+ * Best-effort: kernel/broker unreachable → returns null and the wizard
+ * proceeds on the legacy `mint_grant` path alone, so the user-facing
+ * grant UX never depends on kernel availability. This is *advisory*
+ * in Phase 1 — the kernel verdict is informational alongside the
+ * legacy `vault_grants` row, not enforcing. Phase 2 (issue #833) flips
+ * enforcement.
+ *
+ * Scope shape `vault:grant:<agent_slug>` mirrors the `vault:secret:<slug>`
+ * namespacing established in #832 / PR #830 — one decision per (agent,
+ * grant-mint) tuple. Action `mint`. Approver-set is the gateway's
+ * allowFrom (same set that gates the wizard callback in the first place).
+ */
+async function mintGrantWizardKernelRequest(
+  agentSlug: string,
+  approverSet: string[],
+  selectedKeys: string[],
+  ttlSeconds: number | null,
+): Promise<string | null> {
+  const agentName = process.env.SWITCHROOM_AGENT_NAME
+  if (!agentName) return null
+  try {
+    const why =
+      `Mint capability token for agent "${agentSlug}" — ` +
+      `${selectedKeys.length} key(s), ` +
+      `${ttlSeconds === null ? 'no expiry' : `${ttlSeconds}s TTL`}.`
+    const r = await approvalRequest({
+      agent_unit: `switchroom-${agentName}.service`,
+      scope: `vault:grant:${agentSlug}`,
+      action: 'mint',
+      approver_set: approverSet,
+      why,
+    })
+    if (r === null || r.state !== 'pending') return null
+    return r.request_id
+  } catch (err) {
+    process.stderr.write(
+      `[approval-kernel] mintGrantWizardKernelRequest failed: ${(err as Error).message}\n`,
+    )
+    return null
+  }
+}
+
+/**
+ * Record the user's wizard decision (allow/deny) on the approval kernel
+ * for a `/vault grant` wizard card. Best-effort and idempotent — a
+ * missing `request_id` (legacy in-flight wizard) or an unreachable
+ * broker silently no-op so the legacy UX is unaffected. Audit-only in
+ * Phase 1: nothing downstream reads this verdict yet.
+ */
+async function recordGrantWizardKernelDecision(
+  request_id: string | undefined,
+  decision: 'allow_once' | 'deny',
+  granted_by_user_id: number,
+  approverSet: string[],
+): Promise<void> {
+  if (!request_id) return
+  try {
+    const consumed = await approvalConsume(request_id)
+    if (consumed === null || !consumed.consumed) return
+    await approvalRecord({
+      request_id,
+      decision,
+      approver_set: approverSet,
+      granted_by_user_id,
+      ttl_ms: null,
+    })
+  } catch (err) {
+    process.stderr.write(
+      `[approval-kernel] recordGrantWizardKernelDecision failed: ${(err as Error).message}\n`,
+    )
+  }
 }
 
 // Channel B context rule — tracks when the gateway has emitted the
@@ -7337,12 +7425,43 @@ async function grantWizardConfirm(ctx: Context, chatId: string, state: Extract<P
     const sent = await switchroomReply(ctx, text, { html: true, reply_markup: kb })
     state.wizardMsgId = (sent as unknown as { message_id?: number })?.message_id
   }
-  pendingVaultOps.set(chatId, { ...state, step: 'confirm', expiresLabel })
+  // Mint kernel decision row at the confirm step (MIGRATION.md §2,
+  // audit-only Phase 1). We do it here rather than at executeGrantWizard
+  // so a kernel row exists even if the user taps Cancel from the confirm
+  // card — the deny verdict on cancel is then recorded against the same
+  // request_id. If the kernel/broker is unreachable, request_id stays
+  // undefined and the wizard runs legacy-only (no behaviour change).
+  const kernelRequestId = await mintGrantWizardKernelRequest(
+    state.agent!,
+    loadAccess().allowFrom,
+    state.selectedKeys!,
+    state.ttlSeconds ?? null,
+  )
+  pendingVaultOps.set(chatId, {
+    ...state,
+    step: 'confirm',
+    expiresLabel,
+    kernel_request_id: kernelRequestId ?? state.kernel_request_id,
+  })
 }
 
 /** Execute the grant: call broker mint_grant, write token, reply. */
 async function executeGrantWizard(ctx: Context, chatId: string, state: Extract<PendingVaultOp, { kind: 'grant-wizard' }>): Promise<void> {
   pendingVaultOps.delete(chatId)
+  // Kernel-side dual-dispatch (MIGRATION.md §2, audit-only Phase 1):
+  // record the allow_once decision when the user taps Generate. The
+  // legacy `mintGrantViaBroker` below still drives the actual grant
+  // mint + token write — the kernel row is informational, not
+  // enforcing, in Phase 1 (issue #833 will flip to enforcing).
+  // We record at tap-time rather than after mint_grant succeeds so a
+  // kernel row exists even if the legacy mint fails (audit captures
+  // intent regardless of downstream outcome).
+  await recordGrantWizardKernelDecision(
+    state.kernel_request_id,
+    'allow_once',
+    ctx.from?.id ?? 0,
+    loadAccess().allowFrom,
+  )
   // Defence-in-depth: state.agent flows from callback_data into a path
   // join below. A crafted vg:agent:../../etc payload would produce a
   // path traversal. Validate against the same regex the rest of the
@@ -7490,6 +7609,20 @@ async function handleVaultGrantCallback(ctx: Context, data: string): Promise<voi
 
   // Cancel at any wizard step
   if (data === 'vg:cancel') {
+    // Kernel-side dual-dispatch (MIGRATION.md §2, audit-only Phase 1):
+    // if the user got as far as the confirm step, a kernel request_id
+    // will be on the wizard state — record the deny decision so the
+    // audit log captures the abandonment. No-op if the user cancelled
+    // before the confirm step (or if the kernel was unreachable).
+    const cancelState = pendingVaultOps.get(chatId)
+    if (cancelState && cancelState.kind === 'grant-wizard') {
+      await recordGrantWizardKernelDecision(
+        cancelState.kernel_request_id,
+        'deny',
+        ctx.from?.id ?? 0,
+        loadAccess().allowFrom,
+      )
+    }
     pendingVaultOps.delete(chatId)
     const msg = ctx.callbackQuery?.message
     if (msg && 'text' in msg) {

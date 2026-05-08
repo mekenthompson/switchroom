@@ -24,6 +24,7 @@ import { registerDebugCommand } from "./debug.js";
 import { registerWorktreeCommand } from "./worktree.js";
 import { registerDriveCommand } from "./drive.js";
 import { registerMigrateCommand } from "./migrate/index.js";
+import { registerUpCommand } from "./up.js";
 import { captureEvent, installGlobalErrorHandlers } from "../analytics/posthog.js";
 
 installGlobalErrorHandlers();
@@ -71,3 +72,4 @@ registerDebugCommand(program);
 registerWorktreeCommand(program);
 registerDriveCommand(program);
 registerMigrateCommand(program);
+registerUpCommand(program);

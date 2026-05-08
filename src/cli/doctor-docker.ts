@@ -214,6 +214,73 @@ export function checkDockerfileUserAlignment(
 }
 
 /**
+ * Coexistence check (Phase 3b-3): when the runtime-mode marker says one
+ * runtime but the host visibly still has the OTHER one's enabled state,
+ * surface a warning. Coexistence is legitimate during a migration
+ * window — operators bring the new runtime up before tearing the old
+ * one down — but if it persists, it's the kind of footgun that produces
+ * "why is my agent running twice?" tickets. Warn-not-fail.
+ *
+ * Inputs are pre-resolved by the caller so this stays pure: the marker
+ * value (`"host" | "docker" | null`) and a list of currently-enabled
+ * `switchroom-*` systemd unit names. The caller is responsible for
+ * shelling out to systemctl (or stubbing it in tests).
+ */
+export function checkRuntimeCoexistence(args: {
+  marker: "host" | "docker" | null;
+  enabledSystemdUnits: readonly string[];
+}): CheckResult {
+  const { marker, enabledSystemdUnits } = args;
+  const hasSystemd = enabledSystemdUnits.length > 0;
+  if (marker === "docker" && hasSystemd) {
+    return {
+      name: "runtime coexistence",
+      status: "warn",
+      detail:
+        `runtime-mode=docker but ${enabledSystemdUnits.length} switchroom-* systemd unit(s) still enabled: ` +
+        enabledSystemdUnits.slice(0, 5).join(", ") +
+        (enabledSystemdUnits.length > 5 ? ", ..." : ""),
+      fix:
+        "If migration is complete, disable the legacy units: `systemctl --user disable --now switchroom-*` " +
+        "(or run `switchroom migrate to-docker --finalize`). Coexistence is legitimate mid-migration; " +
+        "stale once you've cut over.",
+    };
+  }
+  if (marker === "host" && hasSystemd) {
+    return {
+      name: "runtime coexistence",
+      status: "ok",
+      detail: `runtime-mode=host with ${enabledSystemdUnits.length} systemd unit(s) — consistent`,
+    };
+  }
+  if (marker === "docker" && !hasSystemd) {
+    return {
+      name: "runtime coexistence",
+      status: "ok",
+      detail: "runtime-mode=docker with no legacy systemd units enabled — clean",
+    };
+  }
+  if (marker === null && hasSystemd) {
+    return {
+      name: "runtime coexistence",
+      status: "warn",
+      detail:
+        `runtime-mode marker absent but ${enabledSystemdUnits.length} switchroom-* systemd unit(s) enabled. ` +
+        "Run `switchroom up --legacy` to pin the marker, or `switchroom migrate to-docker` to flip.",
+      fix:
+        "Either confirm the legacy runtime explicitly with `switchroom up --legacy` (writes runtime-mode=host) " +
+        "or migrate with `switchroom migrate to-docker`.",
+    };
+  }
+  // marker === null && !hasSystemd → nothing to coexist.
+  return {
+    name: "runtime coexistence",
+    status: "ok",
+    detail: "no runtime-mode marker and no legacy systemd units — fresh host",
+  };
+}
+
+/**
  * Aggregate runner — call from doctor.ts. Always returns an array so
  * the section renders consistently.
  */
@@ -222,15 +289,37 @@ export function runDockerChecks(args: {
   composeYaml?: string;
   dockerfileAgent?: string;
   active: boolean;
+  /** Phase 3b-3 inputs for the coexistence check (optional for callers that don't resolve them). */
+  marker?: "host" | "docker" | null;
+  enabledSystemdUnits?: readonly string[];
 }): CheckResult[] {
   if (!args.active) {
-    return [{
+    const out: CheckResult[] = [{
       name: "Docker runtime",
       status: "ok",
       detail: "Docker mode not active (host-native runtime); skipping Docker-specific checks",
     }];
+    // Coexistence is informative even on a host-only fleet — we still
+    // want to flag "marker says docker, but systemd is alive" cases.
+    if (args.marker !== undefined && args.enabledSystemdUnits !== undefined) {
+      out.push(
+        checkRuntimeCoexistence({
+          marker: args.marker,
+          enabledSystemdUnits: args.enabledSystemdUnits,
+        }),
+      );
+    }
+    return out;
   }
   const out: CheckResult[] = [];
+  if (args.marker !== undefined && args.enabledSystemdUnits !== undefined) {
+    out.push(
+      checkRuntimeCoexistence({
+        marker: args.marker,
+        enabledSystemdUnits: args.enabledSystemdUnits,
+      }),
+    );
+  }
   out.push(checkAgentUidUniqueness(args.config));
   out.push(checkAgentCaps(args.config));
   if (args.composeYaml) {

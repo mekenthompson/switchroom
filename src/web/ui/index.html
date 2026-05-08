@@ -307,6 +307,17 @@
     .quota-pct.stale { color: var(--text-dim); font-style: italic; }
     .agent-list { font-size: 0.8rem; color: var(--text-dim); }
     .agent-list.primary { color: var(--text); }
+    .usage-pill {
+      display: inline-block;
+      padding: 0.15rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    .usage-pill.primary {
+      color: var(--green);
+      background: rgba(52,211,153,0.12);
+    }
     .modal-backdrop {
       position: fixed; inset: 0; background: rgba(0,0,0,0.6);
       display: flex; align-items: center; justify-content: center; z-index: 100;
@@ -479,6 +490,7 @@
             <div class="meta-item"><label>Mem </label><span>${a.memory || '--'}</span></div>
             <div class="meta-item"><label>Profile </label><span>${escapeHtml(a.extends)}</span></div>
             <div class="meta-item"><label>Auth </label><span>${a.auth.authenticated ? '✓' : '✗'}</span></div>
+            <div class="meta-item"><label>Account </label><span>${a.primaryAccount ? escapeHtml(a.primaryAccount) : '<span style="color:var(--text-dim)">default</span>'}</span></div>
             <div class="meta-item"><label>Collection </label><span>${escapeHtml(a.memoryCollection)}</span></div>
           </div>
           <div class="card-actions">
@@ -544,25 +556,28 @@
         return;
       }
       const rows = accounts.map(a => {
-        const fiveH = renderQuotaPct(a.quota && a.quota.fiveHourPct, a.quota && a.quota.capturedAt);
-        const sevenD = renderQuotaPct(a.quota && a.quota.sevenDayPct, a.quota && a.quota.capturedAt);
+        const capturedMs = a.quota && a.quota.capturedAt ? new Date(a.quota.capturedAt).getTime() : null;
+        const fiveH = renderQuotaPct(a.quota && a.quota.fiveHourPct, capturedMs);
+        const sevenD = renderQuotaPct(a.quota && a.quota.sevenDayPct, capturedMs);
         const captured = a.quota && a.quota.capturedAt ? new Date(a.quota.capturedAt).toLocaleString() : 'never';
         const usageTitle = `Quota captured: ${captured}`;
         const primaryFor = a.primaryFor || [];
         const fallbackFor = a.fallbackFor || [];
         const usageCell = renderUsageCell(primaryFor, fallbackFor);
+        const refreshed = capturedMs ? formatTimestamp(capturedMs) : '<span style="color:var(--text-dim)">—</span>';
+        const fiveReset = a.quota && a.quota.fiveHourResetAt ? formatTimestamp(a.quota.fiveHourResetAt) : '<span style="color:var(--text-dim)">—</span>';
+        const sevenReset = a.quota && a.quota.sevenDayResetAt ? formatTimestamp(a.quota.sevenDayResetAt) : '<span style="color:var(--text-dim)">—</span>';
         return `
         <tr>
           <td>${escapeHtml(a.label)}</td>
           <td><span class="health-badge ${escapeHtml(a.health)}">${escapeHtml(a.health)}</span></td>
+          <td>${usageCell}</td>
           <td title="${escapeHtml(usageTitle)}">${fiveH}</td>
           <td title="${escapeHtml(usageTitle)}">${sevenD}</td>
-          <td>${usageCell}</td>
-          <td>${escapeHtml(a.subscriptionType || '—')}</td>
-          <td>${escapeHtml(a.email || '—')}</td>
+          <td title="${escapeHtml(usageTitle)}">${refreshed}</td>
+          <td>${fiveReset}</td>
+          <td>${sevenReset}</td>
           <td>${formatTimestamp(a.expiresAt)}</td>
-          <td>${formatTimestamp(a.lastRefreshedAt)}</td>
-          <td>${a.quotaExhaustedUntil ? formatTimestamp(a.quotaExhaustedUntil) : '—'}</td>
           <td><button class="btn" onclick="openPromoteModal('${escapeHtml(a.label)}')">Make primary…</button></td>
         </tr>
       `;
@@ -570,8 +585,10 @@
       container.innerHTML = `
         <table class="accounts-table">
           <thead><tr>
-            <th>Label</th><th>Health</th><th>5h%</th><th>7d%</th><th>Used by</th>
-            <th>Sub</th><th>Email</th><th>Expires</th><th>Refreshed</th><th>Quota reset</th><th></th>
+            <th>Label</th><th>Health</th><th>Used by</th>
+            <th>5h%</th><th>7d%</th>
+            <th>Refreshed</th><th>5h reset</th><th>7d reset</th>
+            <th>Expires</th><th></th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -582,7 +599,11 @@
       if (pct == null) return '<span class="quota-pct stale">—</span>';
       // Stale = capture older than 1 hour. Quota refreshes opportunistically;
       // anything beyond an hour likely doesn't reflect current consumption.
-      const stale = capturedAt && (Date.now() - new Date(capturedAt).getTime() > 60 * 60 * 1000);
+      // Accept either an ISO string or a unix-ms number for capturedAt.
+      const capMs = capturedAt == null ? null
+        : typeof capturedAt === 'number' ? capturedAt
+        : new Date(capturedAt).getTime();
+      const stale = capMs && (Date.now() - capMs > 60 * 60 * 1000);
       let cls = 'quota-pct';
       if (stale) cls += ' stale';
       else if (pct >= 80) cls += ' high';
@@ -591,21 +612,28 @@
     }
 
     function renderUsageCell(primaryFor, fallbackFor) {
-      // Compact: show counts with a tooltip enumerating the agents.
-      // Empty cell = unused (neither primary nor fallback for any agent).
+      // Show primary agents inline as a green pill (most important signal),
+      // fallback on a second muted line. Truncate long lists with a count
+      // and a tooltip carrying the full enumeration.
       if (primaryFor.length === 0 && fallbackFor.length === 0) {
         return '<span style="color:var(--text-dim)">unused</span>';
       }
+      const MAX_INLINE = 3;
+      const fmt = (list) => {
+        if (list.length <= MAX_INLINE) return list.map(escapeHtml).join(', ');
+        const head = list.slice(0, MAX_INLINE).map(escapeHtml).join(', ');
+        return `${head} +${list.length - MAX_INLINE}`;
+      };
       const parts = [];
       if (primaryFor.length > 0) {
         const title = `primary for: ${primaryFor.join(', ')}`;
-        parts.push(`<span class="agent-list primary" title="${escapeHtml(title)}">▶ ${primaryFor.length}</span>`);
+        parts.push(`<div><span class="usage-pill primary" title="${escapeHtml(title)}">Primary: ${fmt(primaryFor)}</span></div>`);
       }
       if (fallbackFor.length > 0) {
         const title = `fallback for: ${fallbackFor.join(', ')}`;
-        parts.push(`<span class="agent-list" title="${escapeHtml(title)}">↩ ${fallbackFor.length}</span>`);
+        parts.push(`<div class="agent-list" title="${escapeHtml(title)}" style="margin-top:0.2rem">Fallback: ${fmt(fallbackFor)}</div>`);
       }
-      return parts.join(' · ');
+      return parts.join('');
     }
 
     function openPromoteModal(label) {

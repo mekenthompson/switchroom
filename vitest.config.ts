@@ -126,6 +126,18 @@ export default defineConfig({
       // recent-outbound-dedup.test.ts uses bun:test (#546 dup fix) —
       // excluded here, run via test:bun.
       "**/telegram-plugin/tests/recent-outbound-dedup.test.ts",
+      // Drive (RFC C) tests use bun:test / bun:sqlite — excluded here,
+      // run via test:bun.
+      "**/src/drive/disconnect.test.ts",
+      "**/src/drive/grants.test.ts",
+      "**/src/drive/oauth.test.ts",
+      "**/src/drive/onboarding.test.ts",
+      "**/src/drive/reconciler.test.ts",
+      "**/src/drive/vault-slots.test.ts",
+      "**/src/drive/wrapper.test.ts",
+      // Approval-kernel tests (RFC B) use bun:test + in-memory bun:sqlite.
+      "**/src/vault/approvals/kernel.test.ts",
+      "**/src/vault/broker/server-approvals.test.ts",
     ],
     coverage: {
       provider: "v8",

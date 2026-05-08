@@ -67,6 +67,99 @@ export interface ScaffoldResult {
 }
 
 /**
+ * Align ownership of an agent's per-agent state directories with the
+ * deterministic container UID assigned by compose.ts.
+ *
+ * Why this is required: in Docker mode the agent container runs as
+ * `user: <uid>` (a hash-derived value in 10001–10999). The container
+ * bind-mounts the host's `~/.switchroom/agents/<name>` etc. into
+ * `/state/agent`. If those host directories are still owned by the
+ * operator (uid 1000), the container UID (10001+) cannot write to
+ * them and the agent silently fails to write logs / state / Claude
+ * settings on first boot. The fix is to chown the dirs once at
+ * scaffold time so the bind-mount lands writable.
+ *
+ * Implementation note: the chown target is well outside the operator's
+ * uid space, so `chownSync` typically needs CAP_CHOWN — i.e. sudo.
+ * We try the unprivileged chown first (works if the agent already
+ * exists from a prior run); on EPERM we shell out to `sudo chown -R`
+ * which prompts the operator's password. Set `confirm` to false to
+ * skip the inline prompt (apply --non-interactive path).
+ *
+ * Returns the list of paths chown'd. Throws only when sudo itself
+ * exits non-zero — that's an operator-actionable failure (wrong
+ * password, no sudoers entry).
+ */
+export interface AlignAgentUidOptions {
+  /** Suppress the y/n prompt; assume yes. Used by `--non-interactive`. */
+  confirm?: boolean;
+  /** Stdout writer for status lines; defaults to console.log. */
+  writeOut?: (s: string) => void;
+  /** Skip the chown entirely (dry-run / tests). */
+  dryRun?: boolean;
+}
+
+export function alignAgentUid(
+  name: string,
+  agentDir: string,
+  uid: number,
+  opts: AlignAgentUidOptions = {},
+): { chowned: boolean; paths: string[] } {
+  const writeOut = opts.writeOut ?? ((s: string) => process.stdout.write(s));
+  const paths: string[] = [];
+  if (existsSync(agentDir)) paths.push(agentDir);
+  if (paths.length === 0) return { chowned: false, paths: [] };
+
+  // Fast path: already correctly owned (idempotent re-runs).
+  try {
+    const st = statSync(agentDir);
+    if (st.uid === uid && st.gid === uid) {
+      return { chowned: false, paths };
+    }
+  } catch { /* fall through to chown */ }
+
+  if (opts.dryRun) return { chowned: false, paths };
+
+  if (opts.confirm !== false && process.stdin.isTTY) {
+    // Interactive prompt: explain why we're shelling sudo. We use
+    // execFileSync below with stdio inherited so the password prompt
+    // appears on the operator's terminal.
+    writeOut(
+      chalk.gray(
+        `  · aligning ${name} state dir ownership to uid ${uid} (sudo chown)\n`,
+      ),
+    );
+  }
+
+  // Try unprivileged chown first; sudo only if EPERM.
+  try {
+    // Recursive chown via shell — node's fs.chownSync isn't recursive
+    // and rolling our own walk just to fall back to sudo is wasted code.
+    execFileSync("chown", ["-R", `${uid}:${uid}`, agentDir], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    return { chowned: true, paths };
+  } catch {
+    // chown failed — most commonly EPERM because the operator's uid
+    // doesn't have CAP_CHOWN. Fall through to sudo. We don't try to
+    // discriminate on errno here because execFileSync's error shape
+    // is messy across node versions; the sudo path is the
+    // operator-actionable fix regardless.
+  }
+
+  try {
+    execFileSync("sudo", ["chown", "-R", `${uid}:${uid}`, agentDir], {
+      stdio: "inherit",
+    });
+    return { chowned: true, paths };
+  } catch {
+    throw new Error(
+      `alignAgentUid: sudo chown failed for ${agentDir} (target uid ${uid}). Run manually: sudo chown -R ${uid}:${uid} ${agentDir}`,
+    );
+  }
+}
+
+/**
  * Resolve a bot token value. If it's a vault reference, try to resolve it
  * via SWITCHROOM_VAULT_PASSPHRASE or fall back to TELEGRAM_BOT_TOKEN env var.
  * Returns the resolved token or undefined if unresolvable.

@@ -27,8 +27,8 @@ import {
   findConfigFile,
   ConfigError,
 } from "../config/loader.js";
-import { scaffoldAgent } from "../agents/scaffold.js";
-import { generateCompose } from "../agents/compose.js";
+import { scaffoldAgent, alignAgentUid } from "../agents/scaffold.js";
+import { generateCompose, allocateAgentUid } from "../agents/compose.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { captureEvent, captureException } from "../analytics/posthog.js";
 
@@ -51,6 +51,12 @@ export interface ApplyOptions {
   outPath?: string;
   /** Optional example name to copy before applying (e.g. "minimal"). */
   example?: string;
+  /**
+   * When true, skip any prompts (e.g. the sudo-chown explainer in
+   * alignAgentUid) and assume yes. Required for CI / `apply` invoked
+   * non-interactively. Default: prompts when stdin is a TTY.
+   */
+  nonInteractive?: boolean;
 }
 
 export interface ApplyDeps {
@@ -109,6 +115,22 @@ export async function runApply(
         chalk.green(`  + ${name}`) +
           chalk.gray(` (${agentConfig.extends ?? "default"}) — ${detail}\n`),
       );
+      // Align per-agent dir ownership with the container UID assigned
+      // by compose.ts. Without this the bind-mount lands read-only
+      // for the in-container UID and the agent fails on first write.
+      try {
+        const uid = allocateAgentUid(name);
+        alignAgentUid(name, join(agentsDir, name), uid, {
+          confirm: !options.nonInteractive,
+          writeOut,
+        });
+      } catch (alignErr) {
+        writeOut(
+          chalk.yellow(
+            `    ! could not chown ${name} state dir: ${(alignErr as Error).message}\n`,
+          ),
+        );
+      }
       scaffolded++;
     } catch (err) {
       writeOut(chalk.red(`  x ${name}: ${(err as Error).message}\n`));
@@ -211,11 +233,16 @@ export function registerApplyCommand(program: Command): void {
       "--example <name>",
       "Copy an example config into cwd before applying (e.g., 'switchroom' or 'minimal').",
     )
+    .option(
+      "--non-interactive",
+      "Skip prompts (e.g. sudo-chown explainer for UID alignment). Use in CI / scripts.",
+    )
     .action(
       async (opts: {
         buildLocal?: boolean | string;
         out?: string;
         example?: string;
+        nonInteractive?: boolean;
       }) => {
         try {
           if (opts.example) {
@@ -240,6 +267,7 @@ export function registerApplyCommand(program: Command): void {
               buildContext: buildLocal ? buildContext : undefined,
               outPath: opts.out,
               example: opts.example,
+              nonInteractive: opts.nonInteractive ?? false,
             },
             {},
             switchroomConfigPath,

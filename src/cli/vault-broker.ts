@@ -3,8 +3,8 @@
  *
  * Subcommands:
  *   start [--foreground]  Start the broker daemon. With --foreground, runs
- *                         in-process (used by systemd Type=notify). Without,
- *                         spawns detached and exits.
+ *                         in-process (used by docker entrypoints / supervised
+ *                         contexts). Without, spawns detached and exits.
  *   stop                  Send lock RPC, then SIGTERM to the PID in the
  *                         PID file (~/.switchroom/vault-broker.pid).
  *   status                Print JSON broker status. Exit 0=unlocked,
@@ -156,9 +156,9 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
   broker
     .command("start")
     .description(
-      "Start the vault-broker daemon. --foreground runs in-process (used by systemd).",
+      "Start the vault-broker daemon. --foreground runs in-process (for supervised contexts).",
     )
-    .option("--foreground", "Run in-process (for systemd Type=notify)")
+    .option("--foreground", "Run in-process (for docker entrypoints / supervised contexts)")
     .action(async (opts: { foreground?: boolean }) => {
       const parentOpts = program.opts();
       const socketPath = getSocketPath(parentOpts.config);
@@ -258,7 +258,7 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
 
       // Closes #472 finding #23 — without this guard, an operator
       // accidentally wiring `vault broker unlock` into a non-TTY
-      // context (cron, ssh -T, systemd ExecStart, an automated
+      // context (cron, ssh -T, a docker entrypoint, an automated
       // pipeline) silently consumes the first stdin line as the
       // passphrase. That value can be visible upstream in process
       // listings, log captures, or pipe buffers — and there is no

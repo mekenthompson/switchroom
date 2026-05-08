@@ -279,10 +279,6 @@ describe("scaffoldAgent", () => {
       resolve(__dirname, "..", "src", "cli", "agent.ts"),
       "utf-8",
     );
-    const watchdogSrc = readFileSync(
-      resolve(__dirname, "..", "bin", "bridge-watchdog.sh"),
-      "utf-8",
-    );
     const gatewaySrc = readFileSync(
       resolve(__dirname, "..", "telegram-plugin", "gateway", "gateway.ts"),
       "utf-8",
@@ -302,14 +298,8 @@ describe("scaffoldAgent", () => {
     // stamping for bulk operations now sits on the operator's
     // docker-compose flow and the per-agent restart path above.)
 
-    // Watchdog writes the marker before the systemctl restart.
-    expect(watchdogSrc).toContain("clean-shutdown.json");
-    expect(watchdogSrc).toMatch(/watchdog: bridge disconnected for/);
-    // The write MUST precede the systemctl restart so the new boot sees it.
-    const writeIdx = watchdogSrc.indexOf("clean-shutdown.json");
-    const restartIdx = watchdogSrc.indexOf('systemctl --user restart "$agent_svc"', writeIdx);
-    expect(writeIdx).toBeGreaterThan(-1);
-    expect(restartIdx).toBeGreaterThan(writeIdx);
+    // (bridge-watchdog.sh was removed in v0.7 PR-A3 — docker container
+    // restart policies replace the legacy systemd-watchdog path.)
 
     // Gateway user-slash paths stamp a user-attributed reason.
     expect(gatewaySrc).toContain("function stampUserRestartReason");

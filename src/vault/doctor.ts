@@ -84,7 +84,7 @@ export function analyseVaultHealth(input: VaultHealthInput): Diagnostic[] {
       level: "fail",
       check: "broker-running",
       message: "Vault broker is configured but not running.",
-      fix: "Run `switchroom vault broker unlock` or check `systemctl --user status switchroom-vault-broker.service`",
+      fix: "Run `switchroom vault broker unlock` or check the broker container with `docker ps`",
     });
   }
 

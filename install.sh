@@ -98,7 +98,14 @@ curl -fsSL --retry 3 -o "$tmp/switchroom-checksums.txt" "$base_url/switchroom-ch
 # ---- verify checksum ----
 
 log "Verifying SHA256"
-expected=$(grep " $asset\$\| ${asset}$" "$tmp/switchroom-checksums.txt" | awk '{print $1}' | head -n 1)
+# The checksums file uses the `sha256sum`-canonical "<hash>  <file>"
+# two-space format. Older revisions of this script grep'd with a
+# pattern that only tolerated a single trailing space and was anchored
+# at end-of-line, which mis-fired on some platforms (BSD grep regex
+# alternation, CRLF line endings) and silently missed valid entries.
+# Use a fixed-string match against the exact two-space-prefixed asset
+# name to find the line.
+expected=$(grep -F "  ${asset}" "$tmp/switchroom-checksums.txt" | awk '{print $1}' | head -n 1)
 [ -n "$expected" ] || die "No checksum entry for $asset in switchroom-checksums.txt."
 
 actual=$($sha_cmd "$tmp/$asset" | awk '{print $1}')

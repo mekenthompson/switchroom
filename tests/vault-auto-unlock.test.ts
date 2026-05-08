@@ -120,13 +120,10 @@ describe("applyAutoUnlock", () => {
     vi.restoreAllMocks();
   });
 
-  it("flips YAML, calls systemctl, polls status, and reports success when vault unlocks", async () => {
-    const systemd = await import("../src/agents/systemd.js");
-    vi.spyOn(systemd, "installAllUnits").mockImplementation(() => {});
-
-    const systemctlCalls: string[][] = [];
-    const runSystemctl = vi.fn((args: string[]) => {
-      systemctlCalls.push(args);
+  it("flips YAML, calls docker compose restart, polls status, and reports success when vault unlocks", async () => {
+    const composeCalls: string[][] = [];
+    const runDockerCompose = vi.fn((args: string[]) => {
+      composeCalls.push(args);
       return { status: 0 };
     });
     let polled = 0;
@@ -137,53 +134,81 @@ describe("applyAutoUnlock", () => {
 
     await applyAutoUnlock({
       configPath,
+      composeFile: "/fake/compose.yml",
       log: () => {},
       err: () => {},
-      runSystemctl,
+      runDockerCompose,
       pollStatus,
       verifyTimeoutMs: 2000,
     });
 
     expect(readFileSync(configPath, "utf-8")).toContain("autoUnlock: true");
-    expect(systemctlCalls).toContainEqual(["--user", "daemon-reload"]);
-    expect(systemctlCalls).toContainEqual(["--user", "restart", "switchroom-vault-broker.service"]);
+    expect(composeCalls).toContainEqual([
+      "compose",
+      "-f",
+      "/fake/compose.yml",
+      "restart",
+      "vault-broker",
+    ]);
     expect(polled).toBeGreaterThanOrEqual(2);
   });
 
-  it("throws when the broker restart exits non-zero", async () => {
-    const systemd = await import("../src/agents/systemd.js");
-    vi.spyOn(systemd, "installAllUnits").mockImplementation(() => {});
-
-    const runSystemctl = vi.fn((args: string[]) => {
-      if (args.includes("restart")) return { status: 1 };
-      return { status: 0 };
-    });
+  it("throws when the docker compose restart exits non-zero", async () => {
+    const runDockerCompose = vi.fn(() => ({ status: 1 }));
 
     await expect(
       applyAutoUnlock({
         configPath,
+        composeFile: "/fake/compose.yml",
         log: () => {},
         err: () => {},
-        runSystemctl,
+        runDockerCompose,
         pollStatus: async () => ({ unlocked: false }),
         verifyTimeoutMs: 500,
       }),
-    ).rejects.toThrow(/broker restart exited 1/);
+    ).rejects.toThrow(/docker compose restart exited 1/);
   });
 
   it("throws when verify-poll times out", async () => {
-    const systemd = await import("../src/agents/systemd.js");
-    vi.spyOn(systemd, "installAllUnits").mockImplementation(() => {});
-
     await expect(
       applyAutoUnlock({
         configPath,
+        composeFile: "/fake/compose.yml",
         log: () => {},
         err: () => {},
-        runSystemctl: () => ({ status: 0 }),
+        runDockerCompose: () => ({ status: 0 }),
         pollStatus: async () => ({ unlocked: false }),
         verifyTimeoutMs: 500,
       }),
     ).rejects.toThrow(/verification timeout/);
+  });
+
+  it("invokes docker (not systemctl) with the configured compose file", async () => {
+    const seen: string[][] = [];
+    const runDockerCompose = vi.fn((args: string[]) => {
+      seen.push(args);
+      return { status: 0 };
+    });
+
+    await applyAutoUnlock({
+      configPath,
+      composeFile: "/etc/switchroom/compose.yml",
+      log: () => {},
+      err: () => {},
+      runDockerCompose,
+      pollStatus: async () => ({ unlocked: true }),
+      verifyTimeoutMs: 2000,
+    });
+
+    // The first (and only) call must be the compose restart with the
+    // exact compose-file path the caller passed in.
+    expect(seen.length).toBe(1);
+    expect(seen[0]).toEqual([
+      "compose",
+      "-f",
+      "/etc/switchroom/compose.yml",
+      "restart",
+      "vault-broker",
+    ]);
   });
 });

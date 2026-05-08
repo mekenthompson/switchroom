@@ -20,16 +20,6 @@ import { startAgent } from "./lifecycle.js";
 import { startAuthSession, submitAuthCode } from "../auth/manager.js";
 import type { AuthCodeOutcome } from "../auth/manager.js";
 import {
-  generateUnit,
-  generateGatewayUnit,
-  installUnit,
-  uninstallUnit,
-  installScheduleTimers,
-  enableScheduleTimers,
-  daemonReload,
-  resolveGatewayUnitName,
-} from "./systemd.js";
-import {
   writeAgentEntryToConfig,
   updateAgentExtendsInConfig,
   removeAgentFromConfig,
@@ -232,45 +222,12 @@ export async function createAgent(
     rollbackStack.push(() => rmSync(agentDir, { recursive: true, force: true }));
   });
 
-  // ── Step 5: Install systemd units ─────────────────────────────────────────
-  const useAutoaccept = agentConfig.channels?.telegram?.plugin === "switchroom";
-  const gwName = resolveGatewayUnitName(config, name);
-
-  await withRollback(() => {
-    const unitContent = generateUnit(name, agentDir, useAutoaccept, gwName);
-    installUnit(name, unitContent);
-    rollbackStack.push(() => uninstallUnit(name));
-
-    if (useAutoaccept && gwName) {
-      const stateDir = resolve(agentDir, "telegram");
-      const gatewayContent = generateGatewayUnit(stateDir, name);
-      installUnit(gwName, gatewayContent);
-      rollbackStack.push(() => uninstallUnit(gwName));
-    }
-  });
-
-  // Install schedule timers if any.
-  const schedule = agentConfig.schedule ?? [];
-  if (schedule.length > 0) {
-    await withRollback(() => {
-      // #26 fix: push the timer-cleanup rollback entry BEFORE
-      // installScheduleTimers runs, not after. The previous order left a
-      // window where the loop inside installScheduleTimers could throw
-      // mid-write (e.g. ENOSPC after timer 0 written but before timer 1)
-      // and the rollback was never registered — orphan .timer + .service
-      // files for partially-written units stayed on disk forever. The
-      // rollback is idempotent (calls installScheduleTimers with empty
-      // schedule, which removes every timer file for this agent
-      // regardless of how many were written), so registering it before
-      // the work is safe.
-      rollbackStack.push(() => {
-        try { installScheduleTimers(name, agentDir, []); } catch { /* best effort */ }
-      });
-      installScheduleTimers(name, agentDir, schedule);
-      daemonReload();
-      enableScheduleTimers(name, schedule.length);
-    });
-  }
+  // ── Step 5: Infra wire-up (deferred to `switchroom apply`) ────────────────
+  // v0.7: agents run as docker-compose services. Compose-file regen +
+  // `docker compose up -d --remove-orphans` is owned by the `apply`
+  // verb, not by this orchestrator. Per-agent schedules run inside the
+  // scheduler container which reads switchroom.yaml directly — no
+  // separate timer install step.
 
   // ── Step 6: Write bot token to telegram/.env ──────────────────────────────
   await withRollback(() => {

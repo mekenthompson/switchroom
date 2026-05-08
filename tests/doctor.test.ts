@@ -14,7 +14,26 @@ import {
   checkConfig,
   checkGatewayUnit,
 } from "../src/cli/doctor.js";
-import { generateGatewayUnit } from "../src/agents/systemd.js";
+// v0.7 PR-A3b: src/agents/systemd.ts is deleted. The doctor's
+// checkGatewayUnit still parses an on-disk unit file produced by older
+// installs (until operators migrate fully to docker-compose), so the
+// shape we emit here mirrors what generateGatewayUnit used to produce
+// — a [Service] block with Environment= directives. Only the fields
+// checkGatewayUnit actually reads (SWITCHROOM_AGENT_NAME) need to be
+// present and correct; the rest is filler.
+function fixtureGatewayUnit(stateDir: string, agentName: string): string {
+  return [
+    "[Unit]",
+    `Description=Switchroom telegram gateway (${agentName})`,
+    "",
+    "[Service]",
+    "Type=simple",
+    "ExecStart=/bin/true",
+    `Environment=TELEGRAM_STATE_DIR=${stateDir}`,
+    `Environment=SWITCHROOM_AGENT_NAME=${agentName}`,
+    "",
+  ].join("\n");
+}
 import { findConfigFile } from "../src/config/loader.js";
 import type { SwitchroomConfig } from "../src/config/schema.js";
 
@@ -457,7 +476,7 @@ describe("checkGatewayUnit", () => {
     const unitPath = join(tempDir, "switchroom-clerk-gateway.service");
     writeFileSync(
       unitPath,
-      generateGatewayUnit("/home/user/.switchroom/agents/clerk/telegram", "clerk"),
+      fixtureGatewayUnit("/home/user/.switchroom/agents/clerk/telegram", "clerk"),
     );
     const result = checkGatewayUnit("clerk", unitPath);
     expect(result.status).toBe("ok");
@@ -495,7 +514,7 @@ describe("checkGatewayUnit", () => {
     // Wrong name — a stale unit from a different agent must not pass.
     writeFileSync(
       unitPath,
-      generateGatewayUnit("/tmp/lawgpt/telegram", "lawgpt"),
+      fixtureGatewayUnit("/tmp/lawgpt/telegram", "lawgpt"),
     );
     const result = checkGatewayUnit("clerk", unitPath);
     expect(result.status).toBe("fail");

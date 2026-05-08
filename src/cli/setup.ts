@@ -5,7 +5,6 @@ import { resolve } from "node:path";
 import { loadConfig, resolveAgentsDir, resolvePath, ConfigError } from "../config/loader.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { scaffoldAgent } from "../agents/scaffold.js";
-import { installAllUnits, installForemanUnit } from "../agents/systemd.js";
 import { syncTopics } from "../telegram/topic-manager.js";
 import { loadTopicState } from "../telegram/state.js";
 import { createVault, openVault, setStringSecret } from "../vault/vault.js";
@@ -743,23 +742,20 @@ async function stepScaffoldAgents(
     }
   }
 
-  // Install systemd units
-  console.log(chalk.gray("\n  Installing systemd units..."));
-  try {
-    installAllUnits(config);
-    console.log(
-      chalk.green(`  ${STEP_DONE} ${scaffolded} agents scaffolded, systemd units installed`),
-    );
-  } catch (err) {
-    console.log(
-      chalk.yellow(
-        `  Warning: systemd install failed: ${(err as Error).message}`,
-      ),
-    );
-    console.log(
-      chalk.gray("  You can run 'switchroom systemd install' later to retry."),
-    );
-  }
+  // v0.7: agent containers come up via docker-compose. The compose
+  // file is regenerated + brought up by `switchroom apply`. We don't
+  // run that automatically from the setup wizard — the operator may
+  // want to inspect switchroom.yaml first.
+  console.log(
+    chalk.green(
+      `  ${STEP_DONE} ${scaffolded} agent(s) scaffolded`,
+    ),
+  );
+  console.log(
+    chalk.gray(
+      "  Next: switchroom apply  (regenerates docker-compose.yml + brings agents up)",
+    ),
+  );
 }
 
 // ─── Step 8: Vault Auto-Unlock ──────────────────────────────────────────────
@@ -1170,36 +1166,17 @@ async function runForemanSetup(opts: { nonInteractive?: boolean; userId?: string
   );
   console.log(chalk.green(`  ${STEP_DONE} Wrote ${accessFile}`));
 
-  // ── Install systemd unit ───────────────────────────────────────────────
-  console.log(chalk.gray("\n  Installing switchroom-foreman.service..."));
-  try {
-    installForemanUnit();
-    console.log(chalk.green(`  ${STEP_DONE} switchroom-foreman.service installed and enabled`));
-  } catch (err) {
-    console.log(
-      chalk.yellow(`  Warning: systemd install failed: ${(err as Error).message}`),
-    );
-    console.log(chalk.gray("  Start manually: systemctl --user start switchroom-foreman"));
-  }
-
-  // ── Offer to start now ─────────────────────────────────────────────────
-  const startNow = nonInteractive
-    ? false
-    : await askYesNo("\n  Start foreman now?", true);
-
-  if (startNow) {
-    try {
-      execFileSync("systemctl", ["--user", "start", "switchroom-foreman"], { stdio: "inherit" });
-      console.log(chalk.green(`  ${STEP_DONE} Foreman started — DM @${botUsername} to verify`));
-    } catch {
-      console.log(
-        chalk.yellow("  Could not start automatically. Run: systemctl --user start switchroom-foreman"),
-      );
-    }
-  }
+  // v0.7: foreman runs as a docker-compose service. The compose file
+  // is regenerated + brought up by `switchroom apply`. The setup
+  // wizard no longer installs/starts a systemd unit.
+  console.log(
+    chalk.gray(
+      "\n  Next: switchroom apply  (regenerates docker-compose.yml + brings foreman up)",
+    ),
+  );
 
   console.log(
     chalk.bold.green("\n  Foreman setup complete!") +
-      chalk.gray(` DM @${botUsername} and try /help.\n`),
+      chalk.gray(` DM @${botUsername} after \`switchroom apply\` and try /help.\n`),
   );
 }

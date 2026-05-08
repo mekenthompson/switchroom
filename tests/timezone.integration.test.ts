@@ -3,7 +3,6 @@ import { mkdtempSync, rmSync, readFileSync, statSync, existsSync } from "node:fs
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { scaffoldAgent } from "../src/agents/scaffold.js";
-import { generateUnit } from "../src/agents/systemd.js";
 import type { AgentConfig, SwitchroomConfig, TelegramConfig } from "../src/config/schema.js";
 
 const telegramConfig: TelegramConfig = {
@@ -95,22 +94,8 @@ describe("timezone hook integration", () => {
   });
 });
 
-describe("systemd unit includes timezone env", () => {
-  it("emits TZ= and SWITCHROOM_TIMEZONE= when timezone is provided", () => {
-    const unit = generateUnit(
-      "coach",
-      "/tmp/agents/coach",
-      false,
-      undefined,
-      "Australia/Melbourne",
-    );
-    expect(unit).toContain("Environment=TZ=Australia/Melbourne");
-    expect(unit).toContain("Environment=SWITCHROOM_TIMEZONE=Australia/Melbourne");
-  });
-
-  it("omits timezone env entirely when no zone is provided", () => {
-    const unit = generateUnit("coach", "/tmp/agents/coach");
-    expect(unit).not.toContain("Environment=TZ=");
-    expect(unit).not.toContain("SWITCHROOM_TIMEZONE=");
-  });
-});
+// v0.7 PR-A3b: the "systemd unit includes timezone env" describe block was
+// removed when src/agents/systemd.ts was deleted. The compose generator
+// (src/agents/compose.ts) now stamps TZ / SWITCHROOM_TIMEZONE on the
+// per-agent service env; the corresponding compose-level assertion lives in
+// tests/agents/compose.test.ts.

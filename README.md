@@ -138,7 +138,7 @@ The wedge against OpenClaw and NanoClaw isn't the substrate — it's the stock `
 
 ## Install
 
-Runs on the box you already have. The supported production runtime is Linux + Docker (Ubuntu 24.04 LTS with 4GB RAM is the canonical target; other Linux distros work with minor tweaks). `switchroom up` brings up the Docker fleet; `switchroom up --legacy` runs the older systemd path instead. macOS and Windows can run the fleet via Docker Desktop on a best-effort basis for development and demo use, but Linux is the only supported production target for v0.6.
+Runs on the box you already have. The supported production runtime is Linux + Docker (Ubuntu 24.04 LTS with 4GB RAM is the canonical target; other Linux distros work with minor tweaks). `switchroom compose generate` writes a `docker-compose.yml` from your `switchroom.yaml`; you bring the fleet up with `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d`. The legacy systemd path is reached via the `switchroom agent` lifecycle verbs. macOS and Windows can run the fleet via Docker Desktop on a best-effort basis for development and demo use, but Linux is the only supported production target for v0.6.
 
 > **Heads up on the package name.** The npm package was originally `switchroom-ai`. It's now just `switchroom`. The old name is deprecated and will stop receiving updates — `npm install -g switchroom` is the current path.
 

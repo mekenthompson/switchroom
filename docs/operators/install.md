@@ -24,19 +24,18 @@ bun run build
 # 2. Generate per-host config + first-run wiring.
 switchroom setup           # interactive wizard
 
-# 3. Bring up the fleet.
-#    `switchroom up` regenerates ~/.switchroom/compose/docker-compose.yml
-#    from your switchroom.yaml and runs `docker compose up -d` against it.
-switchroom up
-```
+# 3. Generate the compose file from your switchroom.yaml.
+#    Writes ~/.switchroom/compose/docker-compose.yml.
+switchroom compose generate
 
-`switchroom up` does NOT pull explicitly — `docker compose up -d` will
-pull missing images on first run. To refresh later:
-
-```sh
+# 4. Bring the fleet up yourself with docker compose.
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml pull
-switchroom up
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 ```
+
+`switchroom compose generate` only writes the compose file — it does
+not call `docker`. Operators control the bring-up so the CLI never has
+to second-guess your docker setup, daemon socket, or rootless config.
 
 ## Image refs
 
@@ -63,13 +62,15 @@ that gets baked into the images via `npm run build`), you don't want
 
 ```sh
 cd ~/code/switchroom
-switchroom up --build-local        # context = cwd
+switchroom compose generate --build-local        # context = cwd
 # or
-switchroom up --build-local /alt/checkout/path
+switchroom compose generate --build-local /alt/checkout/path
+
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d --build
 ```
 
 This emits `build:` blocks instead of `image:` refs in the generated
-compose, and adds `--build` to the `docker compose up` call. The
+compose. Pass `--build` to `docker compose up` to actually rebuild. The
 production path (no flag) is unaffected.
 
 ## Upgrading
@@ -79,8 +80,9 @@ cd ~/code/switchroom
 git pull
 bun install
 bun run build
+switchroom compose generate
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml pull
-switchroom up
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 ```
 
 ## Troubleshooting
@@ -92,13 +94,14 @@ switchroom up
   see auth errors, you're either pointing at a private fork or your
   Docker daemon is configured with a stale GHCR credential. `docker
   logout ghcr.io` clears it.
-- **`switchroom up` hangs** — usually compose waiting for a
+- **`docker compose up` hangs** — usually compose waiting for a
   `depends_on` healthcheck. Inspect with `docker compose -p switchroom
   ps` in another terminal.
 
 ## Related
 
-- `runtime-mode.md` — Docker vs systemd selection (the `--legacy` opt-out).
+- `runtime-mode.md` — Docker is the supported production runtime; the
+  legacy systemd path is reached via `switchroom agent` lifecycle verbs.
 - `docs/proposed/docker-images.yml` — the GHCR build/push workflow.
   Note: as of this PR the workflow file is staged at `docs/proposed/`
   rather than `.github/workflows/` because the OAuth token used to land

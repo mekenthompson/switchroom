@@ -305,6 +305,11 @@ import {
   revokeGrantViaBroker,
 } from '../../src/vault/broker/client.js'
 import {
+  approvalRequest,
+  approvalConsume,
+  approvalRecord,
+} from '../../src/vault/approvals/client.js'
+import {
   openTurnsDb,
   markOrphanedAsRestarted,
   recordTurnStart,
@@ -1342,8 +1347,84 @@ interface DeferredSecret {
    * slug if detection didn't fire.
    */
   suggested_slug: string
+  /**
+   * Approval-kernel request_id minted alongside the bespoke deferred-secret
+   * card (MIGRATION.md §1, Phase 1 dual-dispatch). When set, the
+   * `vd:unlock` / `vd:cancel` callback handler ALSO records the user's
+   * decision on the kernel side via `approvalConsume` + `approvalRecord`,
+   * so the audit log captures the unlock event.
+   *
+   * `undefined` on cards built before this PR landed (in-flight at deploy
+   * time) — the legacy handler runs alone, no kernel record. After ~1-2
+   * releases the legacy-only branch can be removed (separate cleanup PR).
+   */
+  kernel_request_id?: string
 }
 const deferredSecrets = new Map<string, DeferredSecret>()
+
+/**
+ * Mint an approval-kernel decision row for a deferred-secret card
+ * (MIGRATION.md §1). Best-effort: if the kernel/broker is unreachable, we
+ * return null and the caller proceeds with the legacy-only path so the
+ * core unlock UX never depends on kernel availability.
+ *
+ * `agent_unit` is the gateway's agent — the per-agent ACL ships in Docker
+ * Phase 2b. The kernel-server checks the listener's bound socket against
+ * the claimed agent, so passing the local agent name is safe.
+ */
+async function mintDeferredSecretKernelRequest(
+  slug: string,
+  approverSet: string[],
+): Promise<string | null> {
+  const agentName = process.env.SWITCHROOM_AGENT_NAME
+  if (!agentName) return null
+  try {
+    const r = await approvalRequest({
+      agent_unit: `switchroom-${agentName}.service`,
+      scope: `secret:${slug}`,
+      action: 'unlock',
+      approver_set: approverSet,
+      why: 'Unlock vault to save a deferred secret detected in chat.',
+    })
+    if (r === null || r.state !== 'pending') return null
+    return r.request_id
+  } catch (err) {
+    process.stderr.write(
+      `[approval-kernel] mintDeferredSecretKernelRequest failed: ${(err as Error).message}\n`,
+    )
+    return null
+  }
+}
+
+/**
+ * Record the user's decision (allow/deny) on the approval kernel for a
+ * deferred-secret card. Best-effort and idempotent — a missing
+ * `request_id` (legacy in-flight card) or an unreachable kernel both
+ * silently no-op so the legacy UX is unaffected.
+ */
+async function recordDeferredSecretKernelDecision(
+  request_id: string | undefined,
+  decision: 'allow_once' | 'deny',
+  granted_by_user_id: number,
+  approverSet: string[],
+): Promise<void> {
+  if (!request_id) return
+  try {
+    const consumed = await approvalConsume(request_id)
+    if (consumed === null || !consumed.consumed) return
+    await approvalRecord({
+      request_id,
+      decision,
+      approver_set: approverSet,
+      granted_by_user_id,
+      ttl_ms: null,
+    })
+  } catch (err) {
+    process.stderr.write(
+      `[approval-kernel] recordDeferredSecretKernelDecision failed: ${(err as Error).message}\n`,
+    )
+  }
+}
 function deferredKey(chat_id: string, message_id: number): string {
   return `${chat_id}:${message_id}`
 }
@@ -4744,12 +4825,18 @@ async function handleInbound(
         // the post-context flow stays seamless.
         const dKey = deferredKey(chat_id, msgId ?? 0)
         const cachedBranchDetection = detectSecrets(effectiveText).find((d) => d.confidence === 'high' && !d.suppressed)
+        const cachedBranchSlug = cachedBranchDetection?.suggested_slug ?? (isAuthFlowContext ? 'anthropic_oauth_code' : 'secret')
+        const cachedBranchKernelId = await mintDeferredSecretKernelRequest(
+          cachedBranchSlug,
+          loadAccess().allowFrom,
+        )
         deferredSecrets.set(dKey, {
           chat_id,
           original_message_id: msgId ?? 0,
           text: effectiveText,
           staged_at: Date.now(),
-          suggested_slug: cachedBranchDetection?.suggested_slug ?? (isAuthFlowContext ? 'anthropic_oauth_code' : 'secret'),
+          suggested_slug: cachedBranchSlug,
+          kernel_request_id: cachedBranchKernelId ?? undefined,
         })
         await switchroomReply(
           ctx,
@@ -4790,12 +4877,17 @@ async function handleInbound(
           highConfDetection?.suggested_slug
           ?? (isAuthFlowContext ? 'anthropic_oauth_code' : 'secret')
         const dKey = deferredKey(chat_id, msgId ?? 0)
+        const noPassKernelId = await mintDeferredSecretKernelRequest(
+          suggestedSlug,
+          loadAccess().allowFrom,
+        )
         deferredSecrets.set(dKey, {
           chat_id,
           original_message_id: msgId ?? 0,
           text: effectiveText,
           staged_at: Date.now(),
           suggested_slug: suggestedSlug,
+          kernel_request_id: noPassKernelId ?? undefined,
         })
         if (msgId != null) {
           try { await bot.api.deleteMessage(chat_id, msgId) } catch {}
@@ -7021,6 +7113,16 @@ async function handleVaultDeferCallback(ctx: Context, data: string): Promise<voi
   const cardMessageId = ctx.callbackQuery?.message?.message_id
 
   if (action === 'cancel') {
+    // Kernel-side dual-dispatch (MIGRATION.md §1): record the deny decision
+    // BEFORE the legacy handler clears state, so the audit log captures it
+    // even if the editMessageText below races with another tap. Best-effort
+    // — broker unreachable falls back to legacy-only.
+    await recordDeferredSecretKernelDecision(
+      deferred.kernel_request_id,
+      'deny',
+      ctx.from?.id ?? 0,
+      access.allowFrom,
+    )
     deferredSecrets.delete(deferKey)
     await ctx.answerCallbackQuery({ text: 'Discarded.' }).catch(() => {})
     if (cardMessageId != null) {
@@ -7034,6 +7136,18 @@ async function handleVaultDeferCallback(ctx: Context, data: string): Promise<voi
   }
 
   if (action === 'unlock') {
+    // Kernel-side dual-dispatch (MIGRATION.md §1): record the allow_once
+    // decision when the user taps unlock. The actual passphrase capture +
+    // vault write still happens via the legacy path below — the kernel
+    // decision is for audit/state, not secret material (per RFC B). We
+    // record at tap-time rather than after passphrase entry so a kernel
+    // record exists even if the user abandons the passphrase prompt.
+    await recordDeferredSecretKernelDecision(
+      deferred.kernel_request_id,
+      'allow_once',
+      ctx.from?.id ?? 0,
+      access.allowFrom,
+    )
     // If a passphrase is already cached we can skip straight to the write.
     // Covers the case where the user had unlocked separately between
     // detection and tap.

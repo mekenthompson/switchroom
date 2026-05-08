@@ -23,19 +23,14 @@ interface DryRunOpts {
   sharedHost?: boolean;
 }
 
-function notImplemented(verb: MigrateVerb): never {
-  console.error(
-    chalk.red(
-      `migrate ${verb} not yet implemented in this version; use --dry-run to preview the plan`,
-    ),
-  );
-  process.exit(2);
-}
-
-async function runToDocker(opts: DryRunOpts, program: Command): Promise<void> {
+async function runMigration(
+  verb: MigrateVerb,
+  opts: DryRunOpts,
+  program: Command,
+): Promise<void> {
   const config = getConfig(program);
   const agents = Object.keys(config.agents ?? {}).sort();
-  const preflight = await runPreflight("to-docker", { sharedHost: !!opts.sharedHost });
+  const preflight = await runPreflight(verb, { sharedHost: !!opts.sharedHost });
   if (!preflight.ok) {
     const r = preflight.refusal!;
     console.error(chalk.red(`Pre-flight refused at check: ${r.name}`));
@@ -49,9 +44,9 @@ async function runToDocker(opts: DryRunOpts, program: Command): Promise<void> {
     agents,
     composeProject,
     composePath,
-    targetUid: process.getuid?.(),
+    targetUid: verb === "to-docker" ? process.getuid?.() : undefined,
   };
-  const plan = buildPlan("to-docker", state);
+  const plan = buildPlan(verb, state);
   const result = await executePlan(plan, {
     composeProject,
     composePath,
@@ -60,7 +55,7 @@ async function runToDocker(opts: DryRunOpts, program: Command): Promise<void> {
   if (!result.ok) {
     console.error(
       chalk.red(
-        `migrate to-docker FAILED at step ${result.failed!.index + 1}: ${result.failed!.error}`,
+        `migrate ${verb} FAILED at step ${result.failed!.index + 1}: ${result.failed!.error}`,
       ),
     );
     console.error(
@@ -70,7 +65,7 @@ async function runToDocker(opts: DryRunOpts, program: Command): Promise<void> {
     );
     process.exit(1);
   }
-  console.log(chalk.green(`migrate to-docker complete (${result.completed.length} steps).`));
+  console.log(chalk.green(`migrate ${verb} complete (${result.completed.length} steps).`));
 }
 
 async function runDryRun(
@@ -141,7 +136,7 @@ export function registerMigrateCommand(program: Command): void {
           await runDryRun("to-docker", opts, program);
           return;
         }
-        await runToDocker(opts, program);
+        await runMigration("to-docker", opts, program);
       }),
     );
 
@@ -152,8 +147,11 @@ export function registerMigrateCommand(program: Command): void {
     .option("--json", "Emit machine-readable JSONL output (with --dry-run)")
     .action(
       withConfigError(async (opts: DryRunOpts) => {
-        if (!opts.dryRun) notImplemented("to-host");
-        await runDryRun("to-host", opts, program);
+        if (opts.dryRun) {
+          await runDryRun("to-host", opts, program);
+          return;
+        }
+        await runMigration("to-host", opts, program);
       }),
     );
 }

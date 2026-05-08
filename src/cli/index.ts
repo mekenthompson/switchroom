@@ -1,7 +1,7 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { registerInitCommand } from "./init.js";
+import { registerInitCommand } from "./deprecated.js";
 import { registerAgentCommand } from "./agent.js";
 import { registerSystemdCommand } from "./systemd.js";
 import { registerTopicsCommand } from "./topics.js";

@@ -131,6 +131,13 @@ export interface ComposeGeneratorOptions {
  * is pinned, return the digest form; otherwise the legacy tag form. The
  * legacy tag form is preserved exactly so the existing snapshot tests
  * remain valid.
+ *
+ * TODO: the `ghcr.io/switchroom/` namespace is currently hardcoded —
+ * fork operators publishing to their own GHCR org would need to
+ * parametrize this (e.g. via env var or a `ghcrNamespace` option on
+ * GenerateComposeOptions). Lower priority: digest mode is opt-in and
+ * the publish workflow already builds against the forker's namespace
+ * via ${{ github.repository_owner }}.
  */
 function resolveImageRef(
   name: "agent" | "broker" | "kernel" | "scheduler",

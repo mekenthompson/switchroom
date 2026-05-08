@@ -36,8 +36,12 @@ RUN apt-get update \
 # Pin claude CLI version in the base image so every agent / scheduler
 # container resolves the SAME bundle. The version floats with the
 # upstream tag at image-build time; agents do NOT install claude.
+# Fail-fast: if the npm install or the resulting binary is broken we
+# want the image build to die here, not produce a base that ships
+# downstream and explodes at agent boot. Previously this had a
+# trailing `|| true` that swallowed any failure.
 RUN npm install -g @anthropic-ai/claude-code@latest \
- && claude --version >&2 || true
+ && claude --version >&2
 
 # Phase 1b: install bun. The broker server (src/vault/broker/server.ts)
 # imports `bun:sqlite` and `bun:ffi` directly; those modules don't exist

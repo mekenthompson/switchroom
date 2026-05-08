@@ -16,30 +16,16 @@ import YAML from "yaml";
 const mocks = vi.hoisted(() => ({
   scaffold: vi.fn(),
   reconcile: vi.fn(),
-  generateUnit: vi.fn(() => "UNIT_CONTENT"),
-  generateGatewayUnit: vi.fn(() => "GW_UNIT_CONTENT"),
-  installUnit: vi.fn(),
-  uninstallUnit: vi.fn(),
-  installScheduleTimers: vi.fn(),
-  enableScheduleTimers: vi.fn(),
-  daemonReload: vi.fn(),
-  resolveGatewayUnitName: vi.fn(() => null),
 }));
 
 vi.mock("../src/agents/scaffold.js", () => ({
   scaffoldAgent: mocks.scaffold,
   reconcileAgent: mocks.reconcile,
-}));
-
-vi.mock("../src/agents/systemd.js", () => ({
-  generateUnit: mocks.generateUnit,
-  generateGatewayUnit: mocks.generateGatewayUnit,
-  installUnit: mocks.installUnit,
-  uninstallUnit: mocks.uninstallUnit,
-  installScheduleTimers: mocks.installScheduleTimers,
-  enableScheduleTimers: mocks.enableScheduleTimers,
-  daemonReload: mocks.daemonReload,
-  resolveGatewayUnitName: mocks.resolveGatewayUnitName,
+  // detectHooksDrift / buildSettingsHooksBlock are imported by agent.ts
+  // but unused in the create-profile codepath. Stub to keep the mock
+  // surface minimal — the real impls don't run during these tests.
+  detectHooksDrift: vi.fn(() => ({ drifted: false, missing: [], extra: [] })),
+  buildSettingsHooksBlock: vi.fn(() => ({})),
 }));
 
 // Disable PostHog so no network calls fire during tests.
@@ -168,10 +154,6 @@ describe("agent create --profile (command wiring)", () => {
     configPath = join(tmpDir, "switchroom.yaml");
     mocks.scaffold.mockReset();
     mocks.reconcile.mockReset();
-    mocks.installUnit.mockReset();
-    mocks.installScheduleTimers.mockReset();
-    mocks.enableScheduleTimers.mockReset();
-    mocks.daemonReload.mockReset();
 
     // process.exit throws so we can assert on it without the test
     // process actually exiting.

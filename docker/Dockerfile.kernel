@@ -1,0 +1,23 @@
+# switchroom/kernel — singleton approval kernel container.
+#
+# Same identity model as the broker: per-agent socket directories under
+# /run/switchroom/kernel/<agent>/ with mode 0o700 created via mkdirSync's
+# `mode` option (NOT chmod-after), then chown'd to the agent's UID. See
+# docker/Dockerfile.broker for the rationale.
+ARG BASE_IMAGE=switchroom/base:latest
+FROM ${BASE_IMAGE}
+
+ARG TARGETARCH=amd64
+RUN echo "switchroom/kernel building for arch=${TARGETARCH}" >&2
+
+# State dir for kernel.db (in-flight approval grants), bind-mounted from
+# ~/.switchroom/approvals on the host.
+RUN mkdir -p /state/approvals
+
+# Per-agent socket parent — same pattern as the broker.
+RUN install -d -m 0755 /run/switchroom/kernel
+
+USER 0:0
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "/opt/switchroom/dist/vault/approvals/kernel-server.js"]

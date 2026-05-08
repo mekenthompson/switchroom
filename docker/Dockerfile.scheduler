@@ -1,0 +1,29 @@
+# switchroom/scheduler — singleton cron container.
+#
+# Runs as root so it can mount /var/run/docker.sock and dispatch tasks
+# via `docker exec agent-<name> claude -p <prompt>`. The scheduler does
+# NOT see secret values — it only fires the dispatch; the agent resolves
+# its own vault refs through the broker socket.
+ARG BASE_IMAGE=switchroom/base:latest
+FROM ${BASE_IMAGE}
+
+ARG TARGETARCH=amd64
+RUN echo "switchroom/scheduler building for arch=${TARGETARCH}" >&2
+
+# Install the docker CLI so the scheduler can `docker exec` into agent
+# containers via the bind-mounted /var/run/docker.sock. This is the
+# CLI client only; the engine is the host's, mounted in.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends docker.io \
+ && rm -rf /var/lib/apt/lists/*
+
+# State dir for scheduler.db (audit trail of fires).
+RUN mkdir -p /state/scheduler
+
+# Config bind-mount target (the host's switchroom.yaml + cascade).
+RUN mkdir -p /state/config
+
+USER 0:0
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "/opt/switchroom/dist/scheduler/index.js"]

@@ -466,7 +466,18 @@ function registerShutdown(stop: () => void): void {
   process.on("SIGINT", handler);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Entry guard — only run main() when this file is invoked directly as the
+// approval-kernel bundle (dist/vault/approvals/kernel-server.js or src/vault/
+// approvals/kernel-server.ts). Without the filename check, when this module
+// is bundled INTO another entry point (e.g. dist/cli/switchroom.js), bun's
+// bundler rewrites `import.meta.url` to point at the OUTPUT bundle and the
+// naive comparison fires for any CLI invocation. See PR #807 / Phase 3a CI fix.
+if (
+  import.meta.url === `file://${process.argv[1]}` &&
+  /(?:^|[/\\])(?:vault[/\\]approvals[/\\])?kernel-server\.(?:js|ts)$/.test(
+    process.argv[1] ?? "",
+  )
+) {
   main().catch((err) => {
     process.stderr.write(`approval-kernel fatal: ${err instanceof Error ? err.stack : err}\n`);
     process.exit(1);

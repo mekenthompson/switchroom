@@ -264,6 +264,16 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
     lines.push(`      - broker-${a.name}-sock:/run/switchroom/broker/${a.name}`);
   }
   lines.push(`      - ${homePrefix}/.switchroom/vault:/state/vault`);
+  // Auto-unlock blob (encrypted with /etc/machine-id-derived key).
+  // Mounted read-only — the broker only ever reads the blob; rotation
+  // is performed by the host CLI (`switchroom vault broker enable-auto-unlock`)
+  // followed by a `docker compose restart vault-broker`. Mount source
+  // is the host file path `~/.switchroom/vault-auto-unlock` (the
+  // DEFAULT_AUTO_UNLOCK_PATH constant in src/vault/auto-unlock.ts).
+  // Compose treats a missing source as an empty directory — the broker
+  // detects that and falls back to the interactive unlock flow, so
+  // operators who never enabled auto-unlock are unaffected.
+  lines.push(`      - ${homePrefix}/.switchroom/vault-auto-unlock:/state/vault-auto-unlock:ro`);
   lines.push(``);
 
   // ── approval-kernel (singleton) ────────────────────────────────────

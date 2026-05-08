@@ -387,7 +387,7 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
         console.log("");
         console.log("Staged only (--no-apply). To activate:");
         console.log("  1. Set vault.broker.autoUnlock: true in switchroom.yaml");
-        console.log("  2. systemctl --user restart switchroom-vault-broker.service");
+        console.log("  2. docker compose -f ~/.switchroom/compose/docker-compose.yml restart vault-broker");
         return;
       }
 
@@ -420,8 +420,8 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
         console.log("");
         console.log("Next steps:");
         console.log("  1. Set vault.broker.autoUnlock: false in switchroom.yaml (or remove)");
-        console.log("  2. switchroom reconcile");
-        console.log("  3. systemctl --user restart switchroom-vault-broker.service");
+        console.log("  2. switchroom apply");
+        console.log("  3. docker compose -f ~/.switchroom/compose/docker-compose.yml restart vault-broker");
       } catch (err) {
         console.error(`Failed to remove credential file: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);

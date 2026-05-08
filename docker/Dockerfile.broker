@@ -1,0 +1,38 @@
+# switchroom/broker — singleton vault broker container.
+#
+# Runs as root so it can chown per-agent socket directories under
+# /run/switchroom/broker/<agent>/ to the agent's UID. Per the Phase 0
+# spike (broker-server.mjs), the broker must:
+#
+#   1. Set process.umask(0o077) BEFORE creating any inode.
+#   2. mkdir each <agent>/ with mode 0o700 in the SAME syscall (no
+#      mkdir-then-chmod race the second-round reviewer flagged).
+#   3. chown <agent>/ to the agent's UID.
+#   4. bind() socket inside; chown socket to agent UID; chmod 0o660.
+#
+# These invariants are enforced in production at src/vault/broker/server.ts
+# (umask 0o077 set at startup; mkdirSync called with {recursive:true,
+# mode:0o700} so mkdir(2) applies the strict mode atomically — no
+# mkdir-then-chmod window). Compose drops ALL caps and re-adds CHOWN
+# + FOWNER so step 3/4 still work under no-new-privileges.
+ARG BASE_IMAGE=switchroom/base:latest
+FROM ${BASE_IMAGE}
+
+ARG TARGETARCH=amd64
+RUN echo "switchroom/broker building for arch=${TARGETARCH}" >&2
+
+# State dir for the vault DB + audit log (bind-mounted from
+# ~/.switchroom/vault on the host).
+RUN mkdir -p /state/vault
+
+# Socket parent dir — mode 0o755 so per-agent subdirs (each 0o700,
+# owned by the agent UID) are reachable by the agent containers that
+# mount them. The broker creates each <agent>/ subdir at startup with
+# the strict mode option (NOT chmod-after).
+RUN install -d -m 0755 /run/switchroom/broker
+
+# Broker runs as root by default (compose may pin user:"0:0" explicitly).
+USER 0:0
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "/opt/switchroom/dist/vault/broker/server.js"]

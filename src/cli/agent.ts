@@ -46,6 +46,9 @@ import {
 } from "../agents/status.js";
 import { createAgent, completeCreation } from "../agents/create-orchestrator.js";
 import { addAgent, type AgentTopology } from "../agents/add-orchestrator.js";
+import { generateCompose } from "../agents/compose.js";
+import { execFileSync as dockerExecFile } from "node:child_process";
+import { mkdirSync as dockerMkdir } from "node:fs";
 import { renameAgent, type HindsightMode } from "../agents/rename-orchestrator.js";
 import { validateBotTokenMatchesAgent } from "../setup/telegram-api.js";
 import { registerAgentPerfCommand } from "./perf.js";
@@ -2270,6 +2273,54 @@ export function registerAgentCommand(program: Command): void {
             readOAuthCode,
             readLine,
           });
+
+          // Runtime branch — Docker mode regenerates compose and brings
+          // up only the new agent's service (--no-deps), leaving siblings
+          // and shared services untouched. Host-native systemd path
+          // already ran inside addAgent above; this is purely additive
+          // and only fires when SWITCHROOM_RUNTIME=docker.
+          if (process.env.SWITCHROOM_RUNTIME === "docker") {
+            const cfg = getConfig(program);
+            const compose = generateCompose({ config: cfg });
+            const composeDir = resolve(process.env.HOME ?? "", ".switchroom", "compose");
+            dockerMkdir(composeDir, { recursive: true, mode: 0o755 });
+            const composePath = resolve(composeDir, "docker-compose.yml");
+            writeFileSync(composePath, compose, { mode: 0o644 });
+            console.log(chalk.gray(`  Wrote compose: ${composePath}`));
+            try {
+              dockerExecFile("docker", [
+                "compose", "-f", composePath,
+                "up", "-d", "--no-deps", `agent-${name}`,
+              ], { stdio: "inherit" });
+            } catch (err) {
+              console.error(chalk.red(`  docker compose up failed: ${(err as Error).message}`));
+              // Rollback — the host-native addAgent above has already
+              // scaffolded the agent dir + (in non-Docker fleets) the
+              // systemd unit. Leaving that half-state behind means a
+              // re-run of `agent add` will fail on "already exists". Best
+              // effort: stop+remove any container that may have partially
+              // started, then call destroyAgent to wipe the dir+unit.
+              try {
+                dockerExecFile("docker", [
+                  "compose", "-f", composePath,
+                  "rm", "-fsv", `agent-${name}`,
+                ], { stdio: "inherit" });
+              } catch { /* container may not exist — ignore */ }
+              try {
+                stopAgent(name);
+              } catch { /* may already be stopped */ }
+              try {
+                uninstallUnit(name);
+              } catch { /* unit may not exist in pure-Docker fleets */ }
+              const agentsDirRollback = resolveAgentsDir(cfg);
+              const agentDirRollback = resolve(agentsDirRollback, name);
+              if (existsSync(agentDirRollback)) {
+                rmSync(agentDirRollback, { recursive: true, force: true });
+                console.log(chalk.gray(`  Rolled back: removed ${agentDirRollback}`));
+              }
+              process.exit(1);
+            }
+          }
 
           if (result.preflightOk) {
             console.log(chalk.bold.green(`\n  Agent "${name}" is online and paired.\n`));

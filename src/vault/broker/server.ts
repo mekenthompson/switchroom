@@ -213,9 +213,18 @@ export class VaultBroker {
       this.secrets = { ...this.testOpts._testSecrets };
     }
 
-    // Ensure parent directory exists and is mode 0700
+    // Ensure parent directory exists and is mode 0700.
+    //
+    // Race-safe construction: we set a strict umask BEFORE mkdir and pass
+    // mode:0o700 in the same syscall. mkdir(2) applies (mode & ~umask),
+    // so combining umask=0o077 + mode=0o700 yields 0o700 atomically — no
+    // mkdir-then-chmod window where the dir is briefly group/world-readable.
+    // The trailing chmod is defence-in-depth (idempotent re-assertion if
+    // the dir pre-existed with looser perms); we do NOT rely on it to
+    // close the race.
+    process.umask(0o077);
     const parentDir = dirname(this.socketPath);
-    mkdirSync(parentDir, { recursive: true });
+    mkdirSync(parentDir, { recursive: true, mode: 0o700 });
     try {
       chmodSync(parentDir, 0o700);
     } catch {

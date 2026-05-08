@@ -1447,3 +1447,46 @@ export function registerShutdownHandlers(broker: VaultBroker): void {
   process.on("SIGTERM", shutdown);
   process.on("SIGINT", shutdown);
 }
+
+// ─── Top-level entrypoint (Phase 1b — broker container CMD) ──────────────────
+//
+// Dockerfile.broker invokes `bun /opt/switchroom/dist/vault/broker/server.js`.
+// Without a main() + entry guard, the bundle would import VaultBroker, run no
+// listen call, and exit immediately (Phase 1b review blocker). We mirror the
+// scheduler's pattern at src/scheduler/index.ts: read env for socket/config/
+// vault paths, construct a broker, register shutdown handlers, call start().
+//
+// Env contract:
+//   SWITCHROOM_BROKER_SOCKET    Path to data socket. Default
+//                               /run/switchroom/broker/vault-broker.sock
+//                               (compose mounts /run/switchroom/broker/<agent>
+//                               per-agent; the singleton broker uses the
+//                               parent dir directly inside the container).
+//   SWITCHROOM_CONFIG           Path to switchroom.yaml. Default unset →
+//                               loadConfig() auto-detects.
+//   SWITCHROOM_VAULT_PATH       Path to encrypted vault. Default from config.
+//
+// The broker stays alive on its open server sockets — we don't loop here.
+export async function main(): Promise<void> {
+  const socketPath =
+    process.env.SWITCHROOM_BROKER_SOCKET ??
+    "/run/switchroom/broker/vault-broker.sock";
+  const configPath = process.env.SWITCHROOM_CONFIG;
+  const vaultPath = process.env.SWITCHROOM_VAULT_PATH;
+
+  const broker = new VaultBroker();
+  registerShutdownHandlers(broker);
+  await broker.start(socketPath, configPath, vaultPath);
+  process.stdout.write(
+    `vault-broker: listening on ${socketPath}\n`,
+  );
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((err) => {
+    process.stderr.write(
+      `vault-broker fatal: ${err instanceof Error ? err.stack : err}\n`,
+    );
+    process.exit(1);
+  });
+}

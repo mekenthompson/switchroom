@@ -24,6 +24,7 @@ import {
   InMemoryAuditSink,
   type AuditSink,
 } from "./audit.js";
+import { SqliteAuditSink } from "./audit-sqlite.js";
 
 /**
  * Minimal node-cron-shaped surface — we don't add the package as a dep
@@ -81,14 +82,46 @@ export function registerSchedule(opts: RegisterOptions): RegisteredTask[] {
   return tasks;
 }
 
+/**
+ * Pick the audit sink based on env flags. Exported for tests.
+ *
+ * Precedence:
+ *   1. inMemory=true                   → InMemoryAuditSink
+ *   2. sqliteDbPath !== undefined      → SqliteAuditSink at that path.
+ *      Set by Phase 1b's scheduler compose service for production
+ *      telemetry. Requires better-sqlite3 to be resolvable in the
+ *      runtime — installed in the scheduler image, not at the repo
+ *      root, so don't invoke this branch from vitest.
+ *   3. default                         → JsonlAuditSink at jsonlPath
+ */
+export interface PickSinkOptions {
+  inMemory: boolean;
+  sqliteDbPath: string | undefined;
+  jsonlPath: string;
+  /** Test-only: inject a stub better-sqlite3 ctor. */
+  _testSqliteCtor?: ConstructorParameters<typeof SqliteAuditSink>[0]["sqliteCtor"];
+}
+export function pickSink(opts: PickSinkOptions): AuditSink {
+  if (opts.inMemory) return new InMemoryAuditSink();
+  if (opts.sqliteDbPath !== undefined) {
+    return new SqliteAuditSink({
+      dbPath: resolve(opts.sqliteDbPath),
+      sqliteCtor: opts._testSqliteCtor,
+    });
+  }
+  return new JsonlAuditSink(resolve(opts.jsonlPath));
+}
+
 export async function main(): Promise<void> {
   const configPath = process.env.SWITCHROOM_CONFIG ?? "/state/config/switchroom.yaml";
   const dbPath = process.env.SWITCHROOM_SCHEDULER_DB ?? "/state/scheduler/scheduler.db.jsonl";
   const config = loadConfig(configPath);
   const entries = collectScheduleEntries(config);
-  const sink: AuditSink = process.env.SWITCHROOM_SCHEDULER_INMEMORY === "1"
-    ? new InMemoryAuditSink()
-    : new JsonlAuditSink(resolve(dbPath));
+  const sink: AuditSink = pickSink({
+    inMemory: process.env.SWITCHROOM_SCHEDULER_INMEMORY === "1",
+    sqliteDbPath: process.env.SWITCHROOM_SCHEDULER_DB_PATH,
+    jsonlPath: dbPath,
+  });
   // Lazy-resolve node-cron at runtime — the package is installed inside
   // the scheduler container image (Phase 1b) and is intentionally NOT a
   // top-level switchroom dep (avoids dragging it into every install).

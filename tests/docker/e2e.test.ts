@@ -3,24 +3,31 @@
  * Docker isn't available or the phase1b-test images haven't been built
  * yet. CI builds the images first, then runs this suite.
  *
- * What this test covers:
- *   1. Each image's CMD entrypoint loads without ENOENT / MODULE_NOT_FOUND
- *      (the Phase 1a Dockerfiles' `dist/...` paths were aspirational —
- *      Phase 1b's build.mjs bundles them).
- *   2. Per-agent identity isolation: read-only rootfs blocks writes
- *      (EROFS), cap_drop=ALL + no-new-privileges blocks mount (EPERM).
- *   3. better-sqlite3's prebuilt binary actually loads inside the
- *      scheduler image (no apt build-essential fallback needed for
- *      linux/amd64; arm64 would test similarly under multi-arch CI).
+ * What this file ACTUALLY tests (one-liner per case):
+ *   1. base image — node, bun, tini, tmux, claude all on PATH.
+ *   2. broker image — bundle starts as a process and stays alive long
+ *      enough to bind sockets (replaces the prior "module imports OK"
+ *      stub that Phase 1b review correctly flagged as a no-op).
+ *   3. scheduler image — bundle's better-sqlite3 prebuilt binary loads
+ *      and an in-memory DB round-trips a row.
+ *   4. agent image — read-only rootfs blocks writes (EROFS).
+ *   5. agent image — cap_drop=ALL + no-new-privileges blocks mount (EPERM).
  *
- * What this does NOT cover (deferred):
- *   - Live docker-compose stand-up across all 5 services
- *   - Real broker socket peercred handshake
- *   - Approval kernel — kernel-server.ts entrypoint doesn't exist yet
+ * What this file does NOT cover (deferred to Phase 1c):
+ *   - Per-agent identity isolation across SEPARATE agent containers
+ *     (this file only asserts kernel-level guards on a single container).
+ *   - Cross-agent broker-socket testing (peercred ACL across two
+ *     concurrently-running agents hitting the same broker).
+ *   - Live docker-compose stand-up of all 5 services.
+ *   - Approval kernel — kernel-server.ts entrypoint doesn't exist yet.
+ *   - Real broker socket peercred handshake against a cron unit.
  */
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect } from "vitest";
 import { execSync, spawnSync } from "node:child_process";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const TAG = "phase1b-test";
 const IMAGES = {
@@ -80,14 +87,93 @@ describe.skipIf(!dockerOk || !allImagesPresent)(
       expect(out).toMatch(/claude/);
     });
 
-    it("broker image's bundled server.js loads under bun", () => {
-      // Don't actually start the listen — just assert the module
-      // resolves. A live listen would need a writable /run mount.
-      const out = execSync(
-        `docker run --rm --entrypoint bun ${IMAGES.broker} ` +
-          `-e "import('/opt/switchroom/dist/vault/broker/server.js').then(()=>console.log('OK')).catch(e=>{console.error(e);process.exit(1)})"`,
-      ).toString();
-      expect(out.trim()).toBe("OK");
+    it("broker image's bundled server.js boots and stays alive (binds sockets, doesn't exit)", () => {
+      // Phase 1b review fix: the prior version of this test only asserted
+      // the module imported cleanly — it never started the broker, so a
+      // missing main()/entry-guard (which would have made the production
+      // CMD a no-op) would still pass. We now actually start the
+      // container and verify the process stays running for 2s — long
+      // enough for the listen() callbacks to fire and any synchronous
+      // boot error to propagate via container exit.
+      //
+      // We mount a tmpfs over /run/switchroom/broker so the bundle's
+      // mkdir/bind sequence has a writable target, and supply a minimal
+      // switchroom.yaml via SWITCHROOM_CONFIG so loadConfig() resolves.
+      // The vault file doesn't need to exist — the broker stays locked
+      // and that's fine for "did it bind sockets and stay up" assertion.
+      const tmp = mkdtempSync(join(tmpdir(), "broker-e2e-"));
+      const cfgPath = join(tmp, "switchroom.yaml");
+      writeFileSync(
+        cfgPath,
+        [
+          "switchroom:",
+          "  version: 1",
+          "  agents_dir: /tmp/agents",
+          "  skills_dir: /tmp/skills",
+          "telegram:",
+          "  bot_token: xxx",
+          "  forum_chat_id: \"-1001234567890\"",
+          "vault:",
+          "  path: /tmp/vault.enc",
+          "agents: {}",
+          "",
+        ].join("\n"),
+      );
+
+      const containerName = `broker-e2e-${process.pid}-${Date.now()}`;
+      try {
+        // Start detached. Mount config read-only, tmpfs the socket dir
+        // (writable, root-owned per Dockerfile.broker), and override the
+        // CMD-default socket path to a known location.
+        execSync(
+          [
+            "docker run -d",
+            `--name ${containerName}`,
+            "--tmpfs /run/switchroom/broker:rw,mode=755",
+            `-v ${cfgPath}:/state/config/switchroom.yaml:ro`,
+            "-e SWITCHROOM_CONFIG=/state/config/switchroom.yaml",
+            "-e SWITCHROOM_BROKER_SOCKET=/run/switchroom/broker/vault-broker.sock",
+            IMAGES.broker,
+          ].join(" "),
+          { stdio: "pipe" },
+        );
+
+        // Sleep 2s — enough for listen() to fire OR for a synchronous
+        // boot error to crash the container (whichever happens first).
+        execSync("sleep 2");
+
+        const running = execSync(
+          `docker inspect -f '{{.State.Running}}' ${containerName}`,
+        )
+          .toString()
+          .trim();
+
+        if (running !== "true") {
+          // Surface logs in the assertion failure for forensics.
+          const logs = (() => {
+            try {
+              return execSync(`docker logs ${containerName} 2>&1`).toString();
+            } catch {
+              return "<docker logs failed>";
+            }
+          })();
+          throw new Error(`broker container exited within 2s. logs:\n${logs}`);
+        }
+        expect(running).toBe("true");
+
+        // Confirm the data socket actually showed up at the configured
+        // path (proves listen() ran, not just "process is alive sleeping").
+        const lsOut = execSync(
+          `docker exec ${containerName} ls -l /run/switchroom/broker/vault-broker.sock`,
+        ).toString();
+        expect(lsOut).toMatch(/vault-broker\.sock/);
+      } finally {
+        try {
+          execSync(`docker rm -f ${containerName}`, { stdio: "ignore" });
+        } catch {
+          /* best effort */
+        }
+      }
     });
 
     it("scheduler image's bundled index.js loads under node and better-sqlite3 prebuilt opens an in-memory DB", () => {

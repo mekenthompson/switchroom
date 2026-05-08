@@ -10,9 +10,11 @@
 #   3. chown <agent>/ to the agent's UID.
 #   4. bind() socket inside; chown socket to agent UID; chmod 0o660.
 #
-# This Dockerfile is concerned only with the runtime; the production
-# broker source lives at src/vault/broker/ and is bundled into the image
-# at build time alongside the rest of the switchroom CLI.
+# These invariants are enforced in production at src/vault/broker/server.ts
+# (umask 0o077 set at startup; mkdirSync called with {recursive:true,
+# mode:0o700} so mkdir(2) applies the strict mode atomically — no
+# mkdir-then-chmod window). Compose drops ALL caps and re-adds CHOWN
+# + FOWNER so step 3/4 still work under no-new-privileges.
 ARG BASE_IMAGE=switchroom/base:latest
 FROM ${BASE_IMAGE}
 

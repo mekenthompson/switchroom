@@ -82,13 +82,10 @@ function listenForAgent(agent) {
     const bound = server.address(); // string (UDS path)
     const resolvedAgent = socketPathToAgent(bound);
 
-    // SO_PEERCRED forensics — capture peer uid for the matrix's informational column.
-    let peerUid = -1;
-    try {
-      // Node has no built-in SO_PEERCRED; fall back to a best-effort
-      // marker. We log the bound path which is the authoritative identity.
-      peerUid = conn._handle && conn._handle.fd != null ? -1 : -1;
-    } catch {}
+    // SO_PEERCRED column intentionally omitted from the spike — Node has
+    // no built-in capture and the matrix downgrades it to a forensics-only
+    // signal under the path-derived identity model. Adding native
+    // SO_PEERCRED is in-scope for Phase 2's production broker, not here.
 
     let buf = "";
     conn.on("data", (chunk) => {
@@ -106,9 +103,9 @@ function listenForAgent(agent) {
       const decision = checkAclByAgent(resolvedAgent, req.key);
       let resp;
       if (decision.allow) {
-        resp = { ok: true, agent: resolvedAgent, key: req.key, value: SECRETS[req.key], boundSocket: bound, peerUid };
+        resp = { ok: true, agent: resolvedAgent, key: req.key, value: SECRETS[req.key], boundSocket: bound };
       } else {
-        resp = { ok: false, agent: resolvedAgent, key: req.key, error: "acl-deny", reason: decision.reason, boundSocket: bound, peerUid };
+        resp = { ok: false, agent: resolvedAgent, key: req.key, error: "acl-deny", reason: decision.reason, boundSocket: bound };
       }
       conn.end(JSON.stringify(resp) + "\n");
     });

@@ -1,22 +1,24 @@
 # Phase 0 — container identity matrix
 
-Run: `2026-05-07T23:54:50Z`
+Run: `2026-05-08T00:47:20Z` (rootful + rootless full matrix; supersedes 2026-05-07T23:54:50Z rootful-only run)
 Driver: `spike/test-acl-matrix.sh`
 Spike artifacts: `spike/Dockerfile.broker`, `spike/Dockerfile.agent`, `spike/docker-compose.yml`, `spike/broker-server.mjs`, `spike/agent-client.mjs`, `spike/test-tmux-interrupt.sh`
 Raw logs: `spike/results/`
 
 ## Matrix
 
-| Environment | Docker version | Engine mode | identity resolved (alice) | identity resolved (bob) | cross-mount denied (hostile) | tmux interrupt works | SO_PEERCRED uid (forensics) | verdict |
-|---|---|---|---|---|---|---|---|---|
-| Linux rootful (Ubuntu, kernel 6.17.0-23-generic) | 29.4.1 (client+server) | rootful, overlay2, cgroupv2, apparmor+seccomp | YES (`/run/switchroom/broker/alice/sock` → `alice`; allow-own-key + deny-other-key + deny-unknown-key all behaved as expected) | YES (mirror of alice; full 4/4 pass on bob client) | YES — `EACCES` at `connect()` from misconfigured-bob (uid 10002) into `alice/sock` (mode 0700, owned by uid 10001), without the broker ever seeing the connection attempt | YES — `tmux send-keys C-c` reaches the supervised `sleep 600` under `tini` PID 1; `/tmp/sleep-result` never written, target pid gone within 1s | not captured (Node lacks built-in SO_PEERCRED; informational column only per RFC §Phase 0) | **PASS** |
-| Linux rootless | n/a | n/a | PENDING | PENDING | PENDING | PENDING | n/a | **PENDING** — `uidmap` package not installed; see methodology below |
-| Docker Desktop Mac (Apple Silicon, virtiofs) | n/a | n/a | PENDING | PENDING | PENDING | PENDING | n/a | **PENDING** — requires Mac host; methodology below |
-| Docker Desktop Windows (WSL2 backend) | n/a | n/a | PENDING | PENDING | PENDING | PENDING | n/a | **PENDING** — requires Windows host; methodology below |
+Per-env tests (10 each): `build`, `up`, `perms-alice`, `perms-bob`, `alice-client` (3 sub-tests), `bob-client` (3 sub-tests), `tmux-interrupt`, `hostile-cross-mount` (cross-mount + bind/unlink/replace adversarial — 4 sub-tests), `perms-alice-after-restart`, `alice-client-after-restart`.
+
+| Environment | Docker version | Engine mode | identity resolved (alice) | identity resolved (bob) | cross-mount + bind/unlink/replace denied (hostile) | tmux interrupt works | broker-restart persistence | dir-perms assertion | verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| Linux rootful (Ubuntu, kernel 6.17.0-23-generic) | 29.4.1 (client+server) | rootful, overlay2, cgroupv2, apparmor+seccomp | YES — allow-own-key + deny-own-unknown + deny-other-key + cross-mount-attempt-na (ENOENT, *not mounted*) all pass | YES — mirror of alice | YES — `EACCES` at `connect()`, `bind()`, `unlink()`, `open(O_CREAT)` from uid 10002 against alice's dir (mode 0700, uid 10001). All four adversarial paths blocked at the kernel | YES — `tmux send-keys C-c` reaches supervised child under tini PID 1 | YES — broker stop/start preserves chown/chmod on the named volume; alice can re-connect; ACL still resolves to `alice` | YES — `ls -la` parser confirms `drwx------` and uid match | **PASS (10/10)** |
+| Linux rootless (same host, `dockerd-rootless-setuptool.sh`, slirp4netns + builtin port driver) | 29.4.1 (client+server) | rootless, seccomp+cgroupns, vfs storage, userns remap via `subuid`/`subgid` | YES — identical 4/4 alice client behaviour to rootful | YES — identical 4/4 bob client | YES — identical EACCES on cross-mount, bind, unlink, replace; userns remapping does NOT degrade fs-perm enforcement (the broker chowns inside its own userns to uid 10001/10002, which the agent containers also see as 10001/10002) | YES — identical to rootful | YES — identical to rootful | YES — `drwx------` confirmed inside agent-alice and agent-bob containers | **PASS (10/10)** |
+| Docker Desktop Mac (Apple Silicon, virtiofs) | n/a | n/a | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | **PENDING** — requires Mac host; methodology below |
+| Docker Desktop Windows (WSL2 backend) | n/a | n/a | PENDING | PENDING | PENDING | PENDING | PENDING | PENDING | **PENDING** — requires Windows host; methodology below |
 
 ## Verdict (local-runnable subset)
 
-Linux rootful — the production deployment target on bare-metal / RasPi / Linux servers — passes the full matrix end-to-end. **The RFC's Phase 0 abort condition (Linux rootful failure) is not triggered.** The remaining three rows are PENDING on host availability, not on design failure; their methodology is locked below so a Mac/Win operator can run them unattended.
+Both Linux rootful AND Linux rootless pass the full matrix end-to-end (10/10 tests each = 20/20 across the local-runnable rows). **The RFC's Phase 0 abort condition (rootful or rootless failure on Linux) is not triggered.** Rootless was the highest-risk row in this batch — userns remapping was the most plausible failure mode for a path-derived identity model — and it behaved identically to rootful. The remaining two rows (Mac, Windows) are PENDING on host availability, not design failure; methodology is locked below so an operator can run them unattended.
 
 ## Pending-row methodology
 
@@ -30,17 +32,20 @@ bash ./test-acl-matrix.sh
 
 The driver auto-detects rootless contexts via `/run/user/$(id -u)/docker.sock`; on Mac/Windows the default Docker Desktop socket already shows up as `default` in `docker context ls`, and the spike's compose file works unchanged.
 
-### Linux rootless — install steps
+### Linux rootless — RAN 2026-05-08 (PASS)
+
+Install steps actually executed on this host:
 
 ```bash
 sudo apt-get install -y uidmap            # provides newuidmap / newgidmap
 dockerd-rootless-setuptool.sh install --force
-systemctl --user enable --now docker
-export DOCKER_HOST="unix:///run/user/$(id -u)/docker.sock"
+systemctl --user start docker.service
+# rootful daemon left untouched on /var/run/docker.sock
+# rootless daemon listens on /run/user/$(id -u)/docker.sock
 cd spike && bash ./test-acl-matrix.sh
 ```
 
-The driver script will detect `linux-rootless` automatically and run a second matrix row. Expected behaviour: identical to rootful for ACL allow/deny/cross-mount, with the caveat that the broker's `chown` calls inside the container map through rootlesskit's user namespace — UID 10001 inside == subuid 10001 in the rootless namespace, both invisible to the host. As long as `chown` succeeds inside the container (it should, because the broker runs as root inside its userns), the spike is unchanged.
+The driver auto-detects rootless via the user-systemd unit and runs a second matrix row. Confirmed behaviour: identical to rootful end-to-end. The broker's `chown` calls inside its container map through rootlesskit's user namespace — uid 10001 *inside* the userns is a `subuid` on the host but agents *also see* it as 10001 inside their userns, so fs-perm checks at `connect()` / `bind()` / `unlink()` work unchanged. No mount-propagation edge cases observed with named volumes (the storage driver is `vfs` under rootless rather than `overlay2`, but that doesn't affect the path-derived identity model).
 
 ### Docker Desktop Mac (Apple Silicon, virtiofs)
 

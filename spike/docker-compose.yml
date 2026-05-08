@@ -62,6 +62,7 @@ services:
     environment:
       AGENT_NAME: bob
       OTHER_AGENT: alice
+      HOSTILE: "1"
     volumes:
       - bob-sock:/run/switchroom/broker/bob:rw
       - alice-sock:/run/switchroom/broker/alice:rw   # cross-mount, hostile config

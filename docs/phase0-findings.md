@@ -2,7 +2,7 @@
 
 ## Summary
 
-The path-derived per-agent socket identity model holds on Linux rootful Docker 29.4.1 with no surprises. Allow-paths return allow, deny-paths return deny, and a hand-edited hostile compose that cross-mounts another agent's socket dir is stopped at `connect()` by ordinary POSIX file-mode bits — the broker never sees the cross-agent attempt. tmux send-keys C-c under tini reaches a supervised child cleanly. **Phase 0 is PASS for the only environment available locally**; rootless / Mac / Win are PENDING on host availability, not design.
+The path-derived per-agent socket identity model holds on Linux rootful AND rootless Docker 29.4.1 with no surprises. Allow-paths return allow, deny-paths return deny, and a hostile container that cross-mounts another agent's socket dir is stopped at `connect()`, `bind()`, `unlink()`, AND `open(O_CREAT)` by ordinary POSIX file-mode bits — the broker never sees the cross-agent attempt and a hostile agent can neither replace nor squat the other agent's socket. tmux send-keys C-c under tini reaches a supervised child cleanly. The broker's chown/chmod state on the per-agent dirs persists across broker restart (they live on the named volume, not in container-local state), so re-applying perms on every broker startup is safely idempotent. **Phase 0 is PASS on both Linux engine modes (20/20 tests)**; Mac / Windows are PENDING on host availability, not design.
 
 ## What was validated, in detail
 
@@ -33,9 +33,17 @@ No interaction quirks observed between tini's SIGTERM-forwarding behaviour and t
 
 The agent containers run as `10001:10001` (alice) and `10002:10002` (bob) via the compose `user:` directive. Inside each container `id` reports the right uid, and the agent process can read/write files in its own per-agent socket dir while being kernel-blocked from the other agent's. No `--privileged` required. No host-level UID remap required. No userns gymnastics required on rootful Docker.
 
-### 5. Named-volume permission persistence
+### 5. Named-volume permission persistence — now exercised end-to-end
 
-A named volume's contents persist across container restart on Linux rootful — but more importantly, the chown/chmod the broker applies to the per-agent dir at startup persists too (the dir is part of the volume content, not container-local state). Restarting just the agent containers (without the broker) preserves the right uid/gid/mode on the socket dir. This means the broker's startup-time chown is idempotent and one-shot per fleet lifecycle, not per-agent-restart.
+A named volume's contents persist across container restart on Linux rootful — but more importantly, the chown/chmod the broker applies to the per-agent dir at startup persists too (the dir is part of the volume content, not container-local state). The matrix now exercises this directly: `docker compose stop broker` → `docker compose start broker` → re-assert `drwx------` + uid 10001 on `/run/switchroom/broker/alice` from inside the alice container → re-run alice client → identity still resolves to `alice` and all four ACL paths still behave correctly. PASS on both rootful and rootless. The broker's startup-time chown is idempotent and one-shot per fleet lifecycle, not per-agent-restart.
+
+### 6. Adversarial bind/unlink/replace also blocked
+
+In addition to the original `connect()` cross-mount probe, the hostile container now attempts to (a) `bind()` a fresh `intruder.sock` inside the other agent's directory, (b) `unlink()` the other agent's socket inode, and (c) `open(O_CREAT|O_TRUNC)`-replace it. All three fail with `EACCES` because the directory is mode 0700 owned by the other agent's uid and the hostile container runs as a different uid. This closes the "what if the attacker doesn't try to read but tries to squat / DoS / replace?" question — same fs-perm boundary stops all four paths.
+
+### 7. Linux rootless behaves identically to rootful
+
+The rootless row was the highest-risk in the matrix because userns remapping is the most plausible way for a path-derived identity model to drift. It didn't drift. Inside the rootless broker container, `chown(dir, 10001, 10001)` succeeds because the broker is root *inside* its userns; inside the alice agent container, the dir reads back as `drwx------ 10001 10001` because both containers sit inside the same outer userns established by rootlesskit. From the host's perspective the dir is owned by `subuid_10001 + base_offset`, but no host-side process needs to touch the file, so this is irrelevant. The storage driver shifts from `overlay2` (rootful) to `vfs` (rootless) but named-volume contents are unaffected. 10/10 PASS.
 
 ## What surprised me
 
@@ -45,11 +53,10 @@ A named volume's contents persist across container restart on Linux rootful — 
 
 ## What did NOT get validated locally
 
-- **Linux rootless.** The host has `dockerd-rootless-setuptool.sh` and `rootlesskit` but `uidmap` is missing; install requires sudo apt. Methodology recorded in `phase0-peercred-matrix.md`. Risk assessment: rootless adds a userns layer between host uid and in-container uid, but the per-agent dir's uid/gid/mode are entirely *inside* the container userns — the broker's chown to "uid 10001" lands as "host subuid 10001 + offset" on the host but is observed as plain 10001 inside the userns. The fs-perms enforcement is unchanged. The likeliest failure mode would be an unfortunate interaction between rootlesskit's mount propagation and named-volume ownership, which affects bind-mounts more than named volumes and which I expect to pass; if it fails the fallback (HMAC tokens) is already in the RFC.
-- **Docker Desktop Mac / Windows.** No host available locally. virtiofs (Mac) historically has been the source of mode-bit munging on bind-mounted host paths — but the spike uses *named volumes*, not bind mounts, so the in-VM ext4 fs holds the inodes and the host fs never sees them. I am ~85% confident Mac will pass; Windows-WSL2 piggybacks on the same in-VM filesystem and should be equivalent. No paper finding can substitute for a real run.
+- **Docker Desktop Mac / Windows.** No host available locally. virtiofs (Mac) historically has been the source of mode-bit munging on bind-mounted host paths — but the spike uses *named volumes*, not bind mounts, so the in-VM ext4 fs holds the inodes and the host fs never sees them. The driver script now hard-asserts `drwx------` on the per-agent dir from inside each agent container, so a Mac virtiofs UID-collapse would surface as a `perms-alice` / `perms-bob` FAIL in the final tally rather than silently green. ~85% confidence Mac passes; Windows-WSL2 piggybacks on the same in-VM filesystem and should be equivalent. No paper finding substitutes for a real run.
 
 ## Phase 0 verdict
 
-PASS for the only row currently runnable. Two PENDING rows (Mac, Windows) require operator-driven host access and the methodology to run them is locked in `phase0-peercred-matrix.md`. The Linux-rootless row is PENDING on a 30-second `apt install uidmap` step that I declined to execute autonomously because it requires sudo.
+PASS on both Linux rows currently runnable (rootful + rootless, 20/20 tests). Two PENDING rows (Mac, Windows) require operator-driven host access; methodology is locked in `phase0-peercred-matrix.md` and the driver hard-asserts dir mode/owner so silent failures on virtiofs / 9p will surface as red rows in the final tally.
 
-**No Phase 0 abort condition is triggered.** Recommendation: dispatch a fresh reviewer against this branch to assess whether the spike actually validates the RFC's identity-model claims, then unblock the Mac/Win pending rows in parallel with Phase 1 design.
+**No Phase 0 abort condition is triggered.** Recommendation: unblock the Mac/Win rows in parallel with Phase 1 design.

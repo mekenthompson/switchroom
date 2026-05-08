@@ -138,7 +138,16 @@ export async function main(): Promise<void> {
   process.on("SIGINT", shutdown);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+// Entry guard — only run main() when this file is invoked directly as the
+// scheduler bundle (dist/scheduler/index.js or src/scheduler/index.ts).
+// Without the filename check, when this module is bundled INTO another
+// entry point (e.g. dist/cli/switchroom.js), bun's bundler rewrites
+// `import.meta.url` to point at the OUTPUT bundle and the naive
+// comparison fires for any CLI invocation. See PR #807 / Phase 3a CI fix.
+if (
+  import.meta.url === `file://${process.argv[1]}` &&
+  /(?:^|[/\\])scheduler[/\\]index\.(?:js|ts)$/.test(process.argv[1] ?? "")
+) {
   main().catch((err) => {
     process.stderr.write(`scheduler fatal: ${err instanceof Error ? err.stack : err}\n`);
     process.exit(1);

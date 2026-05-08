@@ -29,6 +29,7 @@ This branch's tests run on a host that ALSO runs Coolify, hindsight, nginx-tunne
 
 - ABSOLUTE BAN: `docker ps -a | xargs docker rm`. Bare `docker rm $(docker ps -aq)`. `docker system prune`. `docker container prune`. `docker volume prune`. None of these. Ever. On any host.
 - Per-container removal by explicit name is fine and is the pattern the existing tests use (see `tests/docker/per-agent-isolation.test.ts:248`, `tests/docker/e2e.test.ts:172`).
+- Project-scoped compose teardown is also fine: `docker compose -p <project> down -v --remove-orphans`. Scope is the compose project name — won't touch anything outside it.
 - If you find yourself wanting to "just clean everything up", STOP and ask.
 
 ## Design contract

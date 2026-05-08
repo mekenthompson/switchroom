@@ -8,7 +8,7 @@ Switchroom distinguishes four populations, each living in a different place and 
 
 | Population | Where they live | When they get installed | Audience |
 |---|---|---|---|
-| **Bundled-default skills** | `<repo>/skills/` — vendored Anthropic skills (skill-creator, mcp-builder, webapp-testing, pdf, docx, xlsx, pptx) + slim switchroom-core (switchroom-cli, switchroom-status, switchroom-health) | Auto-symlinked into every agent's `.claude/skills/` on scaffold and on `switchroom update`, regardless of role. Per-key opt-out via `defaults.bundled_skills`. See `reconcileAgentDefaultSkills` in `src/agents/reconcile-default-skills.ts` | **Every agent** |
+| **Bundled-default skills** | `<repo>/skills/` — vendored Anthropic skills (skill-creator, mcp-builder, webapp-testing, pdf, docx, xlsx, pptx) + slim switchroom-core (switchroom-cli, switchroom-status, switchroom-health) | Auto-symlinked into every agent's `.claude/skills/` on scaffold and on `switchroom apply`, regardless of role. Per-key opt-out via `defaults.bundled_skills`. See `reconcileAgentDefaultSkills` in `src/agents/reconcile-default-skills.ts` | **Every agent** |
 | **Switchroom foreman-only skills** | `<repo>/skills/` (`switchroom-install`, `switchroom-manage`, `switchroom-architecture`) | Auto-symlinked only when the agent has `role: foreman`. See `installSwitchroomSkills` in `src/agents/scaffold.ts` | Foreman agents (operator) |
 | **Switchroom-bundled developer skills** | `<repo>/skills/` (without `switchroom-` prefix — e.g. `buildkite-*`, `file-bug`, `telegram-test-harness`, `humanizer*`, `token-helpers`) | NOT auto-installed; a developer agent opts in via `defaults.skills:` or per-agent `skills:` in switchroom.yaml | Switchroom developers + power-user operators |
 | **User-managed personal skills** | `~/.switchroom/skills/` (or wherever `switchroom.skills_dir` points) | Symlinked into agents that name them in `defaults.skills` or `agents.<name>.skills`. See `syncGlobalSkills` in `src/agents/scaffold.ts` | Fleet agents — calendar, garmin, doctor-appointments, etc. — anything personal to the operator |
@@ -51,7 +51,7 @@ agents:
 
 Per-agent values override `defaults.bundled_skills` (so an agent can re-enable a skill the operator opted out of globally).
 
-`switchroom update` reconciles bundled-default skills into every agent on disk — additive only, never removes existing entries, leaves operator-placed real dirs/files alone, honours opt-outs.
+`switchroom apply` reconciles bundled-default skills into every agent on disk — additive only, never removes existing entries, leaves operator-placed real dirs/files alone, honours opt-outs.
 
 ### Why the split
 

@@ -17,7 +17,7 @@ If `$ARGUMENTS` names an agent, start only that one. If empty, start everything 
 switchroom agent start "$ARGUMENTS"
 
 # All agents
-switchroom update              # reconcile + (re)start every agent
+switchroom apply               # reconcile + (re)write compose; bring fleet up via `docker compose ... up -d`
 ```
 
 After starting, verify:

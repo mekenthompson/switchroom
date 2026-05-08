@@ -94,7 +94,7 @@ For common failures, give the exact fix:
 | Account expired (new model — `auth account list` shows red ✗) | `switchroom auth refresh-accounts` (one tick); if no refresh-token, the account needs re-adding |
 | Account quota-exhausted (yellow ⊘ in `auth account list`) | Auto-fallback handles it if the agent has multiple accounts; otherwise wait for the reset window or `switchroom auth enable <other-account> <agent>` |
 | Unit failed | `systemctl --user reset-failed switchroom-<name>`, then restart |
-| Missing .mcp.json | `switchroom update` (full reconcile + restart) or `switchroom agent reconcile <name>` (targeted) |
+| Missing .mcp.json | `switchroom apply` (full reconcile + rewrite compose; bring up via `docker compose ... up -d`) or `switchroom agent reconcile <name>` (targeted) |
 | Bot token unresolved | Check vault: `switchroom vault list` |
 | Memory unreachable | Check Hindsight MCP server is running |
 

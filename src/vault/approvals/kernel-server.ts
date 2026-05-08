@@ -35,7 +35,7 @@
  */
 
 import * as net from "node:net";
-import { mkdirSync, chmodSync, existsSync, unlinkSync, readdirSync, statSync } from "node:fs";
+import { mkdirSync, chmodSync, chownSync, existsSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { dirname, resolve, basename } from "node:path";
 import { Database } from "bun:sqlite";
 
@@ -60,6 +60,7 @@ import {
   MAX_PENDING_GLOBAL,
 } from "./kernel.js";
 import { migrateApprovalSchema } from "./schema.js";
+import { allocateAgentUid } from "../../agents/compose.js";
 
 const DEFAULT_SOCKET_PARENT = "/run/switchroom/kernel";
 const DEFAULT_DB_PATH = "/state/approvals/kernel.db";
@@ -105,15 +106,40 @@ async function bindAgentSocket(
   const dir = resolve(parentDir, agent);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   try { chmodSync(dir, 0o700); } catch { /* idempotent */ }
+  // Chown the per-agent dir to the agent's UID so non-root agent
+  // containers (running as user:<uid>:<uid> per compose) can traverse
+  // into it. This mirrors the broker's design: cap_add: [CHOWN, FOWNER]
+  // is granted in the compose service so this chown succeeds even
+  // under cap_drop=ALL. If chown fails (no CAP_CHOWN, e.g. running
+  // outside docker), we leave the dir root-owned — a non-root agent
+  // would be denied, but in non-docker dev/test environments the
+  // kernel-server typically runs as the same user as its callers.
+  const uid = allocateAgentUid(agent);
+  // IMPORTANT: chown the dir AFTER listen(), not before. Under
+  // cap_drop=ALL + cap_add=[CHOWN,FOWNER], root-in-container does NOT
+  // hold CAP_DAC_OVERRIDE; if we chown the dir to the agent UID first,
+  // root can no longer write into it (mode 0700 owned by 10116) and
+  // bind() fails with EACCES. Order:
+  //   1. mkdir with mode 0o700 under umask 0o077 (root-owned).
+  //   2. listen() — creates the socket file as root inside root-owned dir.
+  //   3. chown dir + sock to the agent UID (CAP_CHOWN granted).
+  //   4. chmod sock to 0o660 (FOWNER not strictly needed here since we
+  //      own the file, but the cap_add list includes it for the broker).
   const socketPath = resolve(dir, "sock");
   if (existsSync(socketPath)) {
     try { unlinkSync(socketPath); } catch { /* ignore */ }
   }
   return new Promise((resolveP, rejectP) => {
     const server = net.createServer((sock) => handleConnection(sock, agent, db));
-    server.on("error", rejectP);
+    server.on("error", (err) => {
+      process.stderr.write(`[kernel] listen error agent=${agent} sock=${socketPath}: ${err.message}\n`);
+      rejectP(err);
+    });
     server.listen(socketPath, () => {
       try { chmodSync(socketPath, 0o660); } catch { /* ignore */ }
+      try { chownSync(socketPath, uid, uid); } catch { /* see above */ }
+      // Now safe to lock the dir down to the agent.
+      try { chownSync(dir, uid, uid); } catch { /* see above */ }
       resolveP({ agent, socketPath, server });
     });
   });

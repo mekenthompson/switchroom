@@ -47,7 +47,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execSync, spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, mkdirSync, rmdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateCompose } from "../../src/agents/compose.js";
@@ -225,9 +225,17 @@ function getRestartCount(container: string): number {
  * client socket path exposed). This avoids needing to mount sockets
  * to the host or shipping a separate test client image.
  */
-function kernelLookup(agent: string, container: string = "switchroom-approval-kernel"):
+function kernelLookup(agent: string, container: string = `switchroom-${agent}`):
   { ok: boolean; raw: string; durationMs: number; err?: string } {
-  const sockPath = `/run/switchroom/kernel/${agent}/sock`;
+  // Exec from INSIDE the agent's own container (running as the agent's
+  // UID) so the file-perm boundary lets the connect through. Doing the
+  // exec from inside the kernel container would fail because root
+  // (cap_drop=ALL minus CAP_DAC_OVERRIDE) can no longer traverse the
+  // 0700 alice-owned socket dir after Phase 1c locked it down.
+  // Path inside the agent container: the kernel-<agent>-sock named
+  // volume is mounted at /run/switchroom/kernel; the bound socket is
+  // at /run/switchroom/kernel/sock.
+  const sockPath = `/run/switchroom/kernel/sock`;
   // Inline node script: connect, send {v:1,op:"approval_lookup",...},
   // print the line. The kernel-server's identity guard requires
   // agent_unit to match the listener's directory name.
@@ -267,9 +275,57 @@ c.on('error', e => { clearTimeout(t); console.log('ERR:'+e.message); process.exi
 
 let ctx: FleetCtx | null = null;
 
+// Cross-fork lock — see per-agent-isolation.test.ts for the rationale.
+let _fleetLockPath: string | null = null;
+function acquireFleetLock(p: string, timeoutMs = 240_000): void {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      mkdirSync(p);
+      _fleetLockPath = p;
+      return;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "EEXIST") {
+        try {
+          const ageMs = Date.now() - statSync(p).mtimeMs;
+          if (ageMs > 5 * 60_000) {
+            try { rmdirSync(p); } catch { /* */ }
+            continue;
+          }
+        } catch { /* */ }
+        execSync("sleep 2");
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error(`Could not acquire fleet lock at ${p} within ${timeoutMs}ms`);
+}
+function releaseFleetLock(): void {
+  if (_fleetLockPath) {
+    try { rmdirSync(_fleetLockPath); } catch { /* */ }
+    _fleetLockPath = null;
+  }
+}
+
 beforeAll(() => {
   if (!imagesOk) return;
+  acquireFleetLock("/tmp/switchroom-docker-fleet.lock");
   composeDown(); // belt + braces
+  // Forcefully remove any leftover singletons from a sibling test file
+  // (per-agent-isolation) — they use fixed container_name: so projects
+  // collide. Scope: ONLY the singleton names this PR introduces.
+  for (const c of [
+    "switchroom-vault-broker",
+    "switchroom-approval-kernel",
+    "switchroom-cron",
+    "switchroom-alice",
+    "switchroom-bob",
+    "switchroom-carol",
+    "switchroom-newbie",
+  ]) {
+    try { execSync(`docker rm -f ${c}`, { stdio: "pipe" }); } catch { /* */ }
+  }
   const workdir = mkdtempSync(join(tmpdir(), "phase1c-race-"));
   const cfgPath = join(workdir, "switchroom.yaml");
   writeFileSync(
@@ -310,6 +366,7 @@ afterAll(() => {
   if (ctx) {
     try { rmSync(ctx.workdir, { recursive: true, force: true }); } catch { /* */ }
   }
+  releaseFleetLock();
 }, 60_000);
 
 describe.skipIf(!imagesOk)(
@@ -319,15 +376,18 @@ describe.skipIf(!imagesOk)(
       "45 requests succeed, 0 broker/kernel/scheduler restarts, newbie reaches first reply within 60s",
       async () => {
         if (!ctx) throw new Error("ctx not initialized");
-        // Sanity: kernel container should be running with alice's sock.
+        // Sanity: alice's container can see its own kernel sock at the
+        // expected path (the kernel container's view of the same volume
+        // is /run/switchroom/kernel/alice/sock, but the socket is now
+        // chowned to alice's UID and the dir is 0700, so we ask alice).
         const aliceSock = (() => {
           try {
             return execSync(
-              "docker exec switchroom-approval-kernel ls /run/switchroom/kernel/alice/sock",
+              "docker exec switchroom-alice ls /run/switchroom/kernel/sock",
             ).toString().trim();
           } catch (e) { return `MISSING (${(e as Error).message})`; }
         })();
-        expect(aliceSock).toContain("/run/switchroom/kernel/alice/sock");
+        expect(aliceSock).toContain("/run/switchroom/kernel/sock");
 
         // Snapshot RestartCount before any topology mutation.
         const startCounts = {

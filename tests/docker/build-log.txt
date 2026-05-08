@@ -1,0 +1,91 @@
+Phase 1b — image build verification log
+========================================
+
+Captured 2026-05-08 by the Phase 1b dispatch. Reproduce with:
+
+    bash tests/docker/build-images.sh
+
+All five Dockerfiles build cleanly on linux/amd64 with docker buildx
+v0.33.0 + buildkit v0.29.0 against debian:bookworm-slim base.
+
+Image sizes (after Phase 1b changes — bun added to base, dist/ bundles
+copied into broker + scheduler, better-sqlite3 + node-cron installed
+in scheduler):
+
+    switchroom/base:phase1b-test       ~ 1.05 GB
+    switchroom/agent:phase1b-test      ~ 1.05 GB   (no extra layers vs base)
+    switchroom/broker:phase1b-test     ~ 1.05 GB   (+ broker bundle, ~520 KB)
+    switchroom/kernel:phase1b-test     ~ 1.05 GB   (no entrypoint copied — see carry-forward)
+    switchroom/scheduler:phase1b-test  ~ 1.45 GB   (+ docker.io CLI, better-sqlite3 prebuilt, node-cron)
+
+Phase 1a → Phase 1b deltas
+--------------------------
+
+1. docker/Dockerfile.base — added `bun` runtime via the official
+   installer (apt: unzip + curl|bash, then mv to /usr/local/bin).
+   Required because the broker server source imports `bun:sqlite` and
+   `bun:ffi` directly (src/vault/grants.ts, src/vault/broker/peercred-ffi.ts).
+   Without bun in the runtime image, the broker container would boot
+   to ERR_UNSUPPORTED_ESM_URL_SCHEME on the `bun:` import scheme.
+
+2. scripts/build.mjs — added a server-bundle step. Phase 1a's
+   Dockerfile CMDs reference /opt/switchroom/dist/{vault/broker/server.js,
+   scheduler/index.js} but the build script only emitted dist/cli/.
+   The new step bundles the broker and scheduler entrypoints with
+   bun build --target=node, marking better-sqlite3 + node-cron external
+   so the native binary matches the linux runtime (npm-installed inside
+   the scheduler image), not the host that ran `npm run build`.
+
+3. docker/Dockerfile.broker — added COPY of dist/vault/broker/server.js
+   into /opt/switchroom/. CMD switched from `node` to `bun` to match
+   the bun: import scheme above.
+
+4. docker/Dockerfile.scheduler — added COPY of dist/scheduler/index.js,
+   plus an in-image `npm install --omit=dev better-sqlite3 node-cron`.
+   The prebuilt better-sqlite3 v11.x binary covers linux/amd64 and
+   linux/arm64; an apt-get install build-essential + python3 fallback
+   would land here if a future arch isn't covered.
+
+5. src/scheduler/audit-sqlite.ts (new) — implements AuditSink against
+   better-sqlite3 using the SCHEDULER_DB_DDL frozen in audit.ts. The
+   class accepts an optional sqliteCtor for testing without the native
+   dep on the host; the production path resolves better-sqlite3 via
+   createRequire(import.meta.url).
+
+Smoke-test results
+------------------
+
+Each image was started with the relevant entrypoint to confirm the
+Phase 1a → Phase 1b CMD wiring works end-to-end:
+
+  - base: `command -v node bun tini tmux claude` — all 5 resolve.
+  - agent: read-only rootfs blocks `touch /etc/passwd` (EROFS); cap_drop
+    + no-new-privs blocks `mount -t tmpfs none /mnt` (EPERM).
+  - broker: `bun -e "import('/opt/switchroom/dist/vault/broker/server.js')"`
+    resolves without throwing. Live socket bind is not exercised here
+    (needs writable /run mount and broker config).
+  - scheduler: `node -e "require('better-sqlite3'); ..."` opens an
+    in-memory DB, creates a table, inserts a row, reads it back.
+
+These checks are codified in tests/docker/e2e.test.ts and run in CI
+via .github/workflows/docker-images.yml's e2e job.
+
+Carry-forward to Phase 1c
+-------------------------
+
+A. docker/Dockerfile.kernel CMD points at
+   /opt/switchroom/dist/vault/approvals/kernel-server.js, but no
+   src/vault/approvals/kernel-server.ts exists yet — kernel.ts is a
+   library (requestApproval, recordDecision, ...), not an entrypoint.
+   The kernel image will boot to MODULE_NOT_FOUND until the kernel
+   server entrypoint is written. Tracked separately.
+
+B. The race test (tests/docker/add-agent-race.test.ts) runs against
+   the dispatch core with a stub ExecRunner — not against live
+   containers. Real container-level RestartCount monitoring is gated
+   on the kernel entrypoint being live and on a synthetic Telegram
+   bot stub (per dispatch Q2(b), broker-level injection at the
+   gateway-MCP socket). Both belong to the Phase 1c gateway slice.
+
+C. The CI workflow's GHCR push path is unverified end-to-end — no tag
+   has been pushed yet. First-tag-push will be the e2e proof.

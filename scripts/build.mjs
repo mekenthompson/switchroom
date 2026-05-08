@@ -147,4 +147,41 @@ const pluginScript = resolve(root, "telegram-plugin/scripts/build.mjs");
 console.log("[build] bundling telegram-plugin/{server,gateway,bridge} -> telegram-plugin/dist/");
 execSync(`node ${JSON.stringify(pluginScript)}`, { stdio: "inherit", cwd: root });
 
+// Phase 1b: bundle the long-running server entry points that ship inside
+// the docker images (broker / kernel / scheduler). The Dockerfiles' CMDs
+// reference /opt/switchroom/dist/{vault/broker/server.js,
+// vault/approvals/kernel-server.js, scheduler/index.js}; without these
+// bundles the containers boot to MODULE_NOT_FOUND. Native deps
+// (better-sqlite3) are marked external — they're npm-installed inside
+// the scheduler image so the prebuilt binary matches the linux/glibc
+// runtime, not the host that ran `npm run build`.
+const serverEntries = [
+  { src: "src/vault/broker/server.ts", out: "dist/vault/broker/server.js" },
+  // NOTE: src/vault/approvals/kernel-server.ts does NOT exist yet — kernel.ts
+  // is a library (requestApproval / recordDecision / etc.). The kernel
+  // image's CMD references /opt/switchroom/dist/vault/approvals/kernel-server.js
+  // and is broken until that entrypoint is written. Tracked in
+  // tests/docker/build-log.txt as a Phase 1b carry-forward.
+  { src: "src/scheduler/index.ts", out: "dist/scheduler/index.js" },
+];
+for (const entry of serverEntries) {
+  const srcAbs = resolve(root, entry.src);
+  const outAbs = resolve(root, entry.out);
+  const outDirAbs = dirname(outAbs);
+  mkdirSync(outDirAbs, { recursive: true });
+  // Skip the entry silently if the source doesn't exist (e.g. kernel-server
+  // is being added in a separate slice). Phase 1b will fail loudly via
+  // tests/docker/build-log.txt if a target image's CMD points at a
+  // missing bundle.
+  try {
+    execSync(
+      `bun build ${JSON.stringify(srcAbs)} --outfile ${JSON.stringify(outAbs)} --target node --external better-sqlite3 --external node-cron`,
+      { stdio: "inherit", cwd: root }
+    );
+    console.log(`[build] bundled ${entry.src} -> ${entry.out}`);
+  } catch (err) {
+    console.warn(`[build] WARN: skipped ${entry.src} -> ${entry.out}: ${err.message}`);
+  }
+}
+
 console.log("[build] done");

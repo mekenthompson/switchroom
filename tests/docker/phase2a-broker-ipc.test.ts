@@ -366,14 +366,12 @@ afterAll(() => {
         .join("\n");
     const beforeFiltered = filterPhase(fx.prodSnapshot);
     const afterFiltered = filterPhase(after);
-    if (beforeFiltered !== afterFiltered) {
-      // eslint-disable-next-line no-console
-      console.error(
-        `[phase2a teardown] PRODUCTION CONTAINER DRIFT DETECTED:\n` +
-        `BEFORE:\n${beforeFiltered}\n` +
-        `AFTER:\n${afterFiltered}`,
-      );
-    }
+    // HARD assertion (F1, post-cohesion-review): a console.error here let
+    // production drift slip past CI silently. Now we fail the suite if any
+    // non-phase2a container appeared, disappeared, or changed status during
+    // the run. The phase-name filter above keeps our own ephemeral containers
+    // out of the diff.
+    expect(afterFiltered).toBe(beforeFiltered);
   }
 }, 60_000);
 

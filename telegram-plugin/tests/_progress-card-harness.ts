@@ -21,6 +21,7 @@ export interface HarnessOpts {
   minIntervalMs?: number
   coalesceMs?: number
   initialDelayMs?: number
+  initialDelayMsBackground?: number
   heartbeatMs?: number
   maxIdleMs?: number
   deferredCompletionTimeoutMs?: number
@@ -43,6 +44,9 @@ export function makeHarness(opts: HarnessOpts = {}): DriverHarness {
     minIntervalMs: opts.minIntervalMs ?? 0,
     coalesceMs: opts.coalesceMs ?? 0,
     initialDelayMs: opts.initialDelayMs ?? 0,
+    ...(opts.initialDelayMsBackground != null
+      ? { initialDelayMsBackground: opts.initialDelayMsBackground }
+      : {}),
     heartbeatMs: opts.heartbeatMs ?? 1_000,
     maxIdleMs: opts.maxIdleMs ?? 30_000,
     deferredCompletionTimeoutMs: opts.deferredCompletionTimeoutMs ?? 10_000,

@@ -44,6 +44,7 @@ export default defineConfig({
       // Approval-kernel suites use bun:sqlite — run via test:bun.
       "**/src/vault/approvals/kernel.test.ts",
       "**/src/vault/approvals/vd-unlock-dual-dispatch.test.ts",
+      "**/src/vault/approvals/vault-grant-dual-dispatch.test.ts",
       // Phase 3b-1 watchdog state/policy tests use bun:sqlite — run via test:bun.
       "**/src/watchdog/state.test.ts",
       "**/src/watchdog/policy.test.ts",

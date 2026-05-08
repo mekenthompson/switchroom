@@ -13,8 +13,20 @@ RUN echo "switchroom/scheduler building for arch=${TARGETARCH}" >&2
 # Install the docker CLI so the scheduler can `docker exec` into agent
 # containers via the bind-mounted /var/run/docker.sock. This is the
 # CLI client only; the engine is the host's, mounted in.
+#
+# We use Docker's official `docker-ce-cli` package (CLI only, ~50MB)
+# rather than Debian's `docker.io` (~250MB, drags in the daemon and
+# containerd we never run). The trade-off is one extra apt repo +
+# GPG key, but the image savings + smaller attack surface (no daemon
+# binary present at all) are worth it. See PR-A2 in the v0.7 series.
 RUN apt-get update \
- && apt-get install -y --no-install-recommends docker.io \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && install -m 0755 -d /etc/apt/keyrings \
+ && curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc \
+ && chmod a+r /etc/apt/keyrings/docker.asc \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian $(. /etc/os-release && echo \"$VERSION_CODENAME\") stable" > /etc/apt/sources.list.d/docker.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends docker-ce-cli \
  && rm -rf /var/lib/apt/lists/*
 
 # State dir for scheduler.db (audit trail of fires).

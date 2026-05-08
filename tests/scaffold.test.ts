@@ -279,10 +279,6 @@ describe("scaffoldAgent", () => {
       resolve(__dirname, "..", "src", "cli", "agent.ts"),
       "utf-8",
     );
-    const cliUpdateSrc = readFileSync(
-      resolve(__dirname, "..", "src", "cli", "update.ts"),
-      "utf-8",
-    );
     const watchdogSrc = readFileSync(
       resolve(__dirname, "..", "bin", "bridge-watchdog.sh"),
       "utf-8",
@@ -302,10 +298,9 @@ describe("scaffoldAgent", () => {
     expect(cliAgentSrc).toMatch(/buildCliRestartReason/);
     expect(cliAgentSrc).toMatch(/reconcile:\s/);
 
-    // switchroom update stamps a reason for every bulk-restart target.
-    expect(cliUpdateSrc).toContain("writeRestartReasonMarker");
-    expect(cliUpdateSrc).toMatch(/update: pulled/);
-    expect(cliUpdateSrc).toMatch(/update: reconciled config/);
+    // (`switchroom update` was removed in v0.7. Restart-reason
+    // stamping for bulk operations now sits on the operator's
+    // docker-compose flow and the per-agent restart path above.)
 
     // Watchdog writes the marker before the systemctl restart.
     expect(watchdogSrc).toContain("clean-shutdown.json");

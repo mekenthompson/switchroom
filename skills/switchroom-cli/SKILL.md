@@ -9,7 +9,7 @@ allowed-tools: Bash(switchroom *) Bash(systemctl --user *) Bash(journalctl *)
 This skill is the reference for running `switchroom` CLI commands against existing agents. Each section below is triggered by a distinct user intent — jump to the relevant one rather than walking top-to-bottom.
 
 **Three commands to know:**
-- `switchroom update` — picks up new code (pull, rebuild, reconcile, restart)
+- `switchroom apply` — reconcile every agent + (re)write `~/.switchroom/compose/docker-compose.yml`. Bring the fleet up afterwards with `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d`. (Replaces the v0.6 `switchroom update` flow.)
 - `switchroom restart [agent]` — bounces a stuck or wedged agent
 - `switchroom version` — shows what's running (versions + health summary)
 
@@ -47,21 +47,25 @@ Include the last ~20 lines verbatim, then summarise what you see (crash, stall, 
 
 ## Update — "update", "pull latest", "get new code", "upgrade"
 
-Pull the latest switchroom source, rebuild the CLI binary, reconcile all agents, and restart everything.
+Pull the latest switchroom source, then re-apply config and bring the fleet back up via docker compose.
 
 ```bash
-switchroom update
+cd ~/code/switchroom
+git pull
+bun install
+bun run build
+switchroom apply
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml pull
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 ```
 
-This is the single command for "running the latest code". It:
-1. `git pull` the switchroom repo
-2. Reinstalls deps if package.json changed
-3. Regenerates systemd units
-4. Reconciles all agent config from switchroom.yaml
-5. Restarts all agents that need it
-6. Prints a one-line health summary when done
+`switchroom apply` reconciles every agent declared in `switchroom.yaml`
+(scaffolding any missing workspaces, refreshing bootstrap files), then
+writes `~/.switchroom/compose/docker-compose.yml`. The CLI deliberately
+does not run `docker` for you — the operator owns the bring-up.
 
-**Idempotent**: running twice = first does work, second is a fast no-op.
+The v0.6 `switchroom update` verb is removed in v0.7+; the legacy command
+still exists as a thin shim that prints this same upgrade hint.
 
 ---
 

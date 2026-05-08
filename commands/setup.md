@@ -63,7 +63,7 @@ If the user wants a non-default persona, suggest passing `--profile <name>` once
 ```bash
 switchroom agent start <name>     # if a specific agent was just scaffolded
 # or:
-switchroom update                  # reconcile + restart everything
+switchroom apply                   # reconcile + (re)write docker-compose.yml; restart with `docker compose ... up -d`
 switchroom agent list              # uptime + state
 ```
 

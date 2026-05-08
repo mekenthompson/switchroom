@@ -20,9 +20,6 @@ import { getAuthStatus } from "../auth/manager.js";
 import {
   validateBotToken,
   pollForDmStart,
-  pollForGroupJoin,
-  validateGroupAdmin,
-  validateGroupForum,
 } from "../setup/telegram-api.js";
 import {
   findExistingClaudeJson,
@@ -111,13 +108,12 @@ export function registerSetupCommand(program: Command): void {
           saveUserConfig(userId);
         }
 
-        // ── Step 4: Group setup ──────────────────────────────────
-        const forumChatId = await stepGroupSetup(
-          config,
-          botToken,
-          botUsername,
-          nonInteractive,
-        );
+        // ── Step 4: (group/forum setup retired in v0.7) ──────────
+        // Per-agent bot DM-only is the default. Sentinel "0" lands in
+        // scaffolded access.json wherever a forum chat ID was previously
+        // stored; the schema still requires `telegram.forum_chat_id`,
+        // and existing configs that set a real one continue to work.
+        const forumChatId = "0";
 
         // ── Step 5: Create topics ────────────────────────────────
         await stepCreateTopics(config, botToken, nonInteractive);
@@ -130,7 +126,6 @@ export function registerSetupCommand(program: Command): void {
           config,
           agentBots,
           userId,
-          forumChatId,
           nonInteractive,
           switchroomConfigPath,
         );
@@ -508,143 +503,10 @@ async function stepDmPairing(
   }
 }
 
-// ─── Step 4: Group Setup ─────────────────────────────────────────────────────
-
-async function stepGroupSetup(
-  config: SwitchroomConfig,
-  botToken: string,
-  botUsername: string,
-  nonInteractive: boolean,
-): Promise<string> {
-  stepHeader(4, "Group setup", STEP_ACTIVE);
-
-  const configChatId = config.telegram.forum_chat_id;
-  const isPlaceholder =
-    configChatId === "-1001234567890" || configChatId === "";
-
-  // If config already has a real chat ID, validate it
-  if (!isPlaceholder) {
-    if (!nonInteractive) {
-      const useExisting = await askYesNo(
-        `  Use group ${chalk.cyan(configChatId)} from config?`,
-        true,
-      );
-      if (!useExisting) {
-        return await detectGroup(botToken, botUsername, nonInteractive);
-      }
-    }
-
-    // Validate the group
-    const spin = spinner("Validating group...");
-    try {
-      const isForum = await validateGroupForum(botToken, configChatId);
-      if (!isForum) {
-        spin.stop(chalk.yellow("Warning: Group does not have topics enabled"));
-      } else {
-        const isAdmin = await validateGroupAdmin(botToken, configChatId);
-        if (!isAdmin) {
-          spin.stop(
-            chalk.yellow("Warning: Bot is not an admin in the group"),
-          );
-        } else {
-          spin.stop(chalk.green(`${STEP_DONE} Group validated (forum, bot is admin)`));
-        }
-      }
-    } catch (err) {
-      spin.stop(
-        chalk.yellow(`Warning: Could not validate group: ${(err as Error).message}`),
-      );
-    }
-
-    return configChatId;
-  }
-
-  if (nonInteractive) {
-    throw new Error(
-      "No forum_chat_id configured. Set it in switchroom.yaml before running setup.",
-    );
-  }
-
-  return await detectGroup(botToken, botUsername, nonInteractive);
-}
-
-async function detectGroup(
-  botToken: string,
-  botUsername: string,
-  nonInteractive: boolean,
-): Promise<string> {
-  console.log(
-    chalk.yellow.bold(
-      "\n  IMPORTANT: Disable privacy mode BEFORE adding the bot to the group.",
-    ),
-  );
-  console.log(
-    chalk.yellow(
-      "  In BotFather: /mybots -> select bot -> Bot Settings -> Group Privacy -> Turn off",
-    ),
-  );
-  console.log(
-    chalk.yellow(
-      "  If you already added the bot, remove it from the group and re-add after disabling privacy.\n",
-    ),
-  );
-  console.log(
-    chalk.cyan(
-      `  Add @${botUsername} to your Telegram forum group as admin.`,
-    ),
-  );
-
-  if (nonInteractive) {
-    throw new Error("Cannot detect group in non-interactive mode");
-  }
-
-  const spin = spinner("Waiting for bot to be added to a group (up to 2 minutes)...");
-  try {
-    const result = await pollForGroupJoin(botToken, 120_000);
-    spin.stop(
-      chalk.green(
-        `${STEP_DONE} Detected group: ${result.title} (ID: ${result.chatId})`,
-      ),
-    );
-
-    // Update switchroom.yaml with the detected chat ID
-    const chatIdStr = String(result.chatId);
-    updateConfigChatId(chatIdStr);
-
-    return chatIdStr;
-  } catch (err) {
-    spin.stop(chalk.red("Timed out"));
-    const manualId = await ask(
-      "  Enter forum group chat ID manually (e.g., -100123456789)",
-    );
-    if (manualId) {
-      updateConfigChatId(manualId);
-      return manualId;
-    }
-    throw new Error("Forum chat ID is required");
-  }
-}
-
-function updateConfigChatId(chatId: string): void {
-  const configPaths = [
-    resolve(process.cwd(), "switchroom.yaml"),
-    resolve(process.cwd(), "switchroom.yml"),
-  ];
-
-  for (const configPath of configPaths) {
-    if (existsSync(configPath)) {
-      let content = readFileSync(configPath, "utf-8");
-      // Replace the placeholder or existing forum_chat_id
-      content = content.replace(
-        /forum_chat_id:\s*["']?-?\d+["']?/,
-        `forum_chat_id: "${chatId}"`,
-      );
-      writeFileSync(configPath, content, "utf-8");
-      console.log(chalk.gray(`  Updated forum_chat_id in ${configPath}`));
-      break;
-    }
-  }
-}
+// ─── Step 4: retired in v0.7 ─────────────────────────────────────────────────
+// Forum/group setup prompts were removed when per-agent bot DM-only became
+// the default. Existing configs with a real `telegram.forum_chat_id` keep
+// working; new setups land sentinel "0" via `stepScaffoldAgents` below.
 
 // ─── Step 5: Create Topics ───────────────────────────────────────────────────
 
@@ -809,10 +671,14 @@ async function stepScaffoldAgents(
   config: SwitchroomConfig,
   agentBots: Record<string, BotTokenInfo>,
   userId: string,
-  forumChatId: string,
   nonInteractive: boolean,
   switchroomConfigPath?: string,
 ): Promise<void> {
+  // Forum chat IDs are no longer collected by the wizard. Write sentinel
+  // "0" (matches the user-id sentinel pattern at `stepDmPairing`) so
+  // `writeAccessJson` lands a deterministic value and the still-required
+  // `telegram.forum_chat_id` schema field remains honest.
+  const forumChatId = "0";
   stepHeader(7, "Scaffold agents", STEP_ACTIVE);
 
   const agentsDir = resolveAgentsDir(config);

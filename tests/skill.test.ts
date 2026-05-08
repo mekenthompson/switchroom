@@ -37,8 +37,8 @@ describe("switchroom-manage skill", () => {
     expect(content).toContain("switchroom restart");
   });
 
-  it("references switchroom update command", () => {
-    expect(content).toContain("switchroom update");
+  it("references switchroom apply command", () => {
+    expect(content).toContain("switchroom apply");
   });
 
   it("references switchroom version command", () => {

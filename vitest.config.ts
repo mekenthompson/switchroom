@@ -41,6 +41,9 @@ export default defineConfig({
       "**/node_modules/**",
       "**/dist/**",
       "**/src/vault/grants.test.ts",
+      // Phase 3b-1 watchdog state/policy tests use bun:sqlite — run via test:bun.
+      "**/src/watchdog/state.test.ts",
+      "**/src/watchdog/policy.test.ts",
       "**/src/vault/broker/server-grants.test.ts",
       "**/src/vault/broker/client-token.test.ts",
       "**/src/vault/broker/server-unlock.test.ts",

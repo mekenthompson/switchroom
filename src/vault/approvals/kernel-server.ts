@@ -35,7 +35,7 @@
  */
 
 import * as net from "node:net";
-import { mkdirSync, chmodSync, existsSync, unlinkSync } from "node:fs";
+import { mkdirSync, chmodSync, existsSync, unlinkSync, readdirSync, statSync } from "node:fs";
 import { dirname, resolve, basename } from "node:path";
 import { Database } from "bun:sqlite";
 
@@ -337,12 +337,36 @@ export async function main(): Promise<void> {
   const configPath = process.env.SWITCHROOM_CONFIG;
 
   let agents: string[] = [];
+  // Primary: enumerate per-agent socket dirs that compose mounted in.
+  // Each agent's compose declaration mounts its kernel-<name>-sock named
+  // volume at /run/switchroom/kernel/<name>; from the kernel container's
+  // POV those are subdirectories of the socket parent. This makes the
+  // kernel-server zero-config — no SWITCHROOM_CONFIG needed in the
+  // compose-generated environment block.
   try {
-    const { loadConfig } = await import("../../config/loader.js");
-    const config = loadConfig(configPath);
-    agents = Object.keys(config.agents ?? {}).sort();
+    if (existsSync(socketParent)) {
+      agents = readdirSync(socketParent)
+        .filter((name) => {
+          try {
+            const p = resolve(socketParent, name);
+            return statSync(p).isDirectory();
+          } catch { return false; }
+        })
+        .sort();
+    }
   } catch (err) {
-    process.stderr.write(`approval-kernel: loadConfig failed (${(err as Error).message}); falling back to single-socket mode\n`);
+    process.stderr.write(`approval-kernel: dir scan failed (${(err as Error).message})\n`);
+  }
+  // Secondary: if no mounted dirs, fall through to config (useful when
+  // running outside docker, e.g. unit tests or systemd-on-host).
+  if (agents.length === 0) {
+    try {
+      const { loadConfig } = await import("../../config/loader.js");
+      const config = loadConfig(configPath);
+      agents = Object.keys(config.agents ?? {}).sort();
+    } catch (err) {
+      process.stderr.write(`approval-kernel: loadConfig failed (${(err as Error).message}); falling back to single-socket mode\n`);
+    }
   }
 
   if (agents.length === 0) {

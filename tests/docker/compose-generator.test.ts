@@ -170,10 +170,13 @@ describe("generateCompose", () => {
     expect(matches.length).toBe(2);
   });
 
-  it("emits scheduler service with docker.sock mount", () => {
+  it("emits scheduler service with docker.sock mount (read-write)", () => {
     const out = generateCompose({ config: makeConfig({}) });
     expect(out).toContain("switchroom-cron:");
-    expect(out).toContain("/var/run/docker.sock:/var/run/docker.sock:ro");
+    // RW, NOT :ro — `docker exec` is a write op against the daemon
+    // API. A :ro bind silently breaks dispatch.
+    expect(out).toContain("/var/run/docker.sock:/var/run/docker.sock\n");
+    expect(out).not.toContain("/var/run/docker.sock:/var/run/docker.sock:ro");
   });
 
   it("emits per-agent named volumes for broker AND kernel", () => {

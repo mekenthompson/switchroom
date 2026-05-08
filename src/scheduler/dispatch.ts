@@ -4,7 +4,11 @@
  * Phase 1a slice. Reads the cascade-resolved config, walks every agent's
  * `schedule[]`, registers each entry with node-cron against the same
  * cron expressions cronToOnCalendar parses today, and on fire dispatches
- * via `docker exec agent-<name> claude -p "<prompt>"`.
+ * via `docker exec switchroom-<name> claude -p "<prompt>"`.
+ *
+ * The container name MUST match `container_name:` set by compose.ts —
+ * `switchroom-<agent>` — not the compose service name `agent-<agent>`.
+ * `docker exec` resolves against container names, not service names.
  *
  * Identity boundary: the scheduler container is privileged (it mounts
  * /var/run/docker.sock to invoke `docker exec`) but does NOT see secret
@@ -72,7 +76,7 @@ export type ExecRunner = (
 ) => Promise<{ exitCode: number; output: string }>;
 
 /**
- * Default exec runner — shells `docker exec -i agent-<name> claude -p`,
+ * Default exec runner — shells `docker exec -i switchroom-<name> claude -p`,
  * piping the prompt on stdin (avoids embedding the prompt in argv where
  * it'd show up in `ps` and shell history). Tests inject a mock.
  */
@@ -98,7 +102,10 @@ export async function dispatchEntry(
   runner: ExecRunner = defaultExecRunner,
 ): Promise<DispatchResult> {
   const startedAt = Date.now();
-  const containerName = `agent-${entry.agent}`;
+  // Must match compose.ts `container_name: switchroom-<agent>`. The
+  // compose service name (`agent-<name>`) is not what `docker exec`
+  // resolves against — it resolves against container names.
+  const containerName = `switchroom-${entry.agent}`;
   // -i: keep stdin open so we can pipe the prompt in.
   // claude -p: print mode, single prompt, exits when done.
   const args = ["exec", "-i", containerName, "claude", "-p"];

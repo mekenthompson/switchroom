@@ -278,7 +278,10 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`    cap_drop:`);
   lines.push(`      - "ALL"`);
   lines.push(`    volumes:`);
-  lines.push(`      - /var/run/docker.sock:/var/run/docker.sock:ro`);
+  // docker.sock mounted read-write: scheduler needs `docker exec`
+  // which is a write op against the daemon API. Read-only would
+  // silently break dispatch with cryptic permission errors.
+  lines.push(`      - /var/run/docker.sock:/var/run/docker.sock`);
   lines.push(`      - \${HOME}/.switchroom:/state/config:ro`);
   lines.push(`      - \${HOME}/.switchroom/scheduler:/state/scheduler`);
   lines.push(`    environment:`);

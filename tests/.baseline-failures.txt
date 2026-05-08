@@ -1,0 +1,10 @@
+# Baseline failing test files on upstream/main as of 2026-05-09
+# Captured via: bun run build && bun run test:vitest 2>&1 | grep '^ FAIL '
+# Subsequent commits in the v0.7 PR series (PR-A1..) must not introduce NEW
+# failing test files. The set produced by current HEAD must remain a subset
+# of this list.
+tests/boot-self-test.test.ts
+tests/docker/broker-ipc-race.test.ts
+tests/docker/per-agent-isolation.test.ts
+tests/docker/phase2a-broker-ipc.test.ts
+tests/docker/phase2b-kernel-ipc.test.ts

@@ -81,7 +81,7 @@ describe("dispatchEntry", () => {
       return { exitCode: 0, output: "ok" };
     };
     await dispatchEntry(entry, runner);
-    expect(captured!.args).toEqual(["exec", "-i", "agent-klanker", "claude", "-p"]);
+    expect(captured!.args).toEqual(["exec", "-i", "switchroom-klanker", "claude", "-p"]);
     expect(captured!.stdin).toBe("morning briefing");
   });
 

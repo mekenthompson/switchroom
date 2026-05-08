@@ -39,6 +39,21 @@ RUN apt-get update \
 RUN npm install -g @anthropic-ai/claude-code@latest \
  && claude --version >&2 || true
 
+# Phase 1b: install bun. The broker server (src/vault/broker/server.ts)
+# imports `bun:sqlite` and `bun:ffi` directly; those modules don't exist
+# in plain Node. Rather than refactor the broker to better-sqlite3 +
+# napi-ffi (a separate slice with its own surface-area review), we ship
+# the bun runtime alongside node in every server image and invoke
+# broker / kernel-server with `bun` instead of `node`. Agent containers
+# don't run bun — they shell out to claude (via tmux) which has its
+# own runtime.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends unzip \
+ && rm -rf /var/lib/apt/lists/* \
+ && curl -fsSL https://bun.sh/install | bash \
+ && mv /root/.bun/bin/bun /usr/local/bin/bun \
+ && bun --version >&2
+
 # Default workdir; overridden by per-image Dockerfile if needed.
 WORKDIR /opt/switchroom
 

@@ -61,6 +61,115 @@ function setupRoot(): { root: string; deps: Required<ExecutorDeps>["logPath"] | 
   return { root, deps: root };
 }
 
+describe("executePlan to-host", () => {
+  it("happy path: stops compose, re-enables/starts systemd, marker=host", async () => {
+    const root = tmpRoot();
+    const logPath = join(root, "migration.log");
+    const composePath = join(root, "compose", "docker-compose.yml");
+    const runtimeModePath = join(root, "runtime-mode");
+    const watchdogPausePath = join(root, "watchdog.paused");
+    // Pretend we were in docker mode.
+    mkdirSync(root, { recursive: true });
+    writeFileSync(runtimeModePath, "docker\n", "utf8");
+    // Pretend the compose file exists (so compose-down's existsSync
+    // branch includes -f).
+    mkdirSync(join(root, "compose"), { recursive: true });
+    writeFileSync(composePath, "# stale compose\n", "utf8");
+
+    const { run, calls } = makeRunner();
+
+    const plan = buildPlan("to-host", {
+      agents: ["alice", "bob"],
+      composeProject: "switchroom-fleet",
+      composePath,
+    });
+
+    const result = await executePlan(
+      plan,
+      { composeProject: "switchroom-fleet", composePath },
+      {
+        runCommand: run,
+        generateComposeContent: () => "# unused for to-host\n",
+        probeAgentBroker: async () => true,
+        confirmUidAlign: async () => true,
+        chownPath: async () => undefined,
+        logPath,
+        runtimeModePath,
+        watchdogPausePath,
+        agentsRoot: join(root, "agents"),
+      },
+    );
+
+    expect(result.ok).toBe(true);
+    expect(result.completed.length).toBe(plan.steps.length);
+    expect(readFileSync(runtimeModePath, "utf8").trim()).toBe("host");
+    expect(existsSync(watchdogPausePath)).toBe(false);
+
+    const dockerDown = calls.find(
+      (c) => c.cmd === "docker" && c.args.includes("down"),
+    );
+    expect(dockerDown).toBeTruthy();
+    const enables = calls.filter(
+      (c) => c.cmd === "systemctl" && c.args.includes("enable"),
+    );
+    expect(enables.length).toBe(2);
+    const starts = calls.filter(
+      (c) => c.cmd === "systemctl" && c.args.includes("start"),
+    );
+    expect(starts.length).toBe(2);
+
+    const log = readLog(logPath);
+    expect(log.length).toBe(plan.steps.length);
+    expect(log.every((e) => e.status === "ok")).toBe(true);
+    expect(log.every((e) => e.verb === "to-host")).toBe(true);
+  });
+
+  it("rolls back when systemd-start fails on second agent", async () => {
+    const root = tmpRoot();
+    const logPath = join(root, "migration.log");
+    const composePath = join(root, "compose", "docker-compose.yml");
+    const runtimeModePath = join(root, "runtime-mode");
+    const watchdogPausePath = join(root, "watchdog.paused");
+    writeFileSync(runtimeModePath, "docker\n", "utf8");
+
+    let startCount = 0;
+    const { run } = makeRunner((cmd, args) => {
+      if (cmd === "systemctl" && args.includes("start")) {
+        startCount++;
+        if (startCount === 2) return "failed to start: unit not found";
+      }
+      return null;
+    });
+
+    const plan = buildPlan("to-host", {
+      agents: ["alice", "bob"],
+      composeProject: "switchroom-fleet",
+      composePath,
+    });
+
+    const result = await executePlan(
+      plan,
+      { composeProject: "switchroom-fleet", composePath },
+      {
+        runCommand: run,
+        generateComposeContent: () => "# stub\n",
+        probeAgentBroker: async () => true,
+        confirmUidAlign: async () => true,
+        chownPath: async () => undefined,
+        logPath,
+        runtimeModePath,
+        watchdogPausePath,
+        agentsRoot: join(root, "agents"),
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.failed?.step.kind).toBe("systemd-start");
+    // Marker must remain "docker" — marker-write hadn't run yet.
+    expect(readFileSync(runtimeModePath, "utf8").trim()).toBe("docker");
+  });
+});
+
 describe("executePlan to-docker", () => {
   it("happy path: runs all steps, writes ok log entries, exits ok", async () => {
     const root = tmpRoot();
@@ -301,6 +410,82 @@ describe("executePlan to-docker", () => {
     expect(result.ok).toBe(false);
     expect(result.failed?.step.kind).toBe("uid-align");
     expect(confirmed).toBe(1);
+  });
+
+  it("rollback log entries name the actual step they revert (not a shifted neighbour)", async () => {
+    // Regression for the 3b-2b nit: with completed.length > rollback.length
+    // (vault-broker-handshake / watchdog-resume push no hook), the previous
+    // mapping `idx = completed[completed.length - 1 - h]` mis-attributed
+    // rollback log entries. Force a failure AFTER the handshake step has
+    // run (so completed includes a hook-less step) and assert every
+    // rollback log entry references one of the steps that actually pushed
+    // a hook — never the handshake/resume.
+    const root = tmpRoot();
+    const logPath = join(root, "migration.log");
+    const composePath = join(root, "compose", "docker-compose.yml");
+    const runtimeModePath = join(root, "runtime-mode");
+    const watchdogPausePath = join(root, "watchdog.paused");
+
+    // Two agents so we exercise multiple handshake steps.
+    const plan = buildPlan("to-docker", {
+      agents: ["alice", "bob"],
+      composeProject: "switchroom-fleet",
+      composePath,
+    });
+
+    // Find the marker-write index — failing it causes rollback after
+    // both vault-broker-handshake steps already ran (they push no hook).
+    const markerIdx = plan.steps.findIndex((s) => s.kind === "marker-write");
+    expect(markerIdx).toBeGreaterThan(0);
+
+    // We can't easily fail a marker-write via runCommand; instead, fail
+    // a systemctl call indirectly by counting calls. Simpler: inject a
+    // chownPath stub that never runs (no uid-align step, targetUid omitted).
+    // To force a failure post-handshake, fail the broker probe for "bob"
+    // only — that aborts at the second handshake AFTER alice's handshake
+    // was a successful no-rollback step.
+    let probeCount = 0;
+    const { run } = makeRunner();
+    const result = await executePlan(
+      plan,
+      { composeProject: "switchroom-fleet", composePath },
+      {
+        runCommand: run,
+        generateComposeContent: () => "# stub\n",
+        probeAgentBroker: async (agent) => {
+          probeCount++;
+          return agent !== "bob"; // fail on bob
+        },
+        confirmUidAlign: async () => true,
+        chownPath: async () => undefined,
+        logPath,
+        runtimeModePath,
+        watchdogPausePath,
+        agentsRoot: join(root, "agents"),
+      },
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.failed?.step.kind).toBe("vault-broker-handshake");
+    expect(probeCount).toBe(2);
+
+    const log = readLog(logPath);
+    const rollbackEntries = log.filter((e) => e.status === "rollback");
+    expect(rollbackEntries.length).toBeGreaterThan(0);
+    // No rollback entry should be tagged as a handshake or watchdog-resume
+    // (those steps push no hook). Every rollback entry MUST correspond to
+    // a step that actually had a rollback hook.
+    for (const entry of rollbackEntries) {
+      const stepLabel = String(entry.step);
+      expect(stepLabel).not.toMatch(/vault-broker-handshake/);
+      expect(stepLabel).not.toBe("watchdog-resume");
+      // And it should match one of: watchdog-pause, systemd-stop,
+      // systemd-disable, compose-generate, compose-up, marker-write,
+      // uid-align.
+      expect(stepLabel).toMatch(
+        /^(watchdog-pause|systemd-(stop|disable|enable|start)|compose-(generate|up|down)|marker-write|uid-align)/,
+      );
+    }
   });
 
   it("preserves prior runtime-mode marker on rollback", async () => {

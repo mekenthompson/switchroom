@@ -17,8 +17,8 @@
  * exercise both happy-path and forced-failure rollback paths without
  * touching the real host.
  */
-import { existsSync, readFileSync, statSync } from "node:fs";
-import { mkdir, rm, writeFile, chown } from "node:fs/promises";
+import { existsSync, statSync } from "node:fs";
+import { mkdir, readFile, rm, writeFile, chown } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import type {
@@ -160,8 +160,14 @@ interface StepCtx {
     >
   >;
   opts: ExecutorOpts;
-  /** Per-step rollback hooks recorded as we go (LIFO). */
-  rollback: Array<() => Promise<void>>;
+  /**
+   * Per-step rollback hooks recorded as we go (LIFO). Each hook records
+   * the original `plan.steps` index it reverses so audit-log entries can
+   * name the step accurately even when some completed steps push no hook
+   * (e.g. `vault-broker-handshake` is idempotent, `watchdog-resume` has
+   * nothing to undo).
+   */
+  rollback: Array<{ stepIndex: number; fn: () => Promise<void> }>;
 }
 
 async function runSystemctl(
@@ -213,11 +219,13 @@ async function writeMarker(path: string, content: string): Promise<void> {
   await writeFile(path, content + "\n", { encoding: "utf8", mode: 0o600 });
 }
 
-async function executeStep(ctx: StepCtx, step: PlanStep): Promise<void> {
+async function executeStep(ctx: StepCtx, step: PlanStep, stepIndex: number): Promise<void> {
+  const pushRollback = (fn: () => Promise<void>) =>
+    ctx.rollback.push({ stepIndex, fn });
   switch (step.kind) {
     case "watchdog-pause": {
       await writeMarker(ctx.deps.watchdogPausePath, "paused-by=migrate");
-      ctx.rollback.push(async () => {
+      pushRollback(async () => {
         await rm(ctx.deps.watchdogPausePath, { force: true });
       });
       return;
@@ -231,7 +239,7 @@ async function executeStep(ctx: StepCtx, step: PlanStep): Promise<void> {
     case "systemd-stop": {
       await runSystemctl(ctx, "stop", step.unit);
       const unit = step.unit;
-      ctx.rollback.push(async () => {
+      pushRollback(async () => {
         await runSystemctl(ctx, "start", unit).catch(() => undefined);
       });
       return;
@@ -239,7 +247,7 @@ async function executeStep(ctx: StepCtx, step: PlanStep): Promise<void> {
     case "systemd-disable": {
       await runSystemctl(ctx, "disable", step.unit);
       const unit = step.unit;
-      ctx.rollback.push(async () => {
+      pushRollback(async () => {
         await runSystemctl(ctx, "enable", unit).catch(() => undefined);
       });
       return;
@@ -247,7 +255,7 @@ async function executeStep(ctx: StepCtx, step: PlanStep): Promise<void> {
     case "systemd-enable": {
       await runSystemctl(ctx, "enable", step.unit);
       const unit = step.unit;
-      ctx.rollback.push(async () => {
+      pushRollback(async () => {
         await runSystemctl(ctx, "disable", unit).catch(() => undefined);
       });
       return;
@@ -255,7 +263,7 @@ async function executeStep(ctx: StepCtx, step: PlanStep): Promise<void> {
     case "systemd-start": {
       await runSystemctl(ctx, "start", step.unit);
       const unit = step.unit;
-      ctx.rollback.push(async () => {
+      pushRollback(async () => {
         await runSystemctl(ctx, "stop", unit).catch(() => undefined);
       });
       return;
@@ -265,7 +273,7 @@ async function executeStep(ctx: StepCtx, step: PlanStep): Promise<void> {
       await mkdir(dirname(step.path), { recursive: true });
       await writeFile(step.path, content, { encoding: "utf8", mode: 0o600 });
       const path = step.path;
-      ctx.rollback.push(async () => {
+      pushRollback(async () => {
         await rm(path, { force: true });
       });
       return;
@@ -274,7 +282,7 @@ async function executeStep(ctx: StepCtx, step: PlanStep): Promise<void> {
       await runComposeUp(ctx, step.project, step.path);
       const project = step.project;
       const path = step.path;
-      ctx.rollback.push(async () => {
+      pushRollback(async () => {
         await runComposeDown(ctx, project, path).catch(() => undefined);
       });
       return;
@@ -287,9 +295,9 @@ async function executeStep(ctx: StepCtx, step: PlanStep): Promise<void> {
       return;
     }
     case "marker-write": {
-      const prev = readMarkerSafe(ctx.deps.runtimeModePath);
+      const prev = await readMarkerSafe(ctx.deps.runtimeModePath);
       await writeMarker(ctx.deps.runtimeModePath, step.mode);
-      ctx.rollback.push(async () => {
+      pushRollback(async () => {
         if (prev === null) {
           await rm(ctx.deps.runtimeModePath, { force: true });
         } else {
@@ -327,7 +335,7 @@ async function executeStep(ctx: StepCtx, step: PlanStep): Promise<void> {
       const fromUid = st.uid;
       const fromGid = st.gid;
       await ctx.deps.chownPath(dir, step.targetUid, step.targetUid);
-      ctx.rollback.push(async () => {
+      pushRollback(async () => {
         await ctx.deps.chownPath(dir, fromUid, fromGid).catch(() => undefined);
       });
       return;
@@ -335,11 +343,12 @@ async function executeStep(ctx: StepCtx, step: PlanStep): Promise<void> {
   }
 }
 
-function readMarkerSafe(path: string): string | null {
+async function readMarkerSafe(path: string): Promise<string | null> {
   try {
-    if (!existsSync(path)) return null;
-    return readFileSync(path, "utf8").trim();
-  } catch {
+    const buf = await readFile(path, "utf8");
+    return buf.trim();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
     return null;
   }
 }
@@ -399,7 +408,7 @@ export async function executePlan(
     const label = describeStepShort(step);
     opts.onProgress?.(`step ${i + 1}/${plan.steps.length}: ${label}`);
     try {
-      await executeStep(ctx, step);
+      await executeStep(ctx, step, i);
       await appendMigrationLogEntry(
         { verb: plan.verb, step: label, status: "ok" },
         deps.logPath,
@@ -411,15 +420,19 @@ export async function executePlan(
         { verb: plan.verb, step: label, status: "error", error: msg },
         deps.logPath,
       );
-      // Run rollback hooks (LIFO).
+      // Run rollback hooks (LIFO). Each hook carries the step index it
+      // reverses so the audit-log entry names the right step even when
+      // some completed steps push no hook (e.g. vault-broker-handshake,
+      // watchdog-resume).
       const hooks = ctx.rollback.slice().reverse();
-      for (let h = 0; h < hooks.length; h++) {
-        const idx = completed[completed.length - 1 - h];
-        const stepIdx = typeof idx === "number" ? idx : -1;
+      for (const hook of hooks) {
+        const stepIdx = hook.stepIndex;
         const stepLabel =
-          stepIdx >= 0 ? describeStepShort(plan.steps[stepIdx]!) : `hook-${h}`;
+          stepIdx >= 0 && stepIdx < plan.steps.length
+            ? describeStepShort(plan.steps[stepIdx]!)
+            : `hook-${stepIdx}`;
         try {
-          await hooks[h]!();
+          await hook.fn();
           await appendMigrationLogEntry(
             {
               verb: plan.verb,

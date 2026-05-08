@@ -1,0 +1,16 @@
+# Phase 0 broker spike. Runs as root so it can chown per-agent socket dirs
+# to the corresponding agent UID. Production broker would do the same.
+FROM node:22-alpine
+
+# Pre-create the agent users so the broker can chown to known UIDs.
+# Production: these would be derived from the compose generator's
+# per-agent UID assignment.
+RUN addgroup -g 10001 alice && adduser -D -u 10001 -G alice alice \
+ && addgroup -g 10002 bob   && adduser -D -u 10002 -G bob   bob
+
+RUN mkdir -p /run/switchroom/broker
+WORKDIR /opt/broker
+COPY broker-server.mjs /opt/broker/broker-server.mjs
+
+ENV AGENTS=alice,bob
+CMD ["node", "/opt/broker/broker-server.mjs"]

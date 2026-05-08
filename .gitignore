@@ -51,3 +51,4 @@ profiles/*/CLAUDE.md
 __pycache__/
 *.pyc
 coverage/
+spike/results/

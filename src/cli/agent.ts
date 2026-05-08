@@ -2280,20 +2280,44 @@ export function registerAgentCommand(program: Command): void {
           // already ran inside addAgent above; this is purely additive
           // and only fires when SWITCHROOM_RUNTIME=docker.
           if (process.env.SWITCHROOM_RUNTIME === "docker") {
+            const cfg = getConfig(program);
+            const compose = generateCompose({ config: cfg });
+            const composeDir = resolve(process.env.HOME ?? "", ".switchroom", "compose");
+            dockerMkdir(composeDir, { recursive: true, mode: 0o755 });
+            const composePath = resolve(composeDir, "docker-compose.yml");
+            writeFileSync(composePath, compose, { mode: 0o644 });
+            console.log(chalk.gray(`  Wrote compose: ${composePath}`));
             try {
-              const cfg = getConfig(program);
-              const compose = generateCompose({ config: cfg });
-              const composeDir = resolve(process.env.HOME ?? "", ".switchroom", "compose");
-              dockerMkdir(composeDir, { recursive: true, mode: 0o755 });
-              const composePath = resolve(composeDir, "docker-compose.yml");
-              writeFileSync(composePath, compose, { mode: 0o644 });
-              console.log(chalk.gray(`  Wrote compose: ${composePath}`));
               dockerExecFile("docker", [
                 "compose", "-f", composePath,
                 "up", "-d", "--no-deps", `agent-${name}`,
               ], { stdio: "inherit" });
             } catch (err) {
               console.error(chalk.red(`  docker compose up failed: ${(err as Error).message}`));
+              // Rollback — the host-native addAgent above has already
+              // scaffolded the agent dir + (in non-Docker fleets) the
+              // systemd unit. Leaving that half-state behind means a
+              // re-run of `agent add` will fail on "already exists". Best
+              // effort: stop+remove any container that may have partially
+              // started, then call destroyAgent to wipe the dir+unit.
+              try {
+                dockerExecFile("docker", [
+                  "compose", "-f", composePath,
+                  "rm", "-fsv", `agent-${name}`,
+                ], { stdio: "inherit" });
+              } catch { /* container may not exist — ignore */ }
+              try {
+                stopAgent(name);
+              } catch { /* may already be stopped */ }
+              try {
+                uninstallUnit(name);
+              } catch { /* unit may not exist in pure-Docker fleets */ }
+              const agentsDirRollback = resolveAgentsDir(cfg);
+              const agentDirRollback = resolve(agentsDirRollback, name);
+              if (existsSync(agentDirRollback)) {
+                rmSync(agentDirRollback, { recursive: true, force: true });
+                console.log(chalk.gray(`  Rolled back: removed ${agentDirRollback}`));
+              }
               process.exit(1);
             }
           }

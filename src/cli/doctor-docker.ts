@@ -37,9 +37,20 @@ export interface CheckResult {
 
 /**
  * Runtime detection — Docker mode is "active" if either the env flag is
- * set or a generated compose file exists. The env flag is the
- * deterministic signal; the compose-file existence is a fallback for
- * `switchroom doctor` invocations from outside the unit context.
+ * set or a generated compose file exists.
+ *
+ * INTENTIONAL ASYMMETRY between read and write paths:
+ *   - Write paths (`agent add`, `reconcile`, anything that mutates state)
+ *     MUST gate on `process.env.SWITCHROOM_RUNTIME === "docker"` directly
+ *     — the env flag is authoritative. We never infer "the user wants
+ *     Docker" from a stray compose file lying around.
+ *   - Read-only paths (`doctor`, `logs`, status commands) accept the
+ *     compose-file presence as a fallback signal so the operator can run
+ *     `switchroom doctor` from outside a unit/cron context (no env flag
+ *     in their interactive shell) and still see Docker-relevant checks.
+ *
+ * Future readers: if you find yourself tempted to use this helper from a
+ * write path, don't. Read the env var directly.
  */
 export function isDockerMode(opts?: { composePath?: string }): boolean {
   if (process.env.SWITCHROOM_RUNTIME === "docker") return true;
@@ -166,6 +177,18 @@ export function checkDockerfileUserAlignment(
     };
   }
   const dockerfileUid = parseInt(userDirective[1]!, 10);
+  // USER 0 is a privilege-escalation hazard, not a drift warning — fail
+  // hard. Compose `user:` overrides this at runtime, but a Dockerfile
+  // baked with USER 0 is a footgun for anyone running the image without
+  // the generator's compose (e.g. ad-hoc `docker run`).
+  if (dockerfileUid === 0) {
+    return {
+      name: "Dockerfile USER alignment",
+      status: "fail",
+      detail: "Dockerfile.agent declares USER 0 (root) — privesc risk if image is run without compose `user:` override",
+      fix: "Drop the USER directive from Dockerfile.agent (the image is identity-neutral by design — compose pins per-agent UIDs).",
+    };
+  }
   // Find any agent service whose user: differs.
   const mismatches: string[] = [];
   const re = /^  agent-([a-z0-9_-]+):[\s\S]*?\n    user:\s+"(\d+):/gm;

@@ -22,6 +22,7 @@ import { getSlotInfos, type SlotInfo } from "../auth/accounts.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { loadManifest, detectDrift, type DriftProbers } from "../manifest.js";
 import { probeHindsight } from "../memory/hindsight.js";
+import { isDockerMode, runDockerChecks } from "./doctor-docker.js";
 
 /**
  * Result of a single doctor check.
@@ -1470,6 +1471,28 @@ export async function checkManifestDrift(probers?: DriftProbers): Promise<CheckR
   return results;
 }
 
+function runDockerSection(config: SwitchroomConfig): CheckResult[] {
+  const composePath = resolve(
+    process.env.HOME ?? "",
+    ".switchroom",
+    "compose",
+    "docker-compose.yml",
+  );
+  const active = isDockerMode({ composePath });
+  let composeYaml: string | undefined;
+  let dockerfileAgent: string | undefined;
+  try { composeYaml = readFileSync(composePath, "utf8"); } catch { /* none */ }
+  // Dockerfile path is relative to the install — best-effort lookup.
+  const dockerfilePath = resolve(
+    process.env.HOME ?? "",
+    ".switchroom",
+    "docker",
+    "Dockerfile.agent",
+  );
+  try { dockerfileAgent = readFileSync(dockerfilePath, "utf8"); } catch { /* none */ }
+  return runDockerChecks({ config, composeYaml, dockerfileAgent, active });
+}
+
 export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
@@ -1521,6 +1544,7 @@ export function registerDoctorCommand(program: Command): void {
           { title: "Memory (Hindsight)", results: await checkHindsight(config) },
           { title: "Telegram", results: await checkTelegram(config) },
           { title: "Agents", results: checkAgents(config, configPath) },
+          { title: "Docker (Phase 1a)", results: runDockerSection(config) },
           { title: "MFF Skill", results: await checkMff(passphrase, vaultPath) },
         ];
 

@@ -1,0 +1,28 @@
+# switchroom/agent — one container per agent.
+#
+# PID 1 is tini. ENTRYPOINT runs start.sh (rendered into the agent's
+# bind-mounted state dir at /state/agent/start.sh). The compose generator
+# sets `user:` to the per-agent UID; this Dockerfile is identity-neutral.
+ARG BASE_IMAGE=switchroom/base:latest
+FROM ${BASE_IMAGE}
+
+# Build args (informational; the actual UID is set by compose `user:`).
+ARG TARGETARCH=amd64
+RUN echo "switchroom/agent building for arch=${TARGETARCH}" >&2
+
+# /state is the bind-mount root inside the container:
+#   /state/agent     — ~/.switchroom/agents/<name>
+#   /state/.claude   — ~/.claude/projects/<name>
+#   /var/log/switchroom — ~/.switchroom/logs/<name>
+# Pre-create them so first-boot doesn't race the bind-mount semantics.
+RUN mkdir -p /state/agent /state/.claude /var/log/switchroom \
+ && mkdir -p /run/switchroom
+
+# Make sure tmux's runtime dir exists; the per-agent UID will own it via
+# the compose `user:` directive at runtime.
+RUN mkdir -p /tmp/tmux-shared
+
+# tini handles zombies + signal forwarding. The actual command is
+# /state/agent/start.sh, which the scaffold renders into the bind-mount.
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["/state/agent/start.sh"]

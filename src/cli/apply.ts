@@ -121,6 +121,9 @@ export async function runApply(
     config,
     buildMode: options.buildLocal ? "local" : "pull",
     buildContext: options.buildContext,
+    // Bake the operator's HOME absolute path into volume sources at
+    // apply time. Avoids `${HOME}` resolving to /root under sudo.
+    homeDir: homedir(),
   });
   await mkdir(dirname(composePath), { recursive: true });
   await writeFile(composePath, composeContent, {

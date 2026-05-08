@@ -112,6 +112,21 @@ export interface ComposeGeneratorOptions {
    * still references the source tree's `docker/Dockerfile.*`.
    */
   buildContext?: string;
+  /**
+   * Absolute path to the operator's home directory — baked into every
+   * host-path bind mount source at apply time.
+   *
+   * Why not `${HOME}`: compose interpolates env vars at the time the
+   * `docker compose` CLI runs. When the operator runs `sudo docker
+   * compose up -d`, sudo strips HOME by default (or sets it to /root),
+   * so `${HOME}/.switchroom/...` resolves to `/root/.switchroom/...`
+   * — wrong filesystem location, agent containers see empty volumes.
+   *
+   * Baking the absolute path at apply time eliminates the env-var
+   * dependency. Optional for back-compat with callers that haven't
+   * been updated yet (defaults to `${HOME}` interpolation).
+   */
+  homeDir?: string;
 }
 
 /** Resolve the image ref for one of the four service images. */
@@ -193,6 +208,12 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   const warn = opts.warn ?? ((m: string) => process.stderr.write(m + "\n"));
   const buildMode = opts.buildMode ?? "pull";
   const buildContext = opts.buildContext;
+  // homePrefix is the leading segment of every host-path bind source.
+  // When the caller passes homeDir we bake an absolute path so compose
+  // interpolation under sudo can't mis-resolve HOME to /root. Default
+  // preserves the older `${HOME}` shape for callers that haven't been
+  // updated.
+  const homePrefix = opts.homeDir ?? "${HOME}";
   if (buildMode === "local" && !buildContext) {
     throw new Error(
       `compose: buildMode="local" requires buildContext (the absolute path to the switchroom checkout)`,
@@ -206,6 +227,14 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push("# switchroom.yaml and re-run the regenerating command.");
   lines.push("");
   lines.push(`# image tag: ${imageTag}`);
+  lines.push("");
+  // Top-level project name — belt-and-braces collision protection. A
+  // Coolify-managed (or any other) compose stack on the same host can't
+  // accidentally claim our service/container names because compose
+  // namespaces by project; pinning the name at file scope means
+  // `docker compose -f <path> ...` invocations always target the same
+  // project even when the operator forgets `-p switchroom`.
+  lines.push(`name: switchroom`);
   lines.push("");
   lines.push(`services:`);
 
@@ -234,7 +263,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   for (const a of describeAgents(config)) {
     lines.push(`      - broker-${a.name}-sock:/run/switchroom/broker/${a.name}`);
   }
-  lines.push(`      - \${HOME}/.switchroom/vault:/state/vault`);
+  lines.push(`      - ${homePrefix}/.switchroom/vault:/state/vault`);
   lines.push(``);
 
   // ── approval-kernel (singleton) ────────────────────────────────────
@@ -260,7 +289,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   for (const a of describeAgents(config)) {
     lines.push(`      - kernel-${a.name}-sock:/run/switchroom/kernel/${a.name}`);
   }
-  lines.push(`      - \${HOME}/.switchroom/approvals:/state/approvals`);
+  lines.push(`      - ${homePrefix}/.switchroom/approvals:/state/approvals`);
   lines.push(``);
 
   // ── switchroom-cron (singleton scheduler) ──────────────────────────
@@ -282,8 +311,8 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // which is a write op against the daemon API. Read-only would
   // silently break dispatch with cryptic permission errors.
   lines.push(`      - /var/run/docker.sock:/var/run/docker.sock`);
-  lines.push(`      - \${HOME}/.switchroom:/state/config:ro`);
-  lines.push(`      - \${HOME}/.switchroom/scheduler:/state/scheduler`);
+  lines.push(`      - ${homePrefix}/.switchroom:/state/config:ro`);
+  lines.push(`      - ${homePrefix}/.switchroom/scheduler:/state/scheduler`);
   lines.push(`    environment:`);
   lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);
   // SQLite audit sink for scheduler fires (Phase 1b — wires
@@ -297,7 +326,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
     if (a.strippedCaps.length > 0) {
       warn(`compose: stripping cap_add ${JSON.stringify(a.strippedCaps)} from agent "${a.name}" (Docker mode forbids capability extras; see RFC §security)`);
     }
-    emitAgentService(lines, a, imageTag, buildMode, buildContext);
+    emitAgentService(lines, a, imageTag, buildMode, buildContext, homePrefix);
   }
 
   // ── volumes ────────────────────────────────────────────────────────
@@ -317,6 +346,7 @@ function emitAgentService(
   imageTag: string,
   buildMode: "pull" | "local",
   buildContext: string | undefined,
+  homePrefix: string,
 ): void {
   lines.push(`  agent-${a.name}:`);
   emitImageOrBuild(lines, "agent", imageTag, buildMode, buildContext);
@@ -364,9 +394,9 @@ function emitAgentService(
   // invariant on every regenerated compose.
   lines.push(`      - broker-${a.name}-sock:/run/switchroom/broker`);
   lines.push(`      - kernel-${a.name}-sock:/run/switchroom/kernel`);
-  lines.push(`      - \${HOME}/.switchroom/agents/${a.name}:/state/agent`);
-  lines.push(`      - \${HOME}/.claude/projects/${a.name}:/state/.claude`);
-  lines.push(`      - \${HOME}/.switchroom/logs/${a.name}:/var/log/switchroom`);
+  lines.push(`      - ${homePrefix}/.switchroom/agents/${a.name}:/state/agent`);
+  lines.push(`      - ${homePrefix}/.claude/projects/${a.name}:/state/.claude`);
+  lines.push(`      - ${homePrefix}/.switchroom/logs/${a.name}:/var/log/switchroom`);
   lines.push(``);
   void imageTag;
 }

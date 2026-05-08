@@ -10,16 +10,23 @@
  *
  *   1. encryptCredential — write the blob to disk (mode 0600).
  *   2. applyAutoUnlock — flip vault.broker.autoUnlock=true in
- *      switchroom.yaml, reconcile units, restart broker, poll status to
- *      verify the vault came up unlocked.
+ *      switchroom.yaml, restart the broker container via
+ *      `docker compose restart vault-broker`, poll status to verify the
+ *      vault came up unlocked.
+ *
+ * Pre-v0.7 this module reconciled systemd user units and called
+ * `systemctl --user restart switchroom-vault-broker.service`. v0.7
+ * dropped the systemd substrate; the orchestration is now Docker
+ * Compose. The crypto path is unchanged.
  */
 
 import { spawnSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import YAML from "yaml";
 
 import { findConfigFile, loadConfig, resolvePath } from "../config/loader.js";
-import { installAllUnits } from "../agents/systemd.js";
 import { statusViaBroker } from "../vault/broker/client.js";
 import {
   AutoUnlockDecryptError,
@@ -89,53 +96,72 @@ export interface ApplyOptions {
   configPath?: string;
   log?: (line: string) => void;
   err?: (line: string) => void;
-  /** Override systemctl invocation in tests. */
-  runSystemctl?: (args: string[]) => { status: number | null };
+  /**
+   * Override the docker compose invocation in tests. Receives the full
+   * argv (excluding the `docker` program name itself, e.g.
+   * `["compose", "-f", "/path/compose.yaml", "restart", "vault-broker"]`)
+   * and returns an object with the exit status. Defaults to a real
+   * `spawnSync("docker", ...)` with stdio inherit.
+   */
+  runDockerCompose?: (args: string[]) => { status: number | null };
+  /**
+   * Path to the generated docker-compose file. Defaults to
+   * `~/.switchroom/compose/docker-compose.yml` — the canonical location
+   * emitted by `switchroom apply`.
+   */
+  composeFile?: string;
   /** Override status polling in tests. */
   pollStatus?: () => Promise<{ unlocked: boolean } | null>;
   /** How long to wait for the broker to come up unlocked. */
   verifyTimeoutMs?: number;
 }
 
+const DEFAULT_COMPOSE_FILE = join(homedir(), ".switchroom", "compose", "docker-compose.yml");
+
 /**
- * Flip vault.broker.autoUnlock=true in switchroom.yaml, regenerate units,
- * restart the broker, and poll status to confirm the vault came up
- * unlocked. The whole thing is one call so callers don't have to
- * re-implement the 3-step "Next steps" list.
+ * Flip vault.broker.autoUnlock=true in switchroom.yaml, restart the
+ * vault-broker container via docker compose, and poll status to confirm
+ * the vault came up unlocked. The whole thing is one call so callers
+ * don't have to re-implement the 3-step "Next steps" list.
+ *
+ * Note that the broker container reads the auto-unlock blob via the
+ * bind-mount declared in src/agents/compose.ts. The blob is written
+ * by `encryptCredential` BEFORE this function runs; here we just need
+ * to bounce the container so the broker re-reads its config + the blob.
  */
 export async function applyAutoUnlock(opts: ApplyOptions = {}): Promise<void> {
   const log = opts.log ?? ((s: string) => console.log(s));
   const err = opts.err ?? ((s: string) => console.error(s));
-  const runSystemctl =
-    opts.runSystemctl ?? ((args: string[]) => spawnSync("systemctl", args, { stdio: "inherit" }));
+  const runDockerCompose =
+    opts.runDockerCompose ??
+    ((args: string[]) => spawnSync("docker", args, { stdio: "inherit" }));
   // 10s default — generous enough for cold-cache decrypt on slow boxes,
   // short enough that a real auto-unlock failure surfaces before the user
   // gives up.
   const verifyTimeoutMs = opts.verifyTimeoutMs ?? 10000;
 
   const configPath = opts.configPath ?? findConfigFile();
+  const composeFile = opts.composeFile ?? DEFAULT_COMPOSE_FILE;
+
   setVaultBrokerAutoUnlock(configPath, true);
   log(`✓ Set vault.broker.autoUnlock=true in ${configPath}`);
 
-  // Reload the config from disk so installAllUnits sees the freshly-flipped
-  // value (broker unit content depends on it indirectly via downstream
-  // consumers; today the unit shape is identical, but reloading keeps the
-  // call site honest if that ever changes).
+  // Reload the config from disk so the post-restart status poll can
+  // resolve the broker socket from the (possibly relative) configured
+  // path. Surfaces parse errors early too.
   const config = loadConfig(configPath);
-  installAllUnits(config);
-  log("✓ Reconciled broker unit");
 
-  runSystemctl(["--user", "daemon-reload"]);
-  const restart = runSystemctl(["--user", "restart", "switchroom-vault-broker.service"]);
+  const composeArgs = ["compose", "-f", composeFile, "restart", "vault-broker"];
+  const restart = runDockerCompose(composeArgs);
   if (restart.status !== 0) {
     err(
       "Broker restart failed. Check:\n" +
-        "  systemctl --user status switchroom-vault-broker.service\n" +
-        "  journalctl --user -u switchroom-vault-broker.service -e",
+        `  docker compose -f ${composeFile} ps vault-broker\n` +
+        `  docker compose -f ${composeFile} logs vault-broker`,
     );
-    throw new Error(`broker restart exited ${restart.status}`);
+    throw new Error(`docker compose restart exited ${restart.status}`);
   }
-  log("✓ Restarted switchroom-vault-broker.service");
+  log("✓ Restarted vault-broker container (docker compose restart)");
 
   const socket = resolvePath(config.vault?.broker?.socket ?? "~/.switchroom/vault-broker.sock");
   const poll = opts.pollStatus ?? (() => statusViaBroker({ socket }));
@@ -153,8 +179,8 @@ export async function applyAutoUnlock(opts: ApplyOptions = {}): Promise<void> {
   err(
     "Broker restarted but vault did not unlock within " +
       `${verifyTimeoutMs}ms. Check:\n` +
-      "  systemctl --user status switchroom-vault-broker.service\n" +
-      "  journalctl --user -u switchroom-vault-broker.service -e",
+      `  docker compose -f ${composeFile} ps vault-broker\n` +
+      `  docker compose -f ${composeFile} logs vault-broker`,
   );
   throw new Error("verification timeout: broker did not unlock");
 }

@@ -133,8 +133,12 @@ describe("generateCompose", () => {
       config: makeConfig({ rogue: { settings_raw: { cap_add: ["SYS_ADMIN", "NET_ADMIN"] } } }),
       warn: (m) => warns.push(m),
     });
-    expect(out).not.toContain("cap_add");
+    // The agent service must not contain cap_add or the smuggled caps.
+    const agentBlock = /agent-rogue:[\s\S]*?(?=\n  agent-|\nvolumes:|$)/.exec(out)?.[0] ?? "";
+    expect(agentBlock).not.toContain("cap_add");
+    expect(agentBlock).not.toContain("SYS_ADMIN");
     expect(out).not.toContain("SYS_ADMIN");
+    expect(out).not.toContain("NET_ADMIN");
     expect(warns.some((w) => /cap_add/.test(w) && /rogue/.test(w))).toBe(true);
   });
 
@@ -177,6 +181,87 @@ describe("generateCompose", () => {
     expect(out).toMatch(/^volumes:\s*$/m);
     expect(out).toContain("broker-a-sock:");
     expect(out).toContain("kernel-a-sock:");
+  });
+
+  // ── regression: tilde in volume sources ────────────────────────────
+  // Docker Compose does NOT expand ~ in volume sources; it creates a
+  // literal "./~/..." directory. We must emit ${HOME}/... so compose's
+  // env-var interpolation handles it.
+  it("never emits a tilde in any volume source", () => {
+    const out = generateCompose({
+      config: makeConfig({ klanker: {}, coach: { extends: "conversational" } }),
+    });
+    // Any line that mentions a host-path volume mount (the source side
+    // of a bind mount) must not start the source with "~/".
+    for (const line of out.split("\n")) {
+      const m = /^\s*-\s+([^:]+):/.exec(line);
+      if (!m) continue;
+      const source = m[1]!;
+      expect(source, `tilde in volume source: ${line}`).not.toMatch(/^~/);
+    }
+    // And there should be no bare ~ anywhere on a volume line.
+    const tildeLines = out.split("\n").filter((l) => /^\s+-\s+~/.test(l));
+    expect(tildeLines).toEqual([]);
+  });
+
+  it("uses ${HOME} for host-path bind mounts", () => {
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    expect(out).toContain("${HOME}/.switchroom/vault:/state/vault");
+    expect(out).toContain("${HOME}/.switchroom/approvals:/state/approvals");
+    expect(out).toContain("${HOME}/.switchroom:/state/config:ro");
+    expect(out).toContain("${HOME}/.switchroom/agents/a:/state/agent");
+  });
+
+  // ── security hardening defaults ────────────────────────────────────
+  it("emits no-new-privileges + cap_drop ALL on every agent service", () => {
+    const out = generateCompose({ config: makeConfig({ a: {}, b: {} }) });
+    // Each agent block must contain both directives.
+    for (const name of ["a", "b"]) {
+      const block = new RegExp(
+        `agent-${name}:[\\s\\S]*?(?=\\n  [a-z]|\\nvolumes:)`,
+      ).exec(out)?.[0] ?? "";
+      expect(block, `agent-${name} security_opt`).toContain('no-new-privileges:true');
+      expect(block, `agent-${name} cap_drop`).toMatch(/cap_drop:\s*\n\s*-\s*"ALL"/);
+      expect(block, `agent-${name} read_only`).toContain("read_only: true");
+      expect(block, `agent-${name} tmpfs`).toContain("/tmp:size=256m");
+    }
+  });
+
+  it("emits no-new-privileges + cap_drop ALL on broker, kernel, scheduler", () => {
+    const out = generateCompose({ config: makeConfig({}) });
+    // Split into top-level service blocks.
+    const blocks: Record<string, string> = {};
+    const re = /^  ([a-z][a-z0-9-]*):\n((?:    [^\n]*\n|\n)+)/gm;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(out)) !== null) {
+      blocks[m[1]!] = m[0]!;
+    }
+    for (const svc of ["vault-broker", "approval-kernel", "switchroom-cron"]) {
+      const block = blocks[svc] ?? "";
+      expect(block, `${svc} block found`).toContain(`${svc}:`);
+      expect(block, `${svc} security_opt`).toContain("no-new-privileges:true");
+      expect(block, `${svc} cap_drop`).toMatch(/cap_drop:\s*\n\s*-\s*"ALL"/);
+    }
+  });
+
+  it("broker keeps CHOWN + FOWNER (needed to chown per-agent sockets)", () => {
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const block = /vault-broker:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toContain("CHOWN");
+    expect(block).toContain("FOWNER");
+  });
+
+  it("kernel keeps CHOWN + FOWNER (mirrors broker socket-ownership flow)", () => {
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const block = /approval-kernel:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toContain("CHOWN");
+    expect(block).toContain("FOWNER");
+  });
+
+  it("scheduler does NOT re-add any caps", () => {
+    const out = generateCompose({ config: makeConfig({}) });
+    const block = /switchroom-cron:[\s\S]*?(?=\nvolumes:|\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).not.toContain("cap_add");
   });
 });
 

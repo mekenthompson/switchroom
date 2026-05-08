@@ -82,8 +82,8 @@ describe("checkAgentSocketMounts", () => {
   it("fails when an agent mounts another's kernel socket", () => {
     const good = generateCompose({ config: makeConfig({ x: {}, y: {} }) });
     const hostile = good.replace(
-      "      - kernel-x-sock:/run/switchroom/kernel\n      - ~/.switchroom/agents/x",
-      "      - kernel-x-sock:/run/switchroom/kernel\n      - kernel-y-sock:/run/switchroom/kernel-y\n      - ~/.switchroom/agents/x",
+      "      - kernel-x-sock:/run/switchroom/kernel\n      - ${HOME}/.switchroom/agents/x",
+      "      - kernel-x-sock:/run/switchroom/kernel\n      - kernel-y-sock:/run/switchroom/kernel-y\n      - ${HOME}/.switchroom/agents/x",
     );
     const r = checkAgentSocketMounts(hostile);
     expect(r.status).toBe("fail");
@@ -116,6 +116,19 @@ describe("checkDockerfileUserAlignment", () => {
     const yaml = generateCompose({ config: makeConfig({ a: {} }) });
     const r = checkDockerfileUserAlignment(yaml, "FROM node:22\nUSER 9999\n");
     expect(r.status).toBe("warn");
+  });
+
+  it("FAILS when Dockerfile.agent declares USER 0 (privesc hazard)", () => {
+    const yaml = generateCompose({ config: makeConfig({ a: {} }) });
+    const r = checkDockerfileUserAlignment(yaml, "FROM node:22\nUSER 0\n");
+    expect(r.status).toBe("fail");
+    expect(r.detail).toMatch(/USER 0|root/);
+  });
+
+  it("FAILS when Dockerfile.agent declares USER 0:0", () => {
+    const yaml = generateCompose({ config: makeConfig({ a: {} }) });
+    const r = checkDockerfileUserAlignment(yaml, "FROM node:22\nUSER 0:0\n");
+    expect(r.status).toBe("fail");
   });
 });
 

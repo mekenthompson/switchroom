@@ -17,6 +17,66 @@ import type {
   ApprovalDecisionMode,
 } from "../broker/protocol.js";
 
+/**
+ * Phase 2b — approval-kernel socket resolver.
+ *
+ * The approval kernel runs as its own container under docker (Phase 1c
+ * shipped `kernel-server.ts`). Each agent container has a per-agent kernel
+ * socket bind-mounted at `/run/switchroom/kernel/<agent>/sock`, and the
+ * compose generator injects this path as `SWITCHROOM_KERNEL_SOCKET` into
+ * every agent's environment block (see src/agents/compose.ts).
+ *
+ * Resolution order — first match wins:
+ *   1. Explicit `opts.socket` — caller-supplied override, e.g. integration
+ *      tests pointing at a host-bind-mounted kernel socket.
+ *   2. `SWITCHROOM_KERNEL_SOCKET` env — set by the docker compose generator
+ *      inside agent containers (Phase 2b runtime). Identifies the kernel
+ *      container as the target, distinct from the broker.
+ *   3. `opts.kernelSocket` — programmatic override matching docker's env
+ *      shape; useful for in-process callers that aren't going through env.
+ *   4. `null` — host-mode fallback. Caller does NOT receive a kernel-
+ *      specific socket; subsequent `rpcRaw` falls through to the legacy
+ *      broker socket resolver, preserving today's host-native behaviour
+ *      where broker and kernel-ish ops share a socket.
+ *
+ * IMPORTANT: this resolver returns null in host mode (case 4). Callers
+ * should pass-through opts unchanged to `rpcRaw` so the broker resolver
+ * picks up. This preserves "host-mode behaviour unchanged" — no callers
+ * outside docker need to set anything.
+ */
+export interface ApprovalKernelClientOpts extends BrokerClientOpts {
+  /**
+   * Override path for the approval kernel socket. Mirrors the env shape
+   * (`SWITCHROOM_KERNEL_SOCKET`) for callers who want to set it in code
+   * rather than via the environment.
+   */
+  kernelSocket?: string;
+}
+
+export function resolveKernelSocketPath(
+  opts?: ApprovalKernelClientOpts,
+): string | null {
+  if (opts?.socket) return opts.socket;
+  const env = process.env.SWITCHROOM_KERNEL_SOCKET;
+  if (env && env.length > 0) return env;
+  if (opts?.kernelSocket) return opts.kernelSocket;
+  return null;
+}
+
+/**
+ * Build the rpcRaw opts for an approval call. When a kernel-specific
+ * socket is in scope (docker mode), we set `opts.socket` to it so rpcRaw
+ * connects to the kernel container; otherwise we forward opts unchanged
+ * so the broker resolver applies (host mode, unchanged behaviour).
+ */
+function withKernelOpts(
+  opts?: ApprovalKernelClientOpts,
+): BrokerClientOpts | undefined {
+  const sock = resolveKernelSocketPath(opts);
+  if (sock === null) return opts;
+  return { ...(opts ?? {}), socket: sock };
+}
+
 export interface ApprovalRequestArgs {
   agent_unit: string;
   scope: string;
@@ -53,7 +113,7 @@ export interface ApprovalConsumeResult {
 
 export async function approvalRequest(
   args: ApprovalRequestArgs,
-  opts?: BrokerClientOpts,
+  opts?: ApprovalKernelClientOpts,
 ): Promise<ApprovalRequestResult | null> {
   const r = await rpcRaw(
     {
@@ -66,7 +126,7 @@ export async function approvalRequest(
       why: args.why,
       ttl_ms: args.ttl_ms,
     },
-    opts,
+    withKernelOpts(opts),
   );
   if (r.kind !== "response" || !r.resp.ok) return null;
   if (!("kind" in r.resp) || r.resp.kind !== "approval_request") return null;
@@ -87,7 +147,7 @@ export async function approvalLookup(
     action: string;
     current_approver_set: string[];
   },
-  opts?: BrokerClientOpts,
+  opts?: ApprovalKernelClientOpts,
 ): Promise<ApprovalLookupResult | null> {
   const r = await rpcRaw(
     {
@@ -98,7 +158,7 @@ export async function approvalLookup(
       action: args.action,
       current_approver_set: args.current_approver_set,
     },
-    opts,
+    withKernelOpts(opts),
   );
   if (r.kind !== "response" || !r.resp.ok) return null;
   if (!("state" in r.resp) || typeof r.resp.state !== "string") return null;
@@ -121,9 +181,9 @@ export async function approvalLookup(
 
 export async function approvalConsume(
   request_id: string,
-  opts?: BrokerClientOpts,
+  opts?: ApprovalKernelClientOpts,
 ): Promise<ApprovalConsumeResult | null> {
-  const r = await rpcRaw({ v: 1, op: "approval_consume", request_id }, opts);
+  const r = await rpcRaw({ v: 1, op: "approval_consume", request_id }, withKernelOpts(opts));
   if (r.kind !== "response" || !r.resp.ok) return null;
   if (!("consumed" in r.resp)) return null;
   return {
@@ -139,11 +199,11 @@ export async function approvalRevoke(
   decision_id: string,
   actor: string,
   reason?: string,
-  opts?: BrokerClientOpts,
+  opts?: ApprovalKernelClientOpts,
 ): Promise<boolean | null> {
   const r = await rpcRaw(
     { v: 1, op: "approval_revoke", decision_id, actor, reason },
-    opts,
+    withKernelOpts(opts),
   );
   if (r.kind !== "response" || !r.resp.ok) return null;
   if (!("revoked" in r.resp)) return null;
@@ -158,7 +218,7 @@ export async function approvalRecord(
     granted_by_user_id: number;
     ttl_ms?: number | null;
   },
-  opts?: BrokerClientOpts,
+  opts?: ApprovalKernelClientOpts,
 ): Promise<string | null> {
   const r = await rpcRaw(
     {
@@ -170,7 +230,7 @@ export async function approvalRecord(
       granted_by_user_id: args.granted_by_user_id,
       ttl_ms: args.ttl_ms ?? null,
     },
-    opts,
+    withKernelOpts(opts),
   );
   if (r.kind !== "response" || !r.resp.ok) return null;
   if (!("decision_id" in r.resp)) return null;
@@ -179,9 +239,9 @@ export async function approvalRecord(
 
 export async function approvalList(
   agent_unit?: string,
-  opts?: BrokerClientOpts,
+  opts?: ApprovalKernelClientOpts,
 ): Promise<ApprovalDecisionMeta[] | null> {
-  const r = await rpcRaw({ v: 1, op: "approval_list", agent_unit }, opts);
+  const r = await rpcRaw({ v: 1, op: "approval_list", agent_unit }, withKernelOpts(opts));
   if (r.kind !== "response" || !r.resp.ok) return null;
   if (!("decisions" in r.resp)) return null;
   return r.resp.decisions as ApprovalDecisionMeta[];

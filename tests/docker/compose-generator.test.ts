@@ -1,0 +1,192 @@
+/**
+ * Pure-function tests for the Phase 1a compose generator.
+ *
+ * Coverage targets (≥15 cases per the dispatch brief):
+ *   - empty fleet
+ *   - single agent
+ *   - multi-agent fleet (sorted output)
+ *   - klanker resource defaults
+ *   - conversational profile defaults
+ *   - lightweight profile defaults
+ *   - coding profile defaults
+ *   - unknown profile falls through to default
+ *   - cap_add stripped + warning emitted
+ *   - per-agent socket volume isolation invariant
+ *   - byte-determinism for byte-identical input (run twice → identical)
+ *   - input order independence (object insertion order doesn't matter)
+ *   - allocateAgentUid is in the reserved range
+ *   - allocateAgentUid is deterministic across calls
+ *   - generated compose contains stop_grace_period: 45s on every agent
+ *   - scheduler service emitted with docker.sock mount
+ */
+
+import { describe, it, expect } from "vitest";
+import {
+  generateCompose,
+  allocateAgentUid,
+  AGENT_UID_MIN,
+  AGENT_UID_MAX,
+  describeAgents,
+} from "../../src/agents/compose.js";
+import type { SwitchroomConfig } from "../../src/config/schema.js";
+
+function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Record<string, unknown> }>): SwitchroomConfig {
+  return {
+    switchroom: { version: 1, agents_dir: "~/.switchroom/agents", skills_dir: "~/.switchroom/skills" },
+    telegram: { bot_token: "x" },
+    defaults: undefined,
+    profiles: undefined,
+    agents: Object.fromEntries(
+      Object.entries(agents).map(([name, cfg]) => [
+        name,
+        {
+          extends: cfg.extends,
+          settings_raw: cfg.settings_raw,
+          schedule: [],
+          tools: { allow: [], deny: [] },
+          hooks: undefined,
+          channels: undefined,
+        } as unknown as SwitchroomConfig["agents"][string],
+      ]),
+    ),
+    drive: undefined as unknown as SwitchroomConfig["drive"],
+  } as unknown as SwitchroomConfig;
+}
+
+describe("allocateAgentUid", () => {
+  it("returns UID in the reserved range", () => {
+    for (const name of ["klanker", "coach", "finn", "ziggy", "alpha", "z9"]) {
+      const uid = allocateAgentUid(name);
+      expect(uid).toBeGreaterThanOrEqual(AGENT_UID_MIN);
+      expect(uid).toBeLessThanOrEqual(AGENT_UID_MAX);
+    }
+  });
+
+  it("is deterministic across calls", () => {
+    expect(allocateAgentUid("klanker")).toBe(allocateAgentUid("klanker"));
+    expect(allocateAgentUid("coach")).toBe(allocateAgentUid("coach"));
+  });
+
+  it("differs across distinct names (probabilistically — sanity)", () => {
+    const uids = new Set(["a", "b", "c", "d", "e"].map(allocateAgentUid));
+    expect(uids.size).toBeGreaterThan(1);
+  });
+});
+
+describe("generateCompose", () => {
+  it("handles an empty fleet", () => {
+    const out = generateCompose({ config: makeConfig({}) });
+    expect(out).toContain("vault-broker:");
+    expect(out).toContain("approval-kernel:");
+    expect(out).toContain("switchroom-cron:");
+    expect(out).not.toContain("agent-");
+  });
+
+  it("emits a single agent", () => {
+    const out = generateCompose({ config: makeConfig({ coach: {} }) });
+    expect(out).toContain("agent-coach:");
+    expect(out).toContain("container_name: switchroom-coach");
+  });
+
+  it("emits agents in sorted order", () => {
+    const out = generateCompose({ config: makeConfig({ zebra: {}, alpha: {}, mango: {} }) });
+    const a = out.indexOf("agent-alpha:");
+    const m = out.indexOf("agent-mango:");
+    const z = out.indexOf("agent-zebra:");
+    expect(a).toBeGreaterThan(0);
+    expect(a).toBeLessThan(m);
+    expect(m).toBeLessThan(z);
+  });
+
+  it("klanker gets 6g mem_limit + 2.0 cpus", () => {
+    const out = generateCompose({ config: makeConfig({ klanker: {} }) });
+    expect(out).toMatch(/agent-klanker:[\s\S]*?mem_limit: 6g/);
+    expect(out).toMatch(/agent-klanker:[\s\S]*?cpus: 2\.0/);
+  });
+
+  it("conversational profile → 1.5g / 1.0", () => {
+    const out = generateCompose({ config: makeConfig({ coach: { extends: "conversational" } }) });
+    expect(out).toMatch(/agent-coach:[\s\S]*?mem_limit: 1\.5g/);
+    expect(out).toMatch(/agent-coach:[\s\S]*?cpus: 1\.0/);
+  });
+
+  it("lightweight profile → 1g / 0.5", () => {
+    const out = generateCompose({ config: makeConfig({ ziggy: { extends: "lightweight" } }) });
+    expect(out).toMatch(/agent-ziggy:[\s\S]*?mem_limit: 1g/);
+    expect(out).toMatch(/agent-ziggy:[\s\S]*?cpus: 0\.5/);
+  });
+
+  it("coding profile → 2g / 2.0", () => {
+    const out = generateCompose({ config: makeConfig({ worker: { extends: "coding" } }) });
+    expect(out).toMatch(/agent-worker:[\s\S]*?mem_limit: 2g/);
+    expect(out).toMatch(/agent-worker:[\s\S]*?cpus: 2\.0/);
+  });
+
+  it("unknown profile → default 1.5g / 1.0", () => {
+    const out = generateCompose({ config: makeConfig({ misc: { extends: "made-up" } }) });
+    expect(out).toMatch(/agent-misc:[\s\S]*?mem_limit: 1\.5g/);
+  });
+
+  it("strips cap_add and emits a warning", () => {
+    const warns: string[] = [];
+    const out = generateCompose({
+      config: makeConfig({ rogue: { settings_raw: { cap_add: ["SYS_ADMIN", "NET_ADMIN"] } } }),
+      warn: (m) => warns.push(m),
+    });
+    expect(out).not.toContain("cap_add");
+    expect(out).not.toContain("SYS_ADMIN");
+    expect(warns.some((w) => /cap_add/.test(w) && /rogue/.test(w))).toBe(true);
+  });
+
+  it("each agent mounts ONLY its own broker socket volume", () => {
+    const out = generateCompose({ config: makeConfig({ a: {}, b: {}, c: {} }) });
+    // Pull the volumes block of agent-a; it must only mention broker-a-sock.
+    const aBlock = /agent-a:[\s\S]*?(?=\n  agent-|\nvolumes:)/.exec(out)?.[0] ?? "";
+    expect(aBlock).toContain("broker-a-sock");
+    expect(aBlock).not.toContain("broker-b-sock");
+    expect(aBlock).not.toContain("broker-c-sock");
+  });
+
+  it("byte-determinism: same input → same output", () => {
+    const cfg = makeConfig({ klanker: {}, coach: { extends: "conversational" } });
+    const a = generateCompose({ config: cfg });
+    const b = generateCompose({ config: cfg });
+    expect(a).toBe(b);
+  });
+
+  it("input order independence", () => {
+    const a = generateCompose({ config: makeConfig({ alpha: {}, zebra: {} }) });
+    const b = generateCompose({ config: makeConfig({ zebra: {}, alpha: {} }) });
+    expect(a).toBe(b);
+  });
+
+  it("emits stop_grace_period 45s on every agent", () => {
+    const out = generateCompose({ config: makeConfig({ a: {}, b: {} }) });
+    const matches = out.match(/stop_grace_period: 45s/g) ?? [];
+    expect(matches.length).toBe(2);
+  });
+
+  it("emits scheduler service with docker.sock mount", () => {
+    const out = generateCompose({ config: makeConfig({}) });
+    expect(out).toContain("switchroom-cron:");
+    expect(out).toContain("/var/run/docker.sock:/var/run/docker.sock:ro");
+  });
+
+  it("emits per-agent named volumes for broker AND kernel", () => {
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    expect(out).toMatch(/^volumes:\s*$/m);
+    expect(out).toContain("broker-a-sock:");
+    expect(out).toContain("kernel-a-sock:");
+  });
+});
+
+describe("describeAgents", () => {
+  it("returns sorted agents with allocated UIDs", () => {
+    const agents = describeAgents(makeConfig({ zebra: {}, alpha: {} }));
+    expect(agents.map((a) => a.name)).toEqual(["alpha", "zebra"]);
+    for (const a of agents) {
+      expect(a.uid).toBeGreaterThanOrEqual(AGENT_UID_MIN);
+      expect(a.uid).toBeLessThanOrEqual(AGENT_UID_MAX);
+    }
+  });
+});

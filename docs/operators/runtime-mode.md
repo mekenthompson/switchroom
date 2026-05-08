@@ -1,15 +1,9 @@
-# Runtime mode — Docker vs systemd
+# Runtime mode — Docker on Linux
 
-Switchroom can run its agent fleet in one of two runtimes:
-
-- **Docker** — each agent runs in its own container, brought up by a
-  generated `docker-compose.yml`. This is the supported production
-  runtime on Linux.
-- **systemd (legacy)** — each agent runs as a `switchroom-<name>` user
-  unit on the host. Reached via the `switchroom agent` lifecycle verbs
-  (`switchroom agent start`, `switchroom agent restart`, ...).
-
-## Docker
+Switchroom v0.7+ runs its agent fleet as Docker containers brought up by
+a generated `docker-compose.yml`. This is the only supported production
+runtime. The legacy systemd path was removed in v0.7 (see
+[`migration-v0.7.md`](./migration-v0.7.md)).
 
 ```sh
 switchroom apply
@@ -32,6 +26,5 @@ See [`install.md`](./install.md) for the operator install flow
 
 ## Production runtime declaration
 
-Linux is the only supported production runtime. macOS and Windows can
-run the fleet under Docker Desktop on a best-effort basis for development
-and demo use, but are not the supported production target.
+Linux is the only supported production runtime. macOS (Docker Desktop)
+is tracked as Phase 3.5 and not yet validated for production use.

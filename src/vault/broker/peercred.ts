@@ -37,6 +37,38 @@ import { readFileSync, readlinkSync, fstatSync } from "node:fs";
 import type { Socket } from "node:net";
 import { getPeerCred } from "./peercred-ffi.js";
 
+/**
+ * Socket-path-as-identity (Phase 2a).
+ *
+ * The Phase 2a Docker migration moves agent identity off of cgroup/systemd-
+ * unit inspection (which only works on Linux + systemd-user) and onto the
+ * socket path itself. Each agent's compose service mounts a per-agent named
+ * volume at /run/switchroom/broker, exposing exactly one socket file:
+ *
+ *     /run/switchroom/broker/<agent>.sock
+ *
+ * The broker container sees those mount points as siblings under
+ * /run/switchroom/broker/ and binds one listener per file. The listener's
+ * own bind-time socketPath is the trusted source-of-truth for the calling
+ * agent's identity — no wire-payload field, no peercred lookup, no cgroup
+ * inspection can override it. Same pattern as kernel-server.ts.
+ *
+ * SO_PEERCRED is still captured (when available) and goes into the audit
+ * row as informational `peer_uid`, but it does NOT gate ACL.
+ *
+ * Returns the parsed agent name on a path matching the canonical shape;
+ * returns null otherwise (caller treats null as "unidentified" → DENIED).
+ */
+const SOCKET_PATH_AGENT_RE =
+  /^\/run\/switchroom\/broker\/([a-zA-Z0-9][a-zA-Z0-9_-]*)\.sock$/;
+
+export function socketPathToAgent(socketPath: string): string | null {
+  if (typeof socketPath !== "string" || socketPath.length === 0) return null;
+  const m = socketPath.match(SOCKET_PATH_AGENT_RE);
+  if (!m) return null;
+  return m[1];
+}
+
 export interface PeerInfo {
   uid: number;
   pid: number;

@@ -25,8 +25,8 @@
  */
 
 import * as net from "node:net";
-import { mkdirSync, chmodSync, existsSync, readFileSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
-import { dirname, resolve, join } from "node:path";
+import { mkdirSync, chmodSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
+import { dirname, resolve, join, basename } from "node:path";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SwitchroomConfig } from "../../config/schema.js";
@@ -38,8 +38,8 @@ import {
   MachineIdUnavailableError,
   readAutoUnlockFile,
 } from "../auto-unlock.js";
-import { identify, type PeerInfo } from "./peercred.js";
-import { checkAcl, checkEntryScope, agentSlugFromPeer, parseCronUnit } from "./acl.js";
+import { identify, socketPathToAgent, type PeerInfo } from "./peercred.js";
+import { checkAcl, checkAclByAgent, checkEntryScope, agentSlugFromPeer, parseCronUnit } from "./acl.js";
 import {
   decodeRequest,
   encodeResponse,
@@ -114,6 +114,13 @@ export class VaultBroker {
   private startedAt: number = Date.now();
   private server: net.Server | null = null;
   private unlockServer: net.Server | null = null;
+  /**
+   * Phase 2a — per-agent listeners keyed by absolute socket path. Populated
+   * by bindAgentSocket(); empty when the broker is in legacy single-socket
+   * mode. Each listener carries the trusted agentName established at bind.
+   */
+  private agentServers: Map<string, { server: net.Server; agentName: string }> =
+    new Map();
   private socketPath: string = "";
   private unlockSocketPath: string = "";
   private vaultPath: string = "";
@@ -314,6 +321,14 @@ export class VaultBroker {
       this.unlockServer.close();
       this.unlockServer = null;
     }
+    // Phase 2a — close per-agent listeners and unlink their socket files.
+    for (const [sockPath, entry] of this.agentServers) {
+      try { entry.server.close(); } catch { /* ignore */ }
+      if (existsSync(sockPath)) {
+        try { unlinkSync(sockPath); } catch { /* ignore */ }
+      }
+    }
+    this.agentServers.clear();
     // Clean up socket files
     for (const p of [this.socketPath, this.unlockSocketPath]) {
       if (p && existsSync(p)) {
@@ -347,6 +362,50 @@ export class VaultBroker {
   }
 
   // ─── Private helpers ──────────────────────────────────────────────────────
+
+  /**
+   * Phase 2a — bind a per-agent data listener at a canonical path.
+   *
+   * The agent name is derived from the socket path (NOT from any caller-
+   * supplied argument or wire payload) via socketPathToAgent(). If the path
+   * doesn't match the canonical /run/switchroom/broker/<agent>.sock shape,
+   * we refuse to bind — fail loud rather than silently fall back to "no
+   * agent identity" which would weaken the ACL boundary.
+   *
+   * The listener stores the agentName inside the broker's agentServers map
+   * and threads it through every connection's request handler. A connection
+   * accepted on alice.sock can never be served bob's keys, regardless of
+   * any wire-payload agent claim.
+   */
+  bindAgentSocket(socketPath: string): Promise<string> {
+    const abs = resolve(socketPath);
+    const agentName = socketPathToAgent(abs);
+    if (agentName === null) {
+      return Promise.reject(
+        new Error(
+          `bindAgentSocket: socket path '${abs}' does not match the canonical ` +
+          `/run/switchroom/broker/<agent>.sock shape — refusing to bind without ` +
+          `a verifiable agent identity`,
+        ),
+      );
+    }
+
+    return new Promise((resolveP, rejectP) => {
+      // Remove stale socket if present (race-safe: parent dir 0700 by main).
+      if (existsSync(abs)) {
+        try { unlinkSync(abs); } catch { /* ignore */ }
+      }
+      const server = net.createServer((sock) => {
+        this._handleDataConnection(sock, abs, agentName);
+      });
+      server.on("error", (err) => rejectP(err));
+      server.listen(abs, () => {
+        try { chmodSync(abs, 0o660); } catch { /* ignore */ }
+        this.agentServers.set(abs, { server, agentName });
+        resolveP(agentName);
+      });
+    });
+  }
 
   private _bindDataSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -388,17 +447,26 @@ export class VaultBroker {
     });
   }
 
-  private _handleDataConnection(socket: net.Socket): void {
+  private _handleDataConnection(
+    socket: net.Socket,
+    listenerSocketPath: string = this.socketPath,
+    agentName: string | null = null,
+  ): void {
     // Identify peer immediately on accept (Linux only). Pass the accepted
     // socket so identify() can use SO_PEERCRED via bun:ffi (bun runtime) or
     // pin its ss-output lookup to the server-side fd's inode (node runtime).
     // Without the socket, identify() falls back to the legacy first-row-wins
     // ss lookup which has a documented concurrency hazard. See issue #129.
+    //
+    // Phase 2a (agent-bound listener): peercred is INFORMATIONAL. The
+    // trusted agent identity came from the listener's bind-time socket
+    // path; peercred only gives us a peer_uid for the audit row. ACL does
+    // not consult `peer` on the agent-bound path.
     let peer: PeerInfo | null = null;
     if (process.platform === "linux") {
       peer = this.testOpts._testIdentify
-        ? this.testOpts._testIdentify(this.socketPath, socket)
-        : identify(this.socketPath, socket);
+        ? this.testOpts._testIdentify(listenerSocketPath, socket)
+        : identify(listenerSocketPath, socket);
     }
 
     let buffer = "";
@@ -423,7 +491,7 @@ export class VaultBroker {
 
         if (!line) continue;
 
-        this._handleRequest(socket, peer, line);
+        this._handleRequest(socket, peer, line, agentName);
       }
     });
 
@@ -436,6 +504,7 @@ export class VaultBroker {
     socket: net.Socket,
     peer: import("./peercred.js").PeerInfo | null,
     line: string,
+    agentName: string | null = null,
   ): Promise<void> {
     let req: ReturnType<typeof import("./protocol.js").decodeRequest>;
     try {
@@ -453,9 +522,34 @@ export class VaultBroker {
 
     // Derive audit identity fields from peer (already computed by peercred at
     // connection accept time — do NOT re-derive here).
+    //
+    // Phase 2a: when agentName is set (the listener was bound on a per-agent
+    // socket), the trusted identity is the agent slug — caller becomes
+    // "agent:<name>" and peercred uid + cgroup ride along as informational
+    // fields so audit reviewers can correlate against the host UID table.
     const auditPid = peer?.pid ?? process.pid;
-    const auditCaller = peer !== null ? callerFromPeer(peer) : `pid:${process.pid}`;
+    const auditCaller =
+      agentName !== null
+        ? `agent:${agentName}`
+        : peer !== null
+          ? callerFromPeer(peer)
+          : `pid:${process.pid}`;
     const auditCgroup = peer?.systemdUnit ?? undefined;
+    const auditPeerUid = peer?.uid;
+    const auditAgentName = agentName ?? undefined;
+
+    // Inject the Phase 2a fields onto every audit row from this connection
+    // without rewriting every call site. The base logger ignores unknown
+    // fields under JSON.stringify, so this is purely additive on the wire.
+    const writeAudit = (
+      entry: import("./audit-log.js").AuditEntry,
+    ): void => {
+      this.auditLogger.write({
+        ...entry,
+        peer_uid: entry.peer_uid ?? auditPeerUid,
+        agent_name: entry.agent_name ?? auditAgentName,
+      });
+    };
 
     // Handle each op
     if (req.op === "status") {
@@ -562,7 +656,10 @@ export class VaultBroker {
       // Linux. Apply the same Linux peercred gate here so cron units can
       // still list (for diagnostics) but a non-cron same-UID caller can't.
       // On non-Linux the socket-file mode 0600 remains the only gate.
-      if (process.platform === "linux" && peer === null) {
+      //
+      // Phase 2a — when agentName is set, the listener's per-agent socket
+      // path is the trusted identity; we don't need peercred to gate.
+      if (agentName === null && process.platform === "linux" && peer === null) {
         const reason = "Unable to identify caller (peercred unavailable); denying on Linux";
         this.auditLogger.write({
           ts: new Date().toISOString(),
@@ -600,9 +697,20 @@ export class VaultBroker {
       // effect; an allow list of named agents would block (null is not in
       // any named list). The socket file mode 0600 is the outer gate for
       // that case.
-      const listAgentSlug = peer !== null ? agentSlugFromPeer(peer) : null;
+      const listAgentSlug =
+        agentName ?? (peer !== null ? agentSlugFromPeer(peer) : null);
       let visibleKeys: string[];
-      if (peer !== null && this.config !== null) {
+      if (agentName !== null && this.config !== null) {
+        // Phase 2a — agent identity is the listener's socket path. Gate
+        // both visibility (per-agent secrets[]) and scope on that name.
+        visibleKeys = Object.entries(this.secrets)
+          .filter(
+            ([key, entry]) =>
+              checkAclByAgent(this.config!, agentName, key).allow &&
+              checkEntryScope(entry.scope, agentName).allow,
+          )
+          .map(([k]) => k);
+      } else if (peer !== null && this.config !== null) {
         visibleKeys = Object.entries(this.secrets)
           .filter(
             ([key, entry]) =>
@@ -699,11 +807,31 @@ export class VaultBroker {
         }
       }
 
-      // ── Peercred ACL path (no token) ────────────────────────────────────
-      if (peer !== null && this.config !== null) {
+      // ── ACL path (no token) ─────────────────────────────────────────────
+      // Phase 2a: when agentName is set, the listener's per-agent socket
+      // path established the identity at bind time. peercred uid is captured
+      // for audit but does not gate.
+      if (agentName !== null && this.config !== null) {
+        const aclResult = checkAclByAgent(this.config, agentName, req.key);
+        if (!aclResult.allow) {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: "get",
+            key: req.key,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: `denied:${aclResult.reason}`,
+          });
+          socket.write(
+            encodeResponse(errorResponse("DENIED", aclResult.reason)),
+          );
+          return;
+        }
+      } else if (peer !== null && this.config !== null) {
         const aclResult = checkAcl(peer, this.config, req.key);
         if (!aclResult.allow) {
-          this.auditLogger.write({
+          writeAudit({
             ts: new Date().toISOString(),
             op: "get",
             key: req.key,
@@ -762,7 +890,8 @@ export class VaultBroker {
       }
 
       // Per-entry scope check (issue #8) — runs AFTER cron-unit ACL passes.
-      const getAgentSlug = peer !== null ? agentSlugFromPeer(peer) : null;
+      const getAgentSlug =
+        agentName ?? (peer !== null ? agentSlugFromPeer(peer) : null);
       const scopeResult = checkEntryScope(entry.scope, getAgentSlug);
       if (!scopeResult.allow) {
         this.auditLogger.write({
@@ -840,6 +969,28 @@ export class VaultBroker {
       req.op === "list_grants" ||
       req.op === "revoke_grant";
     if (isGrantMgmtOp) {
+      // Phase 2a: agent-bound listeners are NEVER allowed to mint, list, or
+      // revoke grants. Grant management is operator-only. An agent that has
+      // its own dedicated socket has no business minting capability tokens.
+      if (agentName !== null) {
+        writeAudit({
+          ts: new Date().toISOString(),
+          op: req.op,
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: "denied:agent-cannot-manage-grants",
+        });
+        socket.write(
+          encodeResponse(
+            errorResponse(
+              "DENIED",
+              "Grant management ops are operator-only; agent-bound listeners cannot mint, list, or revoke grants",
+            ),
+          ),
+        );
+        return;
+      }
       const allowNonLinux = process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX === "1";
       if (peer === null && !allowNonLinux) {
         this.auditLogger.write({
@@ -1462,23 +1613,93 @@ export function registerShutdownHandlers(broker: VaultBroker): void {
 //                               (compose mounts /run/switchroom/broker/<agent>
 //                               per-agent; the singleton broker uses the
 //                               parent dir directly inside the container).
+//   SWITCHROOM_BROKER_PER_AGENT_DIR   Phase 2a — when set (default
+//                               /run/switchroom/broker), the broker scans
+//                               this directory for files matching
+//                               <agent>.sock that compose mounted in (one
+//                               per agent), and binds a dedicated listener
+//                               on each. Each listener uses socket-path-as-
+//                               identity ACL (checkAclByAgent) instead of
+//                               cgroup peercred. Falls back to legacy
+//                               single-socket mode if the dir doesn't
+//                               exist or is empty.
 //   SWITCHROOM_CONFIG           Path to switchroom.yaml. Default unset →
 //                               loadConfig() auto-detects.
 //   SWITCHROOM_VAULT_PATH       Path to encrypted vault. Default from config.
 //
 // The broker stays alive on its open server sockets — we don't loop here.
 export async function main(): Promise<void> {
-  const socketPath =
+  const legacySocketPath =
     process.env.SWITCHROOM_BROKER_SOCKET ??
     "/run/switchroom/broker/vault-broker.sock";
+  const perAgentDir =
+    process.env.SWITCHROOM_BROKER_PER_AGENT_DIR ??
+    "/run/switchroom/broker";
   const configPath = process.env.SWITCHROOM_CONFIG;
   const vaultPath = process.env.SWITCHROOM_VAULT_PATH;
 
+  // Phase 2a — enumerate per-agent socket targets that compose mounted in.
+  // We expect entries to appear as either:
+  //   (a) regular files named <agent>.sock — pre-created by compose
+  //   (b) directories named <agent> with a `sock` file inside (kernel-style)
+  //   (c) nothing (named volumes that resolve to empty dirs) — in this case
+  //       we fall through to legacy single-socket mode.
+  // For Phase 2a we standardize on (a): compose mounts a named volume
+  // `vault-broker-<agent>-sock` at /run/switchroom/broker, and the agent
+  // container's start.sh expects the file at /run/switchroom/vault/sock
+  // by symlink. The broker's job here is just to bind exactly one
+  // listener per <agent>.sock target it sees.
+  let perAgentTargets: string[] = [];
+  try {
+    if (existsSync(perAgentDir)) {
+      perAgentTargets = readdirSync(perAgentDir)
+        .filter((name) => name.endsWith(".sock") && !name.startsWith("."))
+        .map((name) => resolve(perAgentDir, name))
+        .filter((p) => {
+          // Each entry must parse as <agent>.sock (no traversal, no
+          // weird shapes). We trust socketPathToAgent() to vet shape.
+          return socketPathToAgent(p) !== null;
+        })
+        .sort();
+    }
+  } catch (err) {
+    process.stderr.write(
+      `[vault-broker] per-agent enumeration failed at ${perAgentDir}: ${(err as Error).message}\n`,
+    );
+  }
+
   const broker = new VaultBroker();
   registerShutdownHandlers(broker);
-  await broker.start(socketPath, configPath, vaultPath);
+
+  if (perAgentTargets.length > 0) {
+    // Phase 2a path. We still need start() to load config, vault path,
+    // grants DB, and bind the unlock socket — those are unchanged. We
+    // pass the legacy path so the existing data socket also binds (acts
+    // as the operator-control surface for unlock + grant management),
+    // then layer per-agent listeners on top.
+    await broker.start(legacySocketPath, configPath, vaultPath);
+    process.stdout.write(
+      `vault-broker: legacy socket listening on ${legacySocketPath}\n`,
+    );
+    for (const target of perAgentTargets) {
+      try {
+        const agentName = await broker.bindAgentSocket(target);
+        process.stdout.write(
+          `vault-broker: per-agent socket listening agent=${agentName} sock=${target}\n`,
+        );
+      } catch (err) {
+        process.stderr.write(
+          `[vault-broker] failed to bind ${target}: ${(err as Error).message}\n`,
+        );
+      }
+    }
+    return;
+  }
+
+  // Legacy single-socket fallback.
+  await broker.start(legacySocketPath, configPath, vaultPath);
   process.stdout.write(
-    `vault-broker: listening on ${socketPath}\n`,
+    `vault-broker: listening on ${legacySocketPath}\n`,
   );
 }
 

@@ -1,23 +1,33 @@
 /**
- * Phase 1b race test — broker-level injection model (per dispatch Q2).
+ * Phase 1b race test — scheduler-concurrency surface only.
  *
- * The brief's race scenario is "newbie agent comes online while the
- * fleet is processing concurrent inbound messages; verify zero drops
- * and no container RestartCount drift". For Phase 1b we exercise the
- * deterministic core that the gateway sits on top of: the scheduler's
- * dispatch fan-out + audit-write path under sustained load. The
- * gateway-level Telegram-wire-protocol race lives at the v1.0 release
- * E2E gate, where real bot tokens are available.
+ * IMPORTANT — this is NOT the RFC headline broker-IPC race test.
+ *   - It runs entirely in-process against `dispatchEntry` with a stub
+ *     ExecRunner.
+ *   - It does NOT exercise the broker IPC, Unix-socket contention,
+ *     `docker exec`, or the gateway path the RFC's add-agent race
+ *     scenario demands.
+ *   - It DOES exercise the deterministic core the higher layers sit on:
+ *     scheduler dispatch fan-out + audit-write ordering under load.
  *
- * Threshold constants per the dispatch:
+ * The RFC §Phase 1 acceptance test ("newbie agent comes online while
+ * the fleet processes concurrent inbound messages; zero drops; no
+ * container RestartCount drift") is deferred to Phase 1c, blocked on:
+ *   - broker-server entrypoint (now fixed in this PR — Phase 1b)
+ *   - kernel-server entrypoint (still missing)
+ *   - live docker-compose stand-up of all 5 services
+ *   - real bot tokens for the gateway-level wire-protocol race
+ *
+ * Threshold constants kept intact so when the real test lands in 1c
+ * it can reuse these as the smoke-floor:
  *   - 90s window, 2s interval → 45 messages
  *   - 0 dropped messages tolerated
  *   - "first reply" within 60s wall-clock from add-agent invocation
  *
  * Test execution time: shortened from 90s to ~9s (45 messages, 200ms
- * interval) so the test fits a normal CI budget. The thresholds the
- * test asserts are unchanged. The 90s wall-clock variant is gated
- * behind SWITCHROOM_RACE_LONG=1 for manual operator runs.
+ * interval) so the test fits a normal CI budget. The 90s wall-clock
+ * variant is gated behind SWITCHROOM_RACE_LONG=1 for manual operator
+ * runs.
  */
 
 import { describe, it, expect } from "vitest";

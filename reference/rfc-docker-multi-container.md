@@ -432,7 +432,7 @@ Abort: if compose generation can't cleanly express the cascade and we end up wit
   ```
 
 - Banned: bulk teardown over `docker ps -a` (`docker ps -a | xargs docker rm`, bare `docker rm $(docker ps -aq)`). Banned: any `prune` command in test scripts (`docker system prune`, `docker container prune`, `docker volume prune`).
-- Per-container removal by explicit name is fine.
+- Per-container removal by explicit name is fine. Project-scoped compose teardown (`docker compose -p <project> down -v --remove-orphans`) is also fine — scope is the compose project, won't touch anything outside it.
 
 ### Phase 2 — broker + kernel IPC port, agent-minutes ≈ 280
 

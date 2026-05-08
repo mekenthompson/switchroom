@@ -61,6 +61,8 @@ import {
 } from "./kernel.js";
 import { migrateApprovalSchema } from "./schema.js";
 import { allocateAgentUid } from "../../agents/compose.js";
+import { checkApprovalAclByAgent } from "./acl.js";
+import { getPeerCred } from "../broker/peercred-ffi.js";
 
 const DEFAULT_SOCKET_PARENT = "/run/switchroom/kernel";
 const DEFAULT_DB_PATH = "/state/approvals/kernel.db";
@@ -155,6 +157,20 @@ function handleConnection(
   // `agent` is the trusted identity — it came from the listener's directory
   // name, established at bind time before the connection existed. No
   // wire-payload field can override this.
+  //
+  // Phase 2b: capture SO_PEERCRED UID once at accept(2) time. Forensic only
+  // — never used to gate ACL. Best-effort: getPeerCred returns null on
+  // non-Linux or when the FFI symbol isn't available.
+  let peerUid: number | null = null;
+  try {
+    type SocketWithFd = net.Socket & { _handle?: { fd?: number } };
+    const fd = (socket as SocketWithFd)._handle?.fd;
+    if (typeof fd === "number" && fd >= 0) {
+      const cred = getPeerCred(fd);
+      if (cred !== null) peerUid = cred.uid;
+    }
+  } catch { /* best-effort; ACL doesn't depend on this */ }
+
   let buffer = "";
   socket.on("data", (chunk: Buffer) => {
     buffer += chunk.toString("utf8");
@@ -176,7 +192,7 @@ function handleConnection(
         continue;
       }
       try {
-        handleRequest(socket, req, agent, db);
+        handleRequest(socket, req, agent, db, peerUid);
       } catch (err) {
         socket.write(encodeResponse(errorResponse("INTERNAL", (err as Error).message)));
       }
@@ -190,13 +206,15 @@ function handleRequest(
   req: BrokerRequest,
   agent: string,
   db: Database,
+  peerUid: number | null,
 ): void {
   // Only approval ops are served here. Anything else (vault_get, list_grants,
   // etc.) is the broker's territory and gets a hard error.
   if (req.op === "approval_request") {
-    // Identity guard: reject any wire claim that doesn't match this listener.
-    if (req.agent_unit !== agent) {
-      socket.write(encodeResponse(errorResponse("DENIED", `agent_unit mismatch: socket=${agent}, claim=${req.agent_unit}`)));
+    // Phase 2b — explicit ACL gate by listener-bound agent name.
+    const acl = checkApprovalAclByAgent(agent, req.agent_unit);
+    if (!acl.allow) {
+      socket.write(encodeResponse(errorResponse("DENIED", acl.reason)));
       return;
     }
     const counts = countPendingNonces(db);
@@ -216,6 +234,9 @@ function handleRequest(
       approver_set: req.approver_set,
       why: req.why,
       ttl_ms: req.ttl_ms,
+      // Phase 2b — additive audit context, no schema migration.
+      ...(peerUid !== null ? { peer_uid: peerUid } : {}),
+      agent_name: agent,
     });
     socket.write(encodeResponse({
       ok: true,
@@ -227,8 +248,9 @@ function handleRequest(
     return;
   }
   if (req.op === "approval_lookup") {
-    if (req.agent_unit !== agent) {
-      socket.write(encodeResponse(errorResponse("DENIED", `agent_unit mismatch`)));
+    const acl = checkApprovalAclByAgent(agent, req.agent_unit);
+    if (!acl.allow) {
+      socket.write(encodeResponse(errorResponse("DENIED", acl.reason)));
       return;
     }
     const r = lookupDecision(db, {

@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { runApply } from "./apply.js";
+import { runApply, runApplyPreflight } from "./apply.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 
 /**
@@ -50,6 +50,17 @@ describe("runApply", () => {
 
     const onDisk = await readFile(outPath, "utf8");
     expect(onDisk).toMatch(/services:/);
+  });
+
+  it("preflight throws when config has vault refs but vault.enc is missing", () => {
+    // Point vault path at a non-existent file under a temp dir.
+    const fakeVault = join(tmpdir(), `nonexistent-vault-${Date.now()}.enc`);
+    const cfg = {
+      ...makeStubConfig("/tmp/agents"),
+      vault: { path: fakeVault },
+      telegram: { bot_token: "vault:telegram_bot_token" },
+    } as unknown as SwitchroomConfig;
+    expect(() => runApplyPreflight(cfg)).toThrow(/vault/i);
   });
 
   it("returns the count of agents scaffolded", async () => {

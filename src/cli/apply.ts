@@ -21,6 +21,9 @@ import { copyFileSync, existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { isVaultReference } from "../vault/resolver.js";
+import { resolvePath } from "../config/loader.js";
 import {
   loadConfig,
   resolveAgentsDir,
@@ -74,6 +77,72 @@ export interface ApplyResult {
 }
 
 /**
+ * Walk a value recursively and return true if any string property is a
+ * `vault:<key>` reference. Used by the preflight check below so we can
+ * fail fast when the config wants vault-resolved secrets but the
+ * vault hasn't been initialised yet.
+ */
+function hasVaultRefs(value: unknown): boolean {
+  if (typeof value === "string") return isVaultReference(value);
+  if (Array.isArray(value)) return value.some(hasVaultRefs);
+  if (value && typeof value === "object") {
+    return Object.values(value).some(hasVaultRefs);
+  }
+  return false;
+}
+
+/**
+ * Detect whether `docker compose` (the v2 plugin, not the deprecated
+ * `docker-compose` v1 binary) is installed. Returns a friendly error
+ * string explaining how to upgrade if it isn't, otherwise null.
+ */
+function detectComposeV2(): string | null {
+  try {
+    const out = execFileSync("docker", ["compose", "version"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf8",
+    });
+    // v2 output looks like: "Docker Compose version v2.27.0".
+    // v1 (`docker-compose`) wouldn't be invoked via this subcommand —
+    // `docker compose` exits non-zero if only v1 is on PATH — so any
+    // successful return here implies v2.
+    if (!/Docker Compose version v?\d/.test(out)) {
+      return `\`docker compose version\` returned unexpected output:\n${out.trim()}`;
+    }
+    return null;
+  } catch {
+    return (
+      "`docker compose` (v2) not found. switchroom requires the Docker " +
+      "Compose v2 plugin (the `docker compose` subcommand), not the " +
+      "deprecated standalone `docker-compose` v1 binary.\n" +
+      "Upgrade: https://docs.docker.com/compose/install/linux/"
+    );
+  }
+}
+
+/**
+ * Run the preflight gate. Fail fast (throws) when the config requires
+ * vault-resolved secrets but ~/.switchroom/vault.enc is missing, or
+ * when `docker compose` v2 is unavailable. Both conditions would have
+ * surfaced as cryptic mid-apply / mid-up failures otherwise.
+ */
+export function runApplyPreflight(config: SwitchroomConfig): void {
+  const vaultPath = resolvePath(
+    config.vault?.path ?? "~/.switchroom/vault.enc",
+  );
+  if (hasVaultRefs(config) && !existsSync(vaultPath)) {
+    throw new Error(
+      `Config references vault keys (vault:<name>) but ${vaultPath} is missing. ` +
+      `Run \`switchroom setup\` first to initialise the vault.`,
+    );
+  }
+  const composeErr = detectComposeV2();
+  if (composeErr) {
+    throw new Error(composeErr);
+  }
+}
+
+/**
  * Pure orchestrator. Exported for unit tests and the deprecation aliases
  * (`switchroom up`, `switchroom init`) which forward straight to here.
  *
@@ -87,6 +156,11 @@ export async function runApply(
   switchroomConfigPath?: string,
 ): Promise<ApplyResult> {
   const writeOut = deps.writeOut ?? ((s) => process.stdout.write(s));
+
+  // Fail-fast on missing prerequisites before we touch anything.
+  // Both checks throw with operator-actionable messages; the action
+  // wrapper catches and prints them red.
+  runApplyPreflight(config);
 
   const agentsDir = resolveAgentsDir(config);
   const agentNames = Object.keys(config.agents);

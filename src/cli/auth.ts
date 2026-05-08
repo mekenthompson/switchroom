@@ -455,10 +455,10 @@ export function registerAuthCommand(program: Command): void {
   // within `--threshold-ms` of expiry AND a refreshToken is present.
   // Idempotent — when nothing needs refreshing this is a pure read.
   //
-  // Designed to be invoked by an external scheduler (cron / a systemd
-  // timer / an existing watchdog tick) every few minutes. Keeps the
-  // shell side minimal and makes the refresh behaviour fully testable
-  // via the underlying `refreshAllAgents` function.
+  // Designed to be invoked by an external scheduler (cron / the
+  // docker scheduler / an existing watchdog tick) every few minutes.
+  // Keeps the shell side minimal and makes the refresh behaviour
+  // fully testable via the underlying `refreshAllAgents` function.
   //
   // Outcomes per agent are surfaced as a JSON summary (--json) or a
   // one-line-per-agent prose summary. Process exit code is 0 unless
@@ -468,7 +468,7 @@ export function registerAuthCommand(program: Command): void {
   auth
     .command("refresh-tick")
     .description(
-      "Refresh OAuth access tokens that are about to expire (run from cron / a systemd timer)",
+      "Refresh OAuth access tokens that are about to expire (run from cron or the docker scheduler)",
     )
     .option(
       "--threshold-ms <ms>",

@@ -144,8 +144,7 @@ function checkDependencies(): CheckResult[] {
       "expect",
       "sudo apt install expect (only required for switchroom-telegram plugin agents)",
     ),
-    checkBinary("docker", "docker", "Install Docker (only required for Hindsight memory)"),
-    checkBinary("systemctl", "systemctl", "Switchroom requires a systemd-based Linux distro"),
+    checkBinary("docker", "docker", "Install Docker (required for Switchroom's runtime)"),
   ];
 }
 

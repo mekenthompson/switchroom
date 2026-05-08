@@ -1,10 +1,9 @@
 #!/usr/bin/env bun
 // Small CLI wrapper around `runAutoaccept` (#725 PR-4).
 //
-// Invoked from the per-agent systemd unit's `ExecStartPost=` (see
-// `src/agents/systemd.ts`) when the tmux supervisor is the active mode
-// (default since #725 PR-1) AND the agent has not opted into the legacy
-// `expect`-based autoaccept wrapper via
+// Invoked from the agent's docker entrypoint after the tmux supervisor
+// is launched (default since #725 PR-1), when the agent has not opted
+// into the legacy `expect`-based autoaccept wrapper via
 // `experimental.legacy_autoaccept_expect: true`.
 //
 // argv[2] = agent name. Always exits 0 — the poller is best-effort and

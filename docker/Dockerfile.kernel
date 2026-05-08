@@ -17,7 +17,13 @@ RUN mkdir -p /state/approvals
 # Per-agent socket parent — same pattern as the broker.
 RUN install -d -m 0755 /run/switchroom/kernel
 
+# Phase 1c: copy the bundled kernel server. scripts/build.mjs emits
+# dist/vault/approvals/kernel-server.js with native deps marked external.
+# The kernel uses bun:sqlite directly, so we run it under bun (the base
+# image already installs bun for the broker — see Dockerfile.base).
+COPY dist/vault/approvals/kernel-server.js /opt/switchroom/dist/vault/approvals/kernel-server.js
+
 USER 0:0
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "/opt/switchroom/dist/vault/approvals/kernel-server.js"]
+CMD ["bun", "/opt/switchroom/dist/vault/approvals/kernel-server.js"]

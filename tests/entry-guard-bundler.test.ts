@@ -97,22 +97,28 @@ describe("dist/cli/switchroom.js — no inlined-guard misfires (Phase 3a-1)", ()
     "switchroom.js",
   );
 
-  it.skipIf(!existsSync(cli))(
-    "running --help does not boot broker / kernel / scheduler",
-    () => {
-      const res = spawnSync("bun", [cli, "--help"], {
-        encoding: "utf8",
-        env: { ...process.env, HOME: "/tmp/empty-fakehome" },
-        timeout: 30_000,
-      });
-      const blob = `${res.stdout ?? ""}\n${res.stderr ?? ""}`;
-      expect(res.status).toBe(0);
-      expect(blob).not.toMatch(/vault-broker fatal/);
-      expect(blob).not.toMatch(/approval-kernel fatal/);
-      expect(blob).not.toMatch(/scheduler fatal/);
-      // None of these modules should print their boot banners either.
-      expect(blob).not.toMatch(/vault-broker: listening on/);
-      expect(blob).not.toMatch(/scheduler: registered/);
-    },
-  );
+  it("running --help does not boot broker / kernel / scheduler", () => {
+    // Phase 3a-2 (was: it.skipIf(!existsSync(cli))). Silently skipping
+    // when dist/cli/switchroom.js was missing meant a fresh checkout
+    // could pass this suite without the smoke ever running. Now we
+    // assert the dist exists so the suite fails loud — run
+    // `npm run build` first (or wire it into CI as a pretest).
+    expect(
+      existsSync(cli),
+      `dist CLI missing at ${cli} — run \`npm run build\` before this test.`,
+    ).toBe(true);
+    const res = spawnSync("bun", [cli, "--help"], {
+      encoding: "utf8",
+      env: { ...process.env, HOME: "/tmp/empty-fakehome" },
+      timeout: 30_000,
+    });
+    const blob = `${res.stdout ?? ""}\n${res.stderr ?? ""}`;
+    expect(res.status).toBe(0);
+    expect(blob).not.toMatch(/vault-broker fatal/);
+    expect(blob).not.toMatch(/approval-kernel fatal/);
+    expect(blob).not.toMatch(/scheduler fatal/);
+    // None of these modules should print their boot banners either.
+    expect(blob).not.toMatch(/vault-broker: listening on/);
+    expect(blob).not.toMatch(/scheduler: registered/);
+  });
 });

@@ -36,6 +36,11 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execSync, spawnSync } from "node:child_process";
 import {
+  captureProdSnapshot,
+  expectNoProdDrift,
+  type ProdSnapshot,
+} from "./_prod-snapshot";
+import {
   mkdtempSync,
   rmSync,
   mkdirSync,
@@ -112,30 +117,12 @@ interface Fixture {
   stateDir: string; // host path mounted at /state/approvals
   containerName: string;
   initialSchemaVersion: number | null;
-  prodSnapshot: string;
+  prodSnapshot: ProdSnapshot;
 }
 
 let fx: Fixture | null = null;
 
 const AGENTS = ["alice", "bob", "carol"];
-
-function snapshotProductionContainers(): string {
-  try {
-    return execSync(
-      "sudo docker ps --no-trunc --format '{{.Names}}|{{.ID}}|{{.Status}}'",
-      { stdio: ["ignore", "pipe", "pipe"] },
-    ).toString();
-  } catch {
-    try {
-      return execSync(
-        "docker ps --no-trunc --format '{{.Names}}|{{.ID}}|{{.Status}}'",
-        { stdio: ["ignore", "pipe", "pipe"] },
-      ).toString();
-    } catch {
-      return "";
-    }
-  }
-}
 
 /**
  * Read PRAGMA schema_version from the kernel.db inside the container.
@@ -162,7 +149,7 @@ function readKernelSchemaVersion(containerName: string): number | null {
 beforeAll(() => {
   if (!imageOk) return;
 
-  const prodSnapshot = snapshotProductionContainers();
+  const prodSnapshot = captureProdSnapshot();
 
   const workdir = mkdtempSync(join(tmpdir(), "phase2b-kernel-"));
   const socketParent = join(workdir, "kernel-sockets");
@@ -261,23 +248,9 @@ afterAll(() => {
       /* */
     }
 
-    // Production-host safety check.
-    const after = snapshotProductionContainers();
-    // Filter out ALL switchroom phase-test containers (any phase), not just
-    // phase2b's — sibling-phase ephemerals running concurrently are normal
-    // cross-phase noise, not production drift. See phase2a for rationale.
-    const filterPhase = (s: string): string =>
-      s.split("\n")
-        .filter((l) => l && !/switchroom-phase\d/.test(l))
-        .sort()
-        .join("\n");
-    const beforeFiltered = filterPhase(fx.prodSnapshot);
-    const afterFiltered = filterPhase(after);
-    // HARD assertion (F1, post-cohesion-review): a console.error here let
-    // production drift slip past CI silently. Now we fail the suite if any
-    // non-phase2b container appeared, disappeared, or changed status during
-    // the run.
-    expect(afterFiltered).toBe(beforeFiltered);
+    // Production-host safety check — HARD assertion. See
+    // ./_prod-snapshot.ts for the cross-phase filter rationale.
+    expectNoProdDrift(fx.prodSnapshot, captureProdSnapshot());
   }
 }, 60_000);
 

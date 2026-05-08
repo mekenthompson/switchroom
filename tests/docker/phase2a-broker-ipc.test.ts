@@ -359,21 +359,25 @@ afterAll(() => {
     const after = snapshotProductionContainers();
     // The phase2a container was spawned and removed during this run, so
     // we filter both snapshots to non-phase2a names before diffing.
+    // Filter out ALL switchroom phase-test containers (any phase), not just
+    // phase2a's — when the broader docker test suite runs concurrently with
+    // 2b/2c, sibling-phase ephemerals can appear in one snapshot but vanish
+    // before the other, which is normal cross-phase noise, not production
+    // drift. Production containers do NOT carry the "switchroom-phase"
+    // name prefix, so this still catches any genuine drift.
     const filterPhase = (s: string): string =>
       s.split("\n")
-        .filter((l) => l && !l.includes("phase2a"))
+        .filter((l) => l && !/switchroom-phase\d/.test(l))
         .sort()
         .join("\n");
     const beforeFiltered = filterPhase(fx.prodSnapshot);
     const afterFiltered = filterPhase(after);
-    if (beforeFiltered !== afterFiltered) {
-      // eslint-disable-next-line no-console
-      console.error(
-        `[phase2a teardown] PRODUCTION CONTAINER DRIFT DETECTED:\n` +
-        `BEFORE:\n${beforeFiltered}\n` +
-        `AFTER:\n${afterFiltered}`,
-      );
-    }
+    // HARD assertion (F1, post-cohesion-review): a console.error here let
+    // production drift slip past CI silently. Now we fail the suite if any
+    // non-phase2a container appeared, disappeared, or changed status during
+    // the run. The phase-name filter above keeps our own ephemeral containers
+    // out of the diff.
+    expect(afterFiltered).toBe(beforeFiltered);
   }
 }, 60_000);
 

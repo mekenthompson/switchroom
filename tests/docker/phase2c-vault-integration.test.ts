@@ -40,6 +40,11 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execSync, spawnSync } from "node:child_process";
 import {
+  captureProdSnapshot,
+  expectNoProdDrift,
+  type ProdSnapshot,
+} from "./_prod-snapshot";
+import {
   mkdtempSync,
   rmSync,
   writeFileSync,
@@ -130,7 +135,7 @@ interface Fixture {
   agentNames: Map<string, string>; // agent label → container name
   initialBrokerSchemaVersion: number | null;
   initialKernelSchemaVersion: number | null;
-  prodSnapshot: string;
+  prodSnapshot: ProdSnapshot;
 }
 
 let fx: Fixture | null = null;
@@ -138,25 +143,7 @@ let fx: Fixture | null = null;
 const PASSPHRASE = "phase2c-test-passphrase-do-not-use-in-prod";
 const AGENTS = ["alice", "bob", "carol"];
 
-// ─── Snapshot + schema helpers (re-used pattern from 2a/2b) ──────────────────
-
-function snapshotProductionContainers(): string {
-  try {
-    return execSync(
-      "sudo docker ps --no-trunc --format '{{.Names}}|{{.ID}}|{{.Status}}'",
-      { stdio: ["ignore", "pipe", "pipe"] },
-    ).toString();
-  } catch {
-    try {
-      return execSync(
-        "docker ps --no-trunc --format '{{.Names}}|{{.ID}}|{{.Status}}'",
-        { stdio: ["ignore", "pipe", "pipe"] },
-      ).toString();
-    } catch {
-      return "";
-    }
-  }
-}
+// ─── Schema helpers (snapshot helper lives in ./_prod-snapshot.ts) ───────────
 
 function readSchemaVersion(containerName: string, dbPath: string): number | null {
   try {
@@ -258,7 +245,7 @@ function agentNdjson(
 beforeAll(() => {
   if (!imagesOk) return;
 
-  const prodSnapshot = snapshotProductionContainers();
+  const prodSnapshot = captureProdSnapshot();
 
   const workdir = mkdtempSync(join(tmpdir(), "phase2c-integration-"));
   const brokerSocketDir = join(workdir, "broker-sockets");
@@ -506,21 +493,9 @@ afterAll(() => {
     safeLabelTeardownPhase2c();
     try { rmSync(fx.workdir, { recursive: true, force: true }); } catch { /* */ }
 
-    // Production-host safety — HARD assertion (F1 shape, applied from day one).
-    const after = snapshotProductionContainers();
-    // Filter out ALL switchroom phase-test containers (any phase) — sibling
-    // phases running concurrently in the same vitest run will create + remove
-    // ephemeral containers; that's normal cross-phase noise, not production
-    // drift. Production containers don't carry the "switchroom-phase<digit>"
-    // name prefix, so genuine drift still trips this assertion.
-    const filterPhase = (s: string): string =>
-      s.split("\n")
-        .filter((l) => l && !/switchroom-phase\d/.test(l))
-        .sort()
-        .join("\n");
-    const beforeFiltered = filterPhase(fx.prodSnapshot);
-    const afterFiltered = filterPhase(after);
-    expect(afterFiltered).toBe(beforeFiltered);
+    // Production-host safety — HARD assertion. See ./_prod-snapshot.ts
+    // for the cross-phase filter rationale.
+    expectNoProdDrift(fx.prodSnapshot, captureProdSnapshot());
   }
 }, 90_000);
 

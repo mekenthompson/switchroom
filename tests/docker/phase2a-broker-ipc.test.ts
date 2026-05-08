@@ -36,6 +36,11 @@
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { execSync, spawnSync } from "node:child_process";
 import {
+  captureProdSnapshot,
+  expectNoProdDrift,
+  type ProdSnapshot,
+} from "./_prod-snapshot";
+import {
   mkdtempSync,
   rmSync,
   writeFileSync,
@@ -129,35 +134,13 @@ interface Fixture {
   legacySock: string;
   containerName: string;
   initialSchemaVersion: number | null;
-  prodSnapshot: string;
+  prodSnapshot: ProdSnapshot;
 }
 
 let fx: Fixture | null = null;
 
 const PASSPHRASE = "phase2a-test-passphrase-do-not-use-in-prod";
 const AGENTS = ["alice", "bob", "carol"];
-
-function snapshotProductionContainers(): string {
-  // Capture the host's complete container list so afterAll can verify
-  // no production container went down. We use --no-trunc so IDs are
-  // stable for diffing.
-  try {
-    return execSync(
-      "sudo docker ps --no-trunc --format '{{.Names}}|{{.ID}}|{{.Status}}'",
-      { stdio: ["ignore", "pipe", "pipe"] },
-    ).toString();
-  } catch {
-    // Fallback to non-sudo if sudo is unavailable in CI.
-    try {
-      return execSync(
-        "docker ps --no-trunc --format '{{.Names}}|{{.ID}}|{{.Status}}'",
-        { stdio: ["ignore", "pipe", "pipe"] },
-      ).toString();
-    } catch {
-      return "";
-    }
-  }
-}
 
 /**
  * Read PRAGMA schema_version from the broker's grants DB inside the
@@ -189,7 +172,7 @@ function readGrantsSchemaVersion(containerName: string): number | null {
 beforeAll(() => {
   if (!imageOk) return;
 
-  const prodSnapshot = snapshotProductionContainers();
+  const prodSnapshot = captureProdSnapshot();
 
   const workdir = mkdtempSync(join(tmpdir(), "phase2a-broker-"));
   const socketDir = join(workdir, "broker-sockets");
@@ -355,29 +338,10 @@ afterAll(() => {
       /* */
     }
 
-    // Production-host safety check: confirm no container went down.
-    const after = snapshotProductionContainers();
-    // The phase2a container was spawned and removed during this run, so
-    // we filter both snapshots to non-phase2a names before diffing.
-    // Filter out ALL switchroom phase-test containers (any phase), not just
-    // phase2a's — when the broader docker test suite runs concurrently with
-    // 2b/2c, sibling-phase ephemerals can appear in one snapshot but vanish
-    // before the other, which is normal cross-phase noise, not production
-    // drift. Production containers do NOT carry the "switchroom-phase"
-    // name prefix, so this still catches any genuine drift.
-    const filterPhase = (s: string): string =>
-      s.split("\n")
-        .filter((l) => l && !/switchroom-phase\d/.test(l))
-        .sort()
-        .join("\n");
-    const beforeFiltered = filterPhase(fx.prodSnapshot);
-    const afterFiltered = filterPhase(after);
-    // HARD assertion (F1, post-cohesion-review): a console.error here let
-    // production drift slip past CI silently. Now we fail the suite if any
-    // non-phase2a container appeared, disappeared, or changed status during
-    // the run. The phase-name filter above keeps our own ephemeral containers
-    // out of the diff.
-    expect(afterFiltered).toBe(beforeFiltered);
+    // Production-host safety check: HARD assertion that no container
+    // appeared, disappeared, or changed status during the run. See
+    // ./_prod-snapshot.ts for the cross-phase filter rationale.
+    expectNoProdDrift(fx.prodSnapshot, captureProdSnapshot());
   }
 }, 60_000);
 

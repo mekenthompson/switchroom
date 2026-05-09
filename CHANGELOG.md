@@ -1,5 +1,82 @@
 # Changelog
 
+## v0.7.2 — Docker runtime alignment
+
+Closes the v0.7-era code paths that still assumed the legacy systemd
+runtime. Each was verified against live source (no audit assumptions)
+before being patched.
+
+**Fixes:**
+
+- **`telegram-plugin/gateway/gateway.ts` self-restart** — the gateway's
+  three `spawn('sh', ['-c', 'sleep … && systemctl --user restart …'])`
+  callsites and the inline restart-button `execFileSync('systemctl', …)`
+  all branch through a new `triggerSelfRestart(targetAgent, reason)`
+  helper. Under `SWITCHROOM_RUNTIME=docker` the helper sends `SIGTERM`
+  to PID 1 (tini) of the agent's container after a 300ms grace; tini
+  propagates to the whole tree (claude → start.sh → gateway plugin),
+  the container exits, and docker compose's `restart: unless-stopped`
+  policy recreates it. Cross-agent restart (the inline-button case
+  for a target other than this gateway's own agent) is rejected
+  cleanly under docker with an actionable message — no docker.sock
+  inside agent containers, by design. Under legacy systemd the helper
+  preserves the existing detached `systemctl --user restart` shape.
+
+- **`telegram-plugin/gateway/restart-watchdog.ts`** — the watchdog
+  polls systemd's `NRestarts` counter to detect crash loops. There's
+  no equivalent counter accessible from inside an agent container
+  without mounting `docker.sock` (a deliberate security regression
+  we avoid). Under `SWITCHROOM_RUNTIME=docker` the gateway now skips
+  `startRestartWatchdog` entirely and logs the reason; container
+  restart visibility comes from the boot card + gateway boot logs in
+  docker mode.
+
+- **`src/agents/status.ts`** — added `readDockerContainer` adapter
+  that calls `docker inspect --format '{{json .State}}'` and maps
+  `State.{Status,Pid,StartedAt}` into the canonical
+  `{pid, activeEnterTs, active}` shape that `buildClaudeStatus` /
+  `buildGatewayStatus` already consume. `defaultStatusInputs` picks
+  systemd vs docker adapters based on `SWITCHROOM_RUNTIME=docker`.
+  Under docker, both the Claude and gateway readers query the same
+  `switchroom-<agent>` container — claude and the gateway plugin
+  share that container in v0.7. With this, `switchroom agent status
+  <name>` reports the right state for docker fleets.
+
+- **`src/cli/agent.ts` `preflightCheck`** — the systemd-unit existence
+  check (and the autoaccept-handler check that depends on parsing
+  the unit file) is skipped under `SWITCHROOM_RUNTIME=docker`. Only
+  the `start.sh` existence check still runs (it's runtime-agnostic).
+
+- **`src/cli/doctor.ts`** — `checkGatewayUnit` (which validates a
+  per-agent systemd gateway unit pins `Environment=SWITCHROOM_AGENT_NAME`)
+  is now gated on `!isDockerMode()`. Under docker the analogous env
+  var is set in compose.ts and verified by the dockerSection's
+  compose-shape checks.
+
+- **`profiles/_shared/telegram-style.md.hbs`** — agent skill copy that
+  pointed users at `journalctl --user -u switchroom-<agent>` and
+  `journalctl --user -t switchroom-watchdog` for restart forensics.
+  Updated to lead with the docker equivalents (`docker logs --since
+  2h …`, `docker inspect --format '{{.State.StartedAt}}{{println}}{{.RestartCount}}'`)
+  and note the systemd commands as legacy fallbacks. Watchdog source
+  documented as silent under docker (matching the runtime change above).
+
+**Audit findings that were FALSE on current main** (verified against
+live source, not just trusted from the audit):
+
+- `doctor.ts` was claimed to hard-check for `systemctl`. Actually
+  `checkBinary("docker", ...)` is the only binary check on line 147;
+  there's no systemctl check.
+- `README.md` was claimed to still advertise the systemd path. Actually
+  every systemd / `--legacy` reference was already removed in the v0.7
+  docs sweep.
+- `docs/architecture.md` already says "v0.7+ runtime is Docker on
+  Linux. The legacy systemd path was removed in v0.7."
+- `docs/scheduling.md` has zero systemd references.
+
+**No breaking changes** — every behavior under `SWITCHROOM_RUNTIME != docker`
+is byte-identical to v0.7.1.
+
 ## v0.7.1 — v0.7 install hotfix
 
 **Fixes (P0 install blockers from v0.7.0):**

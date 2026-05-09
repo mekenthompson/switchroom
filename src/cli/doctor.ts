@@ -869,7 +869,13 @@ function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[
       // pins the agent name into the gateway process's environment so
       // self-targeting commands (/restart, /reconcile, /update) resolve
       // correctly instead of falling back to basename(cwd) == "telegram".
-      results.push(checkGatewayUnit(name));
+      // Skip under docker mode: there is no per-agent systemd unit for
+      // docker-managed agents, and the analogous container env var
+      // (SWITCHROOM_AGENT_NAME, set in compose.ts) is verified by the
+      // dockerSection's compose-shape checks.
+      if (!isDockerMode()) {
+        results.push(checkGatewayUnit(name));
+      }
 
       const mcpJsonPath = join(agentDir, ".mcp.json");
       if (!existsSync(mcpJsonPath)) {

@@ -809,9 +809,55 @@ function escapeRegex(s: string): string {
 }
 
 /**
+ * Read process info via `docker inspect <container>`. Returns a
+ * `{pid, activeEnterTs, active}` triple shaped to match the systemd
+ * adapter so the status-builder code can be agnostic to runtime.
+ *
+ * Mapping:
+ *   - State.Status = "running"   → active = "active"
+ *   - State.Status = anything else → active = "inactive"
+ *   - State.Pid                  → pid (the host-side PID 1 of the
+ *     container, i.e. tini; in docker, claude and the gateway plugin
+ *     share the same container, so a single inspect serves both
+ *     buildClaudeStatus and buildGatewayStatus).
+ *   - State.StartedAt (ISO8601)  → activeEnterTs (ms-since-epoch).
+ *
+ * Throws are caught — returns the inactive shape so the status
+ * builders downgrade gracefully without crashing the report.
+ */
+export function readDockerContainer(
+  containerName: string,
+): { pid: number | null; activeEnterTs: number | null; active: string } {
+  try {
+    const out = execFileSync(
+      "docker",
+      ["inspect", "--format", "{{json .State}}", containerName],
+      { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const state = JSON.parse(out.trim()) as {
+      Status?: string;
+      Pid?: number;
+      StartedAt?: string;
+    };
+    const active = state.Status === "running" ? "active" : "inactive";
+    const pid =
+      typeof state.Pid === "number" && state.Pid > 0 ? state.Pid : null;
+    let activeEnterTs: number | null = null;
+    if (state.StartedAt) {
+      const ms = Date.parse(state.StartedAt);
+      if (!isNaN(ms)) activeEnterTs = ms;
+    }
+    return { pid, activeEnterTs, active };
+  } catch {
+    return { pid: null, activeEnterTs: null, active: "inactive" };
+  }
+}
+
+/**
  * Compose the default (production) StatusInputs for a given agent.
- * Resolves systemd unit names, log path, history path, and the Hindsight
- * URL from config.
+ * Resolves systemd unit names / docker container names, log path,
+ * history path, and the Hindsight URL from config. Picks systemd vs
+ * docker adapters based on `SWITCHROOM_RUNTIME=docker`.
  */
 export function defaultStatusInputs(params: {
   agentName: string;
@@ -819,16 +865,27 @@ export function defaultStatusInputs(params: {
   hindsightApiUrl: string | null;
   hindsightBankId: string;
 }): StatusInputs {
+  const isDockerMode = process.env.SWITCHROOM_RUNTIME === "docker";
   const service = `switchroom-${params.agentName}`;
   const gatewayService = `switchroom-${params.agentName}-gateway`;
+
+  // Docker mode: claude and the gateway plugin share a single container,
+  // so both readers point at the same `switchroom-<name>` container.
+  // Systemd mode: separate units, separate readers.
+  const getClaudeProcess = isDockerMode
+    ? () => readDockerContainer(service)
+    : () => readSystemdUnit(service);
+  const getGatewayProcess = isDockerMode
+    ? () => readDockerContainer(service)
+    : () => readSystemdUnit(gatewayService);
 
   return {
     agentName: params.agentName,
     agentDir: params.agentDir,
     hindsightApiUrl: params.hindsightApiUrl,
     hindsightBankId: params.hindsightBankId,
-    getClaudeProcess: () => readSystemdUnit(service),
-    getGatewayProcess: () => readSystemdUnit(gatewayService),
+    getClaudeProcess,
+    getGatewayProcess,
     probeHindsight: (url, id) => probeHindsight(url, id),
     readGatewayLog: (path) => readLogFile(path),
     getLastMessages: (path) => readLastMessages(path),

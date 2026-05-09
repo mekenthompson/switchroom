@@ -332,6 +332,71 @@ const ENV_FILE = join(STATE_DIR, '.env')
 const INBOX_DIR = join(STATE_DIR, 'inbox')
 
 /**
+ * Trigger a restart of the agent + gateway pair.
+ *
+ * Branches on `SWITCHROOM_RUNTIME`:
+ *   - `docker`: send `SIGTERM` to PID 1 (tini) after a brief delay so
+ *     in-flight IPC responses flush. tini propagates the signal to its
+ *     children (claude → start.sh → us), the whole tree exits cleanly,
+ *     the container exits, and docker compose's `restart: unless-stopped`
+ *     policy recreates it. This covers BOTH the agent process and the
+ *     gateway plugin (we're a child of claude inside the same container).
+ *     `targetAgent` is informational only here — we can't restart a
+ *     different agent's container from inside our own (no docker.sock).
+ *   - else (legacy systemd): detached `systemctl --user restart` of the
+ *     two units. The detach is required so the systemctl job survives
+ *     us being SIGTERM'd by systemd itself.
+ *
+ * `targetAgent` defaults to `SWITCHROOM_AGENT_NAME`; pass a different
+ * value only for the inline restart-button callback handler. Under
+ * docker, a `targetAgent !== SWITCHROOM_AGENT_NAME` request returns
+ * false (and logs) so the caller can surface a "not supported" message.
+ */
+function triggerSelfRestart(
+  targetAgent: string,
+  reason: string,
+  delayMs = 300,
+): boolean {
+  const isDocker = process.env.SWITCHROOM_RUNTIME === 'docker'
+  const selfAgent = process.env.SWITCHROOM_AGENT_NAME
+  if (isDocker) {
+    if (selfAgent && targetAgent !== selfAgent) {
+      process.stderr.write(
+        `telegram gateway: cross-agent restart not supported under docker (target=${targetAgent}, self=${selfAgent}, reason=${reason})\n`,
+      )
+      return false
+    }
+    process.stderr.write(
+      `telegram gateway: restart-via-SIGTERM-PID1 agent=${targetAgent} reason=${reason} (docker)\n`,
+    )
+    setTimeout(() => {
+      try { process.kill(1, 'SIGTERM') } catch (err) {
+        process.stderr.write(`telegram gateway: SIGTERM PID 1 failed: ${err}\n`)
+      }
+    }, delayMs).unref()
+    return true
+  }
+  // Legacy systemd path.
+  process.stderr.write(
+    `telegram gateway: restart-via-systemctl agent=${targetAgent} reason=${reason}\n`,
+  )
+  try {
+    spawn(
+      'sh',
+      [
+        '-c',
+        `sleep ${(delayMs / 1000).toFixed(2)} && systemctl --user restart switchroom-${targetAgent}.service switchroom-${targetAgent}-gateway.service`,
+      ],
+      { detached: true, stdio: 'ignore' },
+    ).unref()
+    return true
+  } catch (err) {
+    process.stderr.write(`telegram gateway: restart spawn failed for ${targetAgent}: ${err}\n`)
+    return false
+  }
+}
+
+/**
  * Format the version string shown in the boot-card ack line. Two shapes
  * matching the deleted greeting card's behavior:
  *   - on a tag (commits_ahead = 0 or null):   "v0.2.0 · #44 · 2h ago"
@@ -1001,20 +1066,7 @@ function purgeReactionTracking(key: string): void {
   // scheduled, so nobody is waiting on this.
   if (activeTurnStartedAt.size === 0 && pendingRestarts.size > 0) {
     for (const [agentName, _timestamp] of pendingRestarts.entries()) {
-      process.stderr.write(`telegram gateway: turn completed, restarting ${agentName} (agent + gateway) now\n`);
-      try {
-        spawn(
-          'sh',
-          [
-            '-c',
-            // Sleep briefly so our stderr flush lands before systemd kills us.
-            `sleep 0.3 && systemctl --user restart switchroom-${agentName}.service switchroom-${agentName}-gateway.service`,
-          ],
-          { detached: true, stdio: 'ignore' },
-        ).unref();
-      } catch (err) {
-        process.stderr.write(`telegram gateway: restart spawn failed for ${agentName}: ${err}\n`);
-      }
+      triggerSelfRestart(agentName, 'turn-complete-pending-restart');
       pendingRestarts.delete(agentName);
     }
   }
@@ -1651,20 +1703,7 @@ const pendingStateReaper = setInterval(() => {
         `telegram gateway: [restart-drain] forcing agent=${agentName} waited=${waitedSec}s threshold=${Math.round(PENDING_RESTART_DRAIN_CAP_MS / 1000)}s\n`,
       )
       pendingRestarts.delete(agentName)
-      try {
-        spawn(
-          'sh',
-          [
-            '-c',
-            // The systemctl restart will SIGTERM then SIGKILL after TimeoutStopSec.
-            // The currently-running claude process will get SIGKILL via the unit stop.
-            `sleep 0.1 && systemctl --user restart switchroom-${agentName}.service switchroom-${agentName}-gateway.service`,
-          ],
-          { detached: true, stdio: 'ignore' },
-        ).unref()
-      } catch (err) {
-        process.stderr.write(`telegram gateway: [restart-drain] forced restart spawn failed agent=${agentName}: ${err}\n`)
-      }
+      triggerSelfRestart(agentName, 'restart-drain-cap-forced', 100)
     }
   }
 }, 60_000)
@@ -2218,27 +2257,19 @@ const ipcServer: IpcServer = createIpcServer({
     const turnInFlight = activeTurnStartedAt.size > 0;
 
     if (!turnInFlight) {
-      // No active turn, restart immediately. Cycle both the agent unit and
-      // the gateway unit (us) so telegram-plugin code changes always
-      // propagate. Send the client response FIRST, then spawn a detached
-      // shell to run the combined systemctl restart after a brief delay.
-      // The delay ensures the IPC response has flushed before systemd
-      // kills us; the detach ensures the systemctl job survives our death.
+      // No active turn, restart immediately. Cycle both the agent and
+      // gateway side-by-side so telegram-plugin code changes always
+      // propagate. Send the client response FIRST, then trigger the
+      // restart after a brief delay so the IPC response has flushed
+      // before we get killed. (Under docker the helper SIGTERM's PID 1;
+      // under systemd it spawns a detached `systemctl restart`.)
       try {
         client.send({
           type: 'schedule_restart_result',
           success: true,
           restartedImmediately: true,
         });
-        spawn(
-          'sh',
-          [
-            '-c',
-            `sleep 0.3 && systemctl --user restart switchroom-${agentName}.service switchroom-${agentName}-gateway.service`,
-          ],
-          { detached: true, stdio: 'ignore' },
-        ).unref();
-        process.stderr.write(`telegram gateway: scheduled immediate restart of ${agentName} (agent + gateway)\n`);
+        triggerSelfRestart(agentName, 'schedule-restart-immediate');
       } catch (err) {
         client.send({
           type: 'schedule_restart_result',
@@ -7863,19 +7894,19 @@ async function handleOperatorEventCallback(ctx: Context, data: string): Promise<
     }
     case 'restart': {
       await ctx.answerCallbackQuery({ text: `Restarting ${agent}…` }).catch(() => {})
-      try {
-        execFileSync('systemctl', ['--user', 'restart', `switchroom-${agent}`], {
-          encoding: 'utf-8',
-          timeout: 15000,
-          stdio: ['ignore', 'pipe', 'pipe'],
-        })
+      const ok = triggerSelfRestart(agent, 'inline-button-restart')
+      if (ok) {
         await ctx.reply(`<b>${agent}</b> restart requested.`, { parse_mode: 'HTML' })
         await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {})
-      } catch (err) {
-        // err.message includes concatenated stderr which can contain HTML
-        // metacharacters; escape before interpolating into a <pre> block.
-        const safeMsg = escapeHtmlForTg((err as Error).message)
-        await ctx.reply(`<b>Restart failed for ${agent}:</b>\n<pre>${safeMsg}</pre>`, {
+      } else {
+        // Under docker the helper refuses cross-agent restart; surface
+        // a clear message instead of a silent no-op.
+        const isDocker = process.env.SWITCHROOM_RUNTIME === 'docker'
+        const detail = isDocker
+          ? `cross-agent restart is not supported under docker. ` +
+            `Restart from the host: <code>docker compose -p switchroom restart switchroom-${agent}</code>.`
+          : 'restart trigger failed'
+        await ctx.reply(`<b>Restart failed for ${agent}:</b> ${detail}`, {
           parse_mode: 'HTML',
         })
       }
@@ -10397,11 +10428,23 @@ void (async () => {
         // Closes #30 task 4 and the 2026-04-21 lessons-learned loop where
         // IPC flaps falsely triggered the gateway's recovery banner.
         // SWITCHROOM_RESTART_WATCHDOG_POLL_MS=0 disables it.
+        //
+        // Disabled under SWITCHROOM_RUNTIME=docker — the watchdog reads
+        // systemd's NRestarts counter, which doesn't exist for docker
+        // containers. Reading docker's restart count would require
+        // mounting docker.sock into the agent container (a security
+        // regression we explicitly avoid). Container restart visibility
+        // comes from the boot card + gateway boot logs in docker mode.
         const RESTART_WATCHDOG_POLL_MS = Number(
           process.env.SWITCHROOM_RESTART_WATCHDOG_POLL_MS ?? 30_000,
         )
         const watchdogAgentName = process.env.SWITCHROOM_AGENT_NAME
-        if (RESTART_WATCHDOG_POLL_MS > 0 && watchdogAgentName) {
+        const watchdogDockerMode = process.env.SWITCHROOM_RUNTIME === 'docker'
+        if (watchdogDockerMode) {
+          process.stderr.write(
+            `telegram gateway: restart-watchdog disabled (SWITCHROOM_RUNTIME=docker; systemd NRestarts unavailable)\n`,
+          )
+        } else if (RESTART_WATCHDOG_POLL_MS > 0 && watchdogAgentName) {
           startRestartWatchdog({
             agentName: watchdogAgentName,
             pollIntervalMs: RESTART_WATCHDOG_POLL_MS,

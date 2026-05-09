@@ -92,3 +92,47 @@ describe("preflightCheck — autoaccept handler detection (v0.7.0+)", () => {
     expect(errors.some((e) => e.includes("'expect' binary"))).toBe(false);
   });
 });
+
+describe("preflightCheck — SWITCHROOM_RUNTIME=docker skips systemd checks", () => {
+  let sandbox: string;
+  let prevHome: string | undefined;
+  let prevRuntime: string | undefined;
+
+  beforeEach(() => {
+    sandbox = mkdtempSync(join(tmpdir(), "switchroom-preflight-docker-"));
+    prevHome = process.env.HOME;
+    prevRuntime = process.env.SWITCHROOM_RUNTIME;
+    process.env.HOME = sandbox;
+    process.env.SWITCHROOM_RUNTIME = "docker";
+    mkdirSync(join(sandbox, ".config/systemd/user"), { recursive: true });
+  });
+
+  afterEach(() => {
+    if (prevHome !== undefined) process.env.HOME = prevHome;
+    else delete process.env.HOME;
+    if (prevRuntime !== undefined) process.env.SWITCHROOM_RUNTIME = prevRuntime;
+    else delete process.env.SWITCHROOM_RUNTIME;
+    rmSync(sandbox, { recursive: true, force: true });
+  });
+
+  it("does NOT flag a missing systemd unit under docker mode", () => {
+    // No systemd unit written. Only start.sh exists.
+    const agentDir = resolve(sandbox, ".switchroom/agents/dockeragent");
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(resolve(agentDir, "start.sh"), "#!/bin/bash\n", { mode: 0o755 });
+
+    const errors = preflightCheck("dockeragent", agentDir, true);
+    expect(errors.some((e) => e.includes("systemd unit"))).toBe(false);
+    expect(errors.some((e) => e.includes("autoaccept"))).toBe(false);
+  });
+
+  it("still flags a missing start.sh under docker mode", () => {
+    // start.sh check is runtime-agnostic — it's the per-agent scaffold artefact.
+    const agentDir = resolve(sandbox, ".switchroom/agents/missingstart");
+    mkdirSync(agentDir, { recursive: true });
+    // Note: no start.sh written.
+
+    const errors = preflightCheck("missingstart", agentDir, true);
+    expect(errors.some((e) => e.includes("start.sh not found"))).toBe(true);
+  });
+});

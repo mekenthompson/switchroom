@@ -178,6 +178,16 @@ export function preflightCheck(
     errors.push(`start.sh not found at ${startSh}`);
   }
 
+  // Docker mode: systemd unit checks (2 / 3 / 4 below) don't apply —
+  // the runtime is a docker compose service, not a systemd unit. Skip
+  // the systemd-shaped checks. Container-existence is verified by the
+  // doctor's runDockerSection (compose file + image refs) rather than
+  // a per-call preflight, so we just exit early here.
+  const isDockerMode = process.env.SWITCHROOM_RUNTIME === "docker";
+  if (isDockerMode) {
+    return errors;
+  }
+
   // 2. systemd unit exists
   const unitPath = resolve(
     process.env.HOME ?? "/root",

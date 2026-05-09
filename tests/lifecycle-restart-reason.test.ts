@@ -117,18 +117,17 @@ describe("lifecycle: restart-reason marker", () => {
   });
 });
 
-describe("lifecycle: restartAgent ordering (#177)", () => {
-  // Pre-#177 fix: gateway service was restarted FIRST, agent service
-  // SECOND. Problem: when a detached child of the gateway calls
-  // restartAgent, that child is in the gateway's cgroup. systemctl
-  // restart of the gateway cgroup-kills the child mid-flight, before
-  // the second `systemctl restart` (the agent service) ever runs.
-  // The user types /new, sees the gateway bounce, but the session
-  // doesn't actually rotate.
+describe("lifecycle: restartAgent shellout shape (v0.7 PR-C1)", () => {
+  // Under the docker runtime there's a single container per agent
+  // (`switchroom-<name>`), not the systemd-era pair of agent + gateway
+  // services. The pre-#177 ordering concern is moot — a single
+  // `docker compose restart agent-<name>` cycles the whole container,
+  // which holds both the gateway and the claude REPL inside.
   //
-  // This test pins the source ordering so a future re-edit can't
-  // silently regress.
-  it("calls systemctl restart on the agent service BEFORE the gateway service", async () => {
+  // This test pins that the source still routes restart through
+  // docker compose with the expected project + service names, so a
+  // future re-edit can't silently revert to systemctl.
+  it("restartAgent's source uses `docker compose ... restart agent-<name>`", async () => {
     const { readFileSync } = await import("node:fs");
     const { resolve, join: joinPath } = await import("node:path");
     const { fileURLToPath } = await import("node:url");
@@ -136,18 +135,14 @@ describe("lifecycle: restartAgent ordering (#177)", () => {
     const REPO_ROOT = resolve(TEST_DIR, "..");
     const src = readFileSync(joinPath(REPO_ROOT, "src/agents/lifecycle.ts"), "utf-8");
 
-    // Find the restartAgent function body and inspect ordering.
     const funcStart = src.indexOf("export function restartAgent(");
     const funcEnd = src.indexOf("\n}\n", funcStart);
     expect(funcStart).toBeGreaterThan(0);
     const body = src.slice(funcStart, funcEnd);
 
-    const agentRestartIdx = body.indexOf('systemctl(["restart", serviceName(name)])');
-    const gatewayRestartIdx = body.indexOf('systemctlIfExists("restart", gatewayServiceName(name))');
-    expect(agentRestartIdx).toBeGreaterThan(0);
-    expect(gatewayRestartIdx).toBeGreaterThan(0);
-    // Agent first, gateway second — the post-#177 fix.
-    expect(agentRestartIdx).toBeLessThan(gatewayRestartIdx);
+    expect(body).toMatch(/composeArgs\(\["restart", serviceKey\(name\)\]\)/);
+    // No leftover systemctl calls in the restart path.
+    expect(body).not.toMatch(/systemctl/);
   });
 });
 

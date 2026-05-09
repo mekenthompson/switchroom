@@ -34,16 +34,20 @@ const mockedSendInterrupt = sendAgentInterrupt as unknown as ReturnType<typeof v
  *   - anything else                    → ""
  */
 function installSystemctlStub(opts: { killShouldThrow?: boolean } = {}): void {
+  // Despite the legacy name (kept for diff continuity with the
+  // pre-PR-C1 systemd-era test), this stub now models `docker`
+  // shellouts: `docker inspect` returns container State for
+  // getAgentStatus, and `docker kill --signal=SIGINT` is the new
+  // fallback path interruptAgent takes when tmux send-keys fails.
   mockedExec.mockImplementation((bin: string, args: string[]) => {
-    if (bin !== "systemctl") return "";
-    if (args[0] === "--user" && args[1] === "is-active") return "active";
-    if (args[0] === "--user" && args[1] === "show") {
-      // Return a stub that getAgentStatus can parse → MainPID=4242
-      return "MainPID=4242\nControlGroup=/user.slice/test\nMemoryCurrent=1024\nActiveEnterTimestampMonotonic=1\n";
+    if (bin !== "docker") return "";
+    if (args[0] === "inspect" && args.includes("{{.State.Status}}|{{.State.StartedAt}}|{{.State.Pid}}")) {
+      return "running|2026-05-09T12:00:00Z|4242";
     }
-    if (args[0] === "--user" && args[1] === "kill") {
+    if (args[0] === "stats") return "8MiB / 4GiB";
+    if (args[0] === "kill") {
       if (opts.killShouldThrow) {
-        throw new Error("Unit not loaded");
+        throw new Error("No such container");
       }
       return "";
     }
@@ -81,12 +85,12 @@ describe("interruptAgent dual-path", () => {
     expect(mockedSendInterrupt).toHaveBeenCalledWith({ agentName: "klanker" });
 
     const killCalls = mockedExec.mock.calls.filter(
-      (c) => c[0] === "systemctl" && (c[1] as string[])[1] === "kill",
+      (c) => c[0] === "docker" && (c[1] as string[])[0] === "kill",
     );
     expect(killCalls).toHaveLength(0);
   });
 
-  it("tmux-supervised agent: falls back to systemctl kill when send-keys errors", () => {
+  it("tmux-supervised agent: falls back to docker kill when send-keys errors", () => {
     installSystemctlStub();
     mockedSendInterrupt.mockReturnValue({ error: "no server running" });
 
@@ -96,15 +100,15 @@ describe("interruptAgent dual-path", () => {
     expect(mockedSendInterrupt).toHaveBeenCalledTimes(1);
 
     const killCalls = mockedExec.mock.calls.filter(
-      (c) => c[0] === "systemctl" && (c[1] as string[])[1] === "kill",
+      (c) => c[0] === "docker" && (c[1] as string[])[0] === "kill",
     );
     expect(killCalls).toHaveLength(1);
     const args = killCalls[0]![1] as string[];
-    expect(args).toContain("--signal=INT");
+    expect(args).toContain("--signal=SIGINT");
     expect(args).toContain("switchroom-klanker");
   });
 
-  it("legacy_pty agent: bypasses tmux send-keys entirely and uses systemctl kill", () => {
+  it("legacy_pty agent: bypasses tmux send-keys entirely and uses docker kill", () => {
     installSystemctlStub();
     mockedSendInterrupt.mockReturnValue({ ok: true });
 
@@ -114,7 +118,7 @@ describe("interruptAgent dual-path", () => {
     expect(mockedSendInterrupt).not.toHaveBeenCalled();
 
     const killCalls = mockedExec.mock.calls.filter(
-      (c) => c[0] === "systemctl" && (c[1] as string[])[1] === "kill",
+      (c) => c[0] === "docker" && (c[1] as string[])[0] === "kill",
     );
     expect(killCalls).toHaveLength(1);
   });
@@ -139,7 +143,7 @@ describe("interruptAgent dual-path", () => {
       interruptAgent("klanker", { config: makeConfig(true) });
       const messages = logSpy.mock.calls.map((c) => String(c[0]));
       expect(
-        messages.some((m) => /systemctl kill --signal=INT/.test(m)),
+        messages.some((m) => /docker kill --signal=SIGINT/.test(m)),
       ).toBe(true);
     } finally {
       logSpy.mockRestore();
@@ -159,7 +163,7 @@ describe("interruptAgent dual-path", () => {
       ).toBe(true);
       const logMsgs = logSpy.mock.calls.map((c) => String(c[0]));
       expect(
-        logMsgs.some((m) => /systemctl kill --signal=INT/.test(m)),
+        logMsgs.some((m) => /docker kill --signal=SIGINT/.test(m)),
       ).toBe(true);
     } finally {
       errSpy.mockRestore();

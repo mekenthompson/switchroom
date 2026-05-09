@@ -14,29 +14,92 @@ FROM node:22-bookworm-slim
 ARG TARGETARCH
 RUN echo "switchroom/base building for arch=${TARGETARCH}" >&2
 
-# tini: PID 1 in agent containers (zombie reap + signal forward).
-# tmux: agent supervisor surface (#725).
-# bash, ca-certificates, procps: shell + curl trust + ps for diagnostics.
-# git: needed by claude tool calls + agent workflows.
-# sqlite3: kernel.db / scheduler.db / hindsight bank inspection.
-# openssh-client: claude bundle expects ssh-keygen for some flows.
-# python3: hindsight memory plugin's session_end.py / session_start.py
-#   hooks shell out to `python3` (defined in `.claude/hooks` for every
-#   scaffolded agent). Without it the SessionEnd hook errors on every
-#   turn end and claude exits — the v0.7.3 cutover crash-loop chain.
+# Tier 1 base packages — tools Claude reaches for in a meaningful
+# fraction of agent sessions, plus a small human-DX layer for
+# `switchroom agent attach`. Anything narrower belongs in a per-agent
+# image extension (Layer 2 / declarative `packages:` field).
+#
+# Existing rationale (kept for forensics):
+#   tini       — PID 1 in agent containers (zombie reap + signal forward)
+#   tmux       — agent supervisor surface (#725)
+#   bash, ca-certificates, procps — shell + TLS trust + ps
+#   git        — claude tool calls + agent workflows
+#   sqlite3    — kernel.db / scheduler.db / hindsight inspection
+#   openssh-client — claude bundle expects ssh-keygen
+#   curl       — also used by the bun installer below; keep above bun
+#   python3    — hindsight memory plugin's session_end.py /
+#                session_start.py hooks shell out to python3 (#v0.7.3)
+#
+# Tier 1 additions (Layer 1 / persistent-HOME PR):
+#   tzdata, wget               — timezone DB + alt downloader
+#   psmisc                     — pgrep / killall etc.
+#   python3-pip, python3-venv  — `pip install --user` now persists thanks
+#                                to Layer 1's per-agent HOME bind mount
+#   build-essential            — gcc + make for native pip/npm modules
+#   jq                         — JSON wrangling, every API debug task
+#   ripgrep                    — Claude's preferred grep
+#   fd-find                    — modern find (Debian installs as `fdfind`;
+#                                we add a /usr/local/bin/fd symlink so
+#                                Claude can call it under either name)
+#   tar/gzip/xz-utils/unzip/zip — archive handling baseline (unzip moved
+#                                from the bun block below to consolidate)
+#   less                       — pager (Claude pipes through this often)
+#   nano                       — minimal editor for human attach sessions
+#   tree, file                 — directory orientation + content sniffing
+#   dnsutils, iputils-ping,
+#   netcat-openbsd             — network connectivity debugging trio
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       tini \
       tmux \
       bash \
       ca-certificates \
+      tzdata \
       procps \
+      psmisc \
       git \
       sqlite3 \
       openssh-client \
       curl \
+      wget \
       python3 \
+      python3-pip \
+      python3-venv \
+      build-essential \
+      jq \
+      ripgrep \
+      fd-find \
+      tar \
+      gzip \
+      xz-utils \
+      unzip \
+      zip \
+      less \
+      nano \
+      tree \
+      file \
+      dnsutils \
+      iputils-ping \
+      netcat-openbsd \
+ && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
  && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI (`gh`) — promoted to Tier 1 because `gh auth login` is
+# table stakes once Layer 1's persistent HOME makes the credentials
+# survive container restart. Installed from the official cli.github.com
+# apt repo (the path GitHub themselves document at
+# cli.github.com/manual/installation). Keyring goes in
+# /usr/share/keyrings (modern Debian convention) rather than
+# apt-key (deprecated).
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && chmod 644 /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends gh \
+ && rm -rf /var/lib/apt/lists/* \
+ && gh --version >&2
 
 # Pin claude CLI version in the base image so every agent / scheduler
 # container resolves the SAME bundle. The version floats with the
@@ -66,10 +129,9 @@ RUN npm install -g @anthropic-ai/claude-code@latest \
 ARG BUN_VERSION=1.3.13
 ARG BUN_SHA256_X64=79c0771fa8b92c33aae41e15a0e0d307ea99d0e2f00317c71c6c53237a78e25a
 ARG BUN_SHA256_AARCH64=70bae41b3908b0a120e1e58c5c8af30e74afae3b8d11b0d3fdd8e787ddfb4b22
-RUN apt-get update \
- && apt-get install -y --no-install-recommends unzip \
- && rm -rf /var/lib/apt/lists/* \
- && ARCH="$(uname -m)" \
+# `unzip` is now installed in the Tier 1 apt block above; this RUN
+# only does the bun-specific download + verify + place steps.
+RUN ARCH="$(uname -m)" \
  && case "$ARCH" in \
       x86_64)   BUN_ARCH=x64;       BUN_SHA="${BUN_SHA256_X64}";;     \
       aarch64)  BUN_ARCH=aarch64;   BUN_SHA="${BUN_SHA256_AARCH64}";; \

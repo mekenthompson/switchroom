@@ -491,6 +491,21 @@ function emitAgentService(
   lines.push(`    environment:`);
   // env keys MUST be sorted for byte determinism.
   const env: Record<string, string> = {
+    // Per-agent persistent HOME — lives at ~/.switchroom/agents/<name>/home
+    // on the host (inside the existing /state/agent bind mount, no extra
+    // volume needed). The container's ImageConfig.User is a numeric UID
+    // with no /etc/passwd entry, so HOME defaults to "/" which is on the
+    // read-only root fs — every tool that writes to ~/.config, ~/.cache,
+    // ~/.local, ~/.gitconfig fails outright. Pointing HOME at the bind
+    // mount lets `gh auth login`, `git config --global`, `pip install
+    // --user`, shell history, ssh keys, and similar persist across
+    // container restarts.
+    HOME: "/state/agent/home",
+    // npm global installs (`npm install -g foo`) land here so they (a)
+    // don't fail on the read-only /usr/local prefix and (b) survive
+    // restart. PATH adjustment that puts this on the search path lives
+    // in profiles/_base/start.sh.hbs.
+    NPM_CONFIG_PREFIX: "/state/agent/home/.npm-global",
     SWITCHROOM_AGENT_NAME: a.name,
     SWITCHROOM_BROKER_SOCKET: `/run/switchroom/broker/${a.name}/sock`,
     SWITCHROOM_KERNEL_SOCKET: `/run/switchroom/kernel/${a.name}/sock`,

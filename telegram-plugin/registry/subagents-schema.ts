@@ -24,6 +24,9 @@
  *
  * Status transitions:
  *   running → stalled     (via recordSubagentStall — no ended_at, may resume)
+ *   stalled → running     (via recordSubagentResume — JSONL activity returned
+ *                          before terminal; closes the resume edge the watcher
+ *                          documented but never wired)
  *   running → completed   (via recordSubagentEnd)
  *   running → failed      (via recordSubagentEnd)
  *   stalled → completed   (via recordSubagentEnd — terminal beats stalled)
@@ -137,6 +140,14 @@ export interface RecordSubagentStallArgs {
 export interface BumpSubagentActivityArgs {
   id: string
   ts: number
+}
+
+export interface RecordSubagentResumeArgs {
+  id: string
+  /** Wall-clock when the resume was observed. Not stored — last_activity_at
+   *  is updated separately by bumpSubagentActivity. Available for callers
+   *  that want to log it. */
+  resumedAt: number
 }
 
 export interface ReapStuckRunningArgs {
@@ -456,6 +467,32 @@ export function reapStuckRunningRows(
   }
 
   return { reaped: candidates.length, ids: candidates.map((r) => r.id) }
+}
+
+/**
+ * Reverse the stalled→running edge when JSONL activity returns. Mirror of
+ * `recordSubagentStall` for the resume direction the schema doc has always
+ * promised but the watcher never implemented (the cause of "card freezes
+ * at ⚠ Stalled even after sub-agent resumes / completes" — see
+ * subagent-watcher.ts checkStalls + bumpSubagentActivity).
+ *
+ * Idempotent + safe:
+ *   - Only flips rows where status is currently 'stalled'. A row that's
+ *     already 'running' is untouched (no-op UPDATE). A terminal row
+ *     ('completed' / 'failed') stays terminal — terminal beats both
+ *     stalled and running.
+ *   - No-ops gracefully if `id` is not found.
+ *   - last_activity_at is NOT touched here — callers separately call
+ *     bumpSubagentActivity for the activity bump on the same tick.
+ */
+export function recordSubagentResume(db: SqliteDatabase, args: RecordSubagentResumeArgs): void {
+  void args.resumedAt // available for log lines; not persisted (started_at + last_activity_at carry the timing)
+  db.prepare(`
+    UPDATE subagents
+    SET status = 'running'
+    WHERE id = ?
+      AND status = 'stalled'
+  `).run(args.id)
 }
 
 /**

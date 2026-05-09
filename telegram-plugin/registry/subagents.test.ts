@@ -24,6 +24,7 @@ import {
   recordSubagentStart,
   recordSubagentEnd,
   recordSubagentStall,
+  recordSubagentResume,
   bumpSubagentActivity,
   getSubagent,
   reapStuckRunningRows,
@@ -226,6 +227,69 @@ describe('start → stall → end', () => {
     recordSubagentStall(db, { id: 'sa-007', stalledAt: 9999 })
     const row = getSubagent(db, 'sa-007')
     expect(row!.status).toBe('failed')
+    db.close()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Test 4b — recordSubagentResume (stalled → running edge)
+// ---------------------------------------------------------------------------
+//
+// The schema doc (subagents-schema.ts:26) has always promised
+// "running → stalled (may resume)" but the resume edge wasn't
+// implemented — leaving the registry stuck at 'stalled' even when
+// JSONL activity returned. recordSubagentResume closes that gap.
+
+describe('recordSubagentResume — stalled → running edge', () => {
+  it('flips a stalled row back to running', () => {
+    const db = openFreshSubagentsDbInMemory()
+    recordSubagentStart(db, { id: 'sa-r1', background: false, startedAt: 1000 })
+    recordSubagentStall(db, { id: 'sa-r1', stalledAt: 1500 })
+    expect(getSubagent(db, 'sa-r1')!.status).toBe('stalled')
+    recordSubagentResume(db, { id: 'sa-r1', resumedAt: 2000 })
+    const row = getSubagent(db, 'sa-r1')
+    expect(row!.status).toBe('running')
+    expect(row!.ended_at).toBeNull()
+    db.close()
+  })
+
+  it('is a no-op on a row that is already running', () => {
+    // Idempotency: the watcher fires resume on the first activity tick
+    // after a stall, but the same code path is also reached during
+    // normal activity bumps where stallNotified is already false. We
+    // never want a redundant resume to spuriously demote a row.
+    const db = openFreshSubagentsDbInMemory()
+    recordSubagentStart(db, { id: 'sa-r2', background: false, startedAt: 1000 })
+    recordSubagentResume(db, { id: 'sa-r2', resumedAt: 2000 })
+    expect(getSubagent(db, 'sa-r2')!.status).toBe('running')
+    db.close()
+  })
+
+  it('is a no-op on a completed row — terminal beats resume', () => {
+    const db = openFreshSubagentsDbInMemory()
+    recordSubagentStart(db, { id: 'sa-r3', background: false, startedAt: 1000 })
+    recordSubagentEnd(db, { id: 'sa-r3', endedAt: 2000, status: 'completed' })
+    recordSubagentResume(db, { id: 'sa-r3', resumedAt: 3000 })
+    const row = getSubagent(db, 'sa-r3')
+    expect(row!.status).toBe('completed')
+    expect(row!.ended_at).toBe(2000)
+    db.close()
+  })
+
+  it('is a no-op on a failed row', () => {
+    const db = openFreshSubagentsDbInMemory()
+    recordSubagentStart(db, { id: 'sa-r4', background: false, startedAt: 1000 })
+    recordSubagentEnd(db, { id: 'sa-r4', endedAt: 2000, status: 'failed' })
+    recordSubagentResume(db, { id: 'sa-r4', resumedAt: 3000 })
+    expect(getSubagent(db, 'sa-r4')!.status).toBe('failed')
+    db.close()
+  })
+
+  it('is a no-op on a missing row (graceful)', () => {
+    const db = openFreshSubagentsDbInMemory()
+    expect(() =>
+      recordSubagentResume(db, { id: 'sa-nope', resumedAt: 1000 }),
+    ).not.toThrow()
     db.close()
   })
 })

@@ -200,6 +200,11 @@ function makeHarness(opts: {
     agentDir,
     sendNotification: (text) => notifications.push(text),
     stallThresholdMs,
+    // Mirror the active-loop threshold so existing fixtures (which have
+    // toolCount=0 and use the simple "advance past N" model) keep
+    // working under the adaptive split. Tests that need the silent-
+    // synthesis vs active-loop distinction set both explicitly.
+    silentSynthesisStallThresholdMs: stallThresholdMs,
     rescanMs,
     now: () => currentTime,
     setInterval: (fn, ms) => {

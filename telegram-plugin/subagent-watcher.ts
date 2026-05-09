@@ -43,7 +43,7 @@ import { homedir } from 'os'
 import { projectSubagentLine } from './session-tail.js'
 import { sanitiseToolArg } from './fleet-state.js'
 import { escapeHtml, truncate } from './card-format.js'
-import { bumpSubagentActivity, recordSubagentStall, recordSubagentEnd, reapStuckRunningRows } from './registry/subagents-schema.js'
+import { bumpSubagentActivity, recordSubagentStall, recordSubagentResume, recordSubagentEnd, reapStuckRunningRows } from './registry/subagents-schema.js'
 import { touchTurnActiveMarker } from './gateway/turn-active-marker.js'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -119,10 +119,24 @@ export interface SubagentWatcherConfig {
    */
   rescanMs?: number
   /**
-   * How long without JSONL activity before a worker is considered stalled (ms).
-   * Default 60_000.
+   * How long without JSONL activity before a worker is considered stalled
+   * **once at least one tool has been used**. Default 60_000ms. Tool-call
+   * loops emit JSONL events frequently, so 60s of silence in that phase
+   * is a strong signal the sub-agent is stuck on a single tool.
    */
   stallThresholdMs?: number
+  /**
+   * Stall threshold (ms) used **before any tool has been used** —
+   * "silent synthesis" mode where the model is composing a response without
+   * emitting events yet. Long-running plan / synthesis sub-agents commonly
+   * spend 2-5 minutes in this state legitimately, so the active-loop
+   * threshold (60s) misfires. Default 300_000 (5 min).
+   *
+   * The watcher selects between this and `stallThresholdMs` per-entry
+   * based on `entry.toolCount`: 0 ⇒ silent synthesis, ≥1 ⇒ active loop.
+   * Both can be overridden for tests.
+   */
+  silentSynthesisStallThresholdMs?: number
   /**
    * Reaper TTL (ms): background rows in `status='running'` whose
    * `last_activity_at` (or `started_at` if liveness never wrote) is older
@@ -171,6 +185,18 @@ export interface SubagentWatcherConfig {
    * the same sub-agent across subsequent poll ticks.
    */
   onStall?: (agentId: string, idleMs: number, description: string) => void
+  /**
+   * Symmetric to `onStall`: fires when a previously-stalled sub-agent's
+   * JSONL grows again (text emission, tool use, turn_end — anything that
+   * moves last_activity_at). Wired to `progressDriver.onSubAgentUnstall`
+   * in gateway.ts so the pinned card clears the ⚠ Stalled badge as soon
+   * as activity resumes, instead of waiting on the next render tick.
+   *
+   * Each stall→resume cycle fires exactly once: the watcher resets
+   * `entry.stallNotified` on resume, so a sub-agent that stalls again
+   * later in the same lifetime is detected (and reported) again.
+   */
+  onUnstall?: (agentId: string, description: string) => void
   /**
    * Called exactly once per sub-agent when its watcher observes a terminal
    * transition (`done` or `failed`). Mirrors the existing `sub_agent_started`
@@ -226,6 +252,11 @@ export interface SubagentWatcherHandle {
 
 const DEFAULT_RESCAN_MS = 1000
 const DEFAULT_STALL_THRESHOLD_MS = 60_000
+/** Silent-synthesis threshold (no tools used yet). 5min covers plan /
+ *  research sub-agents that legitimately think for several minutes
+ *  before emitting their first event — the 60s active-loop threshold
+ *  misfires on those and freezes the card at ⚠. */
+const DEFAULT_SILENT_SYNTHESIS_STALL_THRESHOLD_MS = 300_000
 const DEFAULT_REAPER_TTL_MS = 60 * 60_000          // 1 hour
 const DEFAULT_REAPER_INTERVAL_MS = 15 * 60_000     // 15 minutes
 /**
@@ -338,6 +369,10 @@ function readSubTail(
   log?: (msg: string) => void,
   db?: SubagentLivenessDb | null,
   parentStateDir?: string | null,
+  /** Fires when the watcher observes JSONL activity returning for a
+   *  previously-stalled entry. Closes the resume edge the schema doc
+   *  has always promised. */
+  onUnstall?: (agentId: string, description: string) => void,
 ): void {
   try {
     const stat = fs.statSync(entry.filePath)
@@ -411,7 +446,39 @@ function readSubTail(
       if (!line) continue
       const events = projectSubagentLine(line, entry.agentId, startState)
       for (const ev of events) {
+        const idleSecBeforeBump = Math.round((now - entry.lastActivityAt) / 1000)
         entry.lastActivityAt = now
+        // Un-stall transition (#previously-missing). The schema doc
+        // promised "stalled → running (may resume)" but neither the
+        // in-memory `stallNotified` flag nor the DB `status` column was
+        // ever flipped back. That left the pinned card stuck at ⚠ until
+        // terminal completion, by which point the user had often
+        // already interrupted or redispatched. Reset both halves on the
+        // first activity tick after a stall + fire onUnstall for the
+        // driver to clear its render-time badge.
+        if (entry.stallNotified) {
+          entry.stallNotified = false
+          if (db != null) {
+            try {
+              const rowRef = db
+                .prepare('SELECT id FROM subagents WHERE jsonl_agent_id = ?')
+                .get(entry.agentId) as { id: string } | null
+              if (rowRef != null) {
+                recordSubagentResume(db, { id: rowRef.id, resumedAt: now })
+              }
+            } catch (dbErr) {
+              log?.(`subagent-watcher: resume DB write error ${entry.agentId}: ${(dbErr as Error).message}`)
+            }
+          }
+          if (onUnstall != null) {
+            try {
+              onUnstall(entry.agentId, entry.description)
+            } catch (cbErr) {
+              log?.(`subagent-watcher: onUnstall callback error ${entry.agentId}: ${(cbErr as Error).message}`)
+            }
+          }
+          log?.(`subagent-watcher: stall cleared for ${entry.agentId} (activity resumed after ${idleSecBeforeBump}s — re-arming detection)`)
+        }
         if (ev.kind === 'sub_agent_tool_use') {
           entry.toolCount++
           // P0 of #662: surface the most recent tool name + sanitised
@@ -467,6 +534,8 @@ function readSubTail(
 export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWatcherHandle {
   const agentDir = config.agentDir
   const stallThresholdMs = config.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS
+  const silentSynthesisStallThresholdMs =
+    config.silentSynthesisStallThresholdMs ?? DEFAULT_SILENT_SYNTHESIS_STALL_THRESHOLD_MS
   const reaperTtlMs = config.reaperTtlMs ?? DEFAULT_REAPER_TTL_MS
   const reaperIntervalMs = config.reaperIntervalMs ?? DEFAULT_REAPER_INTERVAL_MS
   const rescanMs = config.rescanMs ?? DEFAULT_RESCAN_MS
@@ -583,7 +652,7 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
     // Initial read
     readSubTail(entry, tail, n, (desc) => {
       log?.(`subagent-watcher: description updated for ${agentId}: ${desc}`)
-    }, fs, log, db, parentStateDir)
+    }, fs, log, db, parentStateDir, config.onUnstall)
 
     // If the JSONL already contained a turn_end at registration time
     // (file written-then-watched), fire the state-transition + completion
@@ -614,7 +683,7 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
         if (!entry || !t) return
         readSubTail(entry, t, nowFn(), (desc) => {
           log?.(`subagent-watcher: description updated for ${agentId}: ${desc}`)
-        }, fs, log, db, parentStateDir)
+        }, fs, log, db, parentStateDir, config.onUnstall)
         maybySendStateTransition(agentId)
       })
     } catch (err) {
@@ -731,7 +800,17 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
       if (entry.historical) continue
       if (entry.stallNotified) continue
       const idleMs = n - entry.lastActivityAt
-      if (idleMs >= stallThresholdMs) {
+      // Adaptive: a sub-agent that hasn't fired any tools yet is in
+      // "silent synthesis" mode (model thinking before its first emit).
+      // 60s is way too aggressive for plan / research sub-agents that
+      // legitimately spend 2-5 minutes composing before their first
+      // tool_use. Once tools have started, switch to the tighter loop
+      // threshold — frequent JSONL writes mean 60s of silence is a
+      // strong signal the sub-agent is genuinely stuck.
+      const threshold = entry.toolCount === 0
+        ? silentSynthesisStallThresholdMs
+        : stallThresholdMs
+      if (idleMs >= threshold) {
         entry.stallNotified = true
         const desc = escapeHtml(truncate(entry.description, 80))
         const idleSec = Math.floor(idleMs / 1000)
@@ -860,7 +939,7 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
       if (!tail) continue
       readSubTail(entry, tail, n, (desc) => {
         log?.(`subagent-watcher: description updated for ${agentId}: ${desc}`)
-      }, fs, log, db, parentStateDir)
+      }, fs, log, db, parentStateDir, config.onUnstall)
       maybySendStateTransition(agentId)
     }
 

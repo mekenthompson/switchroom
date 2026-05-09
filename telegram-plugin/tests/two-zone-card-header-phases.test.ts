@@ -61,6 +61,16 @@ describe('phaseFor truth table', () => {
     ['parent-done + fg-failed + bg-running → Background, not Done', st({ stage: 'done' }), fleetOf(fm('a', 'failed'), fm('b', 'running', NOW)), { parentDone: true }, 'Background'],
     ['mixed terminal+stuck → not Done', st({ stage: 'run' }), fleetOf(fm('a', 'done'), fm('b', 'stuck', 0)), {}, 'Stalled'],
     ['reply tool fired AND fleet running → Background (parentDone)', st({ stage: 'done' }), fleetOf(fm('a', 'running', NOW)), { parentDone: true }, 'Background'],
+    // Regression: pre-fix the `[].every(...)` vacuous-truth at
+    // two-zone-card.ts fleetAllStuck would mark the fleet stalled the
+    // moment the last sub-agent finished while the parent was still
+    // running. Plan agents that completed in 2-3min showed ⚠ Stalled
+    // on the pinned card until the parent itself wrapped up. Now: zero
+    // running-or-stuck members in the fleet means we fall through to
+    // the default "Working…" instead.
+    ['regression: all fleet done + parent still running → Working… (was Stalled)', st({ stage: 'run' }), fleetOf(fm('a', 'done'), fm('b', 'done')), {}, 'Working…'],
+    ['regression: lone done sub-agent + parent still running → Working…', st({ stage: 'run' }), fleetOf(fm('a', 'done')), {}, 'Working…'],
+    ['regression: failed-only fleet + parent still running → Working… (was Stalled)', st({ stage: 'run' }), fleetOf(fm('a', 'failed')), {}, 'Working…'],
   ])('%s', (_name, state, fleet, opts, expectedLabel) => {
     const phase = phaseFor(state, fleet, NOW, opts as Record<string, unknown>)
     expect(phase.label).toBe(expectedLabel)

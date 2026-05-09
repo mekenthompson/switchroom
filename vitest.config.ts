@@ -17,6 +17,10 @@ if (process.env.BUILDKITE_ANALYTICS_TOKEN) {
 const VITEST_MAX_FORKS = Number(process.env.VITEST_MAX_FORKS ?? 4);
 
 export default defineConfig({
+  // Treat .yaml as a static asset so `import x from "./foo.yaml" with
+  // { type: "text" }` works under Vite/vitest. Bun's compile-time text
+  // imports already handle this; this line keeps vitest aligned.
+  assetsInclude: ["**/*.yaml"],
   test: {
     globals: true,
     environment: "node",

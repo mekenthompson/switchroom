@@ -93,6 +93,12 @@ fi
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 export PATH="$HOME/.bun/bin:$PATH"
+# Layer 1 persistent-HOME PATH additions: user-space binary install dirs.
+# `pip install --user`, `npm install -g` (with NPM_CONFIG_PREFIX set in
+# compose.ts), `cargo install --root $HOME`, and manual `~/bin` drops
+# all land in these paths; survival across container restart is via the
+# /state/agent bind mount (HOME=/state/agent/home).
+export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:$PATH"
 export CLAUDE_CONFIG_DIR="{{agentDir}}/.claude"
 unset CLAUDE_CODE_OAUTH_TOKEN
 if [ -f "$CLAUDE_CONFIG_DIR/.oauth-token" ]; then

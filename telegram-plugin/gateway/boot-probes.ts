@@ -11,7 +11,7 @@
  * caller as a thrown error — only as ProbeResult{ status:'fail', ... }.
  */
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'fs'
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
@@ -252,6 +252,148 @@ type ExecFileFnType = (
 ) => Promise<ExecFileResult>
 
 /**
+ * Filesystem injection point for the docker-mode /proc walk so tests can
+ * drive synthetic `/proc/<pid>/{comm,stat,status}` strings without
+ * touching the real host fs.
+ */
+export interface ProcFsImpl {
+  readdir: (path: string) => string[]
+  readFile: (path: string) => string
+}
+
+const realProcFs: ProcFsImpl = {
+  readdir: (p) => readdirSync(p),
+  readFile: (p) => readFileSync(p, 'utf-8'),
+}
+
+type AgentCandidate = {
+  pid: number
+  rssKb: number
+  comm: string
+  starttime: number
+}
+
+/**
+ * Walk `/proc` from inside the current pid-namespace and pick the
+ * heaviest claude/node process. Used for the docker-mode agent probe:
+ * inside an agent container, we share the namespace with claude, so a
+ * /proc walk replaces the systemctl-driven cgroup walk used under
+ * systemd. Skips wrappers (tmux/expect/script/bash/sh) and our own
+ * gateway PID. Exported for tests.
+ */
+export function findAgentProcessInContainer(
+  fs: ProcFsImpl = realProcFs,
+): AgentCandidate | null {
+  let entries: string[]
+  try {
+    entries = fs.readdir('/proc')
+  } catch {
+    return null
+  }
+  const candidates: AgentCandidate[] = []
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue
+    const pid = Number(entry)
+    if (!Number.isFinite(pid) || pid <= 0) continue
+    if (pid === process.pid) continue
+    let comm = ''
+    try {
+      comm = fs.readFile(`/proc/${pid}/comm`).trim()
+    } catch {
+      continue
+    }
+    let rssKb = 0
+    try {
+      const status = fs.readFile(`/proc/${pid}/status`)
+      const m = status.match(/^VmRSS:\s+(\d+)/m)
+      if (m) rssKb = parseInt(m[1], 10) || 0
+    } catch {
+      continue
+    }
+    let starttime = 0
+    try {
+      const stat = fs.readFile(`/proc/${pid}/stat`)
+      // /proc/<pid>/stat format: pid (comm-with-parens) state ppid ...
+      // field 22 (1-indexed) is starttime in clock ticks since boot.
+      // comm can contain spaces/parens — use the LAST ')' as the
+      // anchor so we tokenize the remainder safely.
+      const close = stat.lastIndexOf(')')
+      const tail = close >= 0 ? stat.slice(close + 2) : stat
+      const fields = tail.trim().split(/\s+/)
+      // After the "(comm)" group, the remaining fields are state, ppid,
+      // ... with starttime at index 19 (0-indexed) of `tail` because
+      // field 3 (state) is `tail[0]`.
+      const st = Number(fields[19])
+      if (Number.isFinite(st) && st > 0) starttime = st
+    } catch {
+      continue
+    }
+    candidates.push({ pid, rssKb, comm, starttime })
+  }
+  if (candidates.length === 0) return null
+
+  const isAgent = (c: AgentCandidate): boolean => c.comm === 'claude'
+  const isWrapper = (c: AgentCandidate): boolean =>
+    c.comm === 'tmux' || c.comm.startsWith('tmux:') ||
+    c.comm === 'expect' || c.comm === 'script' ||
+    c.comm === 'bash' || c.comm === 'sh' ||
+    c.comm === 'tini' || c.comm === 'sleep'
+
+  const claudeMatches = candidates.filter(isAgent)
+  if (claudeMatches.length > 0) {
+    claudeMatches.sort((a, b) => b.rssKb - a.rssKb)
+    return claudeMatches[0]
+  }
+  // No `claude` comm — fall back to heaviest non-wrapper node process.
+  const nodeMatches = candidates
+    .filter(c => c.comm === 'node' && !isWrapper(c))
+    .sort((a, b) => b.rssKb - a.rssKb)
+  if (nodeMatches.length > 0) return nodeMatches[0]
+  return null
+}
+
+/**
+ * Read /proc/uptime to derive the agent process's uptime from its
+ * starttime (clock ticks since boot). Returns null on any failure.
+ *
+ * SC_CLK_TCK (the units of `starttime` in /proc/<pid>/stat) is a stable
+ * kernel ABI value, hardcoded to 100 on x86_64 across Debian/Ubuntu/
+ * Alpine/RHEL. If we ever ship on arm64 hosts where some kernels use
+ * 250, uptimes will look 2.5× too large and we'll revisit.
+ */
+export function uptimeMsForStarttime(
+  starttimeTicks: number,
+  fs: ProcFsImpl = realProcFs,
+): number | null {
+  try {
+    const uptimeRaw = fs.readFile('/proc/uptime').trim()
+    const bootUptimeSec = Number(uptimeRaw.split(/\s+/)[0])
+    if (!Number.isFinite(bootUptimeSec) || bootUptimeSec <= 0) return null
+    const HZ = 100
+    const procUptimeSec = bootUptimeSec - starttimeTicks / HZ
+    if (procUptimeSec < 0) return null
+    return Math.round(procUptimeSec * 1000)
+  } catch {
+    return null
+  }
+}
+
+function probeAgentProcessDocker(): ProbeResult {
+  const found = findAgentProcessInContainer()
+  if (!found) {
+    return { status: 'fail', label: 'Agent', detail: 'claude process not found' }
+  }
+  const uptimeMs = uptimeMsForStarttime(found.starttime)
+  const mb = Math.round(found.rssKb / 1024)
+  const parts = [
+    `PID ${found.pid}`,
+    uptimeMs != null ? `up ${formatMs(uptimeMs)}` : '',
+    mb > 0 ? `${mb} MB` : '',
+  ].filter(Boolean)
+  return { status: 'ok', label: 'Agent', detail: parts.join(' · ') }
+}
+
+/**
  * Resolve the "real" agent PID under tmux supervisor by walking the
  * unit's cgroup and picking the heaviest-RSS claude/node process.
  *
@@ -371,8 +513,19 @@ export async function probeAgentProcess(
     /** When true, resolve PID via cgroup walk (heaviest claude/node) — under
      *  tmux supervisor MainPID is the tmux server (~2MB) which is misleading. */
     tmuxSupervisor?: boolean
+    /** When true, skip systemctl entirely. The gateway is running INSIDE the
+     *  agent container alongside claude, so we walk /proc directly. There's
+     *  no "service deactivating/activating" model under docker — claude is
+     *  either there or it isn't, so we return single-shot without retry. */
+    dockerMode?: boolean
+    /** Test override — defaults to the real probeAgentProcessDocker(). */
+    dockerProbeImpl?: () => ProbeResult
   } = {},
 ): Promise<ProbeResult> {
+  if (opts.dockerMode) {
+    const impl = opts.dockerProbeImpl ?? probeAgentProcessDocker
+    return withTimeout('Agent', Promise.resolve(impl()))
+  }
   const retryIntervalMs = opts.retryIntervalMs ?? AGENT_RETRY_INTERVAL_MS
   const retryMaxMs = opts.retryMaxMs ?? AGENT_RETRY_MAX_MS
   const sleep = opts.sleepImpl ?? ((ms: number) => new Promise(resolve => setTimeout(resolve, ms)))
@@ -469,8 +622,18 @@ export async function* watchAgentProcess(
     nowImpl?: () => number
     /** When true, resolve PID via cgroup walk (heaviest claude/node). */
     tmuxSupervisor?: boolean
+    /** When true, skip systemctl: yield once with the current /proc-derived
+     *  state and exit. Mirrors probeAgentProcess's docker-mode shortcut. */
+    dockerMode?: boolean
+    /** Test override — defaults to the real probeAgentProcessDocker(). */
+    dockerProbeImpl?: () => ProbeResult
   } = {},
 ): AsyncGenerator<ProbeResult> {
+  if (opts.dockerMode) {
+    const impl = opts.dockerProbeImpl ?? probeAgentProcessDocker
+    yield impl()
+    return
+  }
   const liveWindowMs = opts.liveWindowMs ?? AGENT_LIVE_WINDOW_MS
   const pollIntervalMs = opts.pollIntervalMs ?? AGENT_LIVE_POLL_INTERVAL_MS
   const followupRepollMs = opts.followupRepollMs ?? AGENT_LIVE_FOLLOWUP_REPOLL_MS
@@ -793,8 +956,22 @@ function parseTimerLeft(left: string | undefined): number | null {
 
 export async function probeCronTimers(
   agentName: string,
-  opts: { execFileImpl?: ExecFileFnType } = {},
+  opts: {
+    execFileImpl?: ExecFileFnType
+    /** When true, crons live in the `switchroom-cron` container and the
+     *  agent container has no docker.sock to query them. We surface that
+     *  the scheduler is managed externally rather than reporting fail
+     *  every boot for a non-issue. */
+    dockerMode?: boolean
+  } = {},
 ): Promise<ProbeResult> {
+  if (opts.dockerMode) {
+    return {
+      status: 'ok',
+      label: 'Crons',
+      detail: 'managed by switchroom-cron',
+    }
+  }
   const execFileFn: ExecFileFnType = opts.execFileImpl ?? execFile
   return withTimeout('Crons', (async (): Promise<ProbeResult> => {
     let stdout: string

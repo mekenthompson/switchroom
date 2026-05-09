@@ -127,6 +127,20 @@ export interface ComposeGeneratorOptions {
    * been updated yet (defaults to `${HOME}` interpolation).
    */
   homeDir?: string;
+  /**
+   * Absolute host path to the switchroom.yaml the operator wants the
+   * containerised broker / kernel / scheduler to load. Bind-mounted
+   * read-only into each of those services at /state/config/switchroom.yaml,
+   * with `SWITCHROOM_CONFIG=/state/config/switchroom.yaml` set so they
+   * skip the cwd auto-detect that doesn't exist inside the container.
+   *
+   * Without this, broker boots with `ConfigError: No switchroom.yaml found`
+   * and restart-loops — the v0.7 P0 install-path bug. Optional for
+   * back-compat; if omitted, broker / kernel get no config mount and
+   * scheduler keeps its legacy `~/.switchroom:/state/config:ro` directory
+   * mount (back-compat with pre-fix generated compose).
+   */
+  switchroomConfigPath?: string;
 }
 
 /** Resolve the image ref for one of the four service images. */
@@ -214,6 +228,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // preserves the older `${HOME}` shape for callers that haven't been
   // updated.
   const homePrefix = opts.homeDir ?? "${HOME}";
+  const switchroomConfigPath = opts.switchroomConfigPath;
   if (buildMode === "local" && !buildContext) {
     throw new Error(
       `compose: buildMode="local" requires buildContext (the absolute path to the switchroom checkout)`,
@@ -260,10 +275,16 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`      - "CHOWN"`);
   lines.push(`      - "FOWNER"`);
   lines.push(`    environment:`);
+  if (switchroomConfigPath) {
+    lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);
+  }
   lines.push(`      SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH: /state/vault-auto-unlock`);
   lines.push(`    volumes:`);
   for (const a of describeAgents(config)) {
     lines.push(`      - broker-${a.name}-sock:/run/switchroom/broker/${a.name}`);
+  }
+  if (switchroomConfigPath) {
+    lines.push(`      - ${switchroomConfigPath}:/state/config/switchroom.yaml:ro`);
   }
   lines.push(`      - ${homePrefix}/.switchroom/vault:/state/vault`);
   // Auto-unlock blob (encrypted with /etc/machine-id-derived key).
@@ -297,9 +318,16 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`    cap_add:`);
   lines.push(`      - "CHOWN"`);
   lines.push(`      - "FOWNER"`);
+  if (switchroomConfigPath) {
+    lines.push(`    environment:`);
+    lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);
+  }
   lines.push(`    volumes:`);
   for (const a of describeAgents(config)) {
     lines.push(`      - kernel-${a.name}-sock:/run/switchroom/kernel/${a.name}`);
+  }
+  if (switchroomConfigPath) {
+    lines.push(`      - ${switchroomConfigPath}:/state/config/switchroom.yaml:ro`);
   }
   lines.push(`      - ${homePrefix}/.switchroom/approvals:/state/approvals`);
   lines.push(``);
@@ -323,7 +351,15 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // which is a write op against the daemon API. Read-only would
   // silently break dispatch with cryptic permission errors.
   lines.push(`      - /var/run/docker.sock:/var/run/docker.sock`);
-  lines.push(`      - ${homePrefix}/.switchroom:/state/config:ro`);
+  if (switchroomConfigPath) {
+    // Bind-mount the resolved config file directly so the scheduler
+    // boots regardless of where the operator keeps switchroom.yaml.
+    // Without this, scheduler only finds the file when it lives under
+    // ~/.switchroom/ — same install-path bug that bit the broker.
+    lines.push(`      - ${switchroomConfigPath}:/state/config/switchroom.yaml:ro`);
+  } else {
+    lines.push(`      - ${homePrefix}/.switchroom:/state/config:ro`);
+  }
   lines.push(`      - ${homePrefix}/.switchroom/scheduler:/state/scheduler`);
   lines.push(`    environment:`);
   lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);

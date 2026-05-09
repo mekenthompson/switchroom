@@ -209,10 +209,16 @@ describe("generateCompose", () => {
 
   it("uses ${HOME} for host-path bind mounts when no homeDir is given", () => {
     const out = generateCompose({ config: makeConfig({ a: {} }) });
-    expect(out).toContain("${HOME}/.switchroom/vault:/state/vault");
+    // Vault file mounted directly (not as a parent dir) — see compose.ts
+    // for the rationale (#v0.7.1 vault file path fix).
+    expect(out).toContain("${HOME}/.switchroom/vault.enc:/state/vault.enc:ro");
     expect(out).toContain("${HOME}/.switchroom/approvals:/state/approvals");
     expect(out).toContain("${HOME}/.switchroom:/state/config:ro");
     expect(out).toContain("${HOME}/.switchroom/agents/a:/state/agent");
+    // Same-path dual mount for agents — see compose.ts for the rationale
+    // (start.sh bakes host paths at scaffold time, so the same paths
+    // must resolve inside the container).
+    expect(out).toContain("${HOME}/.switchroom/agents/a:${HOME}/.switchroom/agents/a");
   });
 
   it("bakes the absolute homeDir into bind sources when given (sudo-safe)", () => {
@@ -223,12 +229,16 @@ describe("generateCompose", () => {
       config: makeConfig({ a: {} }),
       homeDir: "/home/op",
     });
-    expect(out).toContain("/home/op/.switchroom/vault:/state/vault");
+    expect(out).toContain("/home/op/.switchroom/vault.enc:/state/vault.enc:ro");
     expect(out).toContain("/home/op/.switchroom/approvals:/state/approvals");
     expect(out).toContain("/home/op/.switchroom:/state/config:ro");
+    // Dual mount: canonical /state/agent path AND same-path host path.
     expect(out).toContain("/home/op/.switchroom/agents/a:/state/agent");
+    expect(out).toContain("/home/op/.switchroom/agents/a:/home/op/.switchroom/agents/a");
     expect(out).toContain("/home/op/.switchroom/logs/a:/var/log/switchroom");
+    expect(out).toContain("/home/op/.switchroom/logs/a:/home/op/.switchroom/logs/a");
     expect(out).toContain("/home/op/.claude/projects/a:/state/.claude");
+    expect(out).toContain("/home/op/.claude/projects/a:/home/op/.claude/projects/a");
     expect(out).not.toContain("${HOME}");
   });
 

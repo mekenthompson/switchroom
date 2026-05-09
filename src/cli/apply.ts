@@ -112,6 +112,40 @@ function hasVaultRefs(value: unknown): boolean {
 }
 
 /**
+ * Pre-create every host directory that compose will bind-mount.
+ *
+ * Why: docker auto-creates a missing bind-mount source as an empty
+ * directory owned by the dockerd UID (root). On v0.7 installs that
+ * tripped twice — operators ended up with root-owned `~/.switchroom/vault`
+ * and `~/.switchroom/vault-auto-unlock` stub directories that blocked
+ * the real files from landing at the same path. Creating the
+ * directories ourselves (as the current shell user) removes the
+ * race entirely.
+ *
+ * The set of paths mirrors the volume mount sources emitted by
+ * `generateCompose`. We mkdir directories only — files (vault.enc,
+ * vault-auto-unlock blob) are managed by `switchroom setup` / vault
+ * commands.
+ */
+async function ensureHostMountSources(config: SwitchroomConfig): Promise<void> {
+  const home = homedir();
+  const dirs = [
+    join(home, ".switchroom", "approvals"),
+    join(home, ".switchroom", "scheduler"),
+    join(home, ".switchroom", "logs"),
+    join(home, ".switchroom", "compose"),
+  ];
+  for (const name of Object.keys(config.agents)) {
+    dirs.push(join(home, ".switchroom", "agents", name));
+    dirs.push(join(home, ".switchroom", "logs", name));
+    dirs.push(join(home, ".claude", "projects", name));
+  }
+  for (const dir of dirs) {
+    await mkdir(dir, { recursive: true });
+  }
+}
+
+/**
  * Detect whether `docker compose` (the v2 plugin, not the deprecated
  * `docker-compose` v1 binary) is installed. Returns a friendly error
  * string explaining how to upgrade if it isn't, otherwise null.
@@ -251,7 +285,22 @@ export async function runApply(
     }
   }
 
-  // ── 2. Generate compose file ──────────────────────────────────────
+  // ── 2. Pre-create host mount sources ──────────────────────────────
+  // Why: docker auto-creates a missing bind-mount source as an empty
+  // directory owned by ROOT (because dockerd runs as root). That has
+  // bitten v0.7 installs twice — root-owned `~/.switchroom/vault` and
+  // `~/.switchroom/vault-auto-unlock` stubs that then blocked the user
+  // from moving the real files into place. Eagerly mkdir'ing as the
+  // current shell user keeps the source dirs operator-owned.
+  // Files (vault.enc, vault-auto-unlock blob) are NOT created here —
+  // they're written by `switchroom setup` / vault commands and we
+  // shouldn't fabricate empty placeholders. If they're missing, the
+  // broker handles that gracefully (vault.enc missing => apply
+  // preflight already errors; auto-unlock missing => broker falls
+  // back to interactive unlock).
+  await ensureHostMountSources(config);
+
+  // ── 3. Generate compose file ──────────────────────────────────────
   const composePath = options.outPath ?? DEFAULT_COMPOSE_PATH;
   const composeContent = generateCompose({
     config,

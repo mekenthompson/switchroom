@@ -1,5 +1,60 @@
 # Changelog
 
+## v0.7.1 — v0.7 install hotfix
+
+**Fixes (P0 install blockers from v0.7.0):**
+
+- **Compose: vault file mounted as a directory.** The broker mount was
+  `${HOME}/.switchroom/vault:/state/vault` but the actual vault file is
+  `~/.switchroom/vault.enc` (a top-level file, not a `vault/` subdir).
+  Docker auto-created the missing source as an empty root-owned
+  directory on the host, the broker found no vault, and the fleet
+  restart-looped. Now mounted as the file directly:
+  `~/.switchroom/vault.enc:/state/vault.enc:ro` plus an explicit
+  `SWITCHROOM_VAULT_PATH` env so the broker doesn't fall back to its
+  `~`-expanding default (which resolves to `/root/...` inside the
+  container).
+- **Compose: agent containers crash-looped on `cd` to a host path.**
+  Scaffolded `start.sh` bakes the absolute host path of `agentDir` at
+  scaffold time (`cd "/home/<user>/.switchroom/agents/<name>"`), but
+  the bind mount destination was `/state/agent` — so the host path
+  didn't exist inside the container. Fixed by dual-mounting: the
+  same host directory is bound BOTH at the canonical `/state/agent`
+  (Dockerfile compatibility) AND at the original host path
+  (start.sh compatibility). Same applies to `/state/.claude` and
+  `/var/log/switchroom`. No image rebuild required to pick up this
+  fix — operators just `switchroom apply` and
+  `docker compose -p switchroom up -d`.
+- **Apply: defensive `mkdir` on host bind-mount sources.** Before
+  generating the compose file, `apply` now creates every directory
+  that compose will bind-mount (under the operator's UID), preventing
+  docker from auto-creating them as root. Closes the bug class that
+  produced both the `~/.switchroom/vault` and
+  `~/.switchroom/vault-auto-unlock` root-owned stub directories
+  observed during v0.7.0 cutovers.
+- **package.json: bump version to `0.7.1`.** It had been stuck at
+  `0.5.2` across multiple releases; the gateway boot card reads
+  `package.json` via `src/build-info.ts` and was reporting
+  `v0.5.2 · #826` even on v0.7 fleets.
+
+**Known v0.7 issues NOT addressed in this release** (filed as
+follow-ups; impact: agent self-restart, `switchroom agent status`,
+and the boot watchdog still assume systemd in places):
+
+- `telegram-plugin/gateway/gateway.ts` spawns `systemctl --user restart …`
+  for graceful restart and quota-rotation flows; needs a docker-aware
+  branch (exit 0 and let `restart: unless-stopped` recreate the
+  container).
+- `telegram-plugin/gateway/restart-watchdog.ts` reads systemd unit
+  state to detect crash loops; needs a `docker inspect` fallback.
+- `src/cli/agent.ts` checks for `~/.config/systemd/user/switchroom-*.service`
+  unit files in several lifecycle verbs even under `SWITCHROOM_RUNTIME=docker`.
+- `src/agents/status.ts` `readSystemdUnitStatus()` is the only source
+  of agent state for `switchroom agent status`; needs a `docker ps`
+  fallback.
+- `src/cli/doctor.ts` still hard-checks for `systemctl` and prints
+  "Switchroom requires a systemd-based Linux distro".
+
 ## v0.7.0 — Docker-only (BREAKING)
 
 **Breaking changes:**

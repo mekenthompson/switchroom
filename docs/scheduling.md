@@ -1,6 +1,6 @@
 # Scheduled Tasks
 
-Switchroom runs scheduled tasks as **systemd user timers** — reliable, OS-level, survive reboots and session crashes. Each task fires a one-shot `claude -p` call with the configured model and sends output to Telegram.
+Switchroom runs scheduled tasks via the **`scheduler` container** — a singleton cron service in the docker fleet that dispatches one-shot `claude -p` calls into each agent container at the configured times and sends output to Telegram. Surviving host reboots is handled by docker's restart policy.
 
 ## Quick Start
 
@@ -14,20 +14,17 @@ defaults:
       model: claude-opus-4-6    # override for important tasks
 ```
 
-Run `switchroom agent create <name>` or `switchroom agent reconcile <name>` to install the timers.
+Run `switchroom agent create <name>` or `switchroom agent reconcile <name>` to register the schedule entries with the scheduler.
 
 ## How It Works
 
-For each schedule entry, switchroom generates:
+The `scheduler` container reads each agent's `schedule:` block from `~/.switchroom/switchroom.yaml` (and the cascade), converts every `cron:` expression to a `node-cron` schedule, and at fire time runs:
 
-1. **`telegram/cron-N.sh`** — self-contained bash script that:
-   - Sources nvm (so `claude` is on PATH)
-   - Runs `claude -p "prompt" --model <model> --no-session-persistence`
-   - Sends the output to your Telegram DM via curl
+```
+docker exec agent-<name> claude -p "<prompt>" --model <model> --no-session-persistence
+```
 
-2. **`switchroom-<agent>-cron-N.timer`** — systemd timer with `OnCalendar` converted from the cron expression
-
-3. **`switchroom-<agent>-cron-N.service`** — systemd oneshot service that runs the script
+against the live agent container. The agent's MCP tools (Telegram, Vault, etc.) are wired the same way they are for an interactive turn, so the dispatched task can call `mcp__switchroom-telegram__reply` directly. The scheduler itself never sees secret values — the agent resolves any vault refs through the broker socket.
 
 ## Configuration
 
@@ -108,27 +105,27 @@ Scheduled tasks are **not** part of the running agent session. They:
 
 This means a scheduled task won't see the agent's conversation history or Hindsight memories. It's a clean, isolated execution — ideal for briefings, reminders, and periodic checks.
 
-## Managing Timers
+## Managing the Scheduler
 
 ```bash
-# List all active timers
-systemctl --user list-timers "switchroom-*"
+# Confirm the scheduler container is running
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml ps scheduler
 
-# Check a specific timer
-systemctl --user status switchroom-assistant-cron-0.timer
+# Tail the scheduler's fire log (which task fired when, exit codes)
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml logs -f scheduler
 
-# Manually trigger a scheduled task
-systemctl --user start switchroom-assistant-cron-0.service
+# Manually trigger a scheduled task by dispatching it directly into the agent
+docker exec agent-<name> claude -p "<prompt>" --model claude-sonnet-4-6 --no-session-persistence
 
-# View output from the last run
-journalctl --user -u switchroom-assistant-cron-0.service --no-pager -n 20
+# Restart the scheduler (e.g. after editing switchroom.yaml + reconciling)
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml restart scheduler
 ```
 
 ## Comparison with Claude Code's Native Scheduling
 
-| | Switchroom (systemd timers) | Claude Code CronCreate | Claude Code Desktop |
+| | Switchroom (scheduler container) | Claude Code CronCreate | Claude Code Desktop |
 |---|---|---|---|
-| **Survives restart** | Yes (OS-level) | No (session-scoped) | Yes (app must be open) |
+| **Survives restart** | Yes (docker `restart: unless-stopped`) | No (session-scoped) | Yes (app must be open) |
 | **Headless** | Yes | Yes | No (Desktop app only) |
 | **Model selection** | Per-task | Inherits session | Per-task |
 | **Context isolation** | Fully isolated | Shares session | Isolated |

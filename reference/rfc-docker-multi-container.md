@@ -8,7 +8,26 @@ source: research output for issue #793, "Option 3" of the comparison
 
 # RFC: one container per agent, docker compose for the fleet
 
-## Status (post-v0.6)
+## Status — shipped in v0.7
+
+This RFC is **shipped**. v0.7.0 is the docker-only release: the legacy
+systemd path was removed, `bin/bridge-watchdog.sh` was retired (compose
+healthchecks + `restart: unless-stopped` self-heal), and the `switchroom
+up` / `switchroom init` / `switchroom update` / `switchroom systemd`
+verbs are gone. The v0.7 install path is `curl ... install.sh | sh`,
+then `switchroom setup`, then `switchroom apply && docker compose pull
+&& docker compose up -d --remove-orphans`. Five published GHCR images
+(`switchroom-base`, `switchroom-agent`, `switchroom-broker`,
+`switchroom-kernel`, `switchroom-scheduler`) — no `docker build` on the
+operator's host.
+
+The body below is preserved as the historical design record. Phase
+labels reference earlier PRs; status notes inside individual phases
+describe what landed at the time of the RFC's last edit, not the
+current state of the codebase. For the current operator surface see
+`docs/operators/install.md` and `docs/architecture.md`.
+
+## Status (post-v0.6, historical)
 
 - **Phase 0** (peercred spike) — shipped (#801).
 - **Phase 1** (compose generator + per-agent containers) — shipped (#802, #804, #807).

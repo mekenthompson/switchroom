@@ -92,7 +92,7 @@ doesn't have to:
    Removed when the agent is removed.
 3. **Per-agent long-lived branch.** `agent/<agent-name>/main`, where
    `<agent-name>` is the agent's id from `switchroom.yaml` (the same id
-   used in directory names and systemd units, e.g. `clerk`, `klanker`).
+   used in directory names and compose service names, e.g. `clerk`, `klanker`).
    Fast-forwarded to `upstream/main` on session start when the worktree
    is clean. Task work happens on transient branches off that branch.
 4. **Repos declared in `switchroom.yaml`.** An agent's manifest lists
@@ -117,7 +117,7 @@ doesn't have to:
    Don't try to share.
 10. **Lifecycle is part of `agent restart`.** Worktree provisioning,
     ff-when-clean, and stale-branch cleanup happen as part of the
-    `restart = reconcile + restart` contract — same as systemd unit
+    `restart = reconcile + restart` contract — same as compose-file
     rendering. No new manual command.
 
 ## What this enables

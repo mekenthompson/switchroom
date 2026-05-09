@@ -138,7 +138,7 @@ The wedge against OpenClaw and NanoClaw isn't the substrate — it's the stock `
 
 ## Install
 
-Runs on the box you already have. The supported production runtime is Linux + Docker (Ubuntu 24.04 LTS with 4GB RAM is the canonical target; other Linux distros work with minor tweaks). `switchroom apply` scaffolds every agent and writes a `docker-compose.yml` from your `switchroom.yaml`; you bring the fleet up yourself with `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d`. Linux is the only supported production target; macOS (Docker Desktop) is tracked as Phase 3.5 and not yet validated.
+Runs on the box you already have. The supported production runtime is Linux + Docker (Ubuntu 24.04 LTS with 4GB RAM is the canonical target; other Linux distros work with minor tweaks). `switchroom apply` scaffolds every agent and writes a `docker-compose.yml` from your `switchroom.yaml`; you bring the fleet up yourself with `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d`. Five published images on GHCR (`switchroom-base`, `switchroom-agent`, `switchroom-broker`, `switchroom-kernel`, `switchroom-scheduler`) — no `docker build` on the operator's host. macOS (Docker Desktop) works for development but is not yet release-validated.
 
 > **Heads up on the package name.** The npm package was originally `switchroom-ai`. It's now just `switchroom`. The old name is deprecated and will stop receiving updates — `npm install -g switchroom` is the current path.
 
@@ -217,8 +217,8 @@ switchroom:
   version: 1
 
 telegram:
+  # Per-agent bot token (DM-only by default).
   bot_token: "vault:telegram-bot-token"
-  forum_chat_id: "-1001234567890"
 
 memory:
   backend: hindsight
@@ -421,7 +421,7 @@ Overlay entries win on collision with built-in defaults. Unknown files that appe
 | **[Vault](docs/vault.md)** | Architecture, per-cron secrets, ACL, audit log, threat model |
 | **[Telegram Plugin](docs/telegram-plugin.md)** | Progress cards, 15 MCP tools, native checklists, sticker aliases, voice-in |
 | **[Sub-Agents](docs/sub-agents.md)** | Model routing, delegation patterns, frontmatter spec |
-| **[Scheduling](docs/scheduling.md)** | Cron tasks, systemd timers, model selection |
+| **[Scheduling](docs/scheduling.md)** | Cron tasks (per-agent scheduler container), model selection |
 | **[Session Management](docs/session-optimization.md)** | Continuity, compaction, freshness policy |
 | **[OpenClaw alternative](docs/vs-openclaw.md)** | Switchroom vs OpenClaw |
 | **[NanoClaw alternative](docs/vs-nanoclaw.md)** | Switchroom vs NanoClaw |

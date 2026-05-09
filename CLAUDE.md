@@ -189,8 +189,10 @@ your work affects the CLI, the telegram-plugin, or scaffolded assets,
 expect a `switchroom agent restart all` to be part of verification.
 
 Since PR #59, `switchroom agent restart` always runs reconcile first
-(regenerating systemd units + daemon-reload if changed). So a restart is
-also a mini-deploy of any scaffold changes.
+(regenerating the per-agent scaffold + the compose file if changed). So
+a restart is also a mini-deploy of any scaffold changes — under the
+hood it re-emits `~/.switchroom/compose/docker-compose.yml` and bounces
+the affected container(s) via `docker compose up -d`.
 
 ### Install paths
 

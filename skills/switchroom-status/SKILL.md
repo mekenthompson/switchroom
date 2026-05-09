@@ -29,7 +29,7 @@ If that succeeds, parse the output and present the running agent list with full 
 
 When you have real output, for each agent show:
 - **Name** and topic
-- **Status**: running / stopped / error (from systemd unit state)
+- **Status**: running / stopped / error (from the docker-compose container state)
 - **Uptime**: how long it's been running (for running agents, always include the word "uptime" and the duration)
 - **Model**: which Claude model it's using
 - **Memory**: Hindsight collection name (if configured)

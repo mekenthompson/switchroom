@@ -163,6 +163,13 @@ const serverEntries = [
   // the image runs the bundle under `bun`.
   { src: "src/vault/approvals/kernel-server.ts", out: "dist/vault/approvals/kernel-server.js" },
   { src: "src/scheduler/index.ts", out: "dist/scheduler/index.js" },
+  // Phase 2 cron-fold-in: in-agent scheduler sibling. Baked into the
+  // agent image at /opt/switchroom/agent-scheduler/index.js and started
+  // by start.sh under SWITCHROOM_INLINE_SCHEDULER=1. Same external/build
+  // discipline as the host scheduler bundle — node-cron is npm-installed
+  // inside the agent image (docker/Dockerfile.agent) so the prebuilt
+  // binary lines up with the linux/glibc runtime.
+  { src: "src/agent-scheduler/index.ts", out: "dist/agent-scheduler/index.js" },
 ];
 for (const entry of serverEntries) {
   const srcAbs = resolve(root, entry.src);

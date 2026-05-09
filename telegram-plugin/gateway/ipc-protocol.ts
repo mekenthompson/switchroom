@@ -139,6 +139,38 @@ export interface UpdatePlaceholderMessage {
   text: string;
 }
 
+/**
+ * Phase 2 cron-fold-in: a privileged client (the in-agent scheduler
+ * sibling, supervised by start.sh under SWITCHROOM_INLINE_SCHEDULER=1)
+ * sends this to the gateway to inject a synthesized turn into the
+ * agent's bridge. The gateway forwards the embedded `inbound` envelope
+ * verbatim via `ipcServer.sendToAgent(agentName, inbound)`.
+ *
+ * Why a separate envelope rather than a direct inbound on the wire:
+ *   1. ClientToGateway and GatewayToClient are distinct directions.
+ *      A client cannot send a `type: "inbound"` message — that's a
+ *      gateway→client envelope. The bridge's validateGatewayMessage
+ *      is its security boundary, and the gateway's validateClientMessage
+ *      is the parallel boundary on this side. Wrapping in
+ *      `inject_inbound` keeps both validators sharp on their own
+ *      direction.
+ *   2. The gateway is *deciding* to forward — a future scope check
+ *      (e.g., reject inbounds whose `meta.source` is not in a known
+ *      set, rate-limit per sender) lives naturally at the gateway.
+ *
+ * Trust model: the gateway socket lives at a per-agent path inside
+ * the agent container; only processes inside that container can
+ * connect. `inject_inbound` is therefore as trusted as any other
+ * process running under that agent's UID.
+ */
+export interface InjectInboundMessage {
+  type: "inject_inbound";
+  /** Target agent name — the gateway routes via sendToAgent. */
+  agentName: string;
+  /** Forwarded verbatim to the bridge as a `type: "inbound"` envelope. */
+  inbound: InboundMessage;
+}
+
 export type ClientToGateway =
   | RegisterMessage
   | ToolCallMessage
@@ -148,4 +180,5 @@ export type ClientToGateway =
   | ScheduleRestartMessage
   | OperatorEventForward
   | PtyPartialForward
-  | UpdatePlaceholderMessage;
+  | UpdatePlaceholderMessage
+  | InjectInboundMessage;

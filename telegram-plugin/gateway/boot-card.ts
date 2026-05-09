@@ -390,6 +390,11 @@ export interface RunProbesOpts {
   /** When true, resolve the agent PID via cgroup walk instead of MainPID
    *  (which is the tmux server pid under tmux supervisor). */
   tmuxSupervisor?: boolean
+  /** When true, the gateway is running inside an agent docker container.
+   *  Probes that depend on systemctl (Agent, Crons) switch to /proc walks
+   *  and externally-managed surface text instead of execing systemctl
+   *  (which doesn't exist in the agent image). See `runtime-mode.ts`. */
+  dockerMode?: boolean
 }
 
 /** Run all six probes concurrently with their own per-probe timeouts.
@@ -404,11 +409,11 @@ export async function runAllProbes(opts: RunProbesOpts): Promise<ProbeMap> {
 
   await Promise.allSettled([
     probeAccount(opts.agentDir).then(r => { probes.account = r }),
-    probeAgentProcess(slug, { execFileImpl: opts.probeExecFileImpl, tmuxSupervisor: opts.tmuxSupervisor }).then(r => { probes.agent = r }),
+    probeAgentProcess(slug, { execFileImpl: opts.probeExecFileImpl, tmuxSupervisor: opts.tmuxSupervisor, dockerMode: opts.dockerMode }).then(r => { probes.agent = r }),
     probeGateway(opts.gatewayInfo).then(r => { probes.gateway = r }),
     probeQuota(claudeDir, opts.agentDir, opts.fetchImpl).then(r => { probes.quota = r }),
     probeHindsight(opts.bankName, opts.fetchImpl).then(r => { probes.hindsight = r }),
-    probeCronTimers(slug, { execFileImpl: opts.probeExecFileImpl }).then(r => { probes.crons = r }),
+    probeCronTimers(slug, { execFileImpl: opts.probeExecFileImpl, dockerMode: opts.dockerMode }).then(r => { probes.crons = r }),
   ])
 
   return probes
@@ -530,6 +535,7 @@ export async function startBootCard(
           sleepImpl: opts.agentLiveSleepImpl,
           execFileImpl: opts.agentLiveExecFileImpl,
           tmuxSupervisor: opts.tmuxSupervisor,
+          dockerMode: opts.dockerMode,
         })
 
         for await (const agentResult of watcher) {

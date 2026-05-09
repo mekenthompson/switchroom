@@ -27,6 +27,29 @@
  * Releases happen on shutdown (SIGTERM/SIGINT/uncaught error) by
  * unlinking the canonical path. We log every state transition; do NOT
  * silently swallow filesystem errors.
+ *
+ * Container/PID-namespace correctness (#884):
+ * -------------------------------------------
+ * Under v0.7 docker each agent runs in its own PID namespace. The
+ * gateway PID written to disk inside the previous container instance
+ * is meaningless in the new container — PID 10 in container A and
+ * PID 10 in container B are unrelated processes. `process.kill(pid, 0)`
+ * happily reports "alive" because the PID number is reused by an
+ * unrelated current-container process (tini's child, autoaccept-poll,
+ * etc.), and the new gateway aborts with `another_gateway_is_live`.
+ *
+ * Fix: stamp every record with a `bootId` derived from PID 1's
+ * `starttime` (clock ticks since system boot, field 22 in /proc/1/stat).
+ * Inside a container, PID 1 is tini and its starttime is the container's
+ * start instant — survives PID recycling within the namespace, but
+ * differs from any other container's PID 1 starttime. On bare metal
+ * PID 1 is systemd/init; the field still uniquely identifies the host
+ * boot. The PID-liveness check is now gated on bootId match: same boot
+ * → trust kill(pid,0); different boot → record is stale regardless.
+ *
+ * Records written by older versions have no `bootId`. We treat those as
+ * "unknown boot" and fall back to the legacy kill-based check — same
+ * behavior as before this fix, so the upgrade path is one-way safe.
  */
 import {
   link as linkAsync,
@@ -34,10 +57,48 @@ import {
   writeFile as writeFileAsync,
   readFile as readFileAsync,
 } from "node:fs/promises";
+import { readFileSync } from "node:fs";
 
 export interface MutexRecord {
   pid: number;
   startedAtMs: number;
+  /**
+   * Identifier of the OS/container boot during which this record was
+   * written. See "Container/PID-namespace correctness" in the file
+   * header. Optional for backwards compatibility with records written
+   * by pre-#884 gateway versions.
+   */
+  bootId?: string;
+}
+
+/**
+ * Read PID 1's start-time-in-clock-ticks from /proc/1/stat (field 22).
+ *
+ * Inside a docker container the PID-1 starttime is tied to the
+ * container instance and survives PID recycling but differs across
+ * container recreations. On bare metal it identifies the host boot.
+ * Returns `null` outside Linux or when /proc/1/stat is unreadable —
+ * callers fall back to legacy PID-only checks in that case.
+ *
+ * The 22nd field (`starttime`) appears AFTER the `comm` field which
+ * is wrapped in parentheses and may contain spaces/parens itself, so
+ * we slice past the LAST `)` before splitting on whitespace.
+ */
+export function readCurrentBootId(): string | null {
+  try {
+    const stat = readFileSync("/proc/1/stat", "utf-8");
+    const lastParen = stat.lastIndexOf(")");
+    if (lastParen < 0) return null;
+    const tail = stat.slice(lastParen + 1).trim();
+    const fields = tail.split(/\s+/);
+    // Field index in the post-comm tail: original fields 3..N → tail[0..]
+    // starttime is original field 22, so tail index 22 - 3 = 19.
+    const starttime = fields[19];
+    if (!starttime || !/^\d+$/.test(starttime)) return null;
+    return `pid1:${starttime}`;
+  } catch {
+    return null;
+  }
 }
 
 export type AcquireOutcome =
@@ -63,6 +124,14 @@ export interface AcquireOptions {
    * Injectable so tests can simulate dead/alive PIDs without forking.
    */
   isPidAlive?: (pid: number) => boolean;
+  /**
+   * Override for "what boot are we in right now". Defaults to
+   * `readCurrentBootId()`. Injectable so tests can simulate
+   * container-restart scenarios without recreating containers.
+   * `null` disables the bootId gate (treats all records as
+   * same-boot — the legacy pre-#884 behavior).
+   */
+  currentBootId?: string | null;
   /**
    * Logger. Defaults to process.stderr.write. Lines are pre-formatted
    * with the `telegram gateway:` prefix to match journalctl style.
@@ -114,7 +183,11 @@ async function tryReadRecord(path: string): Promise<MutexRecord | null> {
       Number.isFinite(parsed.pid) &&
       Number.isFinite(parsed.startedAtMs)
     ) {
-      return { pid: parsed.pid, startedAtMs: parsed.startedAtMs };
+      const out: MutexRecord = { pid: parsed.pid, startedAtMs: parsed.startedAtMs };
+      if (typeof parsed.bootId === "string" && parsed.bootId.length > 0) {
+        out.bootId = parsed.bootId;
+      }
+      return out;
     }
     return null;
   } catch {
@@ -139,8 +212,18 @@ export async function acquireStartupLock(
   const { path, record, agentName } = opts;
   const agentTag = fmtAgent(agentName);
 
+  // Resolve the current bootId. `undefined` in opts means "use the
+  // process default"; an explicit `null` opts out (legacy behavior).
+  const currentBootId =
+    opts.currentBootId === undefined ? readCurrentBootId() : opts.currentBootId;
+
+  // Stamp our own record with the bootId so future boots know whether
+  // we belong to the same container/host as them. Don't mutate the
+  // caller's record object.
+  const recordToWrite: MutexRecord =
+    currentBootId != null ? { ...record, bootId: currentBootId } : { ...record };
   const tmp = tmpPath(path, record.pid);
-  const payload = JSON.stringify(record);
+  const payload = JSON.stringify(recordToWrite);
 
   // Write the tmp file first. If this throws, the canonical isn't
   // touched — caller can retry on a fresh boot.
@@ -184,6 +267,31 @@ export async function acquireStartupLock(
           `telegram gateway: boot.lock_corrupt_recovered path=${path}${agentTag}`,
         );
         await unlinkAsync(path).catch(() => {});
+        continue;
+      }
+
+      // Boot/PID-namespace gate (#884). If the holder record carries a
+      // bootId AND it doesn't match ours, the holder PID is from a
+      // different container/host boot and `kill(pid, 0)` against it is
+      // meaningless — same PID number could be a live unrelated process
+      // in our namespace. Skip the kill check, treat as stale, recover.
+      // If either side has no bootId we fall back to the legacy PID
+      // check (preserves pre-#884 behavior for non-Linux dev/test runs
+      // and for upgrades from records that pre-date the bootId field).
+      const bootMismatch =
+        currentBootId != null && holder.bootId != null && holder.bootId !== currentBootId;
+
+      if (bootMismatch) {
+        log(
+          `telegram gateway: boot.lock_stale_recovered_boot_mismatch prior_pid=${holder.pid} prior_started_at=${new Date(
+            holder.startedAtMs,
+          ).toISOString()} prior_boot=${holder.bootId} current_boot=${currentBootId}${agentTag}`,
+        );
+        await unlinkAsync(path).catch((unlinkErr: unknown) => {
+          const code = (unlinkErr as NodeJS.ErrnoException).code;
+          if (code !== "ENOENT") throw unlinkErr;
+        });
+        recoveredFrom = holder;
         continue;
       }
 

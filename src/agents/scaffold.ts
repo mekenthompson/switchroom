@@ -1853,58 +1853,64 @@ export function scaffoldAgent(
   // so the enhanced Telegram plugin can be launched as a dev channel.
   if (usesSwitchroomTelegramPlugin(agentConfig)) {
     const mcpJsonPath = join(agentDir, ".mcp.json");
-    if (!existsSync(mcpJsonPath)) {
-      // v0.7 docker mode: the agent image (Dockerfile.agent) COPYs the
-      // plugin to a stable in-image path and the running switchroom
-      // CLI is the npm-global one inside the image. Reference those —
-      // the host's repo checkout / npm-global install path is irrelevant
-      // inside the container and would resolve to a non-existent path.
-      // v0.6 systemd / non-docker mode: keep resolving against the host
-      // install layout.
-      const pluginDir = dockerMode
-        ? DOCKER_TELEGRAM_PLUGIN_PATH
-        : resolve(import.meta.dirname, "../../telegram-plugin");
-      const switchroomCliPath = dockerMode
-        ? "/usr/local/bin/switchroom"
-        : resolveSwitchroomCliPath();
-      // In docker, the in-container switchroom.yaml lives at the path
-      // compose bind-mounts it to (see compose.ts). In host mode, fall
-      // back to the existing logic.
-      const resolvedConfigPath = dockerMode
-        ? "/state/config/switchroom.yaml"
-        : (switchroomConfigPath
-            ? resolve(switchroomConfigPath)
-            : resolve(process.cwd(), "switchroom.yaml"));
+    // v0.7 docker mode: the agent image (Dockerfile.agent) COPYs the
+    // plugin to a stable in-image path and the running switchroom
+    // CLI is the npm-global one inside the image. Reference those —
+    // the host's repo checkout / npm-global install path is irrelevant
+    // inside the container and would resolve to a non-existent path.
+    // v0.6 systemd / non-docker mode: keep resolving against the host
+    // install layout.
+    const pluginDir = dockerMode
+      ? DOCKER_TELEGRAM_PLUGIN_PATH
+      : resolve(import.meta.dirname, "../../telegram-plugin");
+    const switchroomCliPath = dockerMode
+      ? "/usr/local/bin/switchroom"
+      : resolveSwitchroomCliPath();
+    // In docker, the in-container switchroom.yaml lives at the path
+    // compose bind-mounts it to (see compose.ts). In host mode, fall
+    // back to the existing logic.
+    const resolvedConfigPath = dockerMode
+      ? "/state/config/switchroom.yaml"
+      : (switchroomConfigPath
+          ? resolve(switchroomConfigPath)
+          : resolve(process.cwd(), "switchroom.yaml"));
 
-      const mcpServers: Record<string, McpServerConfig> = {
-        "switchroom-telegram": {
-          command: "bun",
-          args: ["run", "--cwd", pluginDir, "--shell=bun", "--silent", "start"],
-          env: {
-            TELEGRAM_STATE_DIR: join(agentDir, "telegram"),
-            SWITCHROOM_CONFIG: resolvedConfigPath,
-            SWITCHROOM_CLI_PATH: switchroomCliPath,
-          },
+    const mcpServers: Record<string, McpServerConfig> = {
+      "switchroom-telegram": {
+        command: "bun",
+        args: ["run", "--cwd", pluginDir, "--shell=bun", "--silent", "start"],
+        env: {
+          TELEGRAM_STATE_DIR: join(agentDir, "telegram"),
+          SWITCHROOM_CONFIG: resolvedConfigPath,
+          SWITCHROOM_CLI_PATH: switchroomCliPath,
         },
-      };
+      },
+    };
 
-      // Add hindsight memory MCP if configured
-      if (hindsightEnabled && switchroomConfig) {
-        const hindsightEntry = getHindsightSettingsEntry(name, switchroomConfig);
-        if (hindsightEntry) {
-          mcpServers[hindsightEntry.key] = hindsightEntry.value;
-        }
+    // Add hindsight memory MCP if configured
+    if (hindsightEnabled && switchroomConfig) {
+      const hindsightEntry = getHindsightSettingsEntry(name, switchroomConfig);
+      if (hindsightEntry) {
+        mcpServers[hindsightEntry.key] = hindsightEntry.value;
       }
-
-      const mcpJson = { mcpServers };
-
-      writeFileSync(
-        mcpJsonPath,
-        JSON.stringify(mcpJson, null, 2) + "\n",
-        { encoding: "utf-8", mode: 0o600 },
-      );
-      created.push(mcpJsonPath);
     }
+
+    // .mcp.json is purely template-driven (every field is a deterministic
+    // function of dockerMode + the resolved CLI/plugin paths + the
+    // configured MCP set). Use writeIfChanged so that a stale file from a
+    // pre-v0.7.6 release — when the plugin path resolution was different —
+    // is rewritten on the next `switchroom apply`. writeIfMissing left
+    // these stale, which is what bit 7 of 8 agents in the v0.6 → v0.7
+    // cutover (#883): claude couldn't spawn the MCP plugin because the
+    // host repo path baked into the old `.mcp.json` doesn't exist inside
+    // the agent container.
+    writeIfChanged(
+      mcpJsonPath,
+      () => JSON.stringify({ mcpServers }, null, 2) + "\n",
+      created,
+      skipped,
+      0o600,
+    );
   }
 
   // --- Render template-specific files ---

@@ -166,6 +166,108 @@ describe("acquireStartupLock", () => {
     expect(acquired).toContain(`pid=${ourPid}`);
   });
 
+  it("(c.boot-id) auto-recovers a lock from a different boot, even if the recorded PID number is alive (#884)", async () => {
+    // Reproduces the v0.7 docker container-restart bug: the previous
+    // gateway lived in a now-gone container's PID namespace and was
+    // PID 10. The new container's PID 10 is some unrelated process
+    // (autoaccept-poll, tini's child, etc.). isPidAlive(10) reports
+    // alive, but the holder isn't actually the gateway — it's a stale
+    // record from a different boot. Pre-#884 this caused the new
+    // gateway to report blocked, retry 10x, then exit non-zero with
+    // "another_gateway_is_live" — leaving the agent without a
+    // gateway daemon.
+    const { dir, path } = tmpLockPath();
+    cleanups.push(dir);
+    const collidingPid = 10;
+    const stale = { ...makeRecord(collidingPid, Date.now() - 5_000_000), bootId: "pid1:111111111" };
+    writeFileSync(path, JSON.stringify(stale), "utf-8");
+
+    const { lines, log } = noopLog();
+    const result = await acquireStartupLock({
+      path,
+      record: makeRecord(99999),
+      // Inject a DIFFERENT current bootId (this is what readCurrentBootId
+      // would return inside a fresh container).
+      currentBootId: "pid1:222222222",
+      // Crucially: report the holder PID as ALIVE — the bug was that the
+      // PID number is reused by an unrelated current-namespace process.
+      isPidAlive: () => true,
+      log,
+      agentName: "test-agent",
+    });
+
+    expect(result.status).toBe("acquired");
+    if (result.status !== "acquired") throw new Error("unreachable");
+    expect(result.recoveredFrom).toBeDefined();
+    expect(result.recoveredFrom?.pid).toBe(collidingPid);
+    expect(result.recoveredFrom?.bootId).toBe("pid1:111111111");
+
+    // Our record should now own the file AND carry the new bootId so
+    // future boots can apply the same gate.
+    const onDisk = JSON.parse(readFileSync(path, "utf-8")) as MutexRecord;
+    expect(onDisk.pid).toBe(99999);
+    expect(onDisk.bootId).toBe("pid1:222222222");
+
+    const recovered = lines.find((l) => l.includes("boot.lock_stale_recovered_boot_mismatch"));
+    expect(recovered).toBeDefined();
+    expect(recovered).toContain(`prior_pid=${collidingPid}`);
+    expect(recovered).toContain("prior_boot=pid1:111111111");
+    expect(recovered).toContain("current_boot=pid1:222222222");
+
+    // Should NOT have logged boot.lock_blocked — that's the bug we're
+    // pinning against.
+    const blocked = lines.find((l) => l.includes("boot.lock_blocked"));
+    expect(blocked).toBeUndefined();
+  });
+
+  it("(c.legacy-record) falls back to PID check when the existing record predates the bootId field", async () => {
+    // Records written by pre-#884 gateways have no bootId. We must
+    // preserve the legacy kill-based check for those — otherwise an
+    // upgrade would treat every legacy live holder as stale and
+    // potentially clobber a working sibling.
+    const { dir, path } = tmpLockPath();
+    cleanups.push(dir);
+    const livePid = 12345;
+    const legacy = makeRecord(livePid, Date.now() - 5000); // no bootId
+    writeFileSync(path, JSON.stringify(legacy), "utf-8");
+
+    const { log } = noopLog();
+    const result = await acquireStartupLock({
+      path,
+      record: makeRecord(99999),
+      currentBootId: "pid1:any",
+      isPidAlive: (pid) => pid === livePid,
+      log,
+      agentName: "test-agent",
+    });
+
+    expect(result.status).toBe("blocked");
+  });
+
+  it("(c.same-boot) treats matching bootId as same-boot and trusts the PID check", async () => {
+    // Within the same container/host boot, the PID-namespace recycling
+    // problem doesn't exist. A holder record with the same bootId as
+    // ours should be evaluated by isPidAlive verbatim — both for blocked
+    // (live holder) and stale-recovered (dead holder) outcomes.
+    const { dir, path } = tmpLockPath();
+    cleanups.push(dir);
+    const livePid = 12345;
+    const sameBoot = { ...makeRecord(livePid, Date.now() - 5000), bootId: "pid1:same" };
+    writeFileSync(path, JSON.stringify(sameBoot), "utf-8");
+
+    const { log } = noopLog();
+    const result = await acquireStartupLock({
+      path,
+      record: makeRecord(99999),
+      currentBootId: "pid1:same",
+      isPidAlive: (pid) => pid === livePid,
+      log,
+      agentName: "test-agent",
+    });
+
+    expect(result.status).toBe("blocked");
+  });
+
   it("(c.bonus) double-acquire by the SAME process does NOT corrupt state", async () => {
     // Defensive: if the boot path somehow runs acquireStartupLock twice
     // in the same process, we should detect ourselves as the holder and

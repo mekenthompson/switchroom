@@ -17,8 +17,21 @@
  */
 import type { Command } from "commander";
 import chalk from "chalk";
-import { copyFileSync, existsSync } from "node:fs";
+import { copyFileSync, existsSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+// Embed example configs as text imports so they survive `bun build --compile`.
+// `import.meta.dirname` resolves to `/$bunfs/root` inside a compiled binary,
+// which means resolve(import.meta.dirname, "../../examples/...") points at a
+// path that doesn't exist on the host — apply --example would fail with
+// ENOENT. Text imports are bundled into the binary at compile time.
+import switchroomExample from "../../examples/switchroom.yaml" with { type: "text" };
+import minimalExample from "../../examples/minimal.yaml" with { type: "text" };
+
+/** Embedded example configs, keyed by name. Mirrors files under examples/. */
+const EMBEDDED_EXAMPLES: Record<string, string> = {
+  switchroom: switchroomExample,
+  minimal: minimalExample,
+};
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -296,17 +309,8 @@ function copyExampleConfig(name: string): void {
       `Invalid example name: ${name} (must match /^[a-z0-9_-]+$/)`,
     );
   }
-  const exampleFile = resolve(
-    import.meta.dirname,
-    `../../examples/${name}.yaml`,
-  );
-  const dest = resolve(process.cwd(), "switchroom.yaml");
 
-  if (!existsSync(exampleFile)) {
-    throw new Error(
-      `Example config not found: ${name}.yaml (available: switchroom, minimal)`,
-    );
-  }
+  const dest = resolve(process.cwd(), "switchroom.yaml");
 
   if (existsSync(dest)) {
     console.error(
@@ -317,6 +321,26 @@ function copyExampleConfig(name: string): void {
     return;
   }
 
+  // Prefer embedded examples (works under both `bun run` and `bun build
+  // --compile`). Fall back to disk lookup so contributors can add new
+  // examples in-tree without rebuilding — only relevant in dev because
+  // the compiled binary's `import.meta.dirname` is the bunfs virtual root.
+  const embedded = EMBEDDED_EXAMPLES[name];
+  if (embedded !== undefined) {
+    writeFileSync(dest, embedded, { encoding: "utf8" });
+    console.log(chalk.green(`Copied ${name}.yaml -> switchroom.yaml`));
+    return;
+  }
+
+  const exampleFile = resolve(
+    import.meta.dirname,
+    `../../examples/${name}.yaml`,
+  );
+  if (!existsSync(exampleFile)) {
+    throw new Error(
+      `Example config not found: ${name}.yaml (available: ${Object.keys(EMBEDDED_EXAMPLES).join(", ")})`,
+    );
+  }
   copyFileSync(exampleFile, dest);
   console.log(chalk.green(`Copied ${name}.yaml -> switchroom.yaml`));
 }

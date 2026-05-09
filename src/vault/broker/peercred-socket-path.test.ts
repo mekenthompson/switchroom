@@ -50,6 +50,42 @@ describe("socketPathToAgent", () => {
     expect(socketPathToAgent("/run/switchroom/broker/_alice.sock")).toBeNull();
   });
 
+  describe("subdir form (v0.7.4 — per-agent volume mounts)", () => {
+    // The compose generator mounts each per-agent named volume at
+    // /run/switchroom/broker/<agent>, exposing a single `sock` file.
+    // socketPathToAgent must accept that shape so bindAgentSocket can
+    // accept the path as-is (no path rewriting at the call site).
+    it("returns the agent name for /run/switchroom/broker/<agent>/sock", () => {
+      expect(socketPathToAgent("/run/switchroom/broker/alice/sock")).toBe("alice");
+      expect(socketPathToAgent("/run/switchroom/broker/bob/sock")).toBe("bob");
+    });
+
+    it("supports hyphens, underscores, and digits in subdir form too", () => {
+      expect(socketPathToAgent("/run/switchroom/broker/agent-1/sock")).toBe("agent-1");
+      expect(socketPathToAgent("/run/switchroom/broker/my_agent/sock")).toBe("my_agent");
+      expect(socketPathToAgent("/run/switchroom/broker/agent42/sock")).toBe("agent42");
+    });
+
+    it("still rejects non-canonical shapes that look subdir-ish", () => {
+      // Wrong inner filename
+      expect(socketPathToAgent("/run/switchroom/broker/alice/socket")).toBeNull();
+      expect(socketPathToAgent("/run/switchroom/broker/alice/sock.bak")).toBeNull();
+      // Extra path segments
+      expect(socketPathToAgent("/run/switchroom/broker/alice/sub/sock")).toBeNull();
+      // Wrong parent
+      expect(socketPathToAgent("/run/switchroom/kernel/alice/sock")).toBeNull();
+      // Path-traversal in the agent slot
+      expect(socketPathToAgent("/run/switchroom/broker/../etc/sock")).toBeNull();
+      // Empty agent name
+      expect(socketPathToAgent("/run/switchroom/broker//sock")).toBeNull();
+    });
+
+    it("rejects subdir form agent names beginning with non-alphanumeric chars", () => {
+      expect(socketPathToAgent("/run/switchroom/broker/-alice/sock")).toBeNull();
+      expect(socketPathToAgent("/run/switchroom/broker/_alice/sock")).toBeNull();
+    });
+  });
+
   it("returns null for non-string input", () => {
     // @ts-expect-error — runtime guard for type-confused callers
     expect(socketPathToAgent(undefined)).toBeNull();

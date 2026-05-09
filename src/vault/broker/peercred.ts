@@ -42,29 +42,43 @@ import { getPeerCred } from "./peercred-ffi.js";
  *
  * The Phase 2a Docker migration moves agent identity off of cgroup/systemd-
  * unit inspection (which only works on Linux + systemd-user) and onto the
- * socket path itself. Each agent's compose service mounts a per-agent named
- * volume at /run/switchroom/broker, exposing exactly one socket file:
+ * socket path itself. Two canonical shapes are accepted:
  *
- *     /run/switchroom/broker/<agent>.sock
+ *   (a) /run/switchroom/broker/<agent>.sock          (flat sibling files)
+ *   (b) /run/switchroom/broker/<agent>/sock          (per-agent subdir)
  *
- * The broker container sees those mount points as siblings under
- * /run/switchroom/broker/ and binds one listener per file. The listener's
- * own bind-time socketPath is the trusted source-of-truth for the calling
- * agent's identity — no wire-payload field, no peercred lookup, no cgroup
- * inspection can override it. Same pattern as kernel-server.ts.
+ * (b) is the layout the v0.7 compose generator emits: each agent's
+ * `broker-<name>-sock` named volume mounts at
+ * `/run/switchroom/broker/<name>` inside the broker container and at
+ * `/run/switchroom/broker` inside the agent — so the same `sock` file
+ * is at `<subdir>/sock` from the broker's POV and at `sock` from the
+ * agent's POV (after the agent reaches it via its env-var path
+ * `/run/switchroom/broker/<name>/sock`, which collapses to
+ * `<volume root>/sock` once you account for the agent's own mount).
+ * Same pattern as `kernel-server.ts`. Shape (a) is preserved for tests
+ * and any setups that pre-create flat socket files.
+ *
+ * The listener's own bind-time socketPath is the trusted source-of-truth
+ * for the calling agent's identity — no wire-payload field, no peercred
+ * lookup, no cgroup inspection can override it.
  *
  * SO_PEERCRED is still captured (when available) and goes into the audit
  * row as informational `peer_uid`, but it does NOT gate ACL.
  *
- * Returns the parsed agent name on a path matching the canonical shape;
- * returns null otherwise (caller treats null as "unidentified" → DENIED).
+ * Returns the parsed agent name on a path matching one of the canonical
+ * shapes; returns null otherwise (caller treats null as "unidentified"
+ * → DENIED).
  */
 const SOCKET_PATH_AGENT_RE =
   /^\/run\/switchroom\/broker\/([a-zA-Z0-9][a-zA-Z0-9_-]*)\.sock$/;
+const SOCKET_PATH_AGENT_SUBDIR_RE =
+  /^\/run\/switchroom\/broker\/([a-zA-Z0-9][a-zA-Z0-9_-]*)\/sock$/;
 
 export function socketPathToAgent(socketPath: string): string | null {
   if (typeof socketPath !== "string" || socketPath.length === 0) return null;
-  const m = socketPath.match(SOCKET_PATH_AGENT_RE);
+  const m =
+    socketPath.match(SOCKET_PATH_AGENT_RE) ??
+    socketPath.match(SOCKET_PATH_AGENT_SUBDIR_RE);
   if (!m) return null;
   return m[1];
 }

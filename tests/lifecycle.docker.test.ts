@@ -52,6 +52,11 @@ beforeEach(() => {
   mockedExec.mockReset();
   // Pin a deterministic compose path so we can assert argv shape.
   process.env.SWITCHROOM_COMPOSE_FILE = "/tmp/sw-test-compose.yml";
+  // Force docker runtime mode for the whole suite. Without this,
+  // getAgentStatus()'s host-shell branch (added in v0.7.3 PR #871)
+  // calls readSystemdUnit and returns "inactive" — defeating the
+  // point of these tests, which exercise the docker `inspect` path.
+  process.env.SWITCHROOM_RUNTIME = "docker";
 });
 
 describe("lifecycle (docker mode): start/stop/restart shellouts", () => {

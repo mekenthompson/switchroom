@@ -289,6 +289,25 @@ describe("generateCompose", () => {
     expect(block).toContain("FOWNER");
   });
 
+  it("broker adds DAC_READ_SEARCH so root can read host-owned vault files (v0.7.4)", () => {
+    // Without this cap the broker boots, fails to read
+    // /state/vault-auto-unlock (mode 0600 owned by host UID), and silently
+    // falls back to interactive unlock. Verified against a v0.7.3 cutover.
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const block = /vault-broker:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toContain("DAC_READ_SEARCH");
+  });
+
+  it("broker mounts /etc/machine-id so auto-unlock key derivation matches host (v0.7.4)", () => {
+    // The auto-unlock blob is sealed with an AES key derived from the
+    // host's /etc/machine-id. Without passing it through, the broker
+    // image (no /etc/machine-id baked in) errors "Cannot derive
+    // machine-bound key" and falls back to interactive unlock.
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const block = /vault-broker:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toMatch(/-\s+\/etc\/machine-id:\/etc\/machine-id:ro/);
+  });
+
   it("kernel keeps CHOWN + FOWNER (mirrors broker socket-ownership flow)", () => {
     const out = generateCompose({ config: makeConfig({ a: {} }) });
     const block = /approval-kernel:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
@@ -367,6 +386,50 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
       expect(env).toMatch(
         new RegExp(`SWITCHROOM_AGENT_NAME:\\s*"${a}"`),
       );
+    }
+  });
+});
+
+describe("agent service network (v0.7.4 — host networking)", () => {
+  // Scaffolded start.sh hard-codes host-loopback URLs (e.g.
+  // http://127.0.0.1:18888 for hindsight) and operator LAN IPs (HA,
+  // smart-home gear). The default bridge network reaches none of those.
+  // network_mode: host puts the agent on the host's network namespace,
+  // matching the v0.6 systemd-era behavior so existing scaffolds Just
+  // Work without a regen of every start.sh / settings.json.
+  it("emits network_mode: host on every agent service", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    for (const a of ["alice", "bob"]) {
+      const re = new RegExp(`  agent-${a}:[\\s\\S]*?(?=\\n  [a-z])`);
+      const block = re.exec(out)?.[0] ?? "";
+      expect(block, `${a} block`).toMatch(/network_mode:\s*host/);
+    }
+  });
+
+  it("does NOT emit network_mode: host on broker / kernel / scheduler", () => {
+    // Only agents need host networking — the singletons talk via UDS
+    // (broker, kernel) or to the docker daemon socket (scheduler).
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+    });
+    for (const svc of ["vault-broker", "approval-kernel", "switchroom-cron"]) {
+      const re = new RegExp(`  ${svc}:[\\s\\S]*?(?=\\n  [a-z]|\\nvolumes:)`);
+      const block = re.exec(out)?.[0] ?? "";
+      expect(block, `${svc} block`).not.toMatch(/network_mode:\s*host/);
+    }
+  });
+
+  it("drops `hostname:` on agents (incompatible with network_mode: host)", () => {
+    // docker emits a warning when both are set; cleaner to just not emit.
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    for (const a of ["alice", "bob"]) {
+      const re = new RegExp(`  agent-${a}:[\\s\\S]*?(?=\\n  [a-z])`);
+      const block = re.exec(out)?.[0] ?? "";
+      expect(block, `${a} block`).not.toMatch(/^\s+hostname:/m);
     }
   });
 });

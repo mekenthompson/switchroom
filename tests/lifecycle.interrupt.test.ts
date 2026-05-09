@@ -73,6 +73,13 @@ describe("interruptAgent dual-path", () => {
   beforeEach(() => {
     mockedExec.mockReset();
     mockedSendInterrupt.mockReset();
+    // interruptAgent calls getAgentStatus to read the running PID.
+    // Post v0.7.3 #871, getAgentStatus host-shell branch goes through
+    // readSystemdUnit (which the test stubs as a docker-aware
+    // `compose exec` path). Force docker mode so the docker `inspect`
+    // branch fires — otherwise status.pid is null and interruptAgent
+    // bails before exercising the dual-path under test.
+    process.env.SWITCHROOM_RUNTIME = "docker";
   });
 
   it("tmux-supervised agent: prefers tmux send-keys; does NOT fire systemctl kill on success", () => {

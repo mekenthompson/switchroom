@@ -49,16 +49,25 @@ describe("alignAgentUid", () => {
     vi.restoreAllMocks();
   });
 
-  it("is a no-op when the dir is already owned by the target uid (idempotent fast-path)", () => {
+  it("still runs recursive chown even when the top-level dir is already owned (subtree may be stale)", () => {
+    // The previous behaviour was a fast-path no-op when statSync said the
+    // top-level was already aligned. That hid stale uid 1000 entries
+    // sitting deeper in the subtree (e.g. files an operator dropped in
+    // via sudo). chown -R is idempotent + cheap, so we always run it.
     mockedStatSync.mockReturnValue({ uid: 10042, gid: 10042 } as never);
+    mockedExecFileSync.mockImplementationOnce(() => Buffer.from(""));
 
     const res = alignAgentUid("agent", "/fake/state/agent", 10042, {
       writeOut: () => {},
+      confirm: false,
     });
 
-    expect(res.chowned).toBe(false);
+    expect(res.chowned).toBe(true);
     expect(res.paths).toEqual(["/fake/state/agent"]);
-    expect(mockedExecFileSync).not.toHaveBeenCalled();
+    expect(mockedExecFileSync).toHaveBeenCalledTimes(1);
+    const [bin, args] = mockedExecFileSync.mock.calls[0];
+    expect(bin).toBe("chown");
+    expect(args).toEqual(["-R", "10042:10042", "/fake/state/agent"]);
   });
 
   it("tries unprivileged chown first, returns success when it works", () => {

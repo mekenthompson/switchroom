@@ -102,7 +102,7 @@ describe("VaultConfigSchema.broker", () => {
       socket: "~/.switchroom/vault-broker.sock",
       enabled: true,
       autoUnlock: false,
-      autoUnlockCredentialPath: "~/.config/switchroom/auto-unlock.bin",
+      autoUnlockCredentialPath: "~/.switchroom/vault-auto-unlock",
     });
   });
 

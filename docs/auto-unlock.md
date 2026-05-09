@@ -8,7 +8,7 @@ switchroom vault broker enable-auto-unlock
 
 You enter your vault passphrase once. Switchroom encrypts it with a key
 derived from `/etc/machine-id`, writes the result to
-`~/.config/switchroom/auto-unlock.bin` at mode 0600, flips
+`~/.switchroom/vault-auto-unlock` at mode 0600, flips
 `vault.broker.autoUnlock: true` in your `switchroom.yaml`, and restarts the
 broker. Done — every subsequent boot, the broker reads the file, decrypts,
 unlocks the vault, and your fleet comes back working without you typing
@@ -84,7 +84,7 @@ The broker stays running and lets you unlock interactively. Re-running
 ## How it works (file format)
 
 ```
-~/.config/switchroom/auto-unlock.bin   mode 0600
+~/.switchroom/vault-auto-unlock   mode 0600
 
   0       1     version (always 0x01)
   1       16    salt (random per-encryption)

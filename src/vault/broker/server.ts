@@ -1459,8 +1459,10 @@ export class VaultBroker {
    * Sources, in order:
    *   1. The machine-bound auto-unlock blob written by
    *      `switchroom vault broker enable-auto-unlock` — default at
-   *      ~/.config/switchroom/auto-unlock.bin (configurable via
-   *      vault.broker.autoUnlockCredentialPath).
+   *      ~/.switchroom/vault-auto-unlock (configurable via
+   *      vault.broker.autoUnlockCredentialPath, or the
+   *      SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH env var the
+   *      docker-compose vault-broker service injects).
    *   2. `$CREDENTIALS_DIRECTORY/vault-passphrase` — for power users who
    *      installed the broker as a system unit with systemd
    *      LoadCredentialEncrypted=. We don't ship that mode by default but
@@ -1472,7 +1474,7 @@ export class VaultBroker {
   }
 
   /**
-   * Read ~/.config/switchroom/auto-unlock.bin (or configured path), decrypt
+   * Read ~/.switchroom/vault-auto-unlock (or configured/env path), decrypt
    * with the key derived from /etc/machine-id + the per-file salt, push the
    * passphrase into unlockFromPassphrase. Returns true if we attempted —
    * regardless of success — so the caller knows whether to try other paths.
@@ -1480,8 +1482,18 @@ export class VaultBroker {
    * Returns false only when auto-unlock is not configured (file path absent).
    */
   private _tryAutoUnlockFromMachineBoundFile(): boolean {
+    // Resolution order:
+    //   1. SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH env var — set by the
+    //      docker-compose vault-broker service so the in-container path
+    //      (`/state/vault-auto-unlock`) overrides the host-shaped default
+    //      that wouldn't resolve inside the container.
+    //   2. config.vault.broker.autoUnlockCredentialPath — operator override.
+    //   3. DEFAULT_AUTO_UNLOCK_PATH — the canonical host location.
+    const envPath = process.env.SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH;
     const configuredPath =
-      this.config?.vault?.broker?.autoUnlockCredentialPath ?? DEFAULT_AUTO_UNLOCK_PATH;
+      (envPath && envPath.length > 0 ? envPath : undefined) ??
+      this.config?.vault?.broker?.autoUnlockCredentialPath ??
+      DEFAULT_AUTO_UNLOCK_PATH;
     const filePath = resolvePath(configuredPath);
     if (!existsSync(filePath)) return false;
 

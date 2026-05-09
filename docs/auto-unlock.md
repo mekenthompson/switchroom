@@ -148,6 +148,6 @@ Three ways to recover:
 2. **Disable auto-unlock and unlock manually.** Run `switchroom vault
    broker disable-auto-unlock`, then `switchroom vault broker unlock`
    on every boot.
-3. **Inspect.** `journalctl --user -u switchroom-vault-broker.service
-   -e` will show the exact error class
+3. **Inspect.** `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml logs switchroom-broker --tail 100`
+   will show the exact error class
    (`tag-mismatch` / `format` / `io`).

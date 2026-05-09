@@ -1,7 +1,7 @@
 ---
 name: switchroom-cli
 description: "Run switchroom CLI operations on existing agents: logs, update, restart, version, config inspection, scheduled tasks, and Telegram plugin reference. Use when the user wants to: show logs (\"logs\", \"what happened\", \"check the journal\", \"why did it crash\"); update agents (\"update\", \"pull latest\", \"get new code\", \"upgrade\"); restart agents (\"restart\", \"reboot\", \"bounce\", \"kick\", \"it's stuck\"); check what's running (\"version\", \"what sha\", \"are agents up\", \"health summary\"); apply config changes (\"apply\", \"sync my config\", \"I just edited switchroom.yaml\"); inspect an agent's effective config (\"what model is X using\", \"how is <agent> configured\", \"show the cascade\"); list scheduled tasks (\"cron\", \"timers\", \"what runs automatically\", \"scheduled tasks\"); or ask about Telegram-plugin features (\"what MCP tools does the bot have\", \"how does reply work\"). Do NOT use for adding/removing agents (switchroom-manage), bootstrapping switchroom from scratch (switchroom-install), or \"something is broken\" diagnostics (switchroom-health).
-allowed-tools: Bash(switchroom *) Bash(systemctl --user *) Bash(journalctl *)
+allowed-tools: Bash(switchroom *) Bash(docker *) Bash(docker compose *)
 ---
 
 # Switchroom CLI operations
@@ -31,12 +31,12 @@ switchroom agent list
 
 ### Step 2 — Tail the logs
 
-Default is the last 20 lines. User can specify a number. Use the CLI if available; fall back to `journalctl` when it's not:
+Default is the last 20 lines. User can specify a number. Use the CLI if available; fall back to `docker compose logs` when it's not:
 
 ```bash
 switchroom agent logs <name> [--lines 50]
 # or, when switchroom CLI isn't reachable:
-journalctl --user -u switchroom-<name>.service -n 50 --no-pager
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml logs --tail 50 switchroom-<name>
 ```
 
 ### Step 3 — Present output
@@ -64,8 +64,9 @@ docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 writes `~/.switchroom/compose/docker-compose.yml`. The CLI deliberately
 does not run `docker` for you — the operator owns the bring-up.
 
-The v0.6 `switchroom update` verb is removed in v0.7+; the legacy command
-still exists as a thin shim that prints this same upgrade hint.
+The v0.6 `switchroom update` verb is removed in v0.7+; calling it now
+prints this upgrade hint and exits 1. The shim is slated for full removal
+in v0.8.
 
 ---
 
@@ -234,8 +235,11 @@ List cron jobs and scheduled tasks.
 
 ### Step 1 — Show live timers
 
+Cron timers in v0.7+ run inside the per-agent scheduler container. Inspect
+its log to see fired jobs:
+
 ```bash
-systemctl --user list-timers --all | grep switchroom
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml logs switchroom-<agent>-scheduler --tail 100
 ```
 
 ### Step 2 — Show declared schedule entries

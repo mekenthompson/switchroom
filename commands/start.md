@@ -1,5 +1,5 @@
 ---
-description: Start a switchroom agent (or all agents) via systemd
+description: Start a switchroom agent (or all agents) via Docker Compose
 argument-hint: "[agent-name]"
 allowed-tools: [Bash]
 ---
@@ -10,7 +10,7 @@ The user invoked: `/switchroom:start $ARGUMENTS`
 
 ## What to do
 
-If `$ARGUMENTS` names an agent, start only that one. If empty, start everything in the configured fleet. Both paths go through the canonical CLI — never poke `systemctl --user` directly unless the CLI is unavailable.
+If `$ARGUMENTS` names an agent, start only that one. If empty, start everything in the configured fleet. Both paths go through the canonical CLI — never poke `docker compose` directly unless the CLI is unavailable.
 
 ```bash
 # Single agent

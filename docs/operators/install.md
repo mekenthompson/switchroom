@@ -98,6 +98,6 @@ docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 
 ## Related
 
-- `runtime-mode.md` — Docker is the supported production runtime; the
-  legacy systemd path is reached via `switchroom agent` lifecycle verbs.
+- `runtime-mode.md` — Docker is the only supported runtime in v0.7+.
+- `migration-v0.7.md` — upgrading from the v0.6 systemd runtime.
 - `docs/proposed/docker-images.yml` — the GHCR build/push workflow.

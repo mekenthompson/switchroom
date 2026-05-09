@@ -84,6 +84,23 @@ if [ "$SWITCHROOM_RUNTIME" = "docker" ] && [ -z "$SWITCHROOM_DOCKER_TMUX_INNER" 
       bun /opt/switchroom/autoaccept-poll.js "{{name}}" &
   fi
 
+  # 3) agent-scheduler (Phase 2 cron-fold-in, opt-in via env).
+  #    Long-running. Replaces the singleton switchroom-cron container
+  #    once SWITCHROOM_INLINE_SCHEDULER=1 is set per agent (Phase 3
+  #    canary) and then defaulted on (Phase 4). Running as a sibling
+  #    of the gateway means cron fires arrive in this agent's
+  #    transcript through the SAME inbound path as Telegram messages
+  #    — synthesized turns tagged meta.source="cron". The bundle
+  #    connects to the gateway socket above, so the gateway must be
+  #    up before fires can deliver; the supervisor's respawn loop
+  #    handles the early-boot race naturally.
+  if [ "$SWITCHROOM_INLINE_SCHEDULER" = "1" ] \
+     && [ -f /opt/switchroom/agent-scheduler/index.js ] \
+     && command -v bun >/dev/null 2>&1; then
+    _switchroom_supervise agent-scheduler /var/log/switchroom/agent-scheduler.log \
+      bun /opt/switchroom/agent-scheduler/index.js &
+  fi
+
   export SWITCHROOM_DOCKER_TMUX_INNER=1
   exec tmux -L "switchroom-{{name}}" \
     new-session -A -s "{{name}}" -x 400 -y 50 \

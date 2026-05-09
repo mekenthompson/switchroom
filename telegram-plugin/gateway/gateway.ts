@@ -230,6 +230,7 @@ import type {
   OperatorEventForward,
   PtyPartialForward,
   InboundMessage,
+  InjectInboundMessage,
 } from './ipc-protocol.js'
 import { writePidFile, clearPidFile } from './pid-file.js'
 import { acquireStartupLock, releaseStartupLock } from './startup-mutex.js'
@@ -2331,6 +2332,31 @@ const ipcServer: IpcServer = createIpcServer({
    */
   onPtyPartial(_client: IpcClient, msg: PtyPartialForward) {
     handlePtyPartial(msg.text)
+  },
+
+  /**
+   * Phase 2 cron-fold-in: forward a synthesized inbound from the
+   * in-agent scheduler sibling to the registered bridge for the
+   * named agent. The wrapped `inbound` envelope is shipped verbatim
+   * — the in-agent scheduler is the synthesis authority (it runs
+   * `dispatchAsInbound` from `src/scheduler/dispatch.ts` to build
+   * the message). The gateway only validates wire shape (handled
+   * in ipc-server.ts:validateClientMessage) and routes.
+   *
+   * Logs every fire so an operator can correlate the agent's
+   * transcript turn against the scheduler's audit row by `prompt_key`.
+   */
+  onInjectInbound(_client: IpcClient, msg: InjectInboundMessage) {
+    const promptKey = typeof msg.inbound.meta?.prompt_key === 'string'
+      ? msg.inbound.meta.prompt_key
+      : 'unknown'
+    const source = typeof msg.inbound.meta?.source === 'string'
+      ? msg.inbound.meta.source
+      : 'unknown'
+    const delivered = ipcServer.sendToAgent(msg.agentName, msg.inbound)
+    process.stderr.write(
+      `telegram gateway: inject_inbound agent=${msg.agentName} source=${source} prompt_key=${promptKey} delivered=${delivered}\n`,
+    )
   },
 
   log: (msg) => process.stderr.write(`telegram gateway: ipc — ${msg}\n`),

@@ -31,11 +31,11 @@ switchroom auth status 2>/dev/null || echo "FAIL: auth check failed"
 # and per-account health (healthy / quota-exhausted / expired / missing-refresh-token).
 switchroom auth account list 2>/dev/null || echo "INFO: no Anthropic accounts configured (legacy per-agent slot model in use)"
 
-# Check systemd units
-systemctl --user list-units "switchroom-*" --no-pager 2>/dev/null || echo "no switchroom systemd units"
+# Check docker-compose service health
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml ps 2>/dev/null || echo "no switchroom docker fleet"
 
-# Check for failed units
-systemctl --user list-units "switchroom-*" --state=failed --no-pager 2>/dev/null
+# Check for unhealthy or exited containers
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml ps --status exited --status unhealthy 2>/dev/null
 
 # Check MCP config exists for each agent
 for dir in ~/.switchroom/agents/*/; do
@@ -78,7 +78,7 @@ For each check, report:
 
 Group findings by category:
 1. **CLI & Auth** — switchroom installed, authenticated
-2. **Systemd units** — services running, no failed units
+2. **Docker fleet** — containers running, no unhealthy/exited services
 3. **Agent files** — start.sh, .mcp.json, settings.json present
 4. **Bot tokens** — Telegram credentials resolved
 5. **Memory backend** — Hindsight reachable
@@ -93,7 +93,7 @@ For common failures, give the exact fix:
 | Per-agent auth expired (slot model) | `switchroom auth login <agent>` |
 | Account expired (new model — `auth account list` shows red ✗) | `switchroom auth refresh-accounts` (one tick); if no refresh-token, the account needs re-adding |
 | Account quota-exhausted (yellow ⊘ in `auth account list`) | Auto-fallback handles it if the agent has multiple accounts; otherwise wait for the reset window or `switchroom auth enable <other-account> <agent>` |
-| Unit failed | `systemctl --user reset-failed switchroom-<name>`, then restart |
+| Container unhealthy | `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml restart switchroom-<name>` |
 | Missing .mcp.json | `switchroom apply` (full reconcile + rewrite compose; bring up via `docker compose ... up -d`) or `switchroom agent reconcile <name>` (targeted) |
 | Bot token unresolved | Check vault: `switchroom vault list` |
 | Memory unreachable | Check Hindsight MCP server is running |

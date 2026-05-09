@@ -12,7 +12,7 @@ Switchroom is a multi-agent orchestrator built on Claude Code. It manages multip
 
 **One `switchroom.yaml` to rule them all.** All agents are configured from a single file using a three-layer cascade. See [cascade.md](cascade.md) for full merge semantics.
 
-**Agents as systemd services.** Each agent runs as a long-lived `claude` process managed by a systemd user service (`switchroom-<name>.service`). The `start.sh` script sets environment variables and execs into `claude`. Claude Code handles session persistence and tool execution.
+**Agents as Docker containers.** Each agent runs as a long-lived `claude` process inside its own container (`switchroom-<name>`), supervised by Docker Compose with `restart: unless-stopped` and a healthcheck. The `start.sh` script sets environment variables and execs into `claude`. Claude Code handles session persistence and tool execution.
 
 **Telegram as the primary interface.** The `switchroom-telegram` MCP plugin connects Claude Code to Telegram, providing 10 tools for message handling. See [telegram.md](telegram.md) for details.
 
@@ -46,12 +46,13 @@ Switchroom is a multi-agent orchestrator built on Claude Code. It manages multip
 ## Lifecycle
 
 1. `switchroom agent create <name>` — scaffold agent from switchroom.yaml
-2. `systemctl --user start switchroom-<name>` — start the process
-3. Claude Code boots, loads CLAUDE.md + skills + .mcp.json
-4. MCP servers connect (Hindsight, switchroom-telegram, others)
-5. Telegram plugin polls for messages
-6. User sends message → plugin fires `UserPromptSubmit` hook → Claude responds
-7. `switchroom agent reconcile <name>` — re-apply switchroom.yaml (no CLAUDE.md touch)
+2. `switchroom apply` — write `~/.switchroom/compose/docker-compose.yml`
+3. `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d` — start the container
+4. Claude Code boots, loads CLAUDE.md + skills + .mcp.json
+5. MCP servers connect (Hindsight, switchroom-telegram, others)
+6. Telegram plugin polls for messages
+7. User sends message → plugin fires `UserPromptSubmit` hook → Claude responds
+8. `switchroom agent reconcile <name>` — re-apply switchroom.yaml (no CLAUDE.md touch)
 
 ## Deep dives
 

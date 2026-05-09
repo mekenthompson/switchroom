@@ -74,7 +74,7 @@ So I built this.
 
 ## Architecture
 
-One long-running service per agent. Each agent runs the stock `claude` CLI — not a fork, not the Agents SDK, not a wrapped harness — authenticated directly with Anthropic via official OAuth. Switchroom is scaffolding and lifecycle around the CLI you'd run by hand: a Telegram bot, an approval broker, a vault broker, and either Docker Compose (default on Linux) or systemd + a watchdog (`--legacy`) for supervision. See [`docs/architecture.md`](docs/architecture.md) for the process model and how each layer maps to the `claude` CLI.
+One long-running service per agent. Each agent runs the stock `claude` CLI — not a fork, not the Agents SDK, not a wrapped harness — authenticated directly with Anthropic via official OAuth. Switchroom is scaffolding and lifecycle around the CLI you'd run by hand: a Telegram bot, an approval broker, a vault broker, and Docker Compose for supervision. See [`docs/architecture.md`](docs/architecture.md) for the process model and how each layer maps to the `claude` CLI.
 
 ```
 You (Telegram)
@@ -88,7 +88,7 @@ You (Telegram)
            ├─ SQLite history             ├─ Vault broker ◄────────┤   Drive MCP, Playwright MCP, …
            ├─ Card-events.jsonl audit    │   (cron secrets, IPC)  └─ scheduled tasks across reboots
            ├─ Emoji reactions            │
-           └─ Format conversion          └─ Compose restart (Docker) / watchdog (--legacy)
+           └─ Format conversion          └─ Docker Compose restart (unless-stopped)
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for the process model, IPC layout, supervisor choice, and how each layer maps to the `claude` CLI.
@@ -116,7 +116,7 @@ Each agent is a long-running service. They survive reboots, network drops, and y
 
 <p align="center"><img src="docs/diagrams/wake-audit-lifecycle.jpg" width="700" alt="Wake-audit lifecycle: kill, crash-pane snapshot, auto-restart, agent boots with SWITCHROOM_PENDING_TURN, acks with three options"></p>
 
-- **Auto-restart.** Under the default Docker runtime, agent containers come up with `restart: unless-stopped` so a crashed agent comes straight back. Under `--legacy` (systemd), a background watchdog keeps an eye on every agent for stuck turns, dead bridges, and runaway resource use; when it has to act, it captures a **crash pane snapshot** so you can see what the agent was looking at when it died, then auto-recovers with a full audit trail. No silent dropped work.
+- **Auto-restart.** Agent containers come up with `restart: unless-stopped`, and each service has a healthcheck — a crashed or wedged agent is brought back automatically. No silent dropped work.
 - **Resume protocol.** When an agent reboots mid-turn, `start.sh` exports `SWITCHROOM_PENDING_TURN=true` plus the original chat / message ids. The agent's first action on boot is to acknowledge the gap and ask the user how to proceed (start over, summarise and continue, or drop it).
 - **Wake-audit.** On every fresh boot the agent checks for owed replies, orphan sub-agents, and stale in-progress todos. If everything's clean it stays quiet. If it owed you a reply, it tells you.
 - **Token refresh.** Runs unattended for weeks via a `refresh-tick` daemon. Multi-account fallback pool kicks in when the active slot hits its quota window.
@@ -138,7 +138,7 @@ The wedge against OpenClaw and NanoClaw isn't the substrate — it's the stock `
 
 ## Install
 
-Runs on the box you already have. The supported production runtime is Linux + Docker (Ubuntu 24.04 LTS with 4GB RAM is the canonical target; other Linux distros work with minor tweaks). `switchroom apply` scaffolds every agent and writes a `docker-compose.yml` from your `switchroom.yaml`; you bring the fleet up yourself with `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d`. The legacy systemd path is reached via the `switchroom agent` lifecycle verbs. macOS and Windows can run the fleet via Docker Desktop on a best-effort basis for development and demo use, but Linux is the only supported production target.
+Runs on the box you already have. The supported production runtime is Linux + Docker (Ubuntu 24.04 LTS with 4GB RAM is the canonical target; other Linux distros work with minor tweaks). `switchroom apply` scaffolds every agent and writes a `docker-compose.yml` from your `switchroom.yaml`; you bring the fleet up yourself with `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d`. Linux is the only supported production target; macOS (Docker Desktop) is tracked as Phase 3.5 and not yet validated.
 
 > **Heads up on the package name.** The npm package was originally `switchroom-ai`. It's now just `switchroom`. The old name is deprecated and will stop receiving updates — `npm install -g switchroom` is the current path.
 
@@ -183,7 +183,8 @@ Then:
 switchroom setup                                        # interactive Telegram wiring
 switchroom agent create coach --profile health-coach    # scaffold your first agent
 switchroom auth login coach                             # link your Pro or Max session
-switchroom agent start coach                            # go
+switchroom apply                                        # write docker-compose.yml
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 ```
 
 After the last command you talk to the agent from Telegram. You don't touch the server again.
@@ -204,7 +205,7 @@ If you already have Telegram credentials in `~/.switchroom/switchroom.yaml`, ski
 ```bash
 switchroom agent create coach --profile health-coach
 switchroom auth login coach
-switchroom agent start coach
+switchroom apply && docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 ```
 
 ## Example configuration
@@ -251,7 +252,7 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
 
 ## Vault broker (cron secrets)
 
-Scheduled tasks run headless via `systemd --user` timers, so they can't prompt for the vault passphrase. The vault broker is a long-running user-level systemd unit that holds the vault decrypted in memory after a one-time interactive unlock. Cron tasks fetch the specific keys they declare via a unix socket. The passphrase never sits on disk.
+Scheduled tasks run headless inside the agent container, so they can't prompt for the vault passphrase. The vault broker is a long-running container (`switchroom-broker`) that holds the vault decrypted in memory after a one-time interactive unlock. Cron tasks fetch the specific keys they declare via a host-shared unix socket. The passphrase never sits on disk.
 
 **Declare per-cron secrets in `switchroom.yaml`:**
 
@@ -269,17 +270,18 @@ agents:
 **Bootstrap once per host:**
 
 ```bash
-switchroom apply                        # installs the broker systemd unit
+switchroom apply                        # writes broker into docker-compose.yml
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d switchroom-broker
 switchroom vault broker unlock          # prompt for passphrase, primes broker
 ```
 
 Or just run `switchroom vault get <key>` from a TTY. The broker offers to take the unlocked state with `[Y/n]` so you don't have to remember a separate unlock command.
 
-**Identity model.** On Linux, the broker reads `/proc/<pid>/cgroup` to find the connecting cron's systemd unit (`switchroom-<agent>-cron-<i>.service`). Cgroup membership is set by systemd as root and is unspoofable from userspace, so a compromised agent cannot pose as another agent's cron and read its keys. macOS and other platforms degrade to UID-only via the socket file mode 0600. Fine for desktop use, not recommended for production cron.
+**Identity model.** The broker reads `/proc/<pid>/cgroup` on the host to find the connecting cron's container (`switchroom-<agent>-scheduler` or `switchroom-<agent>`), which Docker sets unspoofably from userspace, so a compromised agent cannot pose as another agent's cron and read its keys. macOS (Docker Desktop) degrades to UID-only via the socket file mode 0600. Fine for desktop use, not recommended for production cron.
 
-The broker locks on `SIGTERM` (so a `restart` zeros the in-memory state) and on demand via `switchroom vault broker lock`. Use `switchroom vault get <key> --no-broker` to bypass and prompt locally.
+The broker locks on `SIGTERM` (so a container restart zeros the in-memory state) and on demand via `switchroom vault broker lock`. Use `switchroom vault get <key> --no-broker` to bypass and prompt locally.
 
-Unit installed at `~/.config/systemd/user/switchroom-vault-broker.service`.
+Broker socket lives at `~/.switchroom/vault-broker.sock` (host-mounted into every agent container).
 
 ### Auto-unlock on boot (opt-in)
 
@@ -313,7 +315,7 @@ switchroom agent reconcile <name|all>         # Re-apply switchroom.yaml (withou
 switchroom agent start|stop|restart <name>    # Lifecycle (with preflight)
 switchroom agent interrupt <name>             # Cancel in-flight turn without restarting
 switchroom agent rename <old> <new>           # Rename an agent slug (#168)
-switchroom agent destroy <name>               # Tear down systemd units + scaffold dir
+switchroom agent destroy <name>               # Remove from compose + scaffold dir
 switchroom agent attach <name>                # Interactive tmux session
 switchroom agent logs <name> [-f]             # View logs
 switchroom agent grant <name> <tool>          # Grant a tool permission
@@ -326,7 +328,7 @@ Profiles live in `profiles/` at the repo root. Bundled ones for `--profile`: `co
 `switchroom agent create <name> --profile <profile>` does two things in one step:
 
 1. Adds an entry to `switchroom.yaml` under `agents:` with `extends: <profile>` and a derived `topic_name` (capitalized agent name). Edit the yaml afterwards to change the topic name, emoji, tools, etc.
-2. Scaffolds the agent directory and installs the systemd unit (same as running `agent create` on an entry that already exists in yaml).
+2. Scaffolds the agent directory and registers the agent in `docker-compose.yml` on next `switchroom apply` (same as running `agent create` on an entry that already exists in yaml).
 
 If the agent is already in yaml, `--profile` must match the existing `extends:` value or it errors. If the yaml entry has no `extends:` and you pass `--profile`, the flag is written in additively with a warning. Running `agent create` with no `--profile` on a missing entry keeps the old "Agent not defined in switchroom.yaml" error, now with a hint to use `--profile`.
 

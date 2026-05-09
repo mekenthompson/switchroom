@@ -259,6 +259,8 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`    cap_add:`);
   lines.push(`      - "CHOWN"`);
   lines.push(`      - "FOWNER"`);
+  lines.push(`    environment:`);
+  lines.push(`      SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH: /state/vault-auto-unlock`);
   lines.push(`    volumes:`);
   for (const a of describeAgents(config)) {
     lines.push(`      - broker-${a.name}-sock:/run/switchroom/broker/${a.name}`);

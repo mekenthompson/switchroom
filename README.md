@@ -293,7 +293,7 @@ By default, the broker holds the unlocked state in memory only. Every restart (h
 switchroom vault broker enable-auto-unlock   # one-time setup, prompts for passphrase
 ```
 
-Done. The wizard prompts for your vault passphrase, encrypts it with AES-256-GCM keyed off `/etc/machine-id`, writes the result to `~/.config/switchroom/auto-unlock.bin` (mode 0600), flips `vault.broker.autoUnlock: true` in `switchroom.yaml`, restarts the broker, and verifies the vault came up unlocked. Every subsequent boot the broker reads + decrypts + unlocks itself.
+Done. The wizard prompts for your vault passphrase, encrypts it with AES-256-GCM keyed off `/etc/machine-id`, writes the result to `~/.switchroom/vault-auto-unlock` (mode 0600), flips `vault.broker.autoUnlock: true` in `switchroom.yaml`, restarts the broker, and verifies the vault came up unlocked. Every subsequent boot the broker reads + decrypts + unlocks itself.
 
 Disable with `switchroom vault broker disable-auto-unlock`.
 

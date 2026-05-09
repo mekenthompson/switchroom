@@ -221,8 +221,8 @@ export function readAutoUnlockFile(filePath: string): string {
 }
 
 /**
- * Default location for the auto-unlock blob. Picked so it doesn't collide
- * with systemd-creds' `~/.config/credstore.encrypted/` (different mechanism,
- * different file format) and lives under switchroom's own namespace.
+ * Default location for the auto-unlock blob. Lives under ~/.switchroom
+ * so it's co-located with other operator state and easily mounted into
+ * the broker container by the compose definition.
  */
-export const DEFAULT_AUTO_UNLOCK_PATH = "~/.config/switchroom/auto-unlock.bin";
+export const DEFAULT_AUTO_UNLOCK_PATH = "~/.switchroom/vault-auto-unlock";

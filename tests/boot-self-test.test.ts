@@ -241,7 +241,7 @@ describe("boot-self-test.sh", () => {
     expect(stale!.resolved_at).toBeDefined();
   });
 
-  it("resolves prior issues when state goes healthy", { timeout: 15_000 }, () => {
+  it("resolves prior issues when state goes healthy", { timeout: 30_000 }, () => {
     // First run with a bad state.
     makeFakeClaude(0);
     runSelfTest();

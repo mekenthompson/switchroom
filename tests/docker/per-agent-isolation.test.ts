@@ -49,6 +49,7 @@ import {
   newRunId,
   injectLabelsIntoCompose,
   safeLabelTeardown,
+  mergeServiceEnv,
 } from "./_label-helpers.js";
 
 const RUN_ID = newRunId();
@@ -141,6 +142,9 @@ function makeConfig(agents: string[]): SwitchroomConfig {
  *  a sleep loop so we can `docker exec` into them. */
 function buildTestCompose(agents: string[], cfgPath: string): string {
   let yml = generateCompose({ config: makeConfig(agents), imageTag: TAG });
+  // Generator emits ghcr.io/switchroom/switchroom-<name>:<tag>; locally
+  // built test images are tagged switchroom/<name>:phase1b-test.
+  yml = yml.replace(/ghcr\.io\/switchroom\/switchroom-/g, "switchroom/");
   yml = yml.replace(/ghcr\.io\/switchroom\//g, "switchroom/");
   yml = yml
     .replace(/- \$\{HOME\}\/\.switchroom\/vault:\/state\/vault\b/g, "- vault-state:/state/vault")
@@ -155,14 +159,14 @@ function buildTestCompose(agents: string[], cfgPath: string): string {
       `$1    entrypoint: ["/usr/bin/tini", "--", "sh", "-c", "while true; do sleep 60; done"]\n`,
     );
   }
-  yml = yml.replace(
-    /(  vault-broker:\s*\n)/,
-    `$1    environment:\n      SWITCHROOM_CONFIG: /state/config/switchroom.yaml\n      SWITCHROOM_BROKER_ALLOW_NON_LINUX: "1"\n`,
-  );
-  yml = yml.replace(
-    /(  approval-kernel:\s*\n)/,
-    `$1    environment:\n      SWITCHROOM_CONFIG: /state/config/switchroom.yaml\n      SWITCHROOM_KERNEL_DB_PATH: /state/approvals/kernel.db\n`,
-  );
+  yml = mergeServiceEnv(yml, "vault-broker", [
+    `      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`,
+    `      SWITCHROOM_BROKER_ALLOW_NON_LINUX: "1"`,
+  ]);
+  yml = mergeServiceEnv(yml, "approval-kernel", [
+    `      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`,
+    `      SWITCHROOM_KERNEL_DB_PATH: /state/approvals/kernel.db`,
+  ]);
   yml = yml.replace(/(  vault-broker:[\s\S]*?volumes:\n)/, `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`);
   yml = yml.replace(/(  approval-kernel:[\s\S]*?volumes:\n)/, `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`);
   yml += "  vault-state:\n  approvals-state:\n  scheduler-state:\n  agent-state:\n  claude-state:\n";

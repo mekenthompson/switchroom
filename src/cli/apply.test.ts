@@ -162,4 +162,97 @@ describe("runApply", () => {
     expect(res.agentsTotal).toBe(1);
     expect(res.composePath).toBe(outPath);
   });
+
+  describe("--only=<agent> (v0.7.7 — one-at-a-time cutover)", () => {
+    // The full v0.6 → v0.7 cutover chowns every agent's state dir to a
+    // per-agent UID; that breaks the systemd-managed siblings until
+    // they're stopped. --only=<name> scopes scaffold + chown to one
+    // agent so siblings keep running while operators migrate piecemeal.
+    function multiAgentConfig(agentsDir: string): SwitchroomConfig {
+      return {
+        agents: {
+          alice: { profile: "engineer", claudeAccount: "default" },
+          bob: { profile: "engineer", claudeAccount: "default" },
+          carol: { profile: "engineer", claudeAccount: "default" },
+        },
+        profiles: {},
+        defaults: {},
+        switchroom: { agents_dir: agentsDir },
+        telegram: { forum_chat_id: "0" },
+      } as unknown as SwitchroomConfig;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let scaffoldSpy: any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let alignSpy: any;
+
+    beforeEach(() => {
+      scaffoldSpy = vi
+        .spyOn(scaffoldModule, "scaffoldAgent")
+        .mockImplementation(() => ({ created: [] }) as never);
+      alignSpy = vi
+        .spyOn(scaffoldModule, "alignAgentUid")
+        .mockImplementation(() => ({ chowned: true, paths: [] }));
+    });
+
+    afterEach(() => {
+      scaffoldSpy.mockRestore();
+      alignSpy.mockRestore();
+    });
+
+    it("scaffolds + aligns only the named agent (siblings untouched)", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "switchroom-apply-only-"));
+      const outPath = join(dir, "docker-compose.yml");
+
+      await runApply(
+        multiAgentConfig(join(dir, "agents")),
+        { outPath, only: "bob", nonInteractive: true },
+        { writeOut: () => {}, writeErr: () => {} },
+      );
+
+      // Only `bob` got scaffolded + aligned — alice and carol are
+      // still on whatever state they had before (presumably v0.6 systemd).
+      expect(scaffoldSpy).toHaveBeenCalledTimes(1);
+      expect(scaffoldSpy.mock.calls[0]![0]).toBe("bob");
+      expect(alignSpy).toHaveBeenCalledTimes(1);
+      expect(alignSpy.mock.calls[0]![0]).toBe("bob");
+    });
+
+    it("regenerates compose for the FULL fleet even with --only", async () => {
+      // Compose still needs every agent in YAML for the broker/kernel
+      // per-agent socket volumes to be emitted. Otherwise --only=alice
+      // would silently strip bob/carol from the compose and break their
+      // post-cutover sockets.
+      const dir = await mkdtemp(join(tmpdir(), "switchroom-apply-only-"));
+      const outPath = join(dir, "docker-compose.yml");
+
+      const res = await runApply(
+        multiAgentConfig(join(dir, "agents")),
+        { outPath, only: "alice", nonInteractive: true },
+        { writeOut: () => {}, writeErr: () => {} },
+      );
+
+      const composeYml = await readFile(outPath, "utf-8");
+      // All three agent services in the compose, regardless of --only.
+      expect(composeYml).toMatch(/agent-alice:/);
+      expect(composeYml).toMatch(/agent-bob:/);
+      expect(composeYml).toMatch(/agent-carol:/);
+      // agentsTotal still reflects the YAML, not the --only narrow.
+      expect(res.agentsTotal).toBe(3);
+    });
+
+    it("rejects --only=<unknown-name> with an actionable error", async () => {
+      const dir = await mkdtemp(join(tmpdir(), "switchroom-apply-only-"));
+      const outPath = join(dir, "docker-compose.yml");
+
+      await expect(
+        runApply(
+          multiAgentConfig(join(dir, "agents")),
+          { outPath, only: "frank", nonInteractive: true },
+          { writeOut: () => {}, writeErr: () => {} },
+        ),
+      ).rejects.toThrow(/--only=frank.*no such agent/);
+    });
+  });
 });

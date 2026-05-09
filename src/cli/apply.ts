@@ -80,6 +80,25 @@ export interface ApplyOptions {
    * unless the operator opts into the unsafe path.
    */
   allowUnaligned?: boolean;
+  /**
+   * Restrict apply to a single agent — scaffold + UID-align ONLY this
+   * agent's state dir, leaving every other agent untouched. Compose is
+   * still regenerated for the full fleet so the singletons (broker,
+   * kernel, scheduler) match yaml; we just don't touch the other agents'
+   * state dirs.
+   *
+   * Why: a v0.6 → v0.7 cutover that aligns every agent's UID at once
+   * will break every agent that's currently running under systemd —
+   * systemd-user is uid 1000; the post-align dirs are owned by per-agent
+   * UIDs (10001-10999), which kenthompson can no longer execute or
+   * write to. The fleet-wide chown is correct after a clean stop, but
+   * during a partial cutover where other agents are still systemd-managed,
+   * `--only=<name>` is the safe one-at-a-time path.
+   *
+   * The migration playbook is: stop systemd <name>, `apply --only=<name>`,
+   * compose-up <name>, validate, repeat for next agent.
+   */
+  only?: string;
 }
 
 export interface ApplyDeps {
@@ -235,9 +254,31 @@ export async function runApply(
   runApplyPreflight(config);
 
   const agentsDir = resolveAgentsDir(config);
-  const agentNames = Object.keys(config.agents);
+  const allAgentNames = Object.keys(config.agents);
+
+  // --only=<name> narrows the scaffold+align loop to a single agent.
+  // Compose generation still walks the FULL fleet (all 8 agents are in
+  // the YAML; the singletons need to know about each named agent for
+  // the per-agent socket volumes). Only the per-agent state-dir touches
+  // are scoped.
+  if (options.only !== undefined && !allAgentNames.includes(options.only)) {
+    throw new Error(
+      `apply --only=${options.only}: no such agent in switchroom.yaml. ` +
+      `Defined agents: ${allAgentNames.join(", ")}.`,
+    );
+  }
+  const agentNames =
+    options.only !== undefined ? [options.only] : allAgentNames;
 
   writeOut(chalk.bold("\nApplying switchroom config...\n"));
+  if (options.only !== undefined) {
+    writeOut(
+      chalk.gray(
+        `  (--only=${options.only}: scaffolding/aligning this agent only; ` +
+        `compose still covers all ${allAgentNames.length})\n`,
+      ),
+    );
+  }
 
   // ── 1. Scaffold each agent ────────────────────────────────────────
   let scaffolded = 0;
@@ -371,7 +412,7 @@ export async function runApply(
 
   return {
     scaffolded,
-    agentsTotal: agentNames.length,
+    agentsTotal: allAgentNames.length,
     composePath,
     composeBytes,
   };
@@ -450,6 +491,10 @@ export function registerApplyCommand(program: Command): void {
       "--allow-unaligned",
       "Treat UID-alignment chown failures as warnings instead of hard errors. Unsafe: an unaligned state dir will break the agent on first write. Use only if you know you'll fix ownership out-of-band.",
     )
+    .option(
+      "--only <agent>",
+      "Restrict scaffold + UID-alignment to a single agent (compose still covers the full fleet). Use during a v0.6 → v0.7 cutover to migrate agents one at a time without breaking the systemd-managed siblings.",
+    )
     .action(
       async (opts: {
         buildLocal?: boolean | string;
@@ -457,6 +502,7 @@ export function registerApplyCommand(program: Command): void {
         example?: string;
         nonInteractive?: boolean;
         allowUnaligned?: boolean;
+        only?: string;
       }) => {
         try {
           if (opts.example) {
@@ -483,6 +529,7 @@ export function registerApplyCommand(program: Command): void {
               example: opts.example,
               nonInteractive: opts.nonInteractive ?? false,
               allowUnaligned: opts.allowUnaligned ?? false,
+              only: opts.only,
             },
             {},
             switchroomConfigPath,

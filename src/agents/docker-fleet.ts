@@ -18,6 +18,7 @@
 
 import { resolve } from "node:path";
 import { mkdirSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { generateCompose } from "./compose.js";
 import type { SwitchroomConfig } from "../config/schema.js";
@@ -79,9 +80,15 @@ export function bringUpAgentService(
 
   const compose =
     opts.generateComposeContent?.() ??
-    generateCompose({ config: opts.config });
+    // PR-A1 made compose interpolation use absolute HOME paths instead of
+    // ${HOME}; that fix requires threading homeDir through to
+    // generateCompose. Without it, sudo'd `agent add` would re-write
+    // compose.yml with /root/-rooted paths.
+    generateCompose({ config: opts.config, homeDir: homedir() });
   const composePath = resolve(composeDir, "docker-compose.yml");
-  writeFileSync(composePath, compose, { mode: 0o644 });
+  // 0o600 matches `switchroom apply` — compose can contain references to
+  // sockets/state under the operator's home and shouldn't be world-readable.
+  writeFileSync(composePath, compose, { mode: 0o600 });
 
   const dockerBin = opts.dockerBin ?? "docker";
   const stdio = opts.stdio ?? "inherit";

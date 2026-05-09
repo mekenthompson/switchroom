@@ -25,7 +25,7 @@ agents:
 Then reconcile + restart that one agent:
 
 ```bash
-switchroom systemd reconcile myagent
+switchroom agent reconcile myagent
 switchroom agent restart myagent
 ```
 
@@ -63,16 +63,17 @@ update configs at your convenience but don't leave it forever.
 
 ## How to verify which supervisor an agent is on
 
+Read the resolved config — `experimental.legacy_pty` is the source of truth:
+
 ```bash
-systemctl --user cat switchroom-<name>.service | grep ^ExecStart=
-# default:  ExecStart=/usr/bin/tmux -L switchroom-<name> ...
-# legacy:   ExecStart=/usr/bin/script -qfc ...
+switchroom config show <name> | grep -A1 experimental
+# default:  legacy_pty: false  (or absent)
+# legacy:   legacy_pty: true
 ```
 
-Or check the unit type:
+Or inspect what the agent container is actually running — under the tmux supervisor the entrypoint launches `tmux -L switchroom-<name>`; under `legacy_pty: true` it falls back to `script -qfc`:
 
 ```bash
-systemctl --user show switchroom-<name>.service -p Type
-# default:  Type=forking
-# legacy:   Type=simple
+docker inspect agent-<name> --format '{{.Config.Cmd}} {{.Config.Entrypoint}}'
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml logs agent-<name> | head -5
 ```

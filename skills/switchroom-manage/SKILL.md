@@ -30,7 +30,7 @@ When the user invokes `/switchroom` or asks to add, create, remove, reinstall, r
 
 ### Add / create a new agent
 
-When the user says "add a new agent", "add an agent to my switchroom setup", or "create a new agent", ask for a name (if not provided) and run `switchroom agent create <name>`. This scaffolds the agent directory, installs systemd timers, and wires it into the config cascade.
+When the user says "add a new agent", "add an agent to my switchroom setup", or "create a new agent", ask for a name (if not provided) and run `switchroom agent create <name>`. This scaffolds the agent directory and wires it into the config cascade. Follow up with `switchroom apply` and `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d` to materialise the new agent + scheduler containers.
 
 ### Reinstall / reprovision agents
 

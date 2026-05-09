@@ -129,8 +129,8 @@ user doesn't have to:
    by the broker, not by claude. No symlinks. No bind mounts. Just an
    atomic-write copy whose only writer is `switchroom-auth-broker`.
 
-4. **`switchroom-auth-broker` is the only writer.** A new systemd user
-   service in the same shape as `vault-broker`. Owns:
+4. **`switchroom-auth-broker` is the only writer.** A long-running
+   container in the same shape as `switchroom-broker` (vault). Owns:
    - the global `~/.switchroom/accounts/<label>/credentials.json` files,
    - the OAuth refresh loop (one POST per account, regardless of how
      many agents use it),

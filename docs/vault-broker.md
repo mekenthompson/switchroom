@@ -1,11 +1,20 @@
 # Vault Broker — ACL model and access guide
 
+> **v0.7 note.** Under v0.7+ the broker runs as the `switchroom-broker`
+> container and authenticates connecting clients by the socket path the
+> connection arrived on (`/run/switchroom/broker/<agent>/sock`,
+> broker-controlled per-agent socket), not by parsing systemd cgroups.
+> The terms "cron unit" / "systemd unit" / cgroup parsing below describe
+> the v0.6 host-native broker; the ACL contract — "only declared cron
+> secrets, only the cron caller for that agent" — is identical, and the
+> per-agent `secrets:` allowlist still drives what each cron can read.
+
 ## What is the vault broker?
 
-The vault broker is a per-user daemon that holds the decrypted vault in memory
-and serves secrets to authorised **switchroom cron units** over a Unix socket
-(`~/.switchroom/vault-broker.sock`).  It avoids re-prompting for the vault
-passphrase on every scheduled run.
+The vault broker is a per-host daemon that holds the decrypted vault in
+memory and serves secrets to authorised **switchroom scheduler containers**
+over a Unix socket. It avoids re-prompting for the vault passphrase on
+every scheduled run.
 
 The broker is **not** a general-purpose secret server.  It only serves callers
 it can positively identify as a switchroom cron unit — it does not serve

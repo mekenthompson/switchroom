@@ -127,9 +127,21 @@ export async function main(): Promise<void> {
   const entries = filterForSingleton(allEntries, config);
   const skipped = allEntries.length - entries.length;
   if (skipped > 0) {
+    // Log the per-agent names too — Phase 3.4's audit-parity check
+    // correlates by (agent, schedule_index, prompt_key), and an
+    // operator pulling `docker logs switchroom-cron` should be able
+    // to confirm "yes the singleton skipped exactly the canary
+    // agents" without cross-referencing the YAML.
+    const skippedAgents = [
+      ...new Set(
+        allEntries
+          .filter((e) => !entries.includes(e))
+          .map((e) => e.agent),
+      ),
+    ].sort();
     process.stdout.write(
       `scheduler: skipping ${skipped} task(s) for inline-scheduled agents ` +
-      `(experimental.inline_scheduler=true)\n`,
+      `[${skippedAgents.join(", ")}] (experimental.inline_scheduler=true)\n`,
     );
   }
   const sink: AuditSink = pickSink({

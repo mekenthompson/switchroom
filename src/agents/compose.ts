@@ -552,9 +552,10 @@ function emitAgentService(
   // true on this agent, set the env var so start.sh's third supervised
   // sidecar (the agent-scheduler bundle, gated by the same env var)
   // starts on boot. Mutual-exclusion with the singleton is enforced on
-  // the OTHER side: src/scheduler/index.ts:main() reads the same
-  // resolved config field and skips entries for agents where it's true,
-  // so we never dual-fire.
+  // the OTHER side: src/scheduler/index.ts:main() calls
+  // `filterForSingleton(collectScheduleEntries(config), config)` to
+  // drop entries for inline-scheduled agents before registering its
+  // cron loop, so we never dual-fire.
   if (a.inlineScheduler) {
     env.SWITCHROOM_INLINE_SCHEDULER = "1";
   }

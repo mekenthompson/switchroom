@@ -23,6 +23,29 @@
  * Lifecycle: caller invokes `acquire(path)` at startup; on graceful
  * shutdown calls `release(path)`. Hard kill (SIGKILL) leaves the
  * pidfile behind, but the next start's stale-PID detection clears it.
+ *
+ * Known limitation — PID reuse across container restarts. The lockfile
+ * lives on the bind-mounted /state/agent path so it survives a hard
+ * container kill. Inside an agent container PID density is low (tini=1,
+ * supervised siblings in single digits), so after SIGKILL leaves a
+ * pidfile pointing at, say, PID 23, the new container generation may
+ * have a sibling at PID 23 — `kill(23, 0)` succeeds, the new
+ * agent-scheduler exits with EX_TEMPFAIL, and the supervisor restarts
+ * it until something inside the container churns enough to free that
+ * PID. Bounded by the supervisor's restart-cap (10 in 60s), after
+ * which the supervisor gives up — and because the singleton has been
+ * filtered to skip this agent (mutual exclusion), cron tasks for it
+ * stop firing from EITHER path until the operator intervenes (e.g.
+ * `switchroom agent restart <name>` once, which clears the in-memory
+ * supervisor state).
+ *
+ * Phase 4 follow-up: add a boot-time freshness check by reading PID
+ * 1's start time from /proc/1/stat (field 22, starttime in clock-
+ * ticks since boot) plus btime from /proc/stat, and treat lockfiles
+ * older than that as stale regardless of PID liveness. Not done in
+ * Phase 3 because the post-cap missed-cron window is bounded by the
+ * canary observation period — by the time we'd hit it in production,
+ * Phase 4 will have shipped the fix or rolled back the canary.
  */
 
 import {

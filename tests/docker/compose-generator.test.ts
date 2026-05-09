@@ -656,3 +656,48 @@ describe("describeAgents", () => {
     }
   });
 });
+
+describe("Phase 3: inline_scheduler env emission", () => {
+  /**
+   * Build a config with a per-agent experimental.inline_scheduler flag.
+   * The makeConfig helper above doesn't model experimental, so we
+   * splice in the field after construction.
+   */
+  function configWithInline(agents: Record<string, boolean>): SwitchroomConfig {
+    const base = makeConfig(
+      Object.fromEntries(Object.keys(agents).map((n) => [n, {}])),
+    );
+    for (const [name, inline] of Object.entries(agents)) {
+      const a = base.agents[name] as unknown as Record<string, unknown>;
+      if (inline) a.experimental = { inline_scheduler: true };
+    }
+    return base;
+  }
+
+  it("emits SWITCHROOM_INLINE_SCHEDULER=1 ONLY for agents with the flag", () => {
+    const out = generateCompose({
+      config: configWithInline({ alice: true, bob: false }),
+    });
+    // Both agent service blocks exist — split so we can inspect each in
+    // isolation. The order is alphabetical (allocateAgentUid + sort).
+    const aliceBlock = out.split("agent-bob:")[0]!;
+    const bobBlock = out.split("agent-bob:")[1]!;
+    expect(aliceBlock).toContain('SWITCHROOM_INLINE_SCHEDULER: "1"');
+    expect(bobBlock).not.toContain("SWITCHROOM_INLINE_SCHEDULER");
+  });
+
+  it("does not emit the env var when no agent has the flag (back-compat)", () => {
+    const out = generateCompose({
+      config: configWithInline({ alice: false, bob: false }),
+    });
+    expect(out).not.toContain("SWITCHROOM_INLINE_SCHEDULER");
+  });
+
+  it("describeAgents surfaces inlineScheduler on each agent record", () => {
+    const agents = describeAgents(configWithInline({ alice: true, bob: false }));
+    const alice = agents.find((a) => a.name === "alice")!;
+    const bob = agents.find((a) => a.name === "bob")!;
+    expect(alice.inlineScheduler).toBe(true);
+    expect(bob.inlineScheduler).toBe(false);
+  });
+});

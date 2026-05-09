@@ -40,6 +40,7 @@ import {
   createInjectIpcClient,
   type InjectIpcClient,
 } from "./ipc-client.js";
+import { acquireLock, releaseLock } from "./lock.js";
 
 /**
  * Minimum node-cron-shaped surface — same as the host scheduler. The
@@ -191,6 +192,23 @@ export async function main(): Promise<void> {
     ?? join(stateDir, "gateway.sock");
   const jsonlPath = process.env.SWITCHROOM_AGENT_SCHEDULER_JSONL
     ?? "/state/agent/scheduler.jsonl";
+  const lockPath = process.env.SWITCHROOM_AGENT_SCHEDULER_LOCK
+    ?? "/state/agent/scheduler.lock";
+
+  // Phase 3 belt-and-braces dedup: refuse to start if another
+  // agent-scheduler is already running. start.sh's
+  // `_switchroom_supervise` only respawns after the previous instance
+  // exits, so this catches operator-launched second instances and
+  // mis-configured supervisors. Stale-lock detection lives in
+  // acquireLock — see the doc-comment there.
+  const lock = acquireLock(lockPath);
+  if (!lock.acquired) {
+    process.stderr.write(
+      `agent-scheduler: ${agentName} lock at ${lockPath} held by pid ` +
+      `${lock.holderPid ?? "unknown"} — exiting\n`,
+    );
+    process.exit(75); // EX_TEMPFAIL — the supervisor's restart cap handles repeated failures
+  }
 
   const config = loadConfig(configPath);
   const allEntries = collectScheduleEntries(config);
@@ -244,6 +262,7 @@ export async function main(): Promise<void> {
     for (const t of tasks) t.task.stop();
     sink.close();
     ipcClient.close();
+    releaseLock(lockPath);
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);

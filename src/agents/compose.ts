@@ -184,6 +184,16 @@ interface AgentServiceData {
   resources: ResourceDefaults;
   /** Capability extras the operator requested AND we stripped. */
   strippedCaps: string[];
+  /**
+   * Phase 3 canary flag. True when the cascade-resolved
+   * `experimental.inline_scheduler` is true — compose emits
+   * SWITCHROOM_INLINE_SCHEDULER=1 in the agent container's env so
+   * start.sh starts the in-container scheduler sibling, AND the
+   * singleton scheduler's collectScheduleEntries skips this agent
+   * (mutual exclusion: we never dual-fire). False (default) keeps
+   * the agent on the singleton dispatcher.
+   */
+  inlineScheduler: boolean;
 }
 
 /** Per-agent metadata exposed to doctor checks (and tests). */
@@ -196,8 +206,8 @@ export function describeAgents(config: SwitchroomConfig): AgentServiceData[] {
     const uid = allocateAgentUid(name);
     const resources = resolveResourceDefaults(name, profile);
     const strippedCaps = readStrippedCaps(agent);
-    out.push({ name, uid, profile, resources, strippedCaps });
-    void resolved;
+    const inlineScheduler = resolved.experimental?.inline_scheduler === true;
+    out.push({ name, uid, profile, resources, strippedCaps, inlineScheduler });
   }
   return out;
 }
@@ -537,6 +547,16 @@ function emitAgentService(
   // Same env+mount pattern broker/kernel/scheduler already use.
   if (switchroomConfigPath) {
     env.SWITCHROOM_CONFIG = "/state/config/switchroom.yaml";
+  }
+  // Phase 3 cron-fold-in canary. When experimental.inline_scheduler is
+  // true on this agent, set the env var so start.sh's third supervised
+  // sidecar (the agent-scheduler bundle, gated by the same env var)
+  // starts on boot. Mutual-exclusion with the singleton is enforced on
+  // the OTHER side: src/scheduler/index.ts:main() reads the same
+  // resolved config field and skips entries for agents where it's true,
+  // so we never dual-fire.
+  if (a.inlineScheduler) {
+    env.SWITCHROOM_INLINE_SCHEDULER = "1";
   }
   for (const k of Object.keys(env).sort()) {
     lines.push(`      ${k}: ${JSON.stringify(env[k])}`);

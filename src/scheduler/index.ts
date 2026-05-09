@@ -17,6 +17,7 @@ import {
   collectScheduleEntries,
   defaultExecRunner,
   dispatchEntry,
+  filterForSingleton,
   type SchedulerEntry,
 } from "./dispatch.js";
 import {
@@ -116,7 +117,21 @@ export async function main(): Promise<void> {
   const configPath = process.env.SWITCHROOM_CONFIG ?? "/state/config/switchroom.yaml";
   const dbPath = process.env.SWITCHROOM_SCHEDULER_DB ?? "/state/scheduler/scheduler.db.jsonl";
   const config = loadConfig(configPath);
-  const entries = collectScheduleEntries(config);
+  const allEntries = collectScheduleEntries(config);
+  // Phase 3 cron-fold-in dual-run safety: drop entries for agents
+  // whose cascade-resolved `experimental.inline_scheduler` is true.
+  // Those agents run an in-container scheduler sibling and we MUST
+  // NOT also fire for them from the singleton (mutual exclusion).
+  // Phase 4 deletes the singleton entirely; until then, the filter
+  // is what makes one-agent-at-a-time canary safe.
+  const entries = filterForSingleton(allEntries, config);
+  const skipped = allEntries.length - entries.length;
+  if (skipped > 0) {
+    process.stdout.write(
+      `scheduler: skipping ${skipped} task(s) for inline-scheduled agents ` +
+      `(experimental.inline_scheduler=true)\n`,
+    );
+  }
   const sink: AuditSink = pickSink({
     inMemory: process.env.SWITCHROOM_SCHEDULER_INMEMORY === "1",
     sqliteDbPath: process.env.SWITCHROOM_SCHEDULER_DB_PATH,

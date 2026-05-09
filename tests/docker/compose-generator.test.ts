@@ -434,6 +434,40 @@ describe("agent service network (v0.7.4 — host networking)", () => {
   });
 });
 
+describe("agent service tty (v0.7.4 — claude interactive mode)", () => {
+  // Without tty + stdin_open, claude detects no-TTY at boot and falls
+  // back to --print mode, which then errors "Input must be provided
+  // either through stdin or as a prompt argument when using --print"
+  // because start.sh exec's claude with no stdin pipe. Container
+  // crash-loops forever. v0.6's systemd path got the PTY via the
+  // tmux ExecStart wrapper; under docker we ask compose for it.
+  it("emits tty: true and stdin_open: true on every agent service", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    for (const a of ["alice", "bob"]) {
+      const re = new RegExp(`  agent-${a}:[\\s\\S]*?(?=\\n  [a-z])`);
+      const block = re.exec(out)?.[0] ?? "";
+      expect(block, `${a} block`).toMatch(/tty:\s*true/);
+      expect(block, `${a} block`).toMatch(/stdin_open:\s*true/);
+    }
+  });
+
+  it("does NOT emit tty / stdin_open on broker / kernel / scheduler", () => {
+    // Singletons run a long-lived server loop with no stdin reads;
+    // forcing a TTY would just waste a fd.
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+    });
+    for (const svc of ["vault-broker", "approval-kernel", "switchroom-cron"]) {
+      const re = new RegExp(`  ${svc}:[\\s\\S]*?(?=\\n  [a-z]|\\nvolumes:)`);
+      const block = re.exec(out)?.[0] ?? "";
+      expect(block, `${svc} block`).not.toMatch(/^\s+tty:\s*true/m);
+      expect(block, `${svc} block`).not.toMatch(/^\s+stdin_open:\s*true/m);
+    }
+  });
+});
+
 describe("generateCompose — switchroomConfigPath bind-mount (v0.7 P0 fix)", () => {
   // Regression: without the config bind-mount, the broker container boots
   // with `ConfigError: No switchroom.yaml found` and restart-loops. The

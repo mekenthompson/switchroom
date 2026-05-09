@@ -60,6 +60,10 @@ export default defineConfig({
       // sessions. Their tests duplicate the canonical ones and run against
       // stale code — never discover them from the canonical repo.
       "**/.claude/worktrees/**",
+      // UAT harness scenarios (#863) hit real Telegram and must never run
+      // on the default test path. Invoke via `bun run test:uat` from
+      // telegram-plugin/.
+      "**/telegram-plugin/uat/**",
       "**/telegram-plugin/tests/history.test.ts",
       "**/telegram-plugin/tests/ipc-server-client.test.ts",
       "**/telegram-plugin/tests/ipc-server-race.test.ts",

@@ -6,19 +6,60 @@ tree is gone, `bin/bridge-watchdog.sh` is deleted, and `switchroom up`
 / `switchroom init` / `switchroom update` survive only as deprecation
 shims (slated for removal in v0.8).
 
-This guide walks an existing v0.6 deployment to v0.7 with no fleet
-downtime beyond a normal restart.
+This guide walks an existing v0.6 deployment to v0.7. Read all of
+"Before you start" — three of those preconditions look optional but
+will make the migration fail in subtle ways if skipped.
 
 ## Before you start
 
-- **Snapshot your config.** `cp -a ~/.switchroom ~/.switchroom.v0.6.bak`
-  — config, vault, agent state. Cheap insurance.
+- **Snapshot everything.** `cp -a ~/.switchroom ~/.switchroom.v0.6.bak`
+  — config, vault, agent state. Also save your systemd units:
+  `cp -a ~/.config/systemd/user ~/.config/systemd-user.v0.6.bak`.
+  These are your rollback path. Cheap insurance.
+
 - **Note what's running.** `switchroom agent list` (capture the output)
   so you can compare after the migration.
+
 - **Confirm the host has compose v2.** `docker compose version` should
   print `Docker Compose version v2.x`. If you only have the v1 plugin
   (`docker-compose`), install the v2 plugin first — `apply` errors out
   on v1.
+
+- **Enable vault auto-unlock BEFORE Step 3.** v0.7's broker runs in a
+  container with `cap_drop: ALL` plus `CHOWN/FOWNER/DAC_READ_SEARCH`
+  and reads `/etc/machine-id` to derive the AES unlock key. Without an
+  auto-unlock blob, the broker boots locked, agents can't fetch their
+  bot tokens, and the whole fleet sits idle waiting for an interactive
+  unlock that has no terminal. Run:
+
+  ```sh
+  switchroom vault broker enable-auto-unlock
+  ```
+
+  This writes `~/.switchroom/vault-auto-unlock` (a 60-byte file
+  AES-encrypted with `/etc/machine-id`) and survives v0.6 → v0.7
+  unchanged. The blob ships at mode 0600 (operator-owned). v0.7.4+
+  grants `DAC_READ_SEARCH` to the broker container so root-in-broker
+  can read 0600 operator-owned files without `DAC_OVERRIDE`; do not
+  loosen the file mode.
+
+- **Decide cutover mode: all-at-once or one-at-a-time.** v0.7 `apply`
+  chowns every agent's state dir to its per-agent UID (10001-10999)
+  for the bind-mount to be writable from inside the container. If
+  systemd v0.6 agents are still running, the chown breaks them
+  silently — they keep running on FDs they already opened, but the
+  next restart fails because user 1000 (your shell) can no longer
+  read their `start.sh`.
+
+  Pick one:
+    - **All-at-once:** stop the entire systemd fleet (Step 1), `apply`
+      everything, bring the docker fleet up. Brief total outage.
+    - **One-at-a-time:** for each agent, stop its systemd units, run
+      `switchroom apply --only=<name>`, bring up that one container,
+      validate, repeat. Other agents stay on systemd until they're
+      cut over. **The "all-at-once" failure mode is silent and
+      fragile; use `--only=<name>` if your fleet has more than 2-3
+      agents.**
 
 ## Step 1 — Stop the systemd fleet
 
@@ -66,10 +107,31 @@ switchroom --version    # should report 0.7.x
 
 ## Step 3 — Apply + bring the docker fleet up
 
+### All-at-once
+
 ```sh
 switchroom apply
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml pull
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
+```
+
+### One-at-a-time (recommended for fleets > 2 agents)
+
+```sh
+# For EACH agent, in turn:
+AGENT=alice
+systemctl --user stop switchroom-${AGENT} switchroom-${AGENT}-gateway
+switchroom apply --only=${AGENT}
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml \
+  up -d vault-broker approval-kernel agent-${AGENT}
+# (broker + kernel are idempotent; up -d won't restart them once running)
+
+# Validate this agent before moving to the next:
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml \
+  logs --tail 30 agent-${AGENT}
+# Send a Telegram message to the agent and confirm a reply.
+
+# Then repeat with AGENT=bob, etc.
 ```
 
 `switchroom apply` runs the v0.7 preflights (compose-v2 detection,
@@ -78,6 +140,8 @@ writing `~/.switchroom/compose/docker-compose.yml`. If the UID-alignment
 check fails (your agent state dirs are owned by a UID the container
 won't have), either fix the ownership or pass `--allow-unaligned` after
 reading the warning.
+
+### Auto-unlock blob path
 
 If you used auto-unlock under v0.6, move the auto-unlock blob to its
 v0.7 path **before** running `switchroom apply` above (v0.7 changed the
@@ -90,9 +154,30 @@ default location and the v0.6 file won't be picked up otherwise):
 ```
 
 If you've moved the auto-unlock blob (above) the vault broker re-unlocks
-itself inside its new container on first boot. Otherwise you'll be
-prompted for the passphrase on first start; re-run
-`switchroom vault enable-auto-unlock` to restore unattended unlock.
+itself inside its new container on first boot. If you haven't yet
+enabled auto-unlock, re-run `switchroom vault broker enable-auto-unlock`
+**now** — without it, the broker container boots locked and the fleet
+can't start (see "Before you start" preconditions above).
+
+### Image source: pulled (default) or built locally
+
+`switchroom apply` writes a compose file that pulls the agent / broker
+/ kernel / scheduler images from `ghcr.io/switchroom/*:latest`. If you
+want to validate this branch's fixes before the canonical CI republishes
+the GHCR images (the v0.7.6 fix bakes the telegram-plugin bundle into
+the agent image; older `latest` tags don't have it), pass `--build-local`
+so compose builds from your in-tree Dockerfiles:
+
+```sh
+switchroom apply --build-local
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml \
+  build vault-broker approval-kernel agent-${AGENT}
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml \
+  up -d vault-broker approval-kernel agent-${AGENT}
+```
+
+Use `--build-local` on the maintainer's host until ghcr.io is refreshed;
+once the v0.7.6+ images are republished, drop the flag.
 
 ## Step 4 — Verify
 

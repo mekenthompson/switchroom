@@ -506,6 +506,24 @@ function emitAgentService(
     // restart. PATH adjustment that puts this on the search path lives
     // in profiles/_base/start.sh.hbs.
     NPM_CONFIG_PREFIX: "/state/agent/home/.npm-global",
+    // Make `pip install foo` Just Work for agents. Two env vars:
+    //   PIP_USER=1                 — install to ~/.local (writable +
+    //                                persistent via Layer 1) instead of
+    //                                /usr/local site-packages (read-only).
+    //   PIP_BREAK_SYSTEM_PACKAGES=1 — Debian 12 marks the system Python
+    //                                as PEP 668 "externally-managed",
+    //                                so pip refuses even `pip install
+    //                                --user` by default with a confusing
+    //                                "externally-managed-environment"
+    //                                error. The override is explicit +
+    //                                visible in `printenv`.
+    // Without both, an agent's first `pip install polars / pandas /
+    // numpy / claude-sdk` fails with either that error or "Read-only
+    // file system" — neither recoverable from a tool-call retry loop.
+    // With both, packages land in ~/.local/lib and survive container
+    // restart via the /state/agent bind mount.
+    PIP_BREAK_SYSTEM_PACKAGES: "1",
+    PIP_USER: "1",
     SWITCHROOM_AGENT_NAME: a.name,
     SWITCHROOM_BROKER_SOCKET: `/run/switchroom/broker/${a.name}/sock`,
     SWITCHROOM_KERNEL_SOCKET: `/run/switchroom/kernel/${a.name}/sock`,

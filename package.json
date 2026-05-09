@@ -1,7 +1,7 @@
 {
   "name": "switchroom",
-  "version": "0.5.2",
-  "description": "Run Claude Code 24/7 on your Claude Pro/Max subscription over Telegram. Open-source alternative to OpenClaw and NanoClaw — no API keys, no Docker.",
+  "version": "0.7.1",
+  "description": "Run Claude Code 24/7 on your Claude Pro/Max subscription over Telegram. Open-source alternative to OpenClaw and NanoClaw — no API keys.",
   "type": "module",
   "bin": {
     "switchroom": "./dist/cli/switchroom.js"

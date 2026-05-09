@@ -278,6 +278,11 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   if (switchroomConfigPath) {
     lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);
   }
+  // Vault file path inside the container. Set explicitly so the broker
+  // does NOT fall back to its `~/.switchroom/vault.enc` default — which
+  // would resolve `~` against the container's HOME (/root) instead of
+  // the operator's HOME on the host.
+  lines.push(`      SWITCHROOM_VAULT_PATH: /state/vault.enc`);
   lines.push(`      SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH: /state/vault-auto-unlock`);
   lines.push(`    volumes:`);
   for (const a of describeAgents(config)) {
@@ -286,16 +291,20 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   if (switchroomConfigPath) {
     lines.push(`      - ${switchroomConfigPath}:/state/config/switchroom.yaml:ro`);
   }
-  lines.push(`      - ${homePrefix}/.switchroom/vault:/state/vault`);
+  // Vault file mounted directly (not as a parent directory) — the host
+  // file is `~/.switchroom/vault.enc`, NOT `~/.switchroom/vault/*`.
+  // The earlier `${HOME}/.switchroom/vault:/state/vault` mount caused
+  // docker to auto-create an empty root-owned `~/.switchroom/vault`
+  // directory on the host (the v0.7.0 install bug) which the broker
+  // then "loaded" as a missing vault — restart-loop on every boot.
+  lines.push(`      - ${homePrefix}/.switchroom/vault.enc:/state/vault.enc:ro`);
   // Auto-unlock blob (encrypted with /etc/machine-id-derived key).
   // Mounted read-only — the broker only ever reads the blob; rotation
   // is performed by the host CLI (`switchroom vault broker enable-auto-unlock`)
-  // followed by a `docker compose restart vault-broker`. Mount source
-  // is the host file path `~/.switchroom/vault-auto-unlock` (the
-  // DEFAULT_AUTO_UNLOCK_PATH constant in src/vault/auto-unlock.ts).
-  // Compose treats a missing source as an empty directory — the broker
-  // detects that and falls back to the interactive unlock flow, so
-  // operators who never enabled auto-unlock are unaffected.
+  // followed by a `docker compose restart vault-broker`. Compose treats
+  // a missing source as an empty directory — the broker detects that
+  // and falls back to the interactive unlock flow, so operators who
+  // never enabled auto-unlock are unaffected.
   lines.push(`      - ${homePrefix}/.switchroom/vault-auto-unlock:/state/vault-auto-unlock:ro`);
   lines.push(``);
 
@@ -442,9 +451,25 @@ function emitAgentService(
   // invariant on every regenerated compose.
   lines.push(`      - broker-${a.name}-sock:/run/switchroom/broker`);
   lines.push(`      - kernel-${a.name}-sock:/run/switchroom/kernel`);
+  // Dual mounts — the same host directory is bound BOTH at the canonical
+  // container path (`/state/agent`, `/state/.claude`, `/var/log/switchroom`)
+  // AND at the original host path. Why both:
+  //   - `/state/*` paths are baked into the Dockerfile (Dockerfile.agent's
+  //     CMD is `/state/agent/start.sh`; tini ENTRYPOINT calls into it).
+  //     Removing the canonical paths would break the existing v0.7.0
+  //     image without rebuilding it.
+  //   - Same-path mounts let scaffolded start.sh / settings.json (which
+  //     bake the absolute host path of agentDir at scaffold time) Just
+  //     Work inside the container. The host path in `cd "$agentDir"`
+  //     resolves to the same file the bind mount points at.
+  // Dual-mount is the smallest viable fix that unblocks v0.7.0 installs
+  // without an image rebuild + republish.
   lines.push(`      - ${homePrefix}/.switchroom/agents/${a.name}:/state/agent`);
   lines.push(`      - ${homePrefix}/.claude/projects/${a.name}:/state/.claude`);
   lines.push(`      - ${homePrefix}/.switchroom/logs/${a.name}:/var/log/switchroom`);
+  lines.push(`      - ${homePrefix}/.switchroom/agents/${a.name}:${homePrefix}/.switchroom/agents/${a.name}`);
+  lines.push(`      - ${homePrefix}/.claude/projects/${a.name}:${homePrefix}/.claude/projects/${a.name}`);
+  lines.push(`      - ${homePrefix}/.switchroom/logs/${a.name}:${homePrefix}/.switchroom/logs/${a.name}`);
   lines.push(``);
   void imageTag;
 }

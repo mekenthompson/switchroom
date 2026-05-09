@@ -82,7 +82,7 @@ describe("`up` and `init` delegate to runApply with a yellow deprecation warning
 
     // Warning printed (chalk yellow leaves the text intact)
     expect(warnSpy).toHaveBeenCalled();
-    const banner = warnSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    const banner = warnSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("\n");
     expect(banner).toMatch(/switchroom up is deprecated/);
     expect(banner).toMatch(/use `switchroom apply`/);
     expect(runApply).toHaveBeenCalledOnce();
@@ -94,7 +94,7 @@ describe("`up` and `init` delegate to runApply with a yellow deprecation warning
     registerInitCommand(program);
     await program.parseAsync(["node", "switchroom", "init", "--example", "minimal"]);
 
-    expect(warnSpy.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(
+    expect(warnSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("\n")).toMatch(
       /switchroom init is deprecated/,
     );
     expect(runApply).toHaveBeenCalledOnce();
@@ -105,9 +105,17 @@ describe("`up` and `init` delegate to runApply with a yellow deprecation warning
 });
 
 describe("`update` removed-shim exit codes", () => {
-  let warnSpy: ReturnType<typeof vi.spyOn>;
-  let errSpy: ReturnType<typeof vi.spyOn>;
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  // process.exit's signature `(code?) => never` doesn't unify with the
+  // generic `ReturnType<typeof vi.spyOn>` MockInstance shape — vitest's
+  // generic for spyOn refuses the never return type. Let TS infer the
+  // narrow types directly off the assignments instead of pinning them
+  // to the generic placeholder.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let warnSpy: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let errSpy: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let exitSpy: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -133,7 +141,7 @@ describe("`update` removed-shim exit codes", () => {
       /__exit_1/,
     );
 
-    const errBanner = errSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    const errBanner = errSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("\n");
     expect(errBanner).toMatch(/switchroom update is removed in v0\.7/);
     expect(errBanner).toMatch(/docker compose .* pull/);
     expect(errBanner).toMatch(/switchroom apply/);
@@ -150,7 +158,7 @@ describe("`update` removed-shim exit codes", () => {
       program.parseAsync(["node", "switchroom", "update", "--phase", "post-build"]),
     ).rejects.toThrow(/__exit_0/);
 
-    const warnBanner = warnSpy.mock.calls.map((c) => String(c[0])).join("\n");
+    const warnBanner = warnSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("\n");
     expect(warnBanner).toMatch(/post-build/);
     expect(warnBanner).toMatch(/no longer supported/);
     expect(warnBanner).toMatch(/Restart manually/);

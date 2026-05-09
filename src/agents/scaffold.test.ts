@@ -57,6 +57,14 @@ describe("alignAgentUid", () => {
     vi.restoreAllMocks();
   });
 
+  // The agent state dir AND the per-agent log dir
+  // (~/.switchroom/logs/<name>) are both chowned to the agent UID. The
+  // log dir was added in #880 — without it, the in-container supervised
+  // gateway and autoaccept-poll sidecars exit silently because their
+  // log redirects (`>> /var/log/switchroom/...`) hit the bind-mounted
+  // root-owned dir as a non-root agent UID.
+  const expectedLogsDir = join(homedir(), ".switchroom", "logs", "agent");
+
   it("still runs recursive chown even when the top-level dir is already owned (subtree may be stale)", () => {
     // The previous behaviour was a fast-path no-op when statSync said the
     // top-level was already aligned. That hid stale uid 1000 entries
@@ -71,11 +79,11 @@ describe("alignAgentUid", () => {
     });
 
     expect(res.chowned).toBe(true);
-    expect(res.paths).toEqual(["/fake/state/agent"]);
+    expect(res.paths).toEqual(["/fake/state/agent", expectedLogsDir]);
     expect(mockedExecFileSync).toHaveBeenCalledTimes(1);
     const [bin, args] = mockedExecFileSync.mock.calls[0];
     expect(bin).toBe("chown");
-    expect(args).toEqual(["-R", "10042:10042", "/fake/state/agent"]);
+    expect(args).toEqual(["-R", "10042:10042", "/fake/state/agent", expectedLogsDir]);
   });
 
   it("tries unprivileged chown first, returns success when it works", () => {
@@ -91,7 +99,7 @@ describe("alignAgentUid", () => {
     expect(mockedExecFileSync).toHaveBeenCalledTimes(1);
     const [bin, args] = mockedExecFileSync.mock.calls[0];
     expect(bin).toBe("chown");
-    expect(args).toEqual(["-R", "10042:10042", "/fake/state/agent"]);
+    expect(args).toEqual(["-R", "10042:10042", "/fake/state/agent", expectedLogsDir]);
   });
 
   it("falls back to `sudo chown` when unprivileged chown fails (EPERM)", () => {
@@ -119,6 +127,7 @@ describe("alignAgentUid", () => {
       "-R",
       "10042:10042",
       "/fake/state/agent",
+      expectedLogsDir,
     ]);
   });
 
@@ -150,7 +159,7 @@ describe("alignAgentUid", () => {
     expect(mockedExecFileSync).not.toHaveBeenCalled();
   });
 
-  it("returns immediately with no paths when the agentDir does not exist", () => {
+  it("returns immediately with no paths when neither agentDir nor the logs dir exists", () => {
     mockedExistsSync.mockReturnValue(false);
 
     const res = alignAgentUid("agent", "/missing/agent", 10042, {
@@ -163,11 +172,30 @@ describe("alignAgentUid", () => {
     expect(mockedExecFileSync).not.toHaveBeenCalled();
   });
 
+  it("still chowns when only the logs dir exists (legacy state-only paths absent)", () => {
+    // existsSync returns true for /fake/state/agent (the call argument
+    // sequence in alignAgentUid is agentDir then logsDir).
+    mockedExistsSync.mockImplementation((p) => p !== "/fake/state/agent");
+    mockedStatSync.mockReturnValue({ uid: 1000, gid: 1000 } as never);
+    mockedExecFileSync.mockImplementationOnce(() => Buffer.from(""));
+
+    const res = alignAgentUid("agent", "/fake/state/agent", 10042, {
+      writeOut: () => {},
+      confirm: false,
+    });
+
+    expect(res.chowned).toBe(true);
+    expect(res.paths).toEqual([expectedLogsDir]);
+    const [bin, args] = mockedExecFileSync.mock.calls[0];
+    expect(bin).toBe("chown");
+    expect(args).toEqual(["-R", "10042:10042", expectedLogsDir]);
+  });
+
   // PR-D1 / v0.7 coverage gap #4 — when alignAgentUid actually shells
-  // chown, it must record the prior owner of the top-level dir to
+  // chown, it must record the prior owner of every top-level path to
   // ~/.switchroom/.uid-alignment.log so a future rollback can restore
   // exact ownership without guessing.
-  it("appends `<iso-ts> <dir> <prior-uid>:<prior-gid> -> <new>:<new>` to .uid-alignment.log when prior owner differs", () => {
+  it("appends one log line per top-level path whose prior owner differs from the target uid", () => {
     mockedStatSync.mockReturnValue({ uid: 1000, gid: 1000 } as never);
     mockedExecFileSync.mockImplementationOnce(() => Buffer.from(""));
 
@@ -176,14 +204,23 @@ describe("alignAgentUid", () => {
       confirm: false,
     });
 
-    expect(mockedAppendFileSync).toHaveBeenCalledOnce();
-    const [logPath, line] = mockedAppendFileSync.mock.calls[0]!;
-    expect(logPath).toBe(join(homedir(), ".switchroom", ".uid-alignment.log"));
-    expect(typeof line).toBe("string");
-    // Shape: <iso-ts> <dir> <prior-uid>:<prior-gid> -> <new>:<new>\n
-    expect(line as string).toMatch(
-      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \/fake\/state\/agent 1000:1000 -> 10042:10042\n$/,
-    );
+    // Two paths chowned (state dir + logs dir), so two audit lines.
+    expect(mockedAppendFileSync).toHaveBeenCalledTimes(2);
+    for (const call of mockedAppendFileSync.mock.calls) {
+      const [logPath, line] = call;
+      expect(logPath).toBe(join(homedir(), ".switchroom", ".uid-alignment.log"));
+      expect(typeof line).toBe("string");
+      // Shape: <iso-ts> <path> <prior-uid>:<prior-gid> -> <new>:<new>\n
+      expect(line as string).toMatch(
+        /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z \S+ 1000:1000 -> 10042:10042\n$/,
+      );
+    }
+    // One line per chowned path: state dir AND logs dir each appear.
+    const linesText = mockedAppendFileSync.mock.calls
+      .map((c) => c[1] as string)
+      .join("");
+    expect(linesText).toContain("/fake/state/agent");
+    expect(linesText).toContain(expectedLogsDir);
 
     // The log dir must be ensured ahead of the append (ENOENT-safe).
     expect(mockedMkdirSync).toHaveBeenCalledWith(

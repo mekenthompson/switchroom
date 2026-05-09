@@ -35,17 +35,13 @@ against the live agent container. The agent's MCP tools (Telegram, Vault, etc.) 
 | `model` | No | `claude-sonnet-4-6` | Model for this task |
 | `secrets` | No | `[]` | Vault keys this task may read via the broker. See [configuration.md#vault-broker-linux-only](configuration.md#vault-broker-linux-only). |
 
-> **`suppress_stdout` was removed in [#269](https://github.com/switchroom/switchroom/issues/269).** All cron tasks now route their Telegram message through the MCP `reply` tool — see below.
+> **`suppress_stdout` was removed in [#269](https://github.com/switchroom/switchroom/issues/269).** All cron tasks route their Telegram message through the MCP `reply` tool the agent already uses for interactive turns.
 
 ### How cron tasks deliver to Telegram
 
-Cron-scheduled tasks run as one-shot `claude -p` invocations with no live Telegram session. The cron script:
+Cron-scheduled tasks run as one-shot `claude -p` invocations with no live Telegram session. The scheduler executes the configured `prompt` directly — there is no shell-level prompt wrapping, no `HEARTBEAT_OK` sentinel, and no stdout redirection. If the task has something to say, the model calls `mcp__switchroom-telegram__reply` itself; the scheduler captures stdout only to populate the audit-log `output_summary` column.
 
-1. Wraps the configured `prompt` with delivery guidance instructing the model to call `mcp__switchroom-telegram__reply` with the chat ID and emit `HEARTBEAT_OK` to stdout.
-2. Executes `claude -p` with stdout routed to `/dev/null` so the discarded `HEARTBEAT_OK` (and any incidental model output) never reaches Telegram.
-3. The MCP `reply` tool applies the same markdown→HTML conversion, smart chunking, and sanitization as a live session — output renders identically regardless of trigger.
-
-If a cron task has nothing meaningful to say (data is dull, all signals nominal), the model emits `HEARTBEAT_OK` without calling `reply`. A silent heartbeat is correct behaviour, not an error — the user is not pinged unnecessarily.
+The MCP `reply` tool applies the same markdown→HTML conversion, smart chunking, and sanitization as a live session, so output renders identically regardless of trigger. If the task has nothing meaningful to deliver (data is dull, all signals nominal), the model can simply not call `reply` — a silent run is correct behaviour, not an error.
 
 This replaces the previous flow (raw `claude -p` stdout piped through `curl ... -d parse_mode=HTML`), which produced broken markdown rendering on phones (literal `**asterisks**`) and the duplicate-message bug tracked in [#251](https://github.com/switchroom/switchroom/issues/251).
 

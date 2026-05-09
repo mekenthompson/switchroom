@@ -144,6 +144,37 @@ RUN ARCH="$(uname -m)" \
  && rm -rf /tmp/bun /tmp/bun.zip \
  && bun --version >&2
 
+# Pre-seed /etc/passwd + /etc/group entries for the entire allocator
+# UID range (10001..10999 — see src/agents/compose.ts:AGENT_UID_MIN/MAX
+# and allocateAgentUid). Without these, a container running as one of
+# those UIDs has no passwd entry, which:
+#
+#   - `whoami` fails with "cannot find name for user ID NNN"
+#   - `id` shows uid=NNN with no name; `groups` is empty
+#   - Python's `pwd.getpwuid()` and `getpass.getuser()` raise KeyError
+#     (breaks `pip`, several stdlib paths, and tools that use them)
+#   - `git` warns "Author identity unknown" and (worse) some git
+#     subcommands silently use a fabricated email like agent@hostname
+#   - SSH from the container fails to map the UID to a username,
+#     surfacing as "no user" errors against some servers
+#
+# Runtime fixes (writing to /etc/passwd from start.sh) are blocked by
+# the read-only root fs that Layer 1 deliberately preserves; nss_wrapper
+# adds an LD_PRELOAD dependency we don't want. Baking 999 entries at
+# image-build time costs ~50 KB total and zero runtime cost.
+#
+# Each entry maps to HOME=/state/agent/home and shell=/bin/bash to match
+# the compose-generated env. The `name` column is `agent<UID>` so the
+# username never needs lookup ergonomics — operators always identify
+# agents by container name (`switchroom-<slug>`), not username.
+RUN set -eu \
+ && for uid in $(seq 10001 10999); do \
+      printf 'agent%s:x:%s:%s:switchroom agent:/state/agent/home:/bin/bash\n' "$uid" "$uid" "$uid" >> /etc/passwd; \
+      printf 'agent%s:x:%s:\n' "$uid" "$uid" >> /etc/group; \
+    done \
+ && chmod 644 /etc/passwd /etc/group \
+ && tail -n 1 /etc/passwd >&2
+
 # Default workdir; overridden by per-image Dockerfile if needed.
 WORKDIR /opt/switchroom
 

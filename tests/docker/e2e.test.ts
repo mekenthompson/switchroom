@@ -238,6 +238,78 @@ describe.skipIf(!dockerOk || !allImagesPresent)(
       expect(`${r.stderr}${r.stdout}`).toMatch(/read-only file system/i);
     });
 
+    it("base image resolves an agent UID via /etc/passwd (whoami / id / pwd.getpwuid all work)", () => {
+      // Layer 1 followup: agent containers run with UIDs 10001..10999 from
+      // src/agents/compose.ts:allocateAgentUid. Without /etc/passwd entries
+      // for that range, whoami fails, getpass.getuser() raises KeyError, and
+      // git complains about unknown identity. The base Dockerfile bakes
+      // 999 entries; this test pins both ends of the range plus the middle.
+      for (const uid of [10001, 10500, 10999]) {
+        const r = spawnSync(
+          "docker",
+          [
+            "run", "--rm", ...LABELS_ARGV,
+            "--user", String(uid),
+            "--entrypoint", "sh", IMAGES.base, "-c",
+            // whoami exits non-zero if no passwd entry; getent passwd
+            // confirms the entry shape. Use a fully-shell-quoted body so
+            // neither the host shell nor the JS template literal mangles
+            // the substitution.
+            `whoami && getent passwd ${uid} && python3 -c 'import pwd; print(pwd.getpwuid(${uid}).pw_name)'`,
+          ],
+          { encoding: "utf8" },
+        );
+        expect(r.status, `uid=${uid} stderr=${r.stderr}`).toBe(0);
+        expect(r.stdout).toContain(`agent${uid}`);
+      }
+    });
+
+    it("agent image gives uid 10001 a writable HOME at /state/agent/home (Layer 1)", () => {
+      // The whole point of Layer 1: HOME points inside the bind-mount
+      // root rather than the read-only "/" that an unmapped UID gets by
+      // default. We can't test the bind mount in isolation here (this
+      // test runs the bare image, not via compose), so we mount a tmpfs
+      // at /state/agent and confirm HOME=$path-on-tmpfs is writable
+      // when set in env. Compose itself is exercised by the
+      // compose-generator tests; this asserts the *image* end of the
+      // contract — that an unmapped UID + read-only root + an explicit
+      // HOME env still produces a write-capable shell.
+      const r = spawnSync(
+        "docker",
+        [
+          "run", "--rm", ...LABELS_ARGV,
+          "--read-only",
+          "--user", "10001",
+          "--tmpfs", "/state/agent:rw,uid=10001,mode=755",
+          "--tmpfs", "/tmp:rw,size=16m,mode=1777",
+          "-e", "HOME=/state/agent/home",
+          "--entrypoint", "sh", IMAGES.agent, "-c",
+          'mkdir -p "$HOME" && touch "$HOME/.gitconfig" && echo OK',
+        ],
+        { encoding: "utf8" },
+      );
+      expect(r.status, `stderr=${r.stderr} stdout=${r.stdout}`).toBe(0);
+      expect(r.stdout).toContain("OK");
+    });
+
+    it("base image has Tier 1 tools on PATH (gh, ripgrep, fd, jq, pip, git, less, nano)", () => {
+      // Pin the Tier 1 list — anything missing here is a regression in
+      // docker/Dockerfile.base. These are the tools Claude reaches for
+      // in the first 10 turns of a typical session; failing to install
+      // them in base forces every agent to wait 30+s on apt-get on
+      // first use, which torpedoes the boot-card "ready" promise.
+      const r = spawnSync(
+        "docker",
+        [
+          "run", "--rm", ...LABELS_ARGV, "--entrypoint", "sh", IMAGES.base, "-c",
+          'for c in gh rg fd jq pip3 git less nano dig ping nc tree file; do command -v "$c" || echo "MISSING:$c"; done',
+        ],
+        { encoding: "utf8" },
+      );
+      expect(r.status, `stderr=${r.stderr}`).toBe(0);
+      expect(r.stdout).not.toMatch(/^MISSING:/m);
+    });
+
     it("agent image with cap_drop=ALL blocks mount (mount -t tmpfs → EPERM)", () => {
       const r = spawnSync(
         "docker",

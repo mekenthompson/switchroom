@@ -415,6 +415,23 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
       /NPM_CONFIG_PREFIX:\s*"\/state\/agent\/home\/\.npm-global"/,
     );
   });
+
+  // Layer 1 followup: PEP 668. Debian 12's system Python is marked
+  // externally-managed, which makes `pip install --user foo` refuse
+  // even though Layer 1 made ~/.local writable. Both env vars together
+  // route writes to ~/.local (PIP_USER) and override the PEP 668 guard
+  // (PIP_BREAK_SYSTEM_PACKAGES). Without both, an agent's first
+  // `pip install` fails opaquely inside a tool-call retry loop.
+  it("sets PIP_USER + PIP_BREAK_SYSTEM_PACKAGES so `pip install foo` lands in ~/.local", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    for (const a of ["alice", "bob"]) {
+      const env = envBlockFor(out, a);
+      expect(env).toMatch(/PIP_USER:\s*"1"/);
+      expect(env).toMatch(/PIP_BREAK_SYSTEM_PACKAGES:\s*"1"/);
+    }
+  });
 });
 
 describe("agent service network (v0.7.4 — host networking)", () => {

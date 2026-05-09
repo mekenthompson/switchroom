@@ -1965,6 +1965,53 @@ export function scaffoldAgent(
   });
   ensureClaudeMdSymlinks(phase5WorkspaceDir, created);
 
+  // --- Persistent agent HOME (Layer 1) ---
+  // The container has read-only root + a numeric UID with no
+  // /etc/passwd entry, so HOME defaults to "/" — every tool that
+  // writes to ~/.config / ~/.cache / ~/.local fails outright.
+  // compose.ts sets HOME=/state/agent/home; this section creates that
+  // directory inside the existing /state/agent bind mount and seeds
+  // a minimal .bashrc / .profile so attached interactive shells get
+  // the same PATH/NPM env as start.sh sets for non-interactive
+  // children.
+  //
+  // All seeds are writeIfMissing — agents (and operators) can
+  // customize freely without losing changes on `switchroom apply`.
+  const persistentHomeDir = join(agentDir, "home");
+  mkdirSync(persistentHomeDir, { recursive: true });
+  for (const sub of [".local/bin", ".npm-global", "bin"]) {
+    mkdirSync(join(persistentHomeDir, sub), { recursive: true });
+  }
+  const homeEnvBlock = [
+    "# switchroom Layer 1: per-agent persistent HOME.",
+    "# These exports mirror profiles/_base/start.sh.hbs so attached",
+    "# interactive shells see the same PATH and npm-global prefix as",
+    "# the agent's non-interactive child processes.",
+    'export PATH="$HOME/.local/bin:$HOME/bin:$HOME/.npm-global/bin:$PATH"',
+    'export NPM_CONFIG_PREFIX="$HOME/.npm-global"',
+    "",
+  ].join("\n");
+  writeIfMissing(
+    join(persistentHomeDir, ".profile"),
+    () => homeEnvBlock,
+    created,
+    skipped,
+  );
+  writeIfMissing(
+    join(persistentHomeDir, ".bashrc"),
+    () =>
+      [
+        "# switchroom Layer 1: agent .bashrc.",
+        "# Defers to .profile for the env so login + non-login shells",
+        "# stay in lockstep. Edit freely — `switchroom apply` will not",
+        "# overwrite this file once it exists.",
+        '[ -f "$HOME/.profile" ] && . "$HOME/.profile"',
+        "",
+      ].join("\n"),
+    created,
+    skipped,
+  );
+
   // --- Initialize workspace as git repo (Phase 4) ---
   const workspaceDir = join(agentDir, "workspace");
   initWorkspaceGitRepo(workspaceDir, name);

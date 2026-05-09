@@ -388,6 +388,33 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
       );
     }
   });
+
+  // Layer 1 (persistent agent HOME). The agent container runs as a
+  // numeric UID with no /etc/passwd entry; without HOME pointed at a
+  // writable dir, every tool that writes ~/.config / ~/.cache / ~/.local
+  // fails on the read-only root fs. compose.ts pins HOME inside the
+  // existing /state/agent bind mount so writes survive restart, and
+  // sets NPM_CONFIG_PREFIX so `npm install -g` lands under HOME instead
+  // of /usr/local (which is read-only).
+  it("sets HOME=/state/agent/home on each agent container", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    for (const a of ["alice", "bob"]) {
+      const env = envBlockFor(out, a);
+      expect(env).toMatch(/HOME:\s*"\/state\/agent\/home"/);
+    }
+  });
+
+  it("sets NPM_CONFIG_PREFIX under HOME so npm -g installs persist", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {} }),
+    });
+    const env = envBlockFor(out, "alice");
+    expect(env).toMatch(
+      /NPM_CONFIG_PREFIX:\s*"\/state\/agent\/home\/\.npm-global"/,
+    );
+  });
 });
 
 describe("agent service network (v0.7.4 — host networking)", () => {

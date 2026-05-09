@@ -457,6 +457,17 @@ function emitAgentService(
   lines.push(`    network_mode: host`);
   lines.push(`    restart: unless-stopped`);
   lines.push(`    init: false`);
+  // PTY allocation — claude's interactive mode requires a TTY at stdin
+  // (the alt-screen UI, autoaccept-poll keystrokes, and the `--print`
+  // fallback's stdin check). Without these the container boots, claude
+  // detects "no TTY → fall back to --print", immediately errors
+  // "Input must be provided either through stdin or as a prompt
+  // argument when using --print", tini exits, and the container
+  // restarts forever. Equivalent to `docker run -it`. v0.6's systemd
+  // path got the PTY for free via the tmux ExecStart wrapper; under
+  // docker we ask compose for it directly.
+  lines.push(`    tty: true`);
+  lines.push(`    stdin_open: true`);
   lines.push(`    stop_grace_period: 45s`);
   lines.push(`    user: "${a.uid}:${a.uid}"`);
   lines.push(`    mem_limit: ${a.resources.memLimit}`);

@@ -19,11 +19,14 @@
     "start:source": "bun server.ts",
     "start:dist": "bun dist/server.js",
     "build": "node scripts/build.mjs",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test:uat": "vitest run --config ../vitest.uat.config.ts",
+    "uat:login": "bun uat/login.ts"
   },
   "dependencies": {
     "@grammyjs/runner": "^2.0.3",
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@mtcute/node": "^0.27.0",
     "@secretlint/core": "^12.2.0",
     "@secretlint/secretlint-rule-preset-recommend": "^12.2.0",
     "@secretlint/types": "^12.2.0",

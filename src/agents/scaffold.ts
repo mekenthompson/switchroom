@@ -108,38 +108,54 @@ export function alignAgentUid(
   opts: AlignAgentUidOptions = {},
 ): { chowned: boolean; paths: string[] } {
   const writeOut = opts.writeOut ?? ((s: string) => process.stdout.write(s));
+
+  // The agent state dir is the primary target. We also align the per-agent
+  // log dir (~/.switchroom/logs/<name>) — Dockerfile.agent creates
+  // /var/log/switchroom as root:root 0755, the compose volume mount
+  // inherits that ownership, and start.sh's docker-mode supervisor forks
+  // gateway and autoaccept-poll sidecars whose `>> /var/log/switchroom/*.log`
+  // redirects fail silently as the in-container agent UID. Without the
+  // log dir chowned to the agent UID, the sidecars exit immediately at
+  // boot and the agent comes up without autoaccept or the gateway daemon.
+  // See #880.
+  const logsDir = join(homedir(), ".switchroom", "logs", name);
   const paths: string[] = [];
   if (existsSync(agentDir)) paths.push(agentDir);
+  if (existsSync(logsDir)) paths.push(logsDir);
   if (paths.length === 0) return { chowned: false, paths: [] };
 
-  // No fast-path: a previous `apply` may have aligned the top-level dir
+  // No fast-path: a previous `apply` may have aligned the top-level dirs
   // while leaving stale uid 1000 entries deep in the subtree (e.g. the
   // operator dropped files in via sudo, or a v0.6 → v0.7 migration
   // chowned the root but skipped a child). `chown -R` is idempotent and
   // cheap, so we always run it. Pre-`chown` we record the prior owner of
-  // the top-level dir to ~/.switchroom/.uid-alignment.log so rollback
+  // each top-level path to ~/.switchroom/.uid-alignment.log so rollback
   // can restore precise ownership without guessing.
-  let priorUid: number | undefined;
-  let priorGid: number | undefined;
-  try {
-    const st = statSync(agentDir);
-    priorUid = st.uid;
-    priorGid = st.gid;
-  } catch { /* unreadable — skip the audit log entry */ }
+  const priors: Array<{ path: string; uid: number; gid: number } | { path: string; uid: undefined; gid: undefined }> = [];
+  for (const p of paths) {
+    try {
+      const st = statSync(p);
+      priors.push({ path: p, uid: st.uid, gid: st.gid });
+    } catch {
+      priors.push({ path: p, uid: undefined, gid: undefined });
+    }
+  }
 
   if (opts.dryRun) return { chowned: false, paths };
 
-  if (priorUid !== undefined && priorGid !== undefined && (priorUid !== uid || priorGid !== uid)) {
-    try {
-      const logPath = join(homedir(), ".switchroom", ".uid-alignment.log");
-      mkdirSync(join(homedir(), ".switchroom"), { recursive: true });
-      const ts = new Date().toISOString();
-      appendFileSync(
-        logPath,
-        `${ts} ${agentDir} ${priorUid}:${priorGid} -> ${uid}:${uid}\n`,
-      );
-    } catch { /* best-effort audit; never block alignment */ }
-  }
+  try {
+    const logPath = join(homedir(), ".switchroom", ".uid-alignment.log");
+    mkdirSync(join(homedir(), ".switchroom"), { recursive: true });
+    const ts = new Date().toISOString();
+    for (const prior of priors) {
+      if (prior.uid !== undefined && prior.gid !== undefined && (prior.uid !== uid || prior.gid !== uid)) {
+        appendFileSync(
+          logPath,
+          `${ts} ${prior.path} ${prior.uid}:${prior.gid} -> ${uid}:${uid}\n`,
+        );
+      }
+    }
+  } catch { /* best-effort audit; never block alignment */ }
 
   if (opts.confirm !== false && process.stdin.isTTY) {
     // Interactive prompt: explain why we're shelling sudo. We use
@@ -147,7 +163,7 @@ export function alignAgentUid(
     // appears on the operator's terminal.
     writeOut(
       chalk.gray(
-        `  · aligning ${name} state dir ownership to uid ${uid} (sudo chown)\n`,
+        `  · aligning ${name} state + log dir ownership to uid ${uid} (sudo chown)\n`,
       ),
     );
   }
@@ -156,7 +172,7 @@ export function alignAgentUid(
   try {
     // Recursive chown via shell — node's fs.chownSync isn't recursive
     // and rolling our own walk just to fall back to sudo is wasted code.
-    execFileSync("chown", ["-R", `${uid}:${uid}`, agentDir], {
+    execFileSync("chown", ["-R", `${uid}:${uid}`, ...paths], {
       stdio: ["ignore", "ignore", "pipe"],
     });
     return { chowned: true, paths };
@@ -169,13 +185,13 @@ export function alignAgentUid(
   }
 
   try {
-    execFileSync("sudo", ["chown", "-R", `${uid}:${uid}`, agentDir], {
+    execFileSync("sudo", ["chown", "-R", `${uid}:${uid}`, ...paths], {
       stdio: "inherit",
     });
     return { chowned: true, paths };
   } catch {
     throw new Error(
-      `alignAgentUid: sudo chown failed for ${agentDir} (target uid ${uid}). Run manually: sudo chown -R ${uid}:${uid} ${agentDir}`,
+      `alignAgentUid: sudo chown failed for ${paths.join(", ")} (target uid ${uid}). Run manually: sudo chown -R ${uid}:${uid} ${paths.join(" ")}`,
     );
   }
 }
@@ -1697,7 +1713,14 @@ export function scaffoldAgent(
   }
 
   // --- Render and write base templates ---
-  writeIfMissing(
+  // start.sh is purely template-driven (no user-merged sections), so it
+  // must be regenerated whenever the template changes. writeIfMissing
+  // would skip an existing file regardless of whether the template has
+  // since gained new content (e.g. v0.7.5 added the docker-mode tmux
+  // preamble — agents whose start.sh predated that release booted
+  // without the preamble after `apply --only=<name>` because the file
+  // already existed). See #879.
+  writeIfChanged(
     join(agentDir, "start.sh"),
     () => renderTemplate(join(basePath, "start.sh.hbs"), context),
     created,
@@ -3536,6 +3559,29 @@ function writeIfMissing(
     return;
   }
   writeFileSync(filePath, contentFn(), mode !== undefined ? { encoding: "utf-8", mode } : "utf-8");
+  created.push(filePath);
+}
+
+// Content-aware write for purely template-driven files (see #879).
+// Reads existing content, renders fresh, writes only when different.
+// Existing-and-changed counts as "created" for the caller's running
+// total — `apply`'s "N files created" line then truthfully reflects
+// that the file was rewritten, instead of silently reporting
+// "up to date" when the template has drifted.
+function writeIfChanged(
+  filePath: string,
+  contentFn: () => string,
+  created: string[],
+  skipped: string[],
+  mode?: number,
+): void {
+  const next = contentFn();
+  const prev = existsSync(filePath) ? readFileSync(filePath, "utf-8") : null;
+  if (prev === next) {
+    skipped.push(filePath);
+    return;
+  }
+  writeFileSync(filePath, next, mode !== undefined ? { encoding: "utf-8", mode } : "utf-8");
   created.push(filePath);
 }
 

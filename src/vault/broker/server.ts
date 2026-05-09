@@ -392,9 +392,39 @@ export class VaultBroker {
     }
 
     return new Promise((resolveP, rejectP) => {
-      // Remove stale socket if present (race-safe: parent dir 0700 by main).
+      // Reset the parent dir back to root:root 0700 BEFORE binding (#881).
+      // Subdir-shape paths like /run/switchroom/broker/<agent>/sock have
+      // a parent dir backed by a docker named volume; on a previous
+      // successful bind we chowned that dir to the agent UID 10xxx 0700
+      // (see post-listen chown below). On a fresh broker container — a
+      // common path during v0.6 → v0.7 cutover and on any compose-config
+      // change — root with cap_drop=ALL + cap_add=[CHOWN,FOWNER,
+      // DAC_READ_SEARCH] does NOT hold CAP_DAC_OVERRIDE and cannot
+      // unlink stale sockets or create new ones inside a 10xxx-owned
+      // 0700 dir. CAP_CHOWN succeeds regardless, so chown'ing the dir
+      // back to root recovers from the stale state.
+      if (abs.endsWith("/sock")) {
+        const dir = abs.slice(0, -"/sock".length);
+        if (existsSync(dir)) {
+          try { chownSync(dir, 0, 0); } catch { /* outside docker / no CAP_CHOWN */ }
+          try { chmodSync(dir, 0o700); } catch { /* idempotent */ }
+        }
+      }
+      // Remove stale socket if present.
       if (existsSync(abs)) {
-        try { unlinkSync(abs); } catch { /* ignore */ }
+        try {
+          unlinkSync(abs);
+        } catch (err) {
+          // Don't swallow silently (#881). Surface the path + errno so
+          // an operator chasing a "Failed to listen" can see *why* the
+          // stale socket couldn't be cleaned up. Continue to listen()
+          // either way: it will fail with the same root cause but the
+          // diagnostic breadcrumb is now in the log.
+          const msg = err instanceof Error ? err.message : String(err);
+          process.stderr.write(
+            `[vault-broker] could not unlink stale socket agent=${agentName} sock=${abs}: ${msg}\n`,
+          );
+        }
       }
       const server = net.createServer((sock) => {
         this._handleDataConnection(sock, abs, agentName);

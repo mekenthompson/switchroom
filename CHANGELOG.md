@@ -1,5 +1,104 @@
 # Changelog
 
+## v0.7.7 — Docker migration: completed for fresh installs
+
+This release completes the v0.6 → v0.7 docker migration. v0.7.0–7.3
+shipped the compose generator, lifecycle dockerization, and broker
+IPC; v0.7.4–7.7 close the gaps that prevented a fresh install from
+working end-to-end. After this release, a new operator can install
+switchroom, run `switchroom apply` + `docker compose up -d`, and
+exchange Telegram messages with their first agent without any host-
+side systemd, no dev checkout, and no manual sidecar wiring.
+
+The full set of fixes since v0.7.0:
+
+**v0.7.4 — broker hardening (#872, #873).**
+
+- Broker container regains `DAC_READ_SEARCH` so root-in-container
+  can read host-owned (mode 0600) `vault.enc` and `vault-auto-unlock`
+  files that the surrounding `cap_drop: ALL` would otherwise block.
+- `/etc/machine-id` is bind-mounted from host into the broker so
+  the in-container AES key derivation matches what the host's
+  `enable-auto-unlock` produced.
+- The compose generator emits `/run/switchroom/broker/<agent>/sock`
+  per agent (subdir form, matching the kernel pattern); the broker
+  enumeration now accepts both flat `<agent>.sock` files and the
+  subdir shape, and chowns sockets to the agent UID so non-root
+  agent containers can connect.
+- Agent containers run with `network_mode: host` so scaffolded
+  `start.sh` reaches hindsight at `127.0.0.1:18888` and operator
+  LAN devices unchanged from v0.6.
+- python3 added to the agent base image so the hindsight memory
+  plugin's session_end / session_start hooks work.
+- `tty: true` + `stdin_open: true` on agent compose services so
+  claude's interactive mode allocates a PTY and doesn't fall through
+  to `--print` mode (which immediately errors with no stdin).
+
+**v0.7.5 — in-container tmux supervisor (#874).**
+
+- v0.6 ran tmux + autoaccept-poll outside the agent process (systemd
+  ExecStart wrapped in tmux, ExecStartPost spawned the poller on the
+  host). v0.7 dockerized neither piece: claude blocked forever on
+  the dev-channels acknowledge prompt and `switchroom agent attach`
+  failed with no tmux server inside the container.
+- `profiles/_base/start.sh.hbs` now has a docker-mode preamble that,
+  on first entry under tini, forks autoaccept-poll as a sidecar and
+  re-execs into tmux with the same script as the inner command.
+  Inside tmux the marker is set, the preamble is skipped, and claude
+  starts normally with a real PTY at stdin.
+- `docker/Dockerfile.agent` bakes the autoaccept-poll bundle to
+  `/opt/switchroom/autoaccept-poll.js` so start.sh has a stable
+  in-image path regardless of host install layout.
+
+**v0.7.6 — gateway daemon + plugin baking (#875).**
+
+- The MCP sidecar that claude spawns for the `switchroom-telegram`
+  channel exits at boot if no gateway daemon is reachable: "no
+  gateway socket; check `systemctl --user status switchroom-telegram-
+  gateway`". v0.6 ran the gateway as a sibling systemd unit; v0.7
+  had no equivalent.
+- `start.sh.hbs`'s docker preamble now also forks
+  `bun /opt/switchroom/telegram-plugin/dist/gateway/gateway.js` as
+  a supervised sidecar (under a small `_switchroom_supervise` bash
+  helper that respawns on crash with a 10-restarts-in-60s cap).
+- `docker/Dockerfile.agent` bakes the telegram-plugin (`dist/`,
+  `start.js`, `package.json`) into `/opt/switchroom/telegram-plugin/`.
+- `scaffold.ts` emits a docker-mode `.mcp.json` (new `dockerMode?`
+  parameter on `scaffoldAgent` and `reconcileAgent`) that points
+  `--cwd` at the in-image path, `SWITCHROOM_CLI_PATH` at the
+  in-image binary, and `SWITCHROOM_CONFIG` at the bind mount.
+- The compose generator bind-mounts `switchroom.yaml` into each
+  agent service so the gateway daemon can shell out to the
+  switchroom CLI with `--config`.
+
+**v0.7.7 — operator UX (#876).**
+
+- `switchroom apply --only=<agent>` for one-at-a-time cutover.
+  Scopes scaffold + UID-align to one agent so siblings still on
+  systemd keep running while operators migrate piecemeal. Compose
+  still walks the full fleet so per-agent socket volumes for
+  not-yet-cutover agents stay correct in YAML.
+- `docs/operators/migration-v0.7.md` rewritten from the field:
+  auto-unlock as a hard precondition, all-at-once vs one-at-a-time
+  guidance, image-source clarification (`pull` vs `--build-local`),
+  expanded snapshot step including systemd unit files.
+
+**Also in this release window:**
+
+- `agent list` reports correctly on host-shell systemd fleets
+  during the v0.6 → v0.7 transition (#871). Was: every agent
+  appeared `inactive`. v0.7 PR-C1 had docker-only-ized
+  `getAgentStatus` without keeping the systemd branch.
+- Manifest drift cleared (#871).
+
+**Upgrade path for v0.7.0–v0.7.3 fleets:** rebuilt GHCR images
+(`ghcr.io/switchroom/switchroom-{base,agent,broker,kernel,scheduler}:v0.7.7`)
+include all of the above. `switchroom apply && docker compose pull
+&& docker compose up -d` picks up the new images on existing fleets.
+Read the updated migration doc — auto-unlock is now a hard
+precondition (was an optional knob) and the compose chown loop has
+the new `--only` flag.
+
 ## v0.7.3 — Runtime detection + audit fixes
 
 Closes the v0.7.2 audit findings that survived into the released code.

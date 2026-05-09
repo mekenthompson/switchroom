@@ -248,6 +248,12 @@ export async function runApply(
   for (const name of agentNames) {
     const agentConfig = config.agents[name];
     try {
+      // apply ALWAYS generates a docker compose file (that's its whole
+      // job in v0.7+), so the rendered .mcp.json should reference the
+      // in-image telegram-plugin path the agent container will see, not
+      // the host's switchroom install path. Pass dockerMode=true here so
+      // a fresh user (no dev checkout, no host npm-global) gets a
+      // working agent on first compose-up.
       const result = scaffoldAgent(
         name,
         agentConfig,
@@ -256,6 +262,7 @@ export async function runApply(
         config,
         undefined,
         switchroomConfigPath,
+        true,
       );
       const detail =
         result.created.length > 0

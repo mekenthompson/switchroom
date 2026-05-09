@@ -265,6 +265,11 @@ export async function runApply(
       `  docker compose -p ${COMPOSE_PROJECT} -f ${composePath} pull && \\\n` +
       `    docker compose -p ${COMPOSE_PROJECT} -f ${composePath} up -d\n`,
   );
+  writeOut(
+    chalk.gray(
+      `  (If pull returns 401, login to ghcr.io first: see docs/operators/install.md#ghcr-auth)\n`,
+    ),
+  );
 
   writeOut(
     chalk.bold(

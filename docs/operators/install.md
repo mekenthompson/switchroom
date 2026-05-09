@@ -96,6 +96,31 @@ docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
   `depends_on` healthcheck. Inspect with `docker compose -p switchroom
   ps` in another terminal.
 
+<a id="ghcr-auth"></a>
+## GHCR auth
+
+Switchroom's container images are intended to be public on
+`ghcr.io/switchroom/...`. If you've forked the repo, or if the org's
+package visibility is set to private, anonymous `docker pull` will
+return `401 Unauthorized`. The fix is to authenticate Docker against
+GHCR with a personal access token that has `read:packages` scope. The
+easiest path uses the GitHub CLI:
+
+```sh
+# Mint a token with read:packages scope (interactive, one-time).
+gh auth login --hostname github.com --scopes read:packages
+
+# Hand the token to docker. -u must be your GitHub username.
+gh auth token | docker login ghcr.io -u "$(gh api user -q .login)" --password-stdin
+```
+
+Subsequent `docker compose pull` calls will reuse the credential cached
+in `~/.docker/config.json`. To clear it: `docker logout ghcr.io`.
+
+If you don't have `gh` available, mint a classic PAT via the GitHub
+web UI (Settings → Developer settings → Personal access tokens →
+`read:packages`) and pipe it into `docker login ghcr.io -u <user> --password-stdin` directly.
+
 ## Related
 
 - `runtime-mode.md` — Docker is the only supported runtime in v0.7+.

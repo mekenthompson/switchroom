@@ -875,6 +875,18 @@ const profileFields = {
           "Opt the autoaccept gateway back into the legacy expect-script behaviour " +
           "instead of the tmux send-keys path. Default: false.",
         ),
+      inline_scheduler: z
+        .boolean()
+        .optional()
+        .describe(
+          "Phase 3 canary flag for the cron-fold-in. When true, this agent's " +
+          "container starts an in-container scheduler sibling (gated by " +
+          "SWITCHROOM_INLINE_SCHEDULER=1, set automatically by compose) AND " +
+          "the singleton switchroom-cron container skips this agent's entries. " +
+          "The two paths are mutually exclusive — never dual-fired. Default: " +
+          "false (singleton remains the dispatcher). Phase 4 inverts the " +
+          "default and deletes the singleton.",
+        ),
     })
     .optional()
     .describe(
@@ -1294,6 +1306,18 @@ export const AgentSchema = z.object({
         .describe(
           "Opt the autoaccept gateway back into the legacy expect-script " +
           "behaviour instead of the tmux send-keys path. Default: false.",
+        ),
+      inline_scheduler: z
+        .boolean()
+        .optional()
+        .describe(
+          "Phase 3 canary flag for the cron-fold-in. When true, this agent's " +
+          "container starts an in-container scheduler sibling (gated by " +
+          "SWITCHROOM_INLINE_SCHEDULER=1, set automatically by compose) AND " +
+          "the singleton switchroom-cron container skips this agent's entries. " +
+          "The two paths are mutually exclusive — never dual-fired. Default: " +
+          "false (singleton remains the dispatcher). Phase 4 inverts the " +
+          "default and deletes the singleton.",
         ),
     })
     .optional()

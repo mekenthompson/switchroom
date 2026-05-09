@@ -20,6 +20,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { resolveAgentConfig } from "../config/merge.js";
 import type { ScheduleEntry, SwitchroomConfig } from "../config/schema.js";
 
 export interface SchedulerEntry {
@@ -29,6 +30,53 @@ export interface SchedulerEntry {
   prompt: string;
   /** SHA-256 prefix of prompt — stable, non-reversible audit key. */
   promptKey: string;
+}
+
+/**
+ * Phase 3 cron-fold-in helper. Returns the set of agent names whose
+ * cascade-resolved `experimental.inline_scheduler` is true — these
+ * agents run an in-container scheduler sibling and the singleton
+ * MUST NOT also fire for them (mutual exclusion: never dual-fire).
+ *
+ * Pure function: no IO. The cascade is resolved here (defaults →
+ * profile → per-agent) so callers don't need to pre-merge.
+ */
+export function inlineScheduledAgents(
+  config: SwitchroomConfig,
+): Set<string> {
+  const out = new Set<string>();
+  const agentNames = Object.keys(config.agents);
+  for (const name of agentNames) {
+    const agent = config.agents[name];
+    if (!agent) continue;
+    const resolved = resolveAgentConfig(config.defaults, config.profiles, agent);
+    if (resolved.experimental?.inline_scheduler === true) {
+      out.add(name);
+    }
+  }
+  return out;
+}
+
+/**
+ * Filter to only the entries the singleton scheduler should fire.
+ * Drops entries for any agent whose cascade-resolved
+ * `experimental.inline_scheduler` is true — those fire from the
+ * in-container scheduler sibling instead. Phase 3 canary +
+ * dual-run safety net: prevents double-fires while one agent at
+ * a time gets flipped to inline-mode.
+ *
+ * Pure function: deterministic, no IO. The in-agent scheduler does
+ * NOT need to call this — start.sh only spawns it for agents whose
+ * compose env carries SWITCHROOM_INLINE_SCHEDULER=1, which is the
+ * same gate.
+ */
+export function filterForSingleton(
+  entries: SchedulerEntry[],
+  config: SwitchroomConfig,
+): SchedulerEntry[] {
+  const inline = inlineScheduledAgents(config);
+  if (inline.size === 0) return entries;
+  return entries.filter((e) => !inline.has(e.agent));
 }
 
 /**

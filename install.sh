@@ -81,6 +81,26 @@ fi
 
 ok "Version: $version"
 
+# ---- GHCR auth advisory ----
+#
+# Switchroom container images live on ghcr.io. They're meant to be
+# public, but if you've forked or the org's visibility flipped, an
+# anonymous `docker pull` will return 401. Probe the public manifest
+# endpoint with a HEAD; if it 401s, print the gh-cli login recipe.
+# Don't fail — the static binary itself comes from GitHub Releases,
+# which doesn't need GHCR auth, so this is purely informational.
+ghcr_check_url="https://ghcr.io/v2/${REPO}/switchroom-base/manifests/latest"
+ghcr_status=$(curl -fsSL -o /dev/null -w '%{http_code}' -I "$ghcr_check_url" 2>/dev/null || echo "000")
+if [ "$ghcr_status" = "401" ] || [ "$ghcr_status" = "403" ]; then
+  warn "GHCR returned ${ghcr_status} for ${REPO}/switchroom-base — images may be private."
+  cat <<'GHCR'
+  If `docker compose pull` later returns 401, log in to ghcr.io first:
+    gh auth login --hostname github.com --scopes read:packages
+    gh auth token | docker login ghcr.io -u "$(gh api user -q .login)" --password-stdin
+  See docs/operators/install.md#ghcr-auth for details.
+GHCR
+fi
+
 # ---- download binary + checksums ----
 
 base_url="https://github.com/${REPO}/releases/download/${version}"
@@ -148,6 +168,18 @@ fi
 # Strip it so the user doesn't have to right-click > Open the first time.
 if [ "$platform" = "macos" ] && have xattr; then
   xattr -d com.apple.quarantine "$target" 2>/dev/null || true
+fi
+
+# Sequoia (macOS 15+) adds a notarization re-check that survives the
+# xattr strip — the OS still prompts on first run. Best-effort whitelist
+# the binary with spctl so it's allowed without the dialog. Requires
+# admin / sudo and is silently no-op'd if either is unavailable.
+if [ "$platform" = "macos" ] && have spctl; then
+  if [ -w "$(dirname "$target")" ]; then
+    spctl --add "$target" 2>/dev/null || true
+  elif have sudo; then
+    sudo spctl --add "$target" 2>/dev/null || true
+  fi
 fi
 
 ok "Installed switchroom to $target"

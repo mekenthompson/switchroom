@@ -177,6 +177,8 @@ Replace `switchroom-linux-amd64` with `switchroom-linux-arm64`, `switchroom-maco
 
 **macOS Gatekeeper note.** Releases are not yet Apple-code-signed. After installing on macOS you may need to clear the quarantine xattr so the binary will run: `xattr -d com.apple.quarantine /usr/local/bin/switchroom`. The `install.sh` one-liner handles this automatically.
 
+**Mac (Sequoia+) one-time.** macOS 15 adds a second-stage notarization check that the `xattr` strip alone does not bypass — you may still see a Gatekeeper "cannot verify the developer" dialog the first time you run `switchroom`. `install.sh` attempts `sudo spctl --add /usr/local/bin/switchroom` automatically (best-effort, ignored if sudo isn't available). If the dialog still fires, run that `spctl --add` manually, or open System Settings → Privacy & Security → "Open Anyway" once.
+
 Then:
 
 ```bash

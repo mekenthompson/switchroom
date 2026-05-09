@@ -1,19 +1,25 @@
 #!/bin/bash
 # --- Docker-mode tmux supervisor (#793 §2 / v0.7.5) ---
 # Under v0.6 systemd the unit's ExecStart is `tmux new-session -d ...
-# bash -l start.sh` and ExecStartPost spawns autoaccept-poll on the
-# host — both pieces sit OUTSIDE the agent process. Under v0.7 docker
-# the container's CMD is start.sh directly under tini, with no tmux
-# wrapper and no host-side ExecStartPost. Without this preamble the
-# first-run dev-channels acknowledgement prompt blocks claude forever
-# (no autoaccept), and `switchroom agent attach` fails (no tmux server
-# inside the container for `tmux attach -t <name>` to find).
+# bash -l start.sh`, ExecStartPost spawns autoaccept-poll on the host,
+# and a sibling unit `switchroom-<name>-gateway.service` runs the
+# telegram-plugin gateway daemon — three pieces sitting OUTSIDE the
+# agent process. Under v0.7 docker the container's CMD is start.sh
+# directly under tini, with no tmux wrapper, no host-side
+# ExecStartPost, and no sibling gateway unit. Without this preamble
+# the first-run dev-channels acknowledgement prompt blocks claude
+# forever (no autoaccept), `switchroom agent attach` fails (no tmux
+# server with the expected socket name), and the telegram MCP sidecar
+# exits at boot with "no gateway socket; check `systemctl --user
+# status switchroom-telegram-gateway`" because the gateway daemon
+# isn't running anywhere.
 #
 # Fix: when we detect docker mode AND we're not already inside the
 # inner tmux pane (the SWITCHROOM_DOCKER_TMUX_INNER marker), spawn
-# autoaccept-poll as a sidecar then re-exec into tmux with this same
-# script as the inner command. Inside tmux the marker is set, so the
-# preamble is a no-op and the rest of the script runs normally.
+# the gateway daemon AND autoaccept-poll as supervised sidecars then
+# re-exec into tmux with this same script as the inner command.
+# Inside tmux the marker is set, so the preamble is a no-op and the
+# rest of the script runs normally.
 #
 # Socket name `switchroom-<agent>` and session name `<agent>` match
 # what `src/agents/autoaccept.ts:151` and
@@ -21,10 +27,63 @@
 # same one v0.6 systemd has always honored, just enforced inside the
 # container instead of by the host's user systemd manager.
 if [ "$SWITCHROOM_RUNTIME" = "docker" ] && [ -z "$SWITCHROOM_DOCKER_TMUX_INNER" ]; then
-  if [ -f /opt/switchroom/autoaccept-poll.js ] && command -v bun >/dev/null 2>&1; then
-    bun /opt/switchroom/autoaccept-poll.js "{{name}}" \
-      >> /var/log/switchroom/autoaccept.log 2>&1 &
+  # Hoist TELEGRAM_STATE_DIR up here so the gateway daemon (forked
+  # below) finds gateway.sock / gateway.pid.json / history.db at the
+  # same path the rest of start.sh + the MCP sidecar expects.
+  export TELEGRAM_STATE_DIR="{{agentDir}}/telegram"
+
+  # Tiny in-process supervisor: runs cmd in a respawn loop. Caps at
+  # 10 restarts in 60s before giving up — protects against tight
+  # crash loops that would otherwise burn CPU and obscure the root
+  # cause in logs. The sidecar's own structured logging is written
+  # directly to its log file; this wrapper only handles process
+  # lifecycle. Ampersand-backgrounded by callers below.
+  _switchroom_supervise() {
+    local _name="$1"; local _logfile="$2"; shift 2
+    local _restarts=0
+    local _window_start=$SECONDS
+    while true; do
+      "$@" >> "$_logfile" 2>&1
+      local _exit=$?
+      local _now=$SECONDS
+      if [ $((_now - _window_start)) -ge 60 ]; then
+        _restarts=0
+        _window_start=$_now
+      fi
+      _restarts=$((_restarts + 1))
+      echo "[supervise] $_name exited (status=$_exit, restart=$_restarts in $((_now - _window_start))s window)" >> "$_logfile"
+      if [ $_restarts -ge 10 ]; then
+        echo "[supervise] $_name hit 10 restarts in <60s — giving up" >> "$_logfile"
+        return 1
+      fi
+      sleep 1
+    done
+  }
+
+  # 1) Gateway daemon — the long-running Telegram bot client.
+  #    Polls Telegram, writes gateway.sock for the in-claude MCP
+  #    sidecar to bridge through. Mirrors the v0.6 sibling
+  #    switchroom-<name>-gateway.service unit. Talks to the broker
+  #    over SWITCHROOM_BROKER_SOCKET (set by compose) for the bot
+  #    token. Failure modes: vault locked → gateway boots, fails to
+  #    fetch token, exits non-zero, supervisor respawns; bot token
+  #    invalid → 401 from Telegram, gateway exits, same loop. The
+  #    cap avoids an infinite vault-locked respawn storm.
+  _gateway_bundle=/opt/switchroom/telegram-plugin/dist/gateway/gateway.js
+  if [ -f "$_gateway_bundle" ] && command -v bun >/dev/null 2>&1; then
+    _switchroom_supervise gateway /var/log/switchroom/gateway-supervisor.log \
+      bun "$_gateway_bundle" &
   fi
+
+  # 2) autoaccept-poll — first-run TUI prompt dispatcher. Single-shot
+  #    by design (exits cleanly after idle-timeout once prompts have
+  #    fired); supervisor's restart cap means a flaky autoaccept won't
+  #    masquerade as a tight loop.
+  if [ -f /opt/switchroom/autoaccept-poll.js ] && command -v bun >/dev/null 2>&1; then
+    _switchroom_supervise autoaccept /var/log/switchroom/autoaccept.log \
+      bun /opt/switchroom/autoaccept-poll.js "{{name}}" &
+  fi
+
   export SWITCHROOM_DOCKER_TMUX_INNER=1
   exec tmux -L "switchroom-{{name}}" \
     new-session -A -s "{{name}}" -x 400 -y 50 \

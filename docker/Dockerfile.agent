@@ -35,6 +35,28 @@ RUN mkdir -p /tmp/tmux-shared
 COPY dist/cli/autoaccept-poll.js /opt/switchroom/autoaccept-poll.js
 RUN chmod 0755 /opt/switchroom/autoaccept-poll.js
 
+# telegram-plugin: the MCP channel server claude spawns when invoked
+# with `--dangerously-load-development-channels server:switchroom-telegram`.
+# Resolved by bun via `bun run --cwd /opt/switchroom/telegram-plugin
+# --silent start` (see scaffold.ts:.mcp.json under SWITCHROOM_RUNTIME=docker).
+# The plugin needs three pieces:
+#   - dist/server.js     — the MCP entry (start.js falls back to source if
+#                          dist absent; the bake guarantees dist is present)
+#   - dist/gateway/      — the long-running gateway daemon that polls
+#                          Telegram and writes ~/.../telegram/gateway.sock;
+#                          spawned by start.sh as a sidecar
+#   - start.js           — entry shim that picks dist over source
+#   - package.json       — `bun run start` resolution
+# Under v0.6 systemd the plugin was reachable via the dev checkout path
+# (or npm-global install path on prod hosts); under v0.7 docker the
+# image is the source of truth, and `.mcp.json` points at the in-image
+# path. Without this COPY, the MCP sidecar exits at boot:
+#   "telegram channel: no gateway socket at <path>. Run `switchroom
+#    setup` to install the gateway daemon..."
+COPY telegram-plugin/dist /opt/switchroom/telegram-plugin/dist
+COPY telegram-plugin/start.js /opt/switchroom/telegram-plugin/start.js
+COPY telegram-plugin/package.json /opt/switchroom/telegram-plugin/package.json
+
 # tini handles zombies + signal forwarding. The actual command is
 # /state/agent/start.sh, which the scaffold renders into the bind-mount.
 ENTRYPOINT ["/usr/bin/tini", "--"]

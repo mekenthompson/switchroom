@@ -546,6 +546,13 @@ export async function reconcileAndRestartAgent(
 
   // Reconcile first. If this throws, we stop here — never restart on
   // top of a broken config.
+  //
+  // dockerMode mirrors apply's behavior: when a compose file is present
+  // on the host (the host-shell signal `isDockerRuntime()` checks), the
+  // regenerated .mcp.json must reference the in-image telegram-plugin
+  // path, not the host's switchroom install. Otherwise reconcile would
+  // overwrite a working docker-mode .mcp.json with a host-mode one and
+  // break Telegram routing on the next agent restart.
   const result = deps.reconcileAgent(
     name,
     agentConfig,
@@ -553,6 +560,7 @@ export async function reconcileAndRestartAgent(
     config.telegram,
     config,
     configPath,
+    { dockerMode: isDockerRuntime() },
   );
 
   // v0.7: infra-unit regen no longer happens here. Compose-file drift
@@ -1445,7 +1453,7 @@ export function registerAgentCommand(program: Command): void {
               config.telegram,
               config,
               configPath,
-              { preserveClaudeMd: opts.preserveClaudeMd },
+              { preserveClaudeMd: opts.preserveClaudeMd, dockerMode: isDockerRuntime() },
             );
             // v0.7: infra-unit regen no longer runs here. Compose-file
             // drift is reconciled by `switchroom apply` + `docker compose
@@ -1635,6 +1643,7 @@ export function registerAgentCommand(program: Command): void {
           config.telegram,
           config,
           configPath,
+          { dockerMode: isDockerRuntime() },
         );
         if (result.changes.length > 0) {
           console.log(chalk.green(`  ${name}: reconciled (${result.changes.length} file(s))`));
@@ -1710,6 +1719,7 @@ export function registerAgentCommand(program: Command): void {
           config.telegram,
           config,
           configPath,
+          { dockerMode: isDockerRuntime() },
         );
         if (result.changes.length > 0) {
           console.log(chalk.green(`  ${name}: reconciled (${result.changes.length} file(s))`));

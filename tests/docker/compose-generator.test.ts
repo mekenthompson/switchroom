@@ -524,6 +524,37 @@ describe("generateCompose — switchroomConfigPath bind-mount (v0.7 P0 fix)", ()
     const sched = blockFor(out, "switchroom-cron");
     expect(sched).toMatch(/\.switchroom:\/state\/config:ro/);
   });
+
+  it("bind-mounts switchroom.yaml + sets SWITCHROOM_CONFIG on each agent (v0.7.6)", () => {
+    // The in-container telegram-plugin gateway sidecar shells out to
+    // the switchroom CLI for handoff / vault / topic operations and
+    // passes `--config $SWITCHROOM_CONFIG`. Without this mount the
+    // gateway boots, fails to resolve the config, and access-control
+    // checks default to deny.
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+      switchroomConfigPath: CONFIG,
+    });
+    const re = (a: string) =>
+      new RegExp(`  agent-${a}:[\\s\\S]*?(?=\\n  [a-z])`);
+    for (const a of ["alice", "bob"]) {
+      const block = re(a).exec(out)?.[0] ?? "";
+      expect(block, `${a} bind-mount`).toContain(
+        `${CONFIG}:/state/config/switchroom.yaml:ro`,
+      );
+      expect(block, `${a} env`).toMatch(
+        /SWITCHROOM_CONFIG:\s*"\/state\/config\/switchroom\.yaml"/,
+      );
+    }
+  });
+
+  it("back-compat: omitting switchroomConfigPath leaves agent without the mount", () => {
+    const out = generateCompose({ config: makeConfig({ alice: {} }) });
+    const re = /  agent-alice:[\s\S]*?(?=\n  [a-z])/;
+    const block = re.exec(out)?.[0] ?? "";
+    expect(block).not.toContain(":/state/config/switchroom.yaml");
+    expect(block).not.toMatch(/SWITCHROOM_CONFIG:/);
+  });
 });
 
 describe("generateCompose — buildMode (pull vs local)", () => {

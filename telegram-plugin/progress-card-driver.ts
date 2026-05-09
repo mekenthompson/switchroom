@@ -781,6 +781,18 @@ export interface ProgressDriver {
    */
   onSubAgentStall(agentId: string, idleMs: number, description: string): void
   /**
+   * Symmetric to `onSubAgentStall`. Fires when the watcher observes
+   * JSONL activity returning for a previously-stalled sub-agent. Forces
+   * a re-render so the ⚠ Stalled badge clears immediately, instead of
+   * waiting on the next heartbeat tick (which the diff-guard might
+   * suppress if no chat-level state otherwise changed). The render
+   * itself reads the now-current `sa.lastEventAt` (already bumped by
+   * the standard event path), so this method is purely a render-trigger.
+   *
+   * No-op if no card is currently tracking this `agentId`.
+   */
+  onSubAgentUnstall(agentId: string, description: string): void
+  /**
    * Test-only accessor exposing the driver's internal Maps so unit tests
    * can assert TTL eviction and outer-base-key cleanup actually drop
    * entries. Not part of the supported runtime API — gated behind the
@@ -2830,6 +2842,26 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         lastSubAgentTickBucket.delete(cs.turnKey)
         // If the heartbeat isn't running (it would have been kept alive by
         // preserve-pending, but check defensively), start it.
+        if (chats.size > 0) startHeartbeatIfNeeded()
+        break
+      }
+    },
+
+    onSubAgentUnstall(agentId: string, _description: string) {
+      // Symmetric to onSubAgentStall: watcher saw JSONL activity return.
+      // The standard event path has already bumped sa.lastEventAt and
+      // (for tool events) flipped fleet member status stuck→running via
+      // applyToolUse. All this method needs to do is force a re-render
+      // so the ⚠ badge clears immediately — the diff-guard can otherwise
+      // suppress the heartbeat for several seconds if no chat-level
+      // state changed, which manifests as the badge lingering even
+      // though the underlying state is fresh.
+      for (const cs of chats.values()) {
+        if (!cs.state.subAgents.has(agentId)) continue
+        const sa = cs.state.subAgents.get(agentId)!
+        if (sa.state !== 'running') continue
+        lastHeartbeatBucket.delete(cs.turnKey)
+        lastSubAgentTickBucket.delete(cs.turnKey)
         if (chats.size > 0) startHeartbeatIfNeeded()
         break
       }

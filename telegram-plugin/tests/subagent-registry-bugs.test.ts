@@ -219,6 +219,11 @@ function makeHarnessWithDb(opts: {
     agentDir,
     sendNotification: (text) => notifications.push(text),
     stallThresholdMs,
+    // Mirror the active-loop threshold for fixtures with toolCount=0;
+    // tests that need the silent-synthesis vs active-loop distinction
+    // pass a separate value explicitly. See subagent-watcher.ts adaptive
+    // threshold logic.
+    silentSynthesisStallThresholdMs: stallThresholdMs,
     rescanMs: 500,
     now: () => currentTime,
     setInterval: (fn, ms) => {

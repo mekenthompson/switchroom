@@ -9,11 +9,81 @@ there.
 Switchroom is a Telegram plugin + agent lifecycle layer sitting on top of
 the unmodified `claude` CLI. Users run Claude Code agents 24/7 on a Linux
 box, talk to them from Telegram, and authenticate with their Claude
-Pro/Max subscription via OAuth (no API keys, no Docker, no custom
-runtime). The headline feature is a live **progress card** that pins into
+Pro/Max subscription via OAuth (no API keys, no custom runtime around
+claude). The headline feature is a live **progress card** that pins into
 each Telegram topic while an agent works.
 
+**v0.7+ ships agents in Docker containers** — one per agent, plus three
+shared singletons (`vault-broker`, `approval-kernel`, `switchroom-cron`)
+brought up by `docker compose`. v0.6 was systemd-user units; v0.7 is the
+docker migration. The `claude` CLI runs unmodified inside each agent
+container — Docker is for *distribution and isolation*, not a custom
+runtime around claude (the vision's "no Docker-as-runtime" line in
+`reference/vision.md` is preserved).
+
 See `README.md` for the user-facing description.
+
+## v0.7 runtime architecture (read this before touching docker/compose/broker code)
+
+```
+                  ┌─ vault-broker (root, cap_drop=ALL + CHOWN/FOWNER/DAC_READ_SEARCH)
+                  │    /etc/machine-id mount → auto-unlock derives AES key
+                  │    binds /run/switchroom/broker/<agent>/sock per agent (chowned to UID)
+                  │
+docker compose ───┼─ approval-kernel (root, mirror of broker socket model)
+project=switchroom│    binds /run/switchroom/kernel/<agent>/sock per agent
+                  │
+                  ├─ switchroom-cron (scheduler, mounts /var/run/docker.sock RW)
+                  │
+                  └─ agent-<name> ✕ N (per-agent UID 10001-10999, network_mode: host)
+                       tini → start.sh → tmux server+client → bash → claude
+                                              ↑ autoaccept-poll sidecar (sibling to tmux)
+```
+
+**Agent container process tree** (since v0.7.5): `tini` is PID 1.
+`start.sh` runs as tini's child. When `SWITCHROOM_RUNTIME=docker` is set
+(by compose) and `SWITCHROOM_DOCKER_TMUX_INNER` is unset (top-level
+entry), start.sh forks `bun /opt/switchroom/autoaccept-poll.js <name>`
+as a sidecar then `exec`s into `tmux -L switchroom-<name>
+new-session -A -s <name> bash -l "$0"` — the same script re-enters
+inside tmux with the inner-marker set, skips the wrapper, and runs
+claude. autoaccept-poll uses `tmux capture-pane / send-keys` against
+the same socket+session names to dispatch first-run prompts (dev-channels
+acknowledge, MCP trust, theme picker). v0.6's systemd ExecStart wraps
+the same way; v0.7 just enforces the contract inside the container.
+
+**Why both halves matter:** without tmux, autoaccept can't reach claude
+(it talks tmux), `switchroom agent attach` can't connect (it does
+`docker exec -it ... tmux attach -t <name>`), and `! interrupt`
+(`tmux send-keys C-c`) has nowhere to send. The contract is "tmux
+socket `switchroom-<name>` + session `<name>` lives inside the agent
+container" — pinned in `src/agents/autoaccept.ts:151`,
+`src/agents/lifecycle.ts:attachAgent`, and `profiles/_base/start.sh.hbs`.
+
+**Per-agent socket model:** compose mounts named volume
+`broker-<name>-sock` at `/run/switchroom/broker/<name>` inside the
+broker AND at `/run/switchroom/broker` inside agent-<name>. Broker
+enumerates subdirs at `/run/switchroom/broker/`, binds a socket at
+`<subdir>/sock`, chowns it to the agent UID (CAP_CHOWN granted) so a
+non-root agent container can connect. Path-as-identity invariant: agent
+name is parsed from the bind path via `socketPathToAgent` — never from
+a wire payload. Same shape for approval-kernel.
+
+**Vault auto-unlock:** machine-bound — broker derives an AES key from
+`/etc/machine-id` (host-mounted into the broker container) and decrypts
+the `vault-auto-unlock` blob on boot. Operator runs `switchroom vault
+broker enable-auto-unlock` once on the host to write the blob; rotation
+is via the same CLI. If the blob is missing or fails to decrypt, the
+broker falls back to interactive unlock (`switchroom vault broker
+unlock` from any agent's Telegram chat with `/vault unlock`, or via
+`docker exec -it switchroom-vault-broker ...`).
+
+**Networking:** agent containers use `network_mode: host` so scaffolded
+`start.sh` can reach hindsight at `127.0.0.1:18888` and operator LAN
+devices unchanged from v0.6. Tradeoff: agents share the host network
+namespace (no inter-agent isolation). The trust model already assumed
+shared-host operation. Future work: an opt-in strict-isolation mode
+with `extra_hosts: host.docker.internal`.
 
 ## Docker test discipline (HARD RULES)
 
@@ -76,14 +146,23 @@ Anything else is out of scope, however clever.
 ```
 src/                    TypeScript source for the `switchroom` CLI
   agents/               Agent scaffolding, lifecycle, workspace bootstrap
+                        compose.ts — generates ~/.switchroom/compose/docker-compose.yml
+                        scaffold.ts — renders start.sh, settings.json, .mcp.json per agent
+                        autoaccept.ts — tmux capture-pane / send-keys first-run dispatcher
+                        lifecycle.ts — start/stop/restart/status/attach (docker + systemd dual-path)
   auth/                 OAuth + multi-account slot pool (accounts.ts, manager.ts)
   cli/                  One file per top-level CLI verb (auth, agent,
                         workspace, debug, memory, topics, vault, ...)
+                        autoaccept-poll.ts — bun-runnable bundle baked into agent image
   config/               YAML loader + three-layer cascade (defaults → profiles → agents)
   memory/               Hindsight memory integration
+  runtime-mode.ts       isDockerRuntime() — v0.7.3 unified host-shell + in-container detection
   setup/                Interactive `switchroom setup` wizard
   telegram/             Shared telegram helpers used by the CLI
   vault/                AES-256-GCM encrypted secrets store
+    broker/             Long-lived UDS daemon (server.ts, client.ts, peercred.ts)
+                        Per-agent sockets at /run/switchroom/broker/<name>/sock
+    approvals/          approval-kernel — per-agent UDS for approval/grant flows
   web/                  Web dashboard
 
 telegram-plugin/        The enhanced MCP Telegram plugin (own Bun tests)
@@ -94,17 +173,31 @@ telegram-plugin/        The enhanced MCP Telegram plugin (own Bun tests)
   auto-fallback.ts      Quota-exhaustion auto-fallback
   tests/                Bun tests
 
+docker/                 Dockerfiles (base, agent, broker, kernel, scheduler).
+                        Built via `--build-local` flag on `switchroom apply`,
+                        OR pulled from GHCR (`ghcr.io/switchroom/switchroom-*:latest`).
 profiles/               Built-in agent profiles (CLAUDE.md.hbs + SOUL.md.hbs)
+                        _base/start.sh.hbs is the agent entry script template
+                        (includes the docker-mode tmux preamble, since v0.7.5).
 skills/                 Bundled Claude Code skills (symlinked into agents)
 docs/                   User-facing docs
 reference/              Design contract — vision.md, principles.md,
                         and outcome-focused JTBDs (*.md)
 scripts/                Build + release helpers
 tests/                  Vitest suite for src/
+  docker/               Docker-specific tests (compose generator, broker IPC,
+                        per-agent isolation, e2e). Use `switchroom.test=<phase>`
+                        labels — see "Docker test discipline" above.
 ```
 
 Agent scaffolds are written **outside** this repo (default
 `~/.switchroom/agents/<name>/`) — never commit per-user agent state here.
+
+The generated compose file at `~/.switchroom/compose/docker-compose.yml`
+doubles as a runtime-mode signal: `isDockerRuntime()` (`src/runtime-mode.ts`)
+returns true if either the file exists OR `SWITCHROOM_RUNTIME=docker` is
+set (the env-var path is for in-container code; the file path is for
+host-shell CLI invocations).
 
 ## Commands
 
@@ -241,3 +334,27 @@ contract" above. The pointers below are for *implementation*.)
 - **"What can I inspect at runtime?"** → `switchroom debug turn <agent>`
   dumps exact prompt layering; `switchroom workspace render <agent>`
   prints the bootstrap block.
+- **"How is the docker compose file generated?"** →
+  `src/agents/compose.ts:generateCompose()`. Tests pin every emitted
+  field at `tests/docker/compose-generator.test.ts`. UID allocation is
+  `allocateAgentUid()` (deterministic hash → 10001-10999).
+- **"How does the broker authenticate agents?"** → path-as-identity:
+  `src/vault/broker/peercred.ts:socketPathToAgent()` parses the bind
+  path. Two canonical shapes: flat `<agent>.sock` (legacy / tests) and
+  subdir `<agent>/sock` (what compose emits). ACL is bind-time, never
+  wire-time.
+- **"How does an agent boot inside a container?"** →
+  `profiles/_base/start.sh.hbs` (the docker-mode preamble at the top
+  forks autoaccept-poll + re-execs into tmux), `docker/Dockerfile.agent`
+  (CMD = `/state/agent/start.sh` under tini ENTRYPOINT, COPYs
+  autoaccept-poll bundle to `/opt/switchroom/`), `src/agents/compose.ts`
+  for the env / volumes / caps.
+- **"How does autoaccept dispatch first-run prompts?"** →
+  `src/agents/autoaccept.ts` (tmux capture-pane + send-keys, regex
+  prompts in `PROMPTS`). Bundle entry at `src/cli/autoaccept-poll.ts`.
+  Same code runs under v0.6 systemd (host-side) and v0.7 docker
+  (in-container sidecar) — only the supervisor location changed.
+- **"Why does a host-shell `switchroom agent list` differ from
+  inside a container?"** → `src/runtime-mode.ts:isDockerRuntime()`.
+  Both signals (env var + compose-file presence) flip the answer.
+  Doctor / status / lifecycle all branch on this single helper.

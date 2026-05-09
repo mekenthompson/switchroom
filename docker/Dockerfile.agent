@@ -22,6 +22,19 @@ RUN mkdir -p /state/agent /state/.claude /var/log/switchroom \
 # the compose `user:` directive at runtime.
 RUN mkdir -p /tmp/tmux-shared
 
+# autoaccept-poll bundle: a small bun-runnable JS that uses
+# `tmux capture-pane / send-keys` to dispatch keystrokes for first-run
+# claude TUI prompts (theme picker, MCP trust, dev-channels
+# acknowledgement, API provider picker). Under v0.6 systemd this was
+# spawned as ExecStartPost on the host; under v0.7 docker the agent
+# runs claude inside an in-container tmux (see start.sh's docker
+# preamble) and start.sh forks autoaccept-poll as a sidecar. Bake the
+# self-contained bundle into the image so start.sh has a stable path
+# (`/opt/switchroom/autoaccept-poll.js`) to invoke regardless of
+# operator install layout.
+COPY dist/cli/autoaccept-poll.js /opt/switchroom/autoaccept-poll.js
+RUN chmod 0755 /opt/switchroom/autoaccept-poll.js
+
 # tini handles zombies + signal forwarding. The actual command is
 # /state/agent/start.sh, which the scaffold renders into the bind-mount.
 ENTRYPOINT ["/usr/bin/tini", "--"]

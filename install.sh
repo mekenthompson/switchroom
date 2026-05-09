@@ -81,25 +81,11 @@ fi
 
 ok "Version: $version"
 
-# ---- GHCR auth advisory ----
-#
-# Switchroom container images live on ghcr.io. They're meant to be
-# public, but if you've forked or the org's visibility flipped, an
-# anonymous `docker pull` will return 401. Probe the public manifest
-# endpoint with a HEAD; if it 401s, print the gh-cli login recipe.
-# Don't fail — the static binary itself comes from GitHub Releases,
-# which doesn't need GHCR auth, so this is purely informational.
-ghcr_check_url="https://ghcr.io/v2/${REPO}/switchroom-base/manifests/latest"
-ghcr_status=$(curl -fsSL -o /dev/null -w '%{http_code}' -I "$ghcr_check_url" 2>/dev/null || echo "000")
-if [ "$ghcr_status" = "401" ] || [ "$ghcr_status" = "403" ]; then
-  warn "GHCR returned ${ghcr_status} for ${REPO}/switchroom-base — images may be private."
-  cat <<'GHCR'
-  If `docker compose pull` later returns 401, log in to ghcr.io first:
-    gh auth login --hostname github.com --scopes read:packages
-    gh auth token | docker login ghcr.io -u "$(gh api user -q .login)" --password-stdin
-  See docs/operators/install.md#ghcr-auth for details.
-GHCR
-fi
+# GHCR auth: anonymous `docker pull` against ghcr.io returns 401 even for
+# public images (the registry always wants a bearer token), so probing
+# from the installer was always going to flap or false-positive. We just
+# tell the user what to do if `docker compose pull` later fails — see the
+# "Next" block at the end of this script.
 
 # ---- download binary + checksums ----
 
@@ -201,6 +187,11 @@ Next:
 
 Note: the static binary bundles its runtime, but you still need the
 `claude` CLI installed (npm i -g @anthropic-ai/claude-code) to run agents.
+
+If `docker compose pull` later fails with 401 from ghcr.io, log in once:
+  gh auth login --hostname github.com --scopes read:packages
+  gh auth token | docker login ghcr.io -u "$(gh api user -q .login)" --password-stdin
+See docs/operators/install.md#ghcr-auth for details.
 
 Docs: https://switchroom.ai
 NEXT

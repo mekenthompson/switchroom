@@ -121,3 +121,122 @@ export async function dispatchEntry(
     finishedAt,
   };
 }
+
+// ───────────────────────────────────────────────────────────────────────
+//  Phase 1: in-band cron synthesis primitive (no behaviour change yet)
+// ───────────────────────────────────────────────────────────────────────
+//
+// The end-state for cron scheduling (see issue tracking the scheduler
+// fold-in work) is to retire the `switchroom-cron` singleton container
+// and run cron as a sibling of the gateway inside each agent container.
+// Fires are delivered to the agent as synthesized `InboundMessage`s
+// flowing the same path as Telegram messages and button-callback
+// injections (gateway.ts:5217, :8796, :9226), discriminated by
+// `meta.source = "cron"`. Reusing the existing envelope means the
+// agent transcript and Hindsight see cron fires as ordinary turns
+// tagged with `<channel source="cron">`, rather than as out-of-band
+// one-shot `claude -p` runs that vanish from session history.
+//
+// `dispatchAsInbound` is the synthesis primitive. Phase 1 only adds it
+// — nothing calls it yet. Phase 2 wires the in-agent scheduler.
+
+/**
+ * InboundMessage envelope, mirrored structurally from
+ * `telegram-plugin/gateway/ipc-protocol.ts` so this module can build
+ * one without crossing the src/ ↔ telegram-plugin/ tsconfig boundary.
+ *
+ * Keep this in sync with the source of truth — the bridge's
+ * `validateGatewayMessage` validator (`telegram-plugin/bridge/ipc-client.ts`)
+ * is what decides whether a wire-format message is accepted.
+ */
+export interface InboundMessageWire {
+  type: "inbound";
+  chatId: string;
+  threadId?: number;
+  messageId: number;
+  user: string;
+  userId: number;
+  ts: number;
+  text: string;
+  imagePath?: string;
+  attachment?: { fileId: string; mimeType: string; fileName?: string };
+  meta: Record<string, string>;
+}
+
+/**
+ * Minimum surface a dispatcher needs to deliver a synthesized inbound
+ * to a connected agent client. Matches the shape of the gateway's
+ * `IpcServer.sendToAgent` so a real gateway can be passed in directly,
+ * and tests can pass a capturing fake.
+ *
+ * Returns true when an agent client was registered for `agentName` and
+ * the message was written to its socket; false when the agent is not
+ * currently connected (the caller decides whether to drop, queue, or
+ * persist for replay-on-reconnect).
+ */
+export interface InboundDispatcher {
+  sendToAgent(agentName: string, msg: InboundMessageWire): boolean;
+}
+
+export interface InboundDispatchOptions {
+  /**
+   * Required: the chat the synthesized turn belongs to. The Phase 2
+   * in-agent scheduler resolves this from the agent's primary topic
+   * mapping; tests pass it directly.
+   */
+  chatId: string;
+  /** Optional Telegram topic / thread id when the chat has topics. */
+  threadId?: number;
+  /**
+   * Synthetic timestamp source. Defaulted to `Date.now()`; tests inject
+   * a fixed clock to make `messageId` and `ts` deterministic.
+   */
+  now?: () => number;
+}
+
+export interface InboundDispatchResult {
+  /** False when no agent client was registered for `entry.agent`. */
+  delivered: boolean;
+  /** The exact wire message handed to the dispatcher. */
+  message: InboundMessageWire;
+}
+
+/**
+ * Build an `InboundMessage` from a `SchedulerEntry` and hand it to the
+ * dispatcher. Pure synthesis — no clock, network, or filesystem unless
+ * the dispatcher does it. Phase 1 ships this primitive; Phase 2 wires
+ * it from the in-agent scheduler sibling.
+ *
+ * `meta.source = "cron"` is the only stable discriminator the bridge
+ * uses to render the turn as `<channel source="cron">`. `schedule_index`
+ * and `prompt_key` are carried for audit correlation against the
+ * scheduler.jsonl ledger Phase 2 introduces — both as strings, since
+ * `meta` is `Record<string, string>` on the wire.
+ */
+export function dispatchAsInbound(
+  entry: SchedulerEntry,
+  options: InboundDispatchOptions,
+  dispatcher: InboundDispatcher,
+): InboundDispatchResult {
+  const ts = (options.now ?? Date.now)();
+  const message: InboundMessageWire = {
+    type: "inbound",
+    chatId: options.chatId,
+    ...(options.threadId !== undefined ? { threadId: options.threadId } : {}),
+    // Synthetic id — cron fires don't have a Telegram message_id. The
+    // bridge only uses messageId for telegram_reply context, which is
+    // a no-op for cron-synthesized turns.
+    messageId: ts,
+    user: "cron",
+    userId: 0,
+    ts,
+    text: entry.prompt,
+    meta: {
+      source: "cron",
+      schedule_index: String(entry.scheduleIndex),
+      prompt_key: entry.promptKey,
+    },
+  };
+  const delivered = dispatcher.sendToAgent(entry.agent, message);
+  return { delivered, message };
+}

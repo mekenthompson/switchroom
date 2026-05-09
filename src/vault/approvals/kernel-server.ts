@@ -107,6 +107,19 @@ async function bindAgentSocket(
 ): Promise<AgentListener> {
   const dir = resolve(parentDir, agent);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Reset the per-agent dir back to root:root 0700 BEFORE binding (#881).
+  // On a fresh container the dir is already root-owned (from the mkdir
+  // above) so chown is a no-op. On a restart where a previous instance
+  // left the dir chowned to the agent UID 10xxx mode 0700, a fresh
+  // kernel container — running root with cap_drop=ALL +
+  // cap_add=[CHOWN,FOWNER,DAC_READ_SEARCH] — does NOT hold
+  // CAP_DAC_OVERRIDE and cannot write into a 10xxx-owned 0700 dir.
+  // CAP_CHOWN is granted, so chown'ing the dir back to root succeeds
+  // regardless of its current owner. Pre-fix this manifested as
+  // "[kernel] listen error agent=<x>: Failed to listen at ..." for every
+  // agent on every container restart, with the unlinkSync below silently
+  // failing for the same DAC reason.
+  try { chownSync(dir, 0, 0); } catch { /* outside docker / no CAP_CHOWN */ }
   try { chmodSync(dir, 0o700); } catch { /* idempotent */ }
   // Chown the per-agent dir to the agent's UID so non-root agent
   // containers (running as user:<uid>:<uid> per compose) can traverse
@@ -123,13 +136,27 @@ async function bindAgentSocket(
   // root can no longer write into it (mode 0700 owned by 10116) and
   // bind() fails with EACCES. Order:
   //   1. mkdir with mode 0o700 under umask 0o077 (root-owned).
-  //   2. listen() — creates the socket file as root inside root-owned dir.
-  //   3. chown dir + sock to the agent UID (CAP_CHOWN granted).
-  //   4. chmod sock to 0o660 (FOWNER not strictly needed here since we
+  //   2. chown dir back to root (recovers from a previous run that left
+  //      it chowned to the agent UID — see #881).
+  //   3. listen() — creates the socket file as root inside root-owned dir.
+  //   4. chown dir + sock to the agent UID (CAP_CHOWN granted).
+  //   5. chmod sock to 0o660 (FOWNER not strictly needed here since we
   //      own the file, but the cap_add list includes it for the broker).
   const socketPath = resolve(dir, "sock");
   if (existsSync(socketPath)) {
-    try { unlinkSync(socketPath); } catch { /* ignore */ }
+    try {
+      unlinkSync(socketPath);
+    } catch (err) {
+      // Don't swallow silently (#881). Surface the path + errno so an
+      // operator chasing a "Failed to listen" can see *why* the stale
+      // socket couldn't be cleaned up. Continue to listen() either way:
+      // it will fail with the same root cause but the diagnostic
+      // breadcrumb is now in the log.
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `[kernel] could not unlink stale socket agent=${agent} sock=${socketPath}: ${msg}\n`,
+      );
+    }
   }
   return new Promise((resolveP, rejectP) => {
     const server = net.createServer((sock) => handleConnection(sock, agent, db));

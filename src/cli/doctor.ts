@@ -873,7 +873,19 @@ function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[
       // docker-managed agents, and the analogous container env var
       // (SWITCHROOM_AGENT_NAME, set in compose.ts) is verified by the
       // dockerSection's compose-shape checks.
-      if (!isDockerMode()) {
+      //
+      // Pass the compose path so docker mode is detected on the host
+      // shell (where the env var is never set). v0.7.2 called
+      // `isDockerMode()` with no args, so the env-var-only branch
+      // fired and the systemd check ran on a docker fleet — exactly
+      // the misalignment this gate was meant to prevent.
+      const composePathForGate = resolve(
+        process.env.HOME ?? "",
+        ".switchroom",
+        "compose",
+        "docker-compose.yml",
+      );
+      if (!isDockerMode({ composePath: composePathForGate })) {
         results.push(checkGatewayUnit(name));
       }
 

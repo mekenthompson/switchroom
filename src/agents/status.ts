@@ -21,6 +21,7 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { findLatestSessionJsonl } from "./handoff-summarizer.js";
 import { readTurnUsages, summarizeCache } from "./perf.js";
+import { isDockerRuntime } from "../runtime-mode.js";
 
 export type CheckState = "ok" | "fail" | "warn";
 
@@ -839,7 +840,18 @@ export function readDockerContainer(
       Pid?: number;
       StartedAt?: string;
     };
-    const active = state.Status === "running" ? "active" : "inactive";
+    // `restarting` is its own state — distinct from a clean exit. We
+    // surface it as such so the renderer can flag a crash-loop signal
+    // (the v0.7.2 disabled-watchdog change removed the explicit
+    // operator-event for this; preserving the granular state here keeps
+    // a thread for the user to pull on instead of the misleading
+    // "inactive").
+    const active =
+      state.Status === "running"
+        ? "active"
+        : state.Status === "restarting"
+          ? "restarting"
+          : "inactive";
     const pid =
       typeof state.Pid === "number" && state.Pid > 0 ? state.Pid : null;
     let activeEnterTs: number | null = null;
@@ -857,7 +869,11 @@ export function readDockerContainer(
  * Compose the default (production) StatusInputs for a given agent.
  * Resolves systemd unit names / docker container names, log path,
  * history path, and the Hindsight URL from config. Picks systemd vs
- * docker adapters based on `SWITCHROOM_RUNTIME=docker`.
+ * docker adapters based on the unified `isDockerRuntime()` helper —
+ * env var (set inside containers) OR compose file presence (the
+ * operator-shell signal). v0.7.2 only checked the env var, which
+ * silently fell back to systemd when the operator ran the CLI from
+ * their bare shell on a docker fleet.
  */
 export function defaultStatusInputs(params: {
   agentName: string;
@@ -865,7 +881,7 @@ export function defaultStatusInputs(params: {
   hindsightApiUrl: string | null;
   hindsightBankId: string;
 }): StatusInputs {
-  const isDockerMode = process.env.SWITCHROOM_RUNTIME === "docker";
+  const isDockerMode = isDockerRuntime();
   const service = `switchroom-${params.agentName}`;
   const gatewayService = `switchroom-${params.agentName}-gateway`;
 

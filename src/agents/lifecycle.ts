@@ -8,6 +8,8 @@ import { resolveAgentConfig } from "../config/merge.js";
 import { loadConfig } from "../config/loader.js";
 import { sendAgentInterrupt } from "./tmux.js";
 import { resolveSwitchroomHome } from "./docker-fleet.js";
+import { isDockerRuntime } from "../runtime-mode.js";
+import { readSystemdUnit } from "./status.js";
 
 /**
  * Resolve the per-agent gateway clean-shutdown marker path.
@@ -509,7 +511,32 @@ export function resolveAgentPid(name: string): number {
  * the systemd-era signature; under docker we ignore it (the pid we
  * return is always the container's PID 1).
  */
+function getAgentStatusSystemd(name: string): AgentStatus {
+  const info = readSystemdUnit(`switchroom-${name}`);
+  return {
+    active: info.active === "active" ? "active" : info.active || "inactive",
+    uptime:
+      info.activeEnterTs !== null
+        ? new Date(info.activeEnterTs).toISOString()
+        : null,
+    memory: null,
+    pid: info.pid,
+  };
+}
+
 export function getAgentStatus(name: string, _tmuxSupervisor = true): AgentStatus {
+  // Host-shell + systemd fleet: v0.7 PR-C1 rewrote this function as
+  // docker-only, so on a fleet that hasn't been migrated yet (no compose
+  // file present, no SWITCHROOM_RUNTIME=docker env var) every `docker
+  // inspect` throws and the caller — `switchroom agent list` —
+  // reports every agent as "inactive" even when systemd shows them
+  // running. Mirror the runtime branch that v0.7.3 added in
+  // `defaultStatusInputs` so the list matches reality on systemd hosts
+  // until they cut over.
+  if (!isDockerRuntime()) {
+    return getAgentStatusSystemd(name);
+  }
+
   const cn = containerName(name);
 
   let active = "inactive";

@@ -38,9 +38,10 @@ will make the migration fail in subtle ways if skipped.
 
   This writes `~/.switchroom/vault-auto-unlock` (a 60-byte file
   AES-encrypted with `/etc/machine-id`) and survives v0.6 → v0.7
-  unchanged. Mode 0644 is required so root-in-container can read it
-  (the broker has `DAC_READ_SEARCH`, but the host file mode is the
-  ultimate gate).
+  unchanged. The blob ships at mode 0600 (operator-owned). v0.7.4+
+  grants `DAC_READ_SEARCH` to the broker container so root-in-broker
+  can read 0600 operator-owned files without `DAC_OVERRIDE`; do not
+  loosen the file mode.
 
 - **Decide cutover mode: all-at-once or one-at-a-time.** v0.7 `apply`
   chowns every agent's state dir to its per-agent UID (10001-10999)

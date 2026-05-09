@@ -406,7 +406,7 @@ export async function runApply(
 
   writeOut(
     chalk.bold(
-      `\nDone. Scaffolded ${scaffolded}/${agentNames.length} agents.\n`,
+      `\nDone. Scaffolded ${scaffolded}/${allAgentNames.length} agents.\n`,
     ),
   );
 

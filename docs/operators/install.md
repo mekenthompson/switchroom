@@ -9,26 +9,31 @@ fleet up via `docker compose`. No `docker build` on the operator's host.
 
 - Linux (Ubuntu 24.04 LTS canonical; other distros work).
 - Docker Engine 24+ with the compose v2 plugin (`docker compose ...`).
-- Bun (used for the `switchroom` CLI itself — the agent runtime is in
-  containers, but the CLI runs on the host).
+- The `claude` CLI on the host (`npm i -g @anthropic-ai/claude-code`,
+  Node 20.11+) for OAuth login. The agent runtime itself ships in
+  containers — the host only needs `claude` for `switchroom auth login`.
 
-## Install
+## Install — one-liner (recommended)
 
 ```sh
-# 1. Get the source (the CLI ships from this repo).
-git clone https://github.com/switchroom/switchroom.git ~/code/switchroom
-cd ~/code/switchroom
-bun install
-bun run build
+curl -fsSL https://github.com/switchroom/switchroom/raw/main/install.sh | sh
+```
 
-# 2. Generate per-host config + first-run wiring.
-switchroom setup           # interactive wizard
+This drops a self-contained `switchroom` binary in `/usr/local/bin`
+(falls back to `~/.local/bin` if the former isn't writable). No `bun`,
+no `node`, no source checkout required on the host. The binary is the
+operator CLI; the agent runtime is pulled from GHCR by Docker.
 
-# 3. Apply the config: scaffold agents + write docker-compose.yml.
-#    Writes ~/.switchroom/compose/docker-compose.yml.
+Then bring up your fleet:
+
+```sh
+# 1. Interactive first-time wiring (Telegram bot token, vault, first agent).
+switchroom setup
+
+# 2. Scaffold agents + write ~/.switchroom/compose/docker-compose.yml.
 switchroom apply
 
-# 4. Bring the fleet up yourself with docker compose.
+# 3. Bring the fleet up.
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml pull
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 ```
@@ -36,6 +41,21 @@ docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 `switchroom apply` only scaffolds + writes the compose file — it does
 not call `docker`. Operators control the bring-up so the CLI never has
 to second-guess your docker setup, daemon socket, or rootless config.
+
+## Install — from source (development)
+
+If you're hacking on switchroom itself, install from a checkout instead:
+
+```sh
+git clone https://github.com/switchroom/switchroom.git ~/code/switchroom
+cd ~/code/switchroom
+bun install
+bun run build
+bun link               # adds the dev `switchroom` to PATH
+switchroom setup
+switchroom apply
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
+```
 
 ## Image refs
 
@@ -72,6 +92,18 @@ compose. Pass `--build` to `docker compose up` to actually rebuild. The
 production path (no flag) is unaffected.
 
 ## Upgrading
+
+For the static-binary install, re-run the installer to pick up a newer
+release, then re-apply + pull + up:
+
+```sh
+curl -fsSL https://github.com/switchroom/switchroom/raw/main/install.sh | sh
+switchroom apply
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml pull
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
+```
+
+For the source install:
 
 ```sh
 cd ~/code/switchroom

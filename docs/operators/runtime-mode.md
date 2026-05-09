@@ -5,26 +5,19 @@ a generated `docker-compose.yml`. This is the only supported production
 runtime. The legacy systemd path was removed in v0.7 (see
 [`migration-v0.7.md`](./migration-v0.7.md)).
 
+Three commands cover the full lifecycle:
+
 ```sh
 switchroom apply
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml pull
-docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d --remove-orphans
 ```
 
 `switchroom apply` scaffolds every agent and writes the compose file
 derived from your `switchroom.yaml`. The CLI deliberately does not call
 `docker` for you — operators control the bring-up.
 
-## Installing from GHCR
-
-The Docker runtime pulls its 5 fleet images from
-`ghcr.io/switchroom/switchroom-{base,agent,broker,kernel,scheduler}`.
-See [`install.md`](./install.md) for the operator install flow
-(`git clone` + `bun install` + `switchroom setup` + `switchroom apply` +
-`docker compose ... up -d`), upgrade procedure, and the dev-time
-`--build-local` mode.
-
-## Production runtime declaration
-
-Linux is the only supported production runtime. macOS (Docker Desktop)
-is tracked as Phase 3.5 and not yet validated for production use.
+See [`install.md`](./install.md) for the full operator install flow
+(curl one-liner, prerequisites, GHCR auth, dev-time `--build-local`
+mode, upgrade procedure). Linux is the only release-validated production
+target; macOS (Docker Desktop) is supported for development.

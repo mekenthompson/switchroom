@@ -86,8 +86,9 @@ is work. Give them the working thing first. Let them tinker later.
   with the `default` profile, a working bot, working memory, and the
   first agent already responding in Telegram before the user reads
   anything.
-- ❌ **Bad:** `switchroom init` writes a blank `switchroom.yaml` and
-  tells the user to read `docs/configuration.md` before proceeding.
+- ❌ **Bad:** A bare `switchroom apply` against a blank `switchroom.yaml`
+  with no first agent, telling the user to read `docs/configuration.md`
+  before proceeding.
 
 - ✅ **Good:** Playwright MCP is wired by default; opt out with
   `mcp_servers: { playwright: false }`. Progress cards on by default
@@ -101,11 +102,12 @@ is work. Give them the working thing first. Let them tinker later.
 - ❌ **Bad:** Each new agent requires copying ten files of boilerplate
   before it boots.
 
-- ✅ **Good:** `switchroom update` upgrades the CLI, reconciles each
-  agent's runtime, restarts each agent + gateway, and reports done.
-  One command, idempotent.
-- ❌ **Bad:** "Run `bun run build`, then `systemctl --user
-  daemon-reload`, then restart each agent yourself."
+- ✅ **Good:** The upgrade flow — `switchroom apply` to reconcile,
+  `docker compose pull` to fetch new images, `docker compose up -d
+  --remove-orphans` to roll the fleet — is three lines, idempotent,
+  and the same on every host.
+- ❌ **Bad:** "Run `bun run build`, then bounce each container by hand,
+  then re-render the compose file, then…"
 
 - ✅ **Good:** Sensible default skills on each profile (health-coach
   ships with `check-in` and `weekly-review`); operator skills

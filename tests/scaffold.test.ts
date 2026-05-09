@@ -840,20 +840,69 @@ describe("scaffoldAgent — docker-mode tmux supervisor preamble (v0.7.5)", () =
     expect(startSh).toContain("export SWITCHROOM_DOCKER_TMUX_INNER=1");
   });
 
-  it("forks autoaccept-poll as a background sidecar before the tmux exec", () => {
+  it("forks autoaccept-poll under the bash supervisor before the tmux exec", () => {
     const config = makeAgentConfig({ topic_id: 1 });
     const result = scaffoldAgent("carol", config, tmpDir, telegramConfig);
     const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
     // Path must match the COPY target in docker/Dockerfile.agent. Both
     // sides are pinned in tests so a Dockerfile rename surfaces here.
     expect(startSh).toContain("/opt/switchroom/autoaccept-poll.js");
-    expect(startSh).toContain('bun /opt/switchroom/autoaccept-poll.js "carol"');
-    // & at end ensures it's backgrounded — without it tmux exec never
-    // fires and claude never starts.
-    const autoacceptLine = startSh
-      .split("\n")
-      .find((l) => l.includes("autoaccept.log 2>&1 &"));
-    expect(autoacceptLine).toBeTruthy();
+    // v0.7.6: autoaccept now runs under _switchroom_supervise, which
+    // restarts it on crash up to a per-window cap. The supervisor
+    // line backgrounds with `&` and writes through the supervisor
+    // logfile (not the bare command's stdout).
+    expect(startSh).toMatch(
+      /_switchroom_supervise autoaccept \/var\/log\/switchroom\/autoaccept\.log[\s\S]*?bun \/opt\/switchroom\/autoaccept-poll\.js "carol" &/,
+    );
+  });
+
+  it("forks the gateway daemon under the bash supervisor (v0.7.6 P0)", () => {
+    // The MCP sidecar exits immediately at boot if no gateway daemon
+    // is running. v0.6 ran it as a sibling systemd unit; under v0.7
+    // docker the agent container runs the daemon as an in-process
+    // sidecar. Without this, claude boots fine but Telegram routing
+    // is dead end-to-end.
+    const config = makeAgentConfig({ topic_id: 1 });
+    const result = scaffoldAgent("eli", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    // Path must match the COPY target in docker/Dockerfile.agent.
+    expect(startSh).toContain(
+      "/opt/switchroom/telegram-plugin/dist/gateway/gateway.js",
+    );
+    expect(startSh).toMatch(
+      /_switchroom_supervise gateway \/var\/log\/switchroom\/gateway-supervisor\.log[\s\S]*?bun "\$_gateway_bundle" &/,
+    );
+  });
+
+  it("hoists TELEGRAM_STATE_DIR into the preamble so the gateway sidecar finds it", () => {
+    // The gateway looks at TELEGRAM_STATE_DIR for gateway.sock /
+    // gateway.pid.json / history.db. Without setting it BEFORE the
+    // sidecar fork, the gateway falls back to ~/.claude/channels/
+    // telegram which the MCP sidecar isn't watching.
+    const config = makeAgentConfig({ topic_id: 1 });
+    const result = scaffoldAgent("frank", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    const lines = startSh.split("\n");
+    const stateDirIdx = lines.findIndex((l) =>
+      l.includes(`TELEGRAM_STATE_DIR="${result.agentDir}/telegram"`),
+    );
+    const gatewayForkIdx = lines.findIndex((l) =>
+      l.includes("_switchroom_supervise gateway"),
+    );
+    expect(stateDirIdx).toBeGreaterThan(0);
+    expect(gatewayForkIdx).toBeGreaterThan(stateDirIdx);
+  });
+
+  it("supervisor caps restarts at 10 in 60s (avoids tight-loop CPU burn)", () => {
+    // Pin the cap shape so a future "make it 100" change forces a
+    // discussion: 10/60s is "give up after a clearly-broken
+    // first-minute" without making operators wait too long.
+    const config = makeAgentConfig({ topic_id: 1 });
+    const result = scaffoldAgent("greta", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).toContain("_switchroom_supervise()");
+    expect(startSh).toContain("if [ $_restarts -ge 10 ]");
+    expect(startSh).toMatch(/if \[ \$\(\(_now - _window_start\)\) -ge 60 \]/);
   });
 
   it("re-execs into tmux with the v0.6-systemd socket+session contract", () => {
@@ -888,7 +937,7 @@ describe("scaffoldAgent — docker-mode tmux supervisor preamble (v0.7.5)", () =
     expect(bSh).toContain('new-session -A -s "eve-2"');
   });
 
-  it("Dockerfile.agent COPYs the bundle to the path start.sh references", () => {
+  it("Dockerfile.agent COPYs the autoaccept-poll bundle to the start.sh path", () => {
     // The two contracts have to stay paired: the start.sh preamble's
     // `bun /opt/switchroom/autoaccept-poll.js` invocation only resolves
     // because Dockerfile.agent COPYs the bundle into that exact path
@@ -904,6 +953,102 @@ describe("scaffoldAgent — docker-mode tmux supervisor preamble (v0.7.5)", () =
     expect(dockerfile).toMatch(
       /chmod 0755 \/opt\/switchroom\/autoaccept-poll\.js/,
     );
+  });
+
+  it("Dockerfile.agent COPYs the telegram-plugin bundle for the gateway sidecar (v0.7.6)", () => {
+    // start.sh forks `bun /opt/switchroom/telegram-plugin/dist/gateway/
+    // gateway.js`. That path resolves only because Dockerfile.agent
+    // bakes the plugin in. The MCP sidecar (claude-spawned) ALSO uses
+    // this path via .mcp.json's `--cwd`. A rename in either side
+    // breaks Telegram routing silently end-to-end.
+    const dockerfile = readFileSync(
+      resolve(__dirname, "..", "docker", "Dockerfile.agent"),
+      "utf-8",
+    );
+    expect(dockerfile).toContain(
+      "COPY telegram-plugin/dist /opt/switchroom/telegram-plugin/dist",
+    );
+    expect(dockerfile).toContain(
+      "COPY telegram-plugin/start.js /opt/switchroom/telegram-plugin/start.js",
+    );
+    expect(dockerfile).toContain(
+      "COPY telegram-plugin/package.json /opt/switchroom/telegram-plugin/package.json",
+    );
+  });
+});
+
+describe("scaffoldAgent — docker-mode .mcp.json (v0.7.6)", () => {
+  // The .mcp.json command paths are the third leg of the in-container
+  // telegram routing tripod (alongside Dockerfile.agent COPY and
+  // start.sh's docker preamble). When `dockerMode=true`, scaffold must
+  // emit the in-image paths so a fresh user with no host dev checkout
+  // and no host npm-global install gets a working agent on first
+  // compose-up.
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "switchroom-mcp-docker-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("docker mode .mcp.json points --cwd at /opt/switchroom/telegram-plugin", () => {
+    const config = makeAgentConfig({ topic_id: 1 });
+    const result = scaffoldAgent(
+      "alice",
+      config,
+      tmpDir,
+      telegramConfig,
+      undefined,
+      undefined,
+      undefined,
+      true, // dockerMode
+    );
+    const mcp = JSON.parse(
+      readFileSync(join(result.agentDir, ".mcp.json"), "utf-8"),
+    ) as { mcpServers: Record<string, { args: string[]; env: Record<string, string> }> };
+    const args = mcp.mcpServers["switchroom-telegram"].args;
+    const cwdIdx = args.indexOf("--cwd");
+    expect(cwdIdx).toBeGreaterThan(-1);
+    expect(args[cwdIdx + 1]).toBe("/opt/switchroom/telegram-plugin");
+  });
+
+  it("docker mode .mcp.json points SWITCHROOM_CLI_PATH at the in-image binary", () => {
+    const config = makeAgentConfig({ topic_id: 1 });
+    const result = scaffoldAgent(
+      "bob",
+      config,
+      tmpDir,
+      telegramConfig,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    const mcp = JSON.parse(
+      readFileSync(join(result.agentDir, ".mcp.json"), "utf-8"),
+    ) as { mcpServers: Record<string, { env: Record<string, string> }> };
+    const env = mcp.mcpServers["switchroom-telegram"].env;
+    expect(env.SWITCHROOM_CLI_PATH).toBe("/usr/local/bin/switchroom");
+    expect(env.SWITCHROOM_CONFIG).toBe("/state/config/switchroom.yaml");
+  });
+
+  it("non-docker mode preserves host-resolved paths (back-compat)", () => {
+    // Operators on v0.6 systemd / dev hosts still get the host
+    // pluginDir + host switchroomCliPath. Anything else would break
+    // existing fleets on reconcile.
+    const config = makeAgentConfig({ topic_id: 1 });
+    const result = scaffoldAgent("carol", config, tmpDir, telegramConfig);
+    const mcp = JSON.parse(
+      readFileSync(join(result.agentDir, ".mcp.json"), "utf-8"),
+    ) as { mcpServers: Record<string, { args: string[]; env: Record<string, string> }> };
+    const args = mcp.mcpServers["switchroom-telegram"].args;
+    const cwdIdx = args.indexOf("--cwd");
+    expect(args[cwdIdx + 1]).not.toBe("/opt/switchroom/telegram-plugin");
+    expect(mcp.mcpServers["switchroom-telegram"].env.SWITCHROOM_CLI_PATH)
+      .not.toBe("/usr/local/bin/switchroom");
   });
 });
 

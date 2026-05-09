@@ -406,7 +406,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
     if (a.strippedCaps.length > 0) {
       warn(`compose: stripping cap_add ${JSON.stringify(a.strippedCaps)} from agent "${a.name}" (Docker mode forbids capability extras; see RFC §security)`);
     }
-    emitAgentService(lines, a, imageTag, buildMode, buildContext, homePrefix);
+    emitAgentService(lines, a, imageTag, buildMode, buildContext, homePrefix, switchroomConfigPath);
   }
 
   // ── volumes ────────────────────────────────────────────────────────
@@ -427,6 +427,7 @@ function emitAgentService(
   buildMode: "pull" | "local",
   buildContext: string | undefined,
   homePrefix: string,
+  switchroomConfigPath: string | undefined,
 ): void {
   lines.push(`  agent-${a.name}:`);
   emitImageOrBuild(lines, "agent", imageTag, buildMode, buildContext);
@@ -495,6 +496,15 @@ function emitAgentService(
     SWITCHROOM_KERNEL_SOCKET: `/run/switchroom/kernel/${a.name}/sock`,
     SWITCHROOM_RUNTIME: "docker",
   };
+  // SWITCHROOM_CONFIG: the in-container telegram-plugin gateway daemon
+  // (forked as a sidecar by start.sh's docker preamble) shells out to
+  // the switchroom CLI for handoff / vault / topic operations and
+  // passes `--config $SWITCHROOM_CONFIG` so the in-container CLI finds
+  // the right yaml regardless of cwd. The yaml is bind-mounted below.
+  // Same env+mount pattern broker/kernel/scheduler already use.
+  if (switchroomConfigPath) {
+    env.SWITCHROOM_CONFIG = "/state/config/switchroom.yaml";
+  }
   for (const k of Object.keys(env).sort()) {
     lines.push(`      ${k}: ${JSON.stringify(env[k])}`);
   }
@@ -522,6 +532,13 @@ function emitAgentService(
   lines.push(`      - ${homePrefix}/.switchroom/logs/${a.name}:/var/log/switchroom`);
   lines.push(`      - ${homePrefix}/.switchroom/agents/${a.name}:${homePrefix}/.switchroom/agents/${a.name}`);
   lines.push(`      - ${homePrefix}/.claude/projects/${a.name}:${homePrefix}/.claude/projects/${a.name}`);
+  // switchroom.yaml file mount (read-only) — the in-container gateway
+  // daemon needs `--config $SWITCHROOM_CONFIG` to talk to the
+  // switchroom CLI for handoff / topic / vault grants. SWITCHROOM_CONFIG
+  // is set above; it points here.
+  if (switchroomConfigPath) {
+    lines.push(`      - ${switchroomConfigPath}:/state/config/switchroom.yaml:ro`);
+  }
   lines.push(`      - ${homePrefix}/.switchroom/logs/${a.name}:${homePrefix}/.switchroom/logs/${a.name}`);
   lines.push(``);
   void imageTag;

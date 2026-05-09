@@ -276,7 +276,7 @@ export async function runApply(
   writeOut(
     `Bring the fleet up with:\n` +
       `  docker compose -p ${COMPOSE_PROJECT} -f ${composePath} pull && \\\n` +
-      `    docker compose -p ${COMPOSE_PROJECT} -f ${composePath} up -d\n`,
+      `    docker compose -p ${COMPOSE_PROJECT} -f ${composePath} up -d --remove-orphans\n`,
   );
   writeOut(
     chalk.gray(

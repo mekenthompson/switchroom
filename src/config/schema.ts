@@ -1373,10 +1373,11 @@ export const VaultConfigSchema = z.object({
         "systemd-creds, no TPM. Run `switchroom vault broker " +
         "enable-auto-unlock` once to write the blob."
       ),
-      autoUnlockCredentialPath: z.string().default("~/.config/switchroom/auto-unlock.bin").describe(
+      autoUnlockCredentialPath: z.string().default("~/.switchroom/vault-auto-unlock").describe(
         "Path to the machine-bound auto-unlock blob (see " +
-        "src/vault/auto-unlock.ts for the format). Default lives under the " +
-        "user's switchroom config dir at mode 0600. Tilde-expansion happens " +
+        "src/vault/auto-unlock.ts for the format). Default lives under " +
+        "~/.switchroom so it can be bind-mounted into the vault-broker " +
+        "container by docker compose. Tilde-expansion happens " +
         "at read time."
       ),
     })

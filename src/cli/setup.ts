@@ -801,7 +801,7 @@ async function stepAutoUnlock(
 
   const credPathRaw =
     config.vault?.broker?.autoUnlockCredentialPath ??
-    "~/.config/switchroom/auto-unlock.bin";
+    "~/.switchroom/vault-auto-unlock";
   const credPath = resolvePath(credPathRaw);
   if (config.vault?.broker?.autoUnlock === true && existsSync(credPath)) {
     console.log(chalk.green(`  ${STEP_DONE} Already configured (${credPath})`));

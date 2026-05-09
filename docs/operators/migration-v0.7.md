@@ -79,8 +79,20 @@ check fails (your agent state dirs are owned by a UID the container
 won't have), either fix the ownership or pass `--allow-unaligned` after
 reading the warning.
 
-If you used auto-unlock under v0.6, the vault broker re-unlocks itself
-inside its new container on first boot.
+If you used auto-unlock under v0.6, move the auto-unlock blob to its
+v0.7 path **before** running `switchroom apply` above (v0.7 changed the
+default location and the v0.6 file won't be picked up otherwise):
+
+```sh
+# v0.7 changed the auto-unlock blob path. If you used auto-unlock on v0.6:
+[ -f ~/.config/switchroom/auto-unlock.bin ] && \
+  mv ~/.config/switchroom/auto-unlock.bin ~/.switchroom/vault-auto-unlock
+```
+
+If you've moved the auto-unlock blob (above) the vault broker re-unlocks
+itself inside its new container on first boot. Otherwise you'll be
+prompted for the passphrase on first start; re-run
+`switchroom vault enable-auto-unlock` to restore unattended unlock.
 
 ## Step 4 — Verify
 
@@ -118,6 +130,21 @@ If something breaks and you want back on v0.6:
 ```sh
 # Stop the docker fleet.
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml down
+
+# Restore original UID ownership on agent state dirs. v0.7 apply chowns
+# each agent dir to its container UID (10xx range); v0.6 systemd units
+# run as your own UID and will refuse to read state owned by 10xx.
+# `apply` records the prior <uid>:<gid> per directory to the audit log
+# below — replay it in reverse so each dir gets its v0.6 owner back.
+# If the log is missing (fresh install or pre-PR-C2 v0.7), the
+# unconditional fallback restores everything to your shell user.
+if [ -f ~/.switchroom/.uid-alignment.log ]; then
+  # Each line: "<iso-ts> <agent-dir> <prior-uid>:<prior-gid> -> <new>".
+  awk '{print $2, $3}' ~/.switchroom/.uid-alignment.log \
+    | while read -r dir owner; do sudo chown -R "$owner" "$dir"; done
+else
+  sudo chown -R "$USER:$USER" ~/.switchroom/agents/
+fi
 
 # Restore the v0.6 config snapshot you took at the top of this doc.
 mv ~/.switchroom ~/.switchroom.v0.7.partial

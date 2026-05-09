@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   writeFileSync,
+  appendFileSync,
   readFileSync,
   chmodSync,
   symlinkSync,
@@ -12,6 +13,7 @@ import {
   lstatSync,
   readlinkSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { execSync, execFileSync } from "node:child_process";
 import { basename, join, resolve } from "node:path";
 import chalk from "chalk";
@@ -110,15 +112,34 @@ export function alignAgentUid(
   if (existsSync(agentDir)) paths.push(agentDir);
   if (paths.length === 0) return { chowned: false, paths: [] };
 
-  // Fast path: already correctly owned (idempotent re-runs).
+  // No fast-path: a previous `apply` may have aligned the top-level dir
+  // while leaving stale uid 1000 entries deep in the subtree (e.g. the
+  // operator dropped files in via sudo, or a v0.6 → v0.7 migration
+  // chowned the root but skipped a child). `chown -R` is idempotent and
+  // cheap, so we always run it. Pre-`chown` we record the prior owner of
+  // the top-level dir to ~/.switchroom/.uid-alignment.log so rollback
+  // can restore precise ownership without guessing.
+  let priorUid: number | undefined;
+  let priorGid: number | undefined;
   try {
     const st = statSync(agentDir);
-    if (st.uid === uid && st.gid === uid) {
-      return { chowned: false, paths };
-    }
-  } catch { /* fall through to chown */ }
+    priorUid = st.uid;
+    priorGid = st.gid;
+  } catch { /* unreadable — skip the audit log entry */ }
 
   if (opts.dryRun) return { chowned: false, paths };
+
+  if (priorUid !== undefined && priorGid !== undefined && (priorUid !== uid || priorGid !== uid)) {
+    try {
+      const logPath = join(homedir(), ".switchroom", ".uid-alignment.log");
+      mkdirSync(join(homedir(), ".switchroom"), { recursive: true });
+      const ts = new Date().toISOString();
+      appendFileSync(
+        logPath,
+        `${ts} ${agentDir} ${priorUid}:${priorGid} -> ${uid}:${uid}\n`,
+      );
+    } catch { /* best-effort audit; never block alignment */ }
+  }
 
   if (opts.confirm !== false && process.stdin.isTTY) {
     // Interactive prompt: explain why we're shelling sudo. We use

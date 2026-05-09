@@ -1,4 +1,4 @@
-import { execFile, execFileSync, spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync, renameSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { connect } from "node:net";
@@ -640,6 +640,3 @@ export function getAgentLogs(name: string, follow: boolean): void {
   });
 }
 
-// Silence unused-import lints on `execFile` (kept for future async
-// shellouts; the synchronous path covers everything the CLI needs).
-void execFile;

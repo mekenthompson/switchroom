@@ -79,8 +79,20 @@ check fails (your agent state dirs are owned by a UID the container
 won't have), either fix the ownership or pass `--allow-unaligned` after
 reading the warning.
 
-If you used auto-unlock under v0.6, the vault broker re-unlocks itself
-inside its new container on first boot.
+If you used auto-unlock under v0.6, move the auto-unlock blob to its
+v0.7 path **before** running `switchroom apply` above (v0.7 changed the
+default location and the v0.6 file won't be picked up otherwise):
+
+```sh
+# v0.7 changed the auto-unlock blob path. If you used auto-unlock on v0.6:
+[ -f ~/.config/switchroom/auto-unlock.bin ] && \
+  mv ~/.config/switchroom/auto-unlock.bin ~/.switchroom/vault-auto-unlock
+```
+
+If you've moved the auto-unlock blob (above) the vault broker re-unlocks
+itself inside its new container on first boot. Otherwise you'll be
+prompted for the passphrase on first start; re-run
+`switchroom vault enable-auto-unlock` to restore unattended unlock.
 
 ## Step 4 — Verify
 

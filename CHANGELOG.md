@@ -1,5 +1,89 @@
 # Changelog
 
+## v0.7.3 — Runtime detection + audit fixes
+
+Closes the v0.7.2 audit findings that survived into the released code.
+Each finding was verified against live source before being patched.
+
+**Fixes:**
+
+- **`isDockerRuntime()` host-shell detection** (BLOCKER from audit §3a).
+  v0.7.2 gated docker-aware branches on
+  `process.env.SWITCHROOM_RUNTIME === "docker"` — but that env var is
+  only set INSIDE containers (by `compose.ts`), never on the host.
+  An operator running `switchroom agent status myagent` /
+  `switchroom doctor` from their host shell got the systemd fallback
+  even on a docker fleet, reporting "inactive" forever. v0.7.3 adds
+  a unified helper `src/runtime-mode.ts isDockerRuntime()` that fires
+  on EITHER signal: env var (in-container case) OR existence of
+  `~/.switchroom/compose/docker-compose.yml` (host-shell case).
+  Wired into `src/agents/status.ts:defaultStatusInputs`,
+  `src/cli/agent.ts:preflightCheck`, and `src/cli/doctor.ts`'s
+  `checkGatewayUnit` gate (which was calling `isDockerMode()` with
+  no `composePath`, hitting only the env-var branch).
+
+- **`vault-auto-unlock` placeholder pre-creation** (BLOCKER from audit
+  §1a). v0.7.1's `ensureHostMountSources` mkdir'd directories but
+  left files alone. The `~/.switchroom/vault-auto-unlock` mount
+  source could still be created as a root-owned DIR by docker on
+  greenfield installs (the same bug class v0.7.1 claimed to close).
+  Apply now writes a 0-byte placeholder file at that path with mode
+  0600 if missing; the broker reads empty bytes, fails decrypt,
+  falls back to interactive unlock cleanly (per
+  `src/vault/broker/server.ts:1503-1518`); a later
+  `switchroom vault broker enable-auto-unlock` overwrites the
+  placeholder via `writeFileSync` (per `auto-unlock.ts:199`).
+
+- **Inline-button error message wrong service name** (audit §2a).
+  v0.7.2's `case 'restart'` callback under docker pointed operators at
+  `docker compose -p switchroom restart switchroom-${agent}`. But
+  compose generates SERVICE name `agent-${name}` (`compose.ts:408`)
+  with `container_name: switchroom-${name}`. `docker compose restart`
+  takes a service, not a container — the suggested command would
+  error with "no such service". Now correctly emits `agent-${agent}`.
+
+- **`case 'logs'` callback systemd-only** (audit §2d). Sister of the
+  audit §2a fix — v0.7.2 fixed `restart` but missed the same
+  migration on the operator-events `logs` button. Under docker the
+  inline-button log fetch (which shells out to `journalctl --user`)
+  errored. Now under docker it returns an actionable message
+  ("Run from the host: docker logs --since 30m --tail 30
+  switchroom-${agent}") rather than spawning journalctl in a
+  container without systemd.
+
+- **`Status === "restarting"` distinct from "inactive"** (audit §3b).
+  v0.7.2's `readDockerContainer` collapsed every non-running state
+  into `inactive`, hiding the crash-loop signal that the
+  now-disabled watchdog used to surface. v0.7.3 maps `restarting`
+  to its own bucket so the renderer / status caller can tell a
+  flapping container from a cleanly stopped one.
+
+**Tests:** new `src/runtime-mode.test.ts` (4 cases covering env var,
+compose file, neither, parent-only). Updated `status-runtime.test.ts`
+to mock the runtime-mode helper. Added a `restarting` case for
+`readDockerContainer`. 5077 vitest + 3330 bun pass (the 1 bun
+failure is the new UAT smoke test from PR #868 which requires
+`SWITCHROOM_UAT_CHAT_ID`, unrelated to this PR).
+
+**Audit findings explicitly DEFERRED to v0.7.4+:**
+
+- §2c: `triggerSelfRestart`'s 300ms IPC-flush grace doesn't actually
+  drain the socket — the gateway's IPC code should `socket.end()` +
+  await `'finish'` before the SIGTERM-to-PID-1 setTimeout fires.
+  Architectural change; needs design.
+- §4a: crash-loop signal silently lost when watchdog is disabled
+  under docker. Either add `restart: on-failure:N` to compose or
+  surface `RestartCount` via a periodic host-side scheduler check.
+- §5a: under docker, `preflightCheck` only checks `start.sh`;
+  docker-mode equivalents (image presence, compose validity, UID
+  alignment readback) aren't yet covered. doctor's `runDockerSection`
+  partially fills this but isn't invoked from agent lifecycle verbs.
+- §6a: gateway code changes ship in `telegram-plugin/gateway/` which
+  runs INSIDE the agent container; v0.7.2/v0.7.3 fixes only land on
+  hosts that pull republished GHCR images. CHANGELOG should call
+  this out at release time, and a tag→GHCR cycle should happen
+  before announcing v0.7.3.
+
 ## v0.7.2 — Docker runtime alignment
 
 Closes the v0.7-era code paths that still assumed the legacy systemd

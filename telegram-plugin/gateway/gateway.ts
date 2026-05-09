@@ -7900,11 +7900,15 @@ async function handleOperatorEventCallback(ctx: Context, data: string): Promise<
         await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {})
       } else {
         // Under docker the helper refuses cross-agent restart; surface
-        // a clear message instead of a silent no-op.
+        // a clear message instead of a silent no-op. Service name in
+        // the generated compose is `agent-<name>` (compose.ts:408);
+        // container_name is `switchroom-<name>` (compose.ts:410).
+        // `docker compose restart` takes a SERVICE name, so we point
+        // the operator at the service.
         const isDocker = process.env.SWITCHROOM_RUNTIME === 'docker'
         const detail = isDocker
           ? `cross-agent restart is not supported under docker. ` +
-            `Restart from the host: <code>docker compose -p switchroom restart switchroom-${agent}</code>.`
+            `Restart from the host: <code>docker compose -p switchroom restart agent-${agent}</code>.`
           : 'restart trigger failed'
         await ctx.reply(`<b>Restart failed for ${agent}:</b> ${detail}`, {
           parse_mode: 'HTML',
@@ -7920,6 +7924,21 @@ async function handleOperatorEventCallback(ctx: Context, data: string): Promise<
     }
     case 'logs': {
       await ctx.answerCallbackQuery({ text: 'Fetching logs…' }).catch(() => {})
+      // Pick the right log source for the runtime. Under docker, the
+      // gateway is INSIDE the agent container — calling `docker logs`
+      // requires the host's docker socket which is deliberately not
+      // mounted into agent containers. Under systemd, journalctl
+      // works as before. v0.7.2 fixed `case 'restart'` but left this
+      // path systemd-only.
+      const isDocker = process.env.SWITCHROOM_RUNTIME === 'docker'
+      if (isDocker) {
+        await ctx.reply(
+          `<i>Inline log fetch is not available under docker mode (no docker.sock in agent containers). ` +
+            `Run from the host: <code>docker logs --since 30m --tail 30 switchroom-${agent}</code></i>`,
+          { parse_mode: 'HTML' },
+        )
+        return
+      }
       try {
         const out = execFileSync(
           'journalctl',

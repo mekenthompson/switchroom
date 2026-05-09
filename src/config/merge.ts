@@ -583,6 +583,31 @@ export function mergeAgentConfig(
     merged.extra_stable_files = dedupe([...d, ...a]);
   }
 
+  // --- experimental: shallow per-key merge, agent wins ---
+  //
+  // The schema declares `experimental` at every cascade layer
+  // (defaults / profile / per-agent) and the descriptions promise
+  // "Cascades through defaults → profile → per-agent." Without an
+  // explicit clause here the merger silently dropped the defaults
+  // and profile layers — operators who set `experimental.*` at
+  // those layers got undefined behaviour at the resolved tip.
+  //
+  // Phase 3 cron-fold-in surfaced this for `inline_scheduler`: the
+  // canary toggle needs to survive the cascade so an operator can
+  // (a) flip it per-agent (ship today), and (b) flip it via
+  // defaults for Phase 4's cutover (no per-agent edit fanout).
+  // The same fix benefits `legacy_pty` and `legacy_autoaccept_expect`,
+  // both of which the schema already promised would cascade.
+  //
+  // Per-key (not deep) is the right shape — every existing field
+  // is a boolean. Agent wins on conflict, undefined values don't
+  // clobber.
+  if (defaults.experimental || merged.experimental) {
+    const d = defaults.experimental ?? {};
+    const a = merged.experimental ?? {};
+    merged.experimental = { ...d, ...a };
+  }
+
   return merged;
 }
 

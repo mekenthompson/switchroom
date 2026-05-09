@@ -799,6 +799,114 @@ describe("scaffoldAgent", () => {
   });
 });
 
+describe("scaffoldAgent — docker-mode tmux supervisor preamble (v0.7.5)", () => {
+  // Under v0.7 docker, the agent container's CMD is start.sh under tini
+  // with no host-side tmux wrapper or ExecStartPost autoaccept. Without
+  // this preamble: claude blocks forever on the dev-channels acknowledge
+  // prompt (no autoaccept inside the container) and `switchroom agent
+  // attach` fails (no tmux server inside the container with the expected
+  // socket name). The preamble is gated on SWITCHROOM_RUNTIME=docker so
+  // the systemd path is unchanged byte-for-byte.
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "switchroom-docker-tmux-"));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("renders the SWITCHROOM_RUNTIME=docker gate at the top of start.sh", () => {
+    const config = makeAgentConfig({ topic_id: 1 });
+    const result = scaffoldAgent("alice", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    // Must come BEFORE the env-var setup so we re-exec into tmux before
+    // doing redundant work (handoff load, hindsight wait-loop, etc).
+    const preambleIdx = startSh.indexOf('"$SWITCHROOM_RUNTIME" = "docker"');
+    const envIdx = startSh.indexOf('NVM_DIR="$HOME/.nvm"');
+    expect(preambleIdx).toBeGreaterThan(0);
+    expect(envIdx).toBeGreaterThan(preambleIdx);
+  });
+
+  it("guards re-entry with the SWITCHROOM_DOCKER_TMUX_INNER marker", () => {
+    // Without the inner-marker check the script would tmux-recurse
+    // forever — first invocation re-execs into tmux, the inner script
+    // runs again under tmux and would re-exec into another tmux, ...
+    const config = makeAgentConfig({ topic_id: 1 });
+    const result = scaffoldAgent("bob", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).toContain('-z "$SWITCHROOM_DOCKER_TMUX_INNER"');
+    expect(startSh).toContain("export SWITCHROOM_DOCKER_TMUX_INNER=1");
+  });
+
+  it("forks autoaccept-poll as a background sidecar before the tmux exec", () => {
+    const config = makeAgentConfig({ topic_id: 1 });
+    const result = scaffoldAgent("carol", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    // Path must match the COPY target in docker/Dockerfile.agent. Both
+    // sides are pinned in tests so a Dockerfile rename surfaces here.
+    expect(startSh).toContain("/opt/switchroom/autoaccept-poll.js");
+    expect(startSh).toContain('bun /opt/switchroom/autoaccept-poll.js "carol"');
+    // & at end ensures it's backgrounded — without it tmux exec never
+    // fires and claude never starts.
+    const autoacceptLine = startSh
+      .split("\n")
+      .find((l) => l.includes("autoaccept.log 2>&1 &"));
+    expect(autoacceptLine).toBeTruthy();
+  });
+
+  it("re-execs into tmux with the v0.6-systemd socket+session contract", () => {
+    // src/agents/autoaccept.ts:151 hardcodes socket
+    // `switchroom-${agentName}` and src/agents/lifecycle.ts:attachAgent
+    // does `docker exec -it ... tmux -L switchroom-<name> attach -t <name>`.
+    // Both contracts are met from the inside-the-container side here.
+    const config = makeAgentConfig({ topic_id: 1 });
+    const result = scaffoldAgent("dave", config, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).toMatch(/exec tmux -L "switchroom-dave"/);
+    expect(startSh).toMatch(/new-session -A -s "dave"/);
+  });
+
+  it("preamble interpolates the agent name consistently across the three call sites", () => {
+    // Three places interpolate `{{name}}` in the preamble: the
+    // autoaccept-poll bun arg, the tmux socket name (-L), and the tmux
+    // session name (-s). All three must agree — drift between them
+    // would break the autoaccept contract or the attach contract.
+    const a = scaffoldAgent("eve", makeAgentConfig({ topic_id: 1 }), tmpDir, telegramConfig);
+    const b = scaffoldAgent("eve-2", makeAgentConfig({ topic_id: 2 }), tmpDir, telegramConfig);
+    const aSh = readFileSync(join(a.agentDir, "start.sh"), "utf-8");
+    const bSh = readFileSync(join(b.agentDir, "start.sh"), "utf-8");
+
+    expect(aSh).toContain('bun /opt/switchroom/autoaccept-poll.js "eve"');
+    expect(aSh).toContain('exec tmux -L "switchroom-eve"');
+    expect(aSh).toContain('new-session -A -s "eve"');
+
+    // Non-trivial name (with a hyphen) survives interpolation byte-for-byte.
+    expect(bSh).toContain('bun /opt/switchroom/autoaccept-poll.js "eve-2"');
+    expect(bSh).toContain('exec tmux -L "switchroom-eve-2"');
+    expect(bSh).toContain('new-session -A -s "eve-2"');
+  });
+
+  it("Dockerfile.agent COPYs the bundle to the path start.sh references", () => {
+    // The two contracts have to stay paired: the start.sh preamble's
+    // `bun /opt/switchroom/autoaccept-poll.js` invocation only resolves
+    // because Dockerfile.agent COPYs the bundle into that exact path
+    // at image build time. A rename in either file silently breaks
+    // autoaccept, so pin both halves here.
+    const dockerfile = readFileSync(
+      resolve(__dirname, "..", "docker", "Dockerfile.agent"),
+      "utf-8",
+    );
+    expect(dockerfile).toContain(
+      "COPY dist/cli/autoaccept-poll.js /opt/switchroom/autoaccept-poll.js",
+    );
+    expect(dockerfile).toMatch(
+      /chmod 0755 \/opt\/switchroom\/autoaccept-poll\.js/,
+    );
+  });
+});
+
 describe("reconcileAgent", () => {
   let tmpDir: string;
 

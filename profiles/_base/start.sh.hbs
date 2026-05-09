@@ -1,4 +1,36 @@
 #!/bin/bash
+# --- Docker-mode tmux supervisor (#793 §2 / v0.7.5) ---
+# Under v0.6 systemd the unit's ExecStart is `tmux new-session -d ...
+# bash -l start.sh` and ExecStartPost spawns autoaccept-poll on the
+# host — both pieces sit OUTSIDE the agent process. Under v0.7 docker
+# the container's CMD is start.sh directly under tini, with no tmux
+# wrapper and no host-side ExecStartPost. Without this preamble the
+# first-run dev-channels acknowledgement prompt blocks claude forever
+# (no autoaccept), and `switchroom agent attach` fails (no tmux server
+# inside the container for `tmux attach -t <name>` to find).
+#
+# Fix: when we detect docker mode AND we're not already inside the
+# inner tmux pane (the SWITCHROOM_DOCKER_TMUX_INNER marker), spawn
+# autoaccept-poll as a sidecar then re-exec into tmux with this same
+# script as the inner command. Inside tmux the marker is set, so the
+# preamble is a no-op and the rest of the script runs normally.
+#
+# Socket name `switchroom-<agent>` and session name `<agent>` match
+# what `src/agents/autoaccept.ts:151` and
+# `src/agents/lifecycle.ts:attachAgent` expect — the contract is the
+# same one v0.6 systemd has always honored, just enforced inside the
+# container instead of by the host's user systemd manager.
+if [ "$SWITCHROOM_RUNTIME" = "docker" ] && [ -z "$SWITCHROOM_DOCKER_TMUX_INNER" ]; then
+  if [ -f /opt/switchroom/autoaccept-poll.js ] && command -v bun >/dev/null 2>&1; then
+    bun /opt/switchroom/autoaccept-poll.js "{{name}}" \
+      >> /var/log/switchroom/autoaccept.log 2>&1 &
+  fi
+  export SWITCHROOM_DOCKER_TMUX_INNER=1
+  exec tmux -L "switchroom-{{name}}" \
+    new-session -A -s "{{name}}" -x 400 -y 50 \
+    bash -l "$0"
+fi
+
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 export PATH="$HOME/.bun/bin:$PATH"

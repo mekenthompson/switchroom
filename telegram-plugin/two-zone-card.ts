@@ -87,7 +87,15 @@ export function phaseFor(
   if (stalledClose) return { icon: '⚠', label: 'Forced close' }
 
   const fleetRunning = anyFleetActive(fleet)
-  const fleetAllStuck = fleet.size > 0 && [...fleet.values()].filter((m) => m.status === 'running' || m.status === 'stuck').every((m) => isStuck(m, now))
+  // Stalled = "the only fleet members that could still make progress have
+  // gone idle past the threshold". An empty filtered list (every fleet
+  // member is already terminal) MUST NOT count as stalled — Array#every
+  // returns true vacuously on `[]`, which previously caused the card to
+  // freeze at ⚠ Stalled the moment the last sub-agent finished while the
+  // parent was still running. We require at least one running-or-stuck
+  // member before claiming the fleet is stalled.
+  const runningOrStuck = [...fleet.values()].filter((m) => m.status === 'running' || m.status === 'stuck')
+  const fleetAllStuck = runningOrStuck.length > 0 && runningOrStuck.every((m) => isStuck(m, now))
 
   // SilentEnd: parent terminated without a reply. Lifted above the
   // background/done branches so a still-running fleet can't mask it,
@@ -99,8 +107,11 @@ export function phaseFor(
   // Stalled: every running-or-stuck member is past the idle threshold.
   // Members already terminal (done/failed) are excluded from this check —
   // a fleet of [done, stuck] still surfaces as Stalled because the only
-  // member that could still make progress is no longer doing so.
-  if (fleet.size > 0 && fleetAllStuck && !parentDone) {
+  // member that could still make progress is no longer doing so. The
+  // `fleetAllStuck` calc itself guards against an empty filtered list
+  // (otherwise `[].every()` would lock the card at Stalled the moment
+  // the last sub-agent finished).
+  if (fleetAllStuck && !parentDone) {
     return { icon: '⚠', label: 'Stalled' }
   }
 

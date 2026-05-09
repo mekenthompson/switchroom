@@ -10533,6 +10533,12 @@ void (async () => {
               onStall: (agentId, idleMs, description) => {
                 progressDriver?.onSubAgentStall(agentId, idleMs, description)
               },
+              // Symmetric to onStall: clear the ⚠ Stalled badge as soon
+              // as the watcher sees JSONL activity return, instead of
+              // waiting on the next render tick to recompute idle ms.
+              onUnstall: (agentId, description) => {
+                progressDriver?.onSubAgentUnstall?.(agentId, description)
+              },
               // #card-audit-log: symmetric sub_agent_finished surface.
               // The driver's per-chat shadow knows the parent turnKey and
               // the registry DB carries the background flag — combine them

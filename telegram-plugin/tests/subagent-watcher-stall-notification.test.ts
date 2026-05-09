@@ -28,16 +28,19 @@ function subAgentUserMsg(promptText: string) {
 interface StallHarness {
   notifications: string[]
   stallCalls: Array<{ agentId: string; idleMs: number; description: string }>
+  unstallCalls: Array<{ agentId: string; description: string }>
   logs: string[]
   advance: (ms: number) => void
   watcher: ReturnType<typeof startSubagentWatcher>
   now: () => number
   fileContents: Map<string, Buffer>
+  jsonlPath: string
 }
 
 function makeStallHarness(opts: {
   agentDir?: string
   stallThresholdMs?: number
+  silentSynthesisStallThresholdMs?: number
   rescanMs?: number
   initialContent?: string
   agentId?: string
@@ -45,6 +48,7 @@ function makeStallHarness(opts: {
   const {
     agentDir = '/home/user/.switchroom/agents/myagent',
     stallThresholdMs = 60_000,
+    silentSynthesisStallThresholdMs,
     rescanMs = 500,
     agentId = 'test-stall-agent-01',
     initialContent,
@@ -53,6 +57,7 @@ function makeStallHarness(opts: {
   let currentTime = 1000
   const notifications: string[] = []
   const stallCalls: Array<{ agentId: string; idleMs: number; description: string }> = []
+  const unstallCalls: Array<{ agentId: string; description: string }> = []
   const logs: string[] = []
 
   // Build realistic path: <agentDir>/.claude/projects/<sanitized-cwd>/<sessionId>/subagents/
@@ -127,9 +132,16 @@ function makeStallHarness(opts: {
   const watcher = startSubagentWatcher({
     agentDir,
     stallThresholdMs,
+    // When the test doesn't explicitly distinguish the two thresholds,
+    // mirror them so existing fixtures (which have toolCount=0 and a
+    // simple "advance past 60s" model) keep working under the new
+    // adaptive logic. New tests pass an explicit value to exercise the
+    // silent-synthesis vs active-loop split.
+    silentSynthesisStallThresholdMs: silentSynthesisStallThresholdMs ?? stallThresholdMs,
     rescanMs,
     sendNotification: (text) => notifications.push(text),
     onStall: (id, idle, desc) => stallCalls.push({ agentId: id, idleMs: idle, description: desc }),
+    onUnstall: (id, desc) => unstallCalls.push({ agentId: id, description: desc }),
     now: () => currentTime,
     setInterval: (fn, ms) => {
       const ref = nextRef++
@@ -156,7 +168,7 @@ function makeStallHarness(opts: {
     }
   }
 
-  return { notifications, stallCalls, logs, advance, watcher, now: () => currentTime, fileContents }
+  return { notifications, stallCalls, unstallCalls, logs, advance, watcher, now: () => currentTime, fileContents, jsonlPath }
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -209,6 +221,97 @@ describe('subagent-watcher onStall callback (Option C, issue #393)', () => {
     // must prevent a second onStall call.
     advance(120_000)
     expect(stallCalls.length).toBe(countAfterFirstStall) // still exactly 1
+  })
+
+  // Test 11 (silent-synthesis): a sub-agent that hasn't fired any tools
+  // yet should NOT trip the stall detector at the active-loop threshold
+  // (60s) — it's almost certainly in long-form synthesis mode where the
+  // model is still composing its first emit. The silent-synthesis
+  // threshold (5min by default) is what gates that case. Pre-fix the
+  // single 60s threshold tripped on plan/research sub-agents that ran
+  // 2-3min legitimately, freezing the card at ⚠ until completion.
+  it('does NOT trip stall at 60s when toolCount=0 (silent synthesis adaptive threshold)', () => {
+    const agentId = 'stall-test-11'
+    const { stallCalls, advance, watcher } = makeStallHarness({
+      agentId,
+      stallThresholdMs: 60_000,
+      silentSynthesisStallThresholdMs: 300_000, // 5min
+      rescanMs: 500,
+    })
+    advance(500) // register
+    const entry = watcher.getRegistry().get(agentId)
+    if (entry) entry.historical = false
+    advance(120_000) // 2min idle, far past 60s but well under 5min
+    expect(stallCalls).toHaveLength(0)
+    advance(200_000) // total ~5min 20s — past silent-synthesis threshold
+    expect(stallCalls).toHaveLength(1)
+    expect(stallCalls[0].agentId).toBe(agentId)
+  })
+
+  // Test 12 (un-stall transition): once JSONL activity returns after a
+  // stall, the watcher must reset stallNotified, fire onUnstall, and
+  // re-arm so a subsequent stall detects again. Pre-fix none of those
+  // happened — the card stuck at ⚠ even when the sub-agent was clearly
+  // alive again.
+  it('fires onUnstall when activity returns after a stall and re-arms detection', () => {
+    const agentId = 'stall-test-12'
+    const { stallCalls, unstallCalls, advance, watcher, fileContents, jsonlPath } = makeStallHarness({
+      agentId,
+      // Force the active-loop threshold by giving the entry a tool right
+      // away (avoids the silent-synthesis adaptive path). We append a
+      // sub_agent_tool_use line in the initial content so toolCount > 0
+      // by the first activity bump.
+      stallThresholdMs: 60_000,
+      silentSynthesisStallThresholdMs: 60_000, // keep flat for this test
+      rescanMs: 500,
+      initialContent: buildJSONL(
+        subAgentUserMsg('background task'),
+        { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-A', name: 'Read', input: { path: '/x' } }] } },
+      ),
+    })
+    advance(500) // register + initial tail read (toolCount becomes 1)
+    const entry = watcher.getRegistry().get(agentId)
+    if (entry) entry.historical = false
+    advance(65_000) // cross 60s — stall fires
+    expect(stallCalls).toHaveLength(1)
+    expect(unstallCalls).toHaveLength(0)
+
+    // Append a fresh JSONL line — the sub-agent emits text, proving it's
+    // alive. The watcher should reset stallNotified, fire onUnstall, and
+    // re-arm so a *future* idle period can stall it again.
+    const existing = fileContents.get(jsonlPath) ?? Buffer.from('')
+    const resumeLine = JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'still alive' }] } }) + '\n'
+    fileContents.set(jsonlPath, Buffer.concat([existing, Buffer.from(resumeLine, 'utf-8')]))
+    advance(500) // poll picks up the new line
+
+    expect(unstallCalls).toHaveLength(1)
+    expect(unstallCalls[0].agentId).toBe(agentId)
+    // stallNotified must be re-armed: another idle window crosses
+    // threshold again and onStall fires a SECOND time.
+    advance(65_000)
+    expect(stallCalls).toHaveLength(2)
+  })
+
+  // Test 13 (un-stall + tool-loop adaptive): once tools have been used,
+  // a 60s gap correctly re-trips the stall detector. Sanity check that
+  // toolCount > 0 selects the active-loop threshold, not silent-synthesis.
+  it('uses 60s threshold once toolCount>0 (active-loop adaptive)', () => {
+    const agentId = 'stall-test-13'
+    const { stallCalls, advance, watcher } = makeStallHarness({
+      agentId,
+      stallThresholdMs: 60_000,
+      silentSynthesisStallThresholdMs: 600_000, // way out — 10min
+      rescanMs: 500,
+      initialContent: buildJSONL(
+        subAgentUserMsg('worker'),
+        { type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-A', name: 'Read', input: {} }] } },
+      ),
+    })
+    advance(500) // register + tail (toolCount=1)
+    const entry = watcher.getRegistry().get(agentId)
+    if (entry) entry.historical = false
+    advance(65_000) // 65s of silence with tools active → stall
+    expect(stallCalls).toHaveLength(1)
   })
 
   // Test 10: onStall is NOT called for sub-agents already done/failed

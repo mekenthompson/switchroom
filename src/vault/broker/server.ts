@@ -25,7 +25,8 @@
  */
 
 import * as net from "node:net";
-import { mkdirSync, chmodSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
+import { mkdirSync, chmodSync, chownSync, existsSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync, renameSync } from "node:fs";
+import { allocateAgentUid } from "../../agents/compose.js";
 import { dirname, resolve, join, basename } from "node:path";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -401,6 +402,27 @@ export class VaultBroker {
       server.on("error", (err) => rejectP(err));
       server.listen(abs, () => {
         try { chmodSync(abs, 0o660); } catch { /* ignore */ }
+        // Chown the socket (and, for subdir-shape paths, the parent dir
+        // mount point) to the agent UID so a non-root agent container
+        // — running as `user: <uid>:<uid>` per compose — can connect.
+        // The broker runs root-in-container with cap_drop=ALL +
+        // cap_add=[CHOWN, FOWNER, DAC_READ_SEARCH], so chown succeeds
+        // here. Mirrors `kernel-server.ts:bindAgentSocket`. Order
+        // matters: chown AFTER listen() so root could write into the
+        // (still-root-owned) parent dir to create the socket node.
+        // Errors swallowed for non-docker dev/test runs where CAP_CHOWN
+        // isn't held (callers run as the same UID as agents).
+        try {
+          const uid = allocateAgentUid(agentName);
+          try { chownSync(abs, uid, uid); } catch { /* see above */ }
+          if (abs.endsWith("/sock")) {
+            const dir = abs.slice(0, -"/sock".length);
+            try { chownSync(dir, uid, uid); } catch { /* see above */ }
+          }
+        } catch {
+          // allocateAgentUid is deterministic and pure; swallow only to
+          // protect the listen() callback from any unexpected throw.
+        }
         this.agentServers.set(abs, { server, agentName });
         resolveP(agentName);
       });
@@ -1651,27 +1673,48 @@ export async function main(): Promise<void> {
   const vaultPath = process.env.SWITCHROOM_VAULT_PATH;
 
   // Phase 2a — enumerate per-agent socket targets that compose mounted in.
-  // We expect entries to appear as either:
+  // We accept two shapes (matching the kernel and the patterns
+  // socketPathToAgent() vets):
   //   (a) regular files named <agent>.sock — pre-created by compose
-  //   (b) directories named <agent> with a `sock` file inside (kernel-style)
-  //   (c) nothing (named volumes that resolve to empty dirs) — in this case
-  //       we fall through to legacy single-socket mode.
-  // For Phase 2a we standardize on (a): compose mounts a named volume
-  // `vault-broker-<agent>-sock` at /run/switchroom/broker, and the agent
-  // container's start.sh expects the file at /run/switchroom/vault/sock
-  // by symlink. The broker's job here is just to bind exactly one
-  // listener per <agent>.sock target it sees.
+  //   (b) directories named <agent> (per-agent named-volume mount points);
+  //       we bind a socket at `<dir>/sock`. This is what the v0.7 compose
+  //       generator emits — `broker-<name>-sock` mounts at
+  //       `/run/switchroom/broker/<name>` inside the broker, and the agent
+  //       sees the same file via its `/run/switchroom/broker` mount of
+  //       the same volume, accessed by its env path
+  //       `/run/switchroom/broker/<name>/sock`.
+  //   (c) nothing (named volumes that resolve to empty dirs without the
+  //       per-agent subdir mounts) — fall through to legacy single-socket.
+  // The agent name is always derived from the socket path (not from a
+  // wire-payload field) via socketPathToAgent(), so both shapes preserve
+  // the path-as-identity invariant.
   let perAgentTargets: string[] = [];
   try {
     if (existsSync(perAgentDir)) {
-      perAgentTargets = readdirSync(perAgentDir)
-        .filter((name) => name.endsWith(".sock") && !name.startsWith("."))
-        .map((name) => resolve(perAgentDir, name))
-        .filter((p) => {
-          // Each entry must parse as <agent>.sock (no traversal, no
-          // weird shapes). We trust socketPathToAgent() to vet shape.
-          return socketPathToAgent(p) !== null;
-        })
+      const entries = readdirSync(perAgentDir, { withFileTypes: true });
+      const flat: string[] = [];
+      const subdirs: string[] = [];
+      for (const e of entries) {
+        if (e.name.startsWith(".")) continue;
+        // (a) flat file
+        if (
+          (e.isFile() || e.isSocket()) &&
+          e.name.endsWith(".sock")
+        ) {
+          flat.push(resolve(perAgentDir, e.name));
+          continue;
+        }
+        // (b) per-agent subdir — bind <subdir>/sock if the subdir name
+        // parses as a valid agent identifier.
+        if (e.isDirectory()) {
+          const candidate = resolve(perAgentDir, e.name, "sock");
+          if (socketPathToAgent(candidate) !== null) {
+            subdirs.push(candidate);
+          }
+        }
+      }
+      perAgentTargets = [...flat, ...subdirs]
+        .filter((p) => socketPathToAgent(p) !== null)
         .sort();
     }
   } catch (err) {

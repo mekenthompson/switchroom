@@ -268,12 +268,26 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`      - "no-new-privileges:true"`);
   lines.push(`    cap_drop:`);
   lines.push(`      - "ALL"`);
-  // Broker needs CHOWN + FOWNER to take ownership of per-agent socket
-  // dirs (created at startup) and chmod sockets to 0660 owned by the
-  // agent's UID. Everything else stays dropped.
+  // Broker needs:
+  //  - CHOWN + FOWNER: take ownership of per-agent socket dirs
+  //    (created at startup) and chmod sockets to 0660 owned by the
+  //    agent's UID.
+  //  - DAC_READ_SEARCH: bypass DAC checks to read the operator-owned
+  //    vault files. Broker runs as UID 0 so it can chown sockets, but
+  //    `cap_drop: ALL` strips DAC_OVERRIDE / DAC_READ_SEARCH — without
+  //    re-adding it, root can't read 0600 files owned by the operator's
+  //    UID (which is what `setup` writes for vault.enc and
+  //    `enable-auto-unlock` writes for vault-auto-unlock). Verified
+  //    against a v0.7.3 test cutover: without this cap the broker
+  //    boots, hits "Permission denied" on `/state/vault-auto-unlock`,
+  //    logs `auto-unlock decrypt failed (io)`, and falls back to
+  //    interactive unlock — i.e. auto-unlock is silently broken under
+  //    docker. Read-only is enough; we don't need DAC_OVERRIDE which
+  //    would also bypass write checks.
   lines.push(`    cap_add:`);
   lines.push(`      - "CHOWN"`);
   lines.push(`      - "FOWNER"`);
+  lines.push(`      - "DAC_READ_SEARCH"`);
   lines.push(`    environment:`);
   if (switchroomConfigPath) {
     lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);
@@ -306,6 +320,15 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // and falls back to the interactive unlock flow, so operators who
   // never enabled auto-unlock are unaffected.
   lines.push(`      - ${homePrefix}/.switchroom/vault-auto-unlock:/state/vault-auto-unlock:ro`);
+  // /etc/machine-id passthrough — required so the broker can derive
+  // the same machine-bound key the host's `enable-auto-unlock` used
+  // to seal the auto-unlock blob. The agent base image (node:22-bookworm-slim)
+  // ships without /etc/machine-id; without this mount the broker
+  // errors out "Cannot derive machine-bound key: neither /etc/machine-id
+  // nor /var/lib/dbus/machine-id is readable" and falls back to
+  // interactive unlock. Mount the FILE (not the /etc dir) so we don't
+  // shadow the rest of /etc inside the broker image.
+  lines.push(`      - /etc/machine-id:/etc/machine-id:ro`);
   lines.push(``);
 
   // ── approval-kernel (singleton) ────────────────────────────────────
@@ -408,11 +431,30 @@ function emitAgentService(
   lines.push(`  agent-${a.name}:`);
   emitImageOrBuild(lines, "agent", imageTag, buildMode, buildContext);
   lines.push(`    container_name: switchroom-${a.name}`);
-  lines.push(`    hostname: ${a.name}`);
   lines.push(`    labels:`);
   lines.push(`      switchroom.role: "agent"`);
   lines.push(`      switchroom.fleet: "switchroom"`);
   lines.push(`      switchroom.agent: "${a.name}"`);
+  // Share the host's network namespace.
+  //
+  // Scaffolded `start.sh` and the env baked into it reach a number of
+  // host-local endpoints by their host-side address: Hindsight at
+  // 127.0.0.1:18888 (host-loopback), the operator's LAN devices for
+  // user-declared env vars (HA at 192.168.x.x, NAS, smart-home gear),
+  // and the host's resolver for any DNS. With the default bridge
+  // network those are unreachable from inside the container —
+  // `127.0.0.1` is the container's own loopback, and the LAN is on the
+  // host side of the bridge. v0.7.0 → v0.7.3 emitted no network config
+  // and the agent silently failed: hindsight wait-loop timed out, MCP
+  // servers errored at startup, telegram polling never began.
+  // `network_mode: host` puts the agent on the host's network stack —
+  // identical semantics to the v0.6 systemd-era model. Tradeoff:
+  // network isolation between agents goes away (they can reach each
+  // other and any host service), but the previous trust model already
+  // assumed shared-host operation. Future work: a strict-isolation
+  // mode that puts agents on a custom network and routes hindsight
+  // through an explicit `extra_hosts` entry for `host.docker.internal`.
+  lines.push(`    network_mode: host`);
   lines.push(`    restart: unless-stopped`);
   lines.push(`    init: false`);
   lines.push(`    stop_grace_period: 45s`);

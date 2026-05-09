@@ -361,6 +361,64 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
   });
 });
 
+describe("generateCompose — switchroomConfigPath bind-mount (v0.7 P0 fix)", () => {
+  // Regression: without the config bind-mount, the broker container boots
+  // with `ConfigError: No switchroom.yaml found` and restart-loops. The
+  // fix bind-mounts the resolved switchroom.yaml into broker, kernel, and
+  // scheduler at /state/config/switchroom.yaml, with SWITCHROOM_CONFIG
+  // pointing at it so the in-container loader skips its cwd auto-detect.
+  const CONFIG = "/home/op/switchroom.yaml";
+
+  function blockFor(yml: string, service: string): string {
+    const re = new RegExp(`  ${service}:[\\s\\S]*?(?=\\n  [a-z]|\\nvolumes:)`);
+    return re.exec(yml)?.[0] ?? "";
+  }
+
+  it("bind-mounts switchroom.yaml + sets SWITCHROOM_CONFIG on the broker", () => {
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+      switchroomConfigPath: CONFIG,
+    });
+    const block = blockFor(out, "vault-broker");
+    expect(block).toContain(`${CONFIG}:/state/config/switchroom.yaml:ro`);
+    expect(block).toMatch(/SWITCHROOM_CONFIG:\s*\/state\/config\/switchroom\.yaml/);
+  });
+
+  it("bind-mounts switchroom.yaml + sets SWITCHROOM_CONFIG on the approval-kernel", () => {
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+      switchroomConfigPath: CONFIG,
+    });
+    const block = blockFor(out, "approval-kernel");
+    expect(block).toContain(`${CONFIG}:/state/config/switchroom.yaml:ro`);
+    expect(block).toMatch(/SWITCHROOM_CONFIG:\s*\/state\/config\/switchroom\.yaml/);
+  });
+
+  it("bind-mounts switchroom.yaml as a file on the scheduler (not the dir)", () => {
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+      switchroomConfigPath: CONFIG,
+    });
+    const block = blockFor(out, "switchroom-cron");
+    expect(block).toContain(`${CONFIG}:/state/config/switchroom.yaml:ro`);
+    // The legacy directory mount must be replaced when the explicit
+    // file path is provided, otherwise both compete for /state/config.
+    expect(block).not.toMatch(/\.switchroom:\/state\/config:ro/);
+    expect(block).toMatch(/SWITCHROOM_CONFIG:\s*\/state\/config\/switchroom\.yaml/);
+  });
+
+  it("back-compat: omitting switchroomConfigPath leaves broker/kernel without the mount", () => {
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const broker = blockFor(out, "vault-broker");
+    expect(broker).not.toContain(":/state/config/switchroom.yaml");
+    const kernel = blockFor(out, "approval-kernel");
+    expect(kernel).not.toContain(":/state/config/switchroom.yaml");
+    // Scheduler keeps its legacy directory mount in back-compat mode.
+    const sched = blockFor(out, "switchroom-cron");
+    expect(sched).toMatch(/\.switchroom:\/state\/config:ro/);
+  });
+});
+
 describe("generateCompose — buildMode (pull vs local)", () => {
   it("default mode emits ghcr.io image refs and no build: blocks", () => {
     const out = generateCompose({ config: makeConfig({ alice: {} }) });

@@ -260,6 +260,11 @@ export async function runApply(
     // Bake the operator's HOME absolute path into volume sources at
     // apply time. Avoids `${HOME}` resolving to /root under sudo.
     homeDir: homedir(),
+    // Bind-mount the resolved switchroom.yaml directly into the broker,
+    // approval-kernel, and scheduler containers so they don't restart-loop
+    // on `ConfigError: No switchroom.yaml found` when the operator's
+    // config lives outside ~/.switchroom (v0.7 P0 install-path bug).
+    switchroomConfigPath,
   });
   await mkdir(dirname(composePath), { recursive: true });
   await writeFile(composePath, composeContent, {

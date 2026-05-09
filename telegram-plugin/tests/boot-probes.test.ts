@@ -16,6 +16,9 @@ import {
   probeCronTimers,
   probeQuota,
   watchAgentProcess,
+  findAgentProcessInContainer,
+  uptimeMsForStarttime,
+  type ProcFsImpl,
 } from '../gateway/boot-probes.js'
 import { readQuotaCache, RATE_LIMIT_TTL_MS } from '../gateway/quota-cache.js'
 
@@ -531,8 +534,166 @@ describe('probeAgentProcess / probeCronTimers — docker mode skips systemctl', 
     })
     expect(result.status).toBe('ok')
     expect(result.label).toBe('Crons')
-    expect(result.detail).toContain('switchroom-cron')
+    expect(result.detail).toBe('managed by switchroom-cron')
     expect(execFileCalls).toBe(0)
+  })
+})
+
+// ── /proc parser unit tests (synthetic fs) ────────────────────────────────
+
+/** Build a /proc/<pid>/stat string for tests. */
+function makeStat(pid: number, comm: string, starttime: number): string {
+  // Layout: pid (comm) state ppid pgrp session tty_nr tpgid flags
+  //         minflt cminflt majflt cmajflt utime stime cutime cstime
+  //         priority nice num_threads itrealvalue starttime ...
+  // We need starttime at field 22 (1-indexed). Pad fields 4..21 with zeros.
+  const middle = new Array(18).fill('0').join(' ')
+  return `${pid} (${comm}) S ${middle} ${starttime} 0 0 0 0\n`
+}
+
+function makeProcFs(
+  procs: Array<{ pid: number; comm: string; rssKb: number; starttime: number }>,
+  extraFiles: Record<string, string> = {},
+): ProcFsImpl {
+  const files: Record<string, string> = { ...extraFiles }
+  const dirEntries = ['1', '2', 'self', 'uptime', 'meminfo']
+  for (const p of procs) {
+    files[`/proc/${p.pid}/comm`] = `${p.comm}\n`
+    files[`/proc/${p.pid}/status`] = `Name:\t${p.comm}\nVmRSS:\t  ${p.rssKb} kB\n`
+    files[`/proc/${p.pid}/stat`] = makeStat(p.pid, p.comm, p.starttime)
+    if (!dirEntries.includes(String(p.pid))) dirEntries.push(String(p.pid))
+  }
+  return {
+    readdir: (path: string) => {
+      if (path === '/proc') return dirEntries
+      throw new Error(`unexpected readdir: ${path}`)
+    },
+    readFile: (path: string) => {
+      if (path in files) return files[path]
+      throw new Error(`ENOENT: ${path}`)
+    },
+  }
+}
+
+describe('findAgentProcessInContainer — /proc parser', () => {
+  it('picks heaviest claude process across multiple candidates', () => {
+    const fs = makeProcFs([
+      { pid: 100, comm: 'claude', rssKb: 50_000, starttime: 1000 },
+      { pid: 101, comm: 'claude', rssKb: 200_000, starttime: 1100 },
+      { pid: 102, comm: 'bash',   rssKb: 5_000,   starttime: 900  },
+      { pid: 103, comm: 'tmux',   rssKb: 2_000,   starttime: 800  },
+    ])
+    const found = findAgentProcessInContainer(fs)
+    expect(found).not.toBeNull()
+    expect(found!.pid).toBe(101)
+    expect(found!.rssKb).toBe(200_000)
+    expect(found!.starttime).toBe(1100)
+  })
+
+  it('falls back to heaviest non-wrapper node when no claude exists', () => {
+    const fs = makeProcFs([
+      { pid: 200, comm: 'node', rssKb: 80_000, starttime: 500 },
+      { pid: 201, comm: 'node', rssKb: 30_000, starttime: 600 },
+      { pid: 202, comm: 'bash', rssKb: 5_000,  starttime: 400 },
+    ])
+    const found = findAgentProcessInContainer(fs)
+    expect(found!.pid).toBe(200)
+  })
+
+  it('returns null when only wrappers exist', () => {
+    const fs = makeProcFs([
+      { pid: 1,  comm: 'tini', rssKb: 500,  starttime: 100 },
+      { pid: 50, comm: 'bash', rssKb: 1000, starttime: 200 },
+      { pid: 51, comm: 'tmux', rssKb: 800,  starttime: 250 },
+    ])
+    const found = findAgentProcessInContainer(fs)
+    expect(found).toBeNull()
+  })
+
+  it('handles a comm containing parens via lastIndexOf(\")\")', () => {
+    // Tests are the only protection against off-by-one when comm is funky.
+    const procs = [{ pid: 300, comm: '(weird)comm', rssKb: 90_000, starttime: 1234 }]
+    const fs = makeProcFs(procs)
+    // Override stat with a path comm has parens — comm content goes inside (...)
+    // Note: the kernel actually wraps comm in single parens in /proc/<pid>/stat,
+    // so a comm of `(weird)comm` lands as `300 ((weird)comm) S ...` — making
+    // lastIndexOf the only safe parse anchor.
+    const fsWithFunky: ProcFsImpl = {
+      readdir: () => ['300', 'uptime'],
+      readFile: (path: string) => {
+        if (path === '/proc/300/comm') return '(weird)comm\n'
+        if (path === '/proc/300/status') return 'VmRSS:\t90000 kB\n'
+        if (path === '/proc/300/stat') return `300 ((weird)comm) S ${new Array(18).fill('0').join(' ')} 1234 0 0 0\n`
+        throw new Error(`ENOENT: ${path}`)
+      },
+    }
+    // Funky comm is neither 'claude' nor 'node', so it's filtered out.
+    expect(findAgentProcessInContainer(fsWithFunky)).toBeNull()
+    void fs; void procs
+  })
+
+  it('handles a claude comm with trailing parens correctly', () => {
+    const fs: ProcFsImpl = {
+      readdir: () => ['400', 'uptime'],
+      readFile: (path: string) => {
+        if (path === '/proc/400/comm') return 'claude\n'
+        if (path === '/proc/400/status') return 'VmRSS:\t  150000 kB\n'
+        // Use a `claude` comm followed by 18 zero pad fields then starttime=9999.
+        if (path === '/proc/400/stat') return `400 (claude) S ${new Array(18).fill('0').join(' ')} 9999 0 0 0\n`
+        throw new Error(`ENOENT: ${path}`)
+      },
+    }
+    const found = findAgentProcessInContainer(fs)
+    expect(found).not.toBeNull()
+    expect(found!.pid).toBe(400)
+    expect(found!.starttime).toBe(9999)
+    expect(found!.rssKb).toBe(150_000)
+  })
+
+  it('skips entries that fail to read', () => {
+    const fs: ProcFsImpl = {
+      readdir: () => ['1', '500'],
+      readFile: (path: string) => {
+        if (path === '/proc/500/comm') return 'claude\n'
+        if (path === '/proc/500/status') return 'VmRSS:\t10000 kB\n'
+        if (path === '/proc/500/stat') return `500 (claude) S ${new Array(18).fill('0').join(' ')} 7000 0 0 0\n`
+        throw new Error(`ENOENT: ${path}`) // PID 1 reads fail → skipped
+      },
+    }
+    const found = findAgentProcessInContainer(fs)
+    expect(found!.pid).toBe(500)
+  })
+})
+
+describe('uptimeMsForStarttime', () => {
+  it('computes uptime in ms from starttime ticks and /proc/uptime', () => {
+    const fs: ProcFsImpl = {
+      readdir: () => [],
+      readFile: (path: string) => {
+        if (path === '/proc/uptime') return '1234.56 1000.00\n'
+        throw new Error(`unexpected: ${path}`)
+      },
+    }
+    // boot uptime = 1234.56 s, starttime = 1000 ticks → 10 s in.
+    // Process uptime = 1234.56 - 10 = 1224.56 s = 1_224_560 ms.
+    expect(uptimeMsForStarttime(1000, fs)).toBe(1_224_560)
+  })
+
+  it('returns null if /proc/uptime is unreadable', () => {
+    const fs: ProcFsImpl = {
+      readdir: () => [],
+      readFile: () => { throw new Error('ENOENT') },
+    }
+    expect(uptimeMsForStarttime(1000, fs)).toBeNull()
+  })
+
+  it('returns null when computed uptime is negative', () => {
+    // starttime in the future relative to boot uptime → invalid.
+    const fs: ProcFsImpl = {
+      readdir: () => [],
+      readFile: () => '5.0 0.0\n',
+    }
+    expect(uptimeMsForStarttime(99999999, fs)).toBeNull()
   })
 })
 })

@@ -252,32 +252,45 @@ type ExecFileFnType = (
 ) => Promise<ExecFileResult>
 
 /**
+ * Filesystem injection point for the docker-mode /proc walk so tests can
+ * drive synthetic `/proc/<pid>/{comm,stat,status}` strings without
+ * touching the real host fs.
+ */
+export interface ProcFsImpl {
+  readdir: (path: string) => string[]
+  readFile: (path: string) => string
+}
+
+const realProcFs: ProcFsImpl = {
+  readdir: (p) => readdirSync(p),
+  readFile: (p) => readFileSync(p, 'utf-8'),
+}
+
+type AgentCandidate = {
+  pid: number
+  rssKb: number
+  comm: string
+  starttime: number
+}
+
+/**
  * Walk `/proc` from inside the current pid-namespace and pick the
  * heaviest claude/node process. Used for the docker-mode agent probe:
  * inside an agent container, we share the namespace with claude, so a
  * /proc walk replaces the systemctl-driven cgroup walk used under
  * systemd. Skips wrappers (tmux/expect/script/bash/sh) and our own
- * gateway PID.
+ * gateway PID. Exported for tests.
  */
-function findAgentProcessInContainer(): {
-  pid: number
-  comm: string
-  rssKb: number
-  starttime: number
-} | null {
+export function findAgentProcessInContainer(
+  fs: ProcFsImpl = realProcFs,
+): AgentCandidate | null {
   let entries: string[]
   try {
-    entries = readdirSync('/proc')
+    entries = fs.readdir('/proc')
   } catch {
     return null
   }
-  type Candidate = {
-    pid: number
-    rssKb: number
-    comm: string
-    starttime: number
-  }
-  const candidates: Candidate[] = []
+  const candidates: AgentCandidate[] = []
   for (const entry of entries) {
     if (!/^\d+$/.test(entry)) continue
     const pid = Number(entry)
@@ -285,13 +298,13 @@ function findAgentProcessInContainer(): {
     if (pid === process.pid) continue
     let comm = ''
     try {
-      comm = readFileSync(`/proc/${pid}/comm`, 'utf-8').trim()
+      comm = fs.readFile(`/proc/${pid}/comm`).trim()
     } catch {
       continue
     }
     let rssKb = 0
     try {
-      const status = readFileSync(`/proc/${pid}/status`, 'utf-8')
+      const status = fs.readFile(`/proc/${pid}/status`)
       const m = status.match(/^VmRSS:\s+(\d+)/m)
       if (m) rssKb = parseInt(m[1], 10) || 0
     } catch {
@@ -299,7 +312,7 @@ function findAgentProcessInContainer(): {
     }
     let starttime = 0
     try {
-      const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8')
+      const stat = fs.readFile(`/proc/${pid}/stat`)
       // /proc/<pid>/stat format: pid (comm-with-parens) state ppid ...
       // field 22 (1-indexed) is starttime in clock ticks since boot.
       // comm can contain spaces/parens — use the LAST ')' as the
@@ -319,8 +332,8 @@ function findAgentProcessInContainer(): {
   }
   if (candidates.length === 0) return null
 
-  const isAgent = (c: Candidate): boolean => c.comm === 'claude'
-  const isWrapper = (c: Candidate): boolean =>
+  const isAgent = (c: AgentCandidate): boolean => c.comm === 'claude'
+  const isWrapper = (c: AgentCandidate): boolean =>
     c.comm === 'tmux' || c.comm.startsWith('tmux:') ||
     c.comm === 'expect' || c.comm === 'script' ||
     c.comm === 'bash' || c.comm === 'sh' ||
@@ -340,18 +353,22 @@ function findAgentProcessInContainer(): {
 }
 
 /**
- * Read the host /proc/uptime to derive the agent process's uptime from
- * its starttime (clock ticks since boot). Returns null on any failure.
+ * Read /proc/uptime to derive the agent process's uptime from its
+ * starttime (clock ticks since boot). Returns null on any failure.
+ *
+ * SC_CLK_TCK (the units of `starttime` in /proc/<pid>/stat) is a stable
+ * kernel ABI value, hardcoded to 100 on x86_64 across Debian/Ubuntu/
+ * Alpine/RHEL. If we ever ship on arm64 hosts where some kernels use
+ * 250, uptimes will look 2.5× too large and we'll revisit.
  */
-function uptimeMsForStarttime(starttimeTicks: number): number | null {
+export function uptimeMsForStarttime(
+  starttimeTicks: number,
+  fs: ProcFsImpl = realProcFs,
+): number | null {
   try {
-    const uptimeRaw = readFileSync('/proc/uptime', 'utf-8').trim()
+    const uptimeRaw = fs.readFile('/proc/uptime').trim()
     const bootUptimeSec = Number(uptimeRaw.split(/\s+/)[0])
     if (!Number.isFinite(bootUptimeSec) || bootUptimeSec <= 0) return null
-    // SC_CLK_TCK is conventionally 100 on Linux. We can't read it from
-    // node without an FFI, but every distro we ship on uses 100. If
-    // this ever changes we'll see suspiciously off uptimes; that's a
-    // cheap signal to revisit.
     const HZ = 100
     const procUptimeSec = bootUptimeSec - starttimeTicks / HZ
     if (procUptimeSec < 0) return null

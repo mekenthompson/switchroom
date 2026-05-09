@@ -10378,6 +10378,7 @@ void (async () => {
                       restartAgeMs: markerAgeMs,
                       loadAccounts: () => loadAccountsForBootCard(agentSlug),
                       tmuxSupervisor: process.env.SWITCHROOM_TMUX_SUPERVISOR === '1',
+                      dockerMode: process.env.SWITCHROOM_RUNTIME === 'docker',
                     }, ackMsgId)
                     activeBootCard = handle
                   } catch (err) {

@@ -143,6 +143,24 @@ async function ensureHostMountSources(config: SwitchroomConfig): Promise<void> {
   for (const dir of dirs) {
     await mkdir(dir, { recursive: true });
   }
+
+  // The auto-unlock blob is bind-mounted at
+  // `~/.switchroom/vault-auto-unlock`. If the source path is missing,
+  // docker auto-creates it as a root-owned DIRECTORY when the broker
+  // starts — which then blocks `switchroom vault broker enable-auto-unlock`
+  // from later writing a file at that path. v0.7.1 claimed to close
+  // this bug class but only handled the dir-shape case; the file path
+  // was still vulnerable on greenfield installs.
+  //
+  // Pre-create as a 0-byte file owned by the operator. The broker
+  // detects empty/undecryptable contents at boot and falls back to
+  // interactive unlock cleanly (vault/broker/server.ts:1503-1518).
+  // `enable-auto-unlock` later overwrites this placeholder via
+  // `writeFileSync` (auto-unlock.ts:199), so no special handoff.
+  const autoUnlockPath = join(home, ".switchroom", "vault-auto-unlock");
+  if (!existsSync(autoUnlockPath)) {
+    writeFileSync(autoUnlockPath, "", { mode: 0o600 });
+  }
 }
 
 /**

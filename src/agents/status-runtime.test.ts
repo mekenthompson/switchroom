@@ -16,10 +16,21 @@ vi.mock("node:child_process", () => ({
   execFileSync: vi.fn(),
 }));
 
+// Mock the runtime-mode helper so the systemd-mode tests don't depend
+// on the developer's host filesystem. (v0.7.3 made isDockerRuntime()
+// also return true when a compose file is present at ~/.switchroom/
+// compose/docker-compose.yml — that signal would leak into these tests
+// otherwise.)
+vi.mock("../runtime-mode.js", () => ({
+  isDockerRuntime: vi.fn(),
+}));
+
 import { execFileSync } from "node:child_process";
 import { readDockerContainer, defaultStatusInputs } from "./status.js";
+import { isDockerRuntime } from "../runtime-mode.js";
 
 const execMock = execFileSync as unknown as ReturnType<typeof vi.fn>;
+const isDockerRuntimeMock = isDockerRuntime as unknown as ReturnType<typeof vi.fn>;
 
 describe("readDockerContainer", () => {
   beforeEach(() => {
@@ -70,23 +81,27 @@ describe("readDockerContainer", () => {
     const got = readDockerContainer("switchroom-broken");
     expect(got.active).toBe("inactive");
   });
+
+  it("maps Status='restarting' to its own bucket (crash-loop signal preserved)", () => {
+    // v0.7.2 collapsed restarting → inactive, hiding the signal that
+    // the now-disabled watchdog used to emit. v0.7.3 keeps it distinct.
+    execMock.mockReturnValue(
+      JSON.stringify({ Status: "restarting", Pid: 0, StartedAt: "2026-05-09T01:00:00Z" }),
+    );
+    const got = readDockerContainer("switchroom-flapping");
+    expect(got.active).toBe("restarting");
+    expect(got.pid).toBeNull();
+  });
 });
 
 describe("defaultStatusInputs — runtime branching", () => {
-  let prevRuntime: string | undefined;
-
   beforeEach(() => {
-    prevRuntime = process.env.SWITCHROOM_RUNTIME;
     execMock.mockReset();
-  });
-
-  afterEach(() => {
-    if (prevRuntime !== undefined) process.env.SWITCHROOM_RUNTIME = prevRuntime;
-    else delete process.env.SWITCHROOM_RUNTIME;
+    isDockerRuntimeMock.mockReset();
   });
 
   it("under docker mode, both getClaudeProcess + getGatewayProcess query docker for the SAME container", () => {
-    process.env.SWITCHROOM_RUNTIME = "docker";
+    isDockerRuntimeMock.mockReturnValue(true);
     execMock.mockReturnValue(
       JSON.stringify({ Status: "running", Pid: 99, StartedAt: "2026-05-09T01:00:00Z" }),
     );
@@ -109,8 +124,8 @@ describe("defaultStatusInputs — runtime branching", () => {
     expect(execMock.mock.calls[1]![1]).toContain("switchroom-clerk");
   });
 
-  it("under systemd mode (default), adapters call systemctl with separate unit names", () => {
-    delete process.env.SWITCHROOM_RUNTIME;
+  it("under systemd mode, adapters call systemctl with separate unit names", () => {
+    isDockerRuntimeMock.mockReturnValue(false);
     execMock.mockReturnValue("MainPID=42\nActiveEnterTimestamp=Sat 2026-05-09 01:00:00 UTC\n");
     const inputs = defaultStatusInputs({
       agentName: "clerk",

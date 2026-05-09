@@ -38,6 +38,7 @@ import { addAgent, type AgentTopology } from "../agents/add-orchestrator.js";
 import { bringUpAgentService } from "../agents/docker-fleet.js";
 import { execFileSync as dockerExecFile } from "node:child_process";
 import { renameAgent, type HindsightMode } from "../agents/rename-orchestrator.js";
+import { isDockerRuntime } from "../runtime-mode.js";
 import { validateBotTokenMatchesAgent } from "../setup/telegram-api.js";
 import { registerAgentPerfCommand } from "./perf.js";
 import {
@@ -183,8 +184,12 @@ export function preflightCheck(
   // the systemd-shaped checks. Container-existence is verified by the
   // doctor's runDockerSection (compose file + image refs) rather than
   // a per-call preflight, so we just exit early here.
-  const isDockerMode = process.env.SWITCHROOM_RUNTIME === "docker";
-  if (isDockerMode) {
+  //
+  // Use the unified `isDockerRuntime()` helper rather than reading the
+  // env var directly: the env var is only set inside containers, but
+  // preflight runs from the operator's host shell where the compose
+  // file's presence is the right signal.
+  if (isDockerRuntime()) {
     return errors;
   }
 

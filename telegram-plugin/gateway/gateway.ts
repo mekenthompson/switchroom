@@ -2137,6 +2137,7 @@ const ipcServer: IpcServer = createIpcServer({
             restartAgeMs: markerAgeMs,
             loadAccounts: () => loadAccountsForBootCard(agentSlug),
             tmuxSupervisor: process.env.SWITCHROOM_TMUX_SUPERVISOR === '1',
+            dockerMode: process.env.SWITCHROOM_RUNTIME === 'docker',
           }, ackMsgId).then(handle => {
             activeBootCard = handle
           }).catch((err: Error) => {
@@ -10325,7 +10326,10 @@ void (async () => {
               const cleanMarkerStale = cleanMarker
                 ? !shouldSuppressRecoveryBanner(cleanMarker, nowMs, CLEAN_SHUTDOWN_MAX_AGE_MS)
                 : false
-              const detailParts: string[] = ['gateway crashed and was auto-restarted by systemd']
+              const supervisor = process.env.SWITCHROOM_RUNTIME === 'docker'
+                ? 'docker compose'
+                : 'systemd'
+              const detailParts: string[] = [`gateway crashed and was auto-restarted by ${supervisor}`]
               if (cleanMarker?.signal) detailParts.push(`prior signal=${cleanMarker.signal}`)
               if (cleanMarkerStale) detailParts.push('clean-shutdown marker stale')
               emitGatewayOperatorEvent({

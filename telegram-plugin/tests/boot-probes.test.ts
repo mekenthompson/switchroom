@@ -13,6 +13,7 @@ import { join } from 'path'
 
 import {
   probeAgentProcess,
+  probeCronTimers,
   probeQuota,
   watchAgentProcess,
 } from '../gateway/boot-probes.js'
@@ -448,4 +449,90 @@ describe('watchAgentProcess — #296: re-poll after window expiry', () => {
     expect(yields[0].status).toBe('ok')
     expect(extraCalls).toBe(1) // only the initial probe; no follow-up
   })
+
+// ── docker mode: skip systemctl, use /proc walk ───────────────────────────
+
+describe('probeAgentProcess / probeCronTimers — docker mode skips systemctl', () => {
+  it('probeAgentProcess(dockerMode) returns the injected /proc result without execing', async () => {
+    let execFileCalls = 0
+    const execFileImpl: ExecFileFn = async () => {
+      execFileCalls++
+      throw new Error('systemctl should never be called under dockerMode')
+    }
+    const dockerProbeImpl = () => ({
+      status: 'ok' as const,
+      label: 'Agent',
+      detail: 'PID 42 · up 3.0s · 128 MB',
+    })
+    const result = await probeAgentProcess('clerk', {
+      dockerMode: true,
+      dockerProbeImpl,
+      execFileImpl: execFileImpl as never,
+      sleepImpl: noopSleep,
+      retryIntervalMs: 1,
+      retryMaxMs: 5,
+    })
+    expect(result.status).toBe('ok')
+    expect(result.label).toBe('Agent')
+    expect(result.detail).toBe('PID 42 · up 3.0s · 128 MB')
+    expect(execFileCalls).toBe(0)
+  })
+
+  it('probeAgentProcess(dockerMode) surfaces fail when no claude process found', async () => {
+    const dockerProbeImpl = () => ({
+      status: 'fail' as const,
+      label: 'Agent',
+      detail: 'claude process not found',
+    })
+    const result = await probeAgentProcess('clerk', {
+      dockerMode: true,
+      dockerProbeImpl,
+    })
+    expect(result.status).toBe('fail')
+    expect(result.detail).toBe('claude process not found')
+  })
+
+  it('watchAgentProcess(dockerMode) yields the /proc result once and exits', async () => {
+    let execFileCalls = 0
+    const execFileImpl: ExecFileFn = async () => {
+      execFileCalls++
+      return { stdout: '', stderr: '' }
+    }
+    const dockerProbeImpl = () => ({
+      status: 'ok' as const,
+      label: 'Agent',
+      detail: 'PID 42 · up 5.0s · 200 MB',
+    })
+    const yields: Array<{ status: string; detail: string }> = []
+    const gen = watchAgentProcess('clerk', {
+      dockerMode: true,
+      dockerProbeImpl,
+      execFileImpl: execFileImpl as never,
+      sleepImpl: noopSleep,
+      liveWindowMs: 1000,
+      pollIntervalMs: 10,
+      followupRepollMs: 0,
+    })
+    for await (const r of gen) yields.push({ status: r.status, detail: r.detail })
+    expect(yields).toHaveLength(1)
+    expect(yields[0].status).toBe('ok')
+    expect(execFileCalls).toBe(0)
+  })
+
+  it('probeCronTimers(dockerMode) returns ok-with-managed-externally without execing', async () => {
+    let execFileCalls = 0
+    const execFileImpl: ExecFileFn = async () => {
+      execFileCalls++
+      throw new Error('systemctl should never be called under dockerMode')
+    }
+    const result = await probeCronTimers('clerk', {
+      dockerMode: true,
+      execFileImpl: execFileImpl as never,
+    })
+    expect(result.status).toBe('ok')
+    expect(result.label).toBe('Crons')
+    expect(result.detail).toContain('switchroom-cron')
+    expect(execFileCalls).toBe(0)
+  })
+})
 })

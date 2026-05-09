@@ -170,6 +170,18 @@ if [ "$platform" = "macos" ] && have xattr; then
   xattr -d com.apple.quarantine "$target" 2>/dev/null || true
 fi
 
+# Sequoia (macOS 15+) adds a notarization re-check that survives the
+# xattr strip — the OS still prompts on first run. Best-effort whitelist
+# the binary with spctl so it's allowed without the dialog. Requires
+# admin / sudo and is silently no-op'd if either is unavailable.
+if [ "$platform" = "macos" ] && have spctl; then
+  if [ -w "$(dirname "$target")" ]; then
+    spctl --add "$target" 2>/dev/null || true
+  elif have sudo; then
+    sudo spctl --add "$target" 2>/dev/null || true
+  fi
+fi
+
 ok "Installed switchroom to $target"
 
 # ---- verify ----

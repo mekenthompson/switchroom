@@ -7,6 +7,7 @@ import { resolveStatePath } from "../config/paths.js";
 import { resolveAgentConfig } from "../config/merge.js";
 import { loadConfig } from "../config/loader.js";
 import { sendAgentInterrupt } from "./tmux.js";
+import { resolveSwitchroomHome } from "./docker-fleet.js";
 
 /**
  * Resolve the per-agent gateway clean-shutdown marker path.
@@ -16,7 +17,7 @@ import { sendAgentInterrupt } from "./tmux.js";
  * `TELEGRAM_STATE_DIR=<agentDir>/telegram` and writes the marker as
  * `clean-shutdown.json` inside that directory. Callers that want to
  * stamp WHY a restart happened (so the next greeting card can show it)
- * write to the same path BEFORE issuing systemctl restart.
+ * write to the same path BEFORE issuing the restart.
  */
 export function cleanShutdownMarkerPathForAgent(name: string): string {
   const agentsDir = process.env.SWITCHROOM_AGENTS_DIR ?? resolveStatePath("agents");
@@ -26,8 +27,8 @@ export function cleanShutdownMarkerPathForAgent(name: string): string {
 /**
  * Atomically write a clean-shutdown marker for `name` annotated with a
  * human-readable `reason`. Intended for the CLI/watchdog/IPC paths that
- * initiate a restart — they call this BEFORE the systemctl restart so
- * the file is on disk by the time the next gateway/agent boots.
+ * initiate a restart — they call this BEFORE the restart so the file is
+ * on disk by the time the next gateway/agent boots.
  *
  * Best-effort: if the directory doesn't exist or the write fails, we
  * swallow. The restart still proceeds; the next greeting will just omit
@@ -41,12 +42,6 @@ export function writeRestartReasonMarker(
   const path = cleanShutdownMarkerPathForAgent(name);
   try {
     mkdirSync(join(path, ".."), { recursive: true });
-    // Cooperative race guard. The gateway's user-/restart path writes a
-    // marker with reason="user: /restart from chat" BEFORE spawning the
-    // detached `switchroom agent restart --force` CLI. When that CLI
-    // then tries to write its own `cli: restart` marker, we'd blow away
-    // the user attribution. `preserveExisting: true` means: if a marker
-    // already exists on disk that's younger than a few seconds, leave it.
     if (opts.preserveExisting && existsSync(path)) {
       try {
         const prev = JSON.parse(readFileSync(path, "utf-8")) as {
@@ -71,14 +66,6 @@ export function writeRestartReasonMarker(
 
 /**
  * Build a deploy-aware "cli: …" reason for `switchroom agent restart`.
- *
- *   - When the running build's commit (BUILD_COMMIT) differs from the
- *     repo's current HEAD, the user is restarting to ship new code →
- *     `cli: deploying <sha-short> <subject>`.
- *   - Otherwise (or when commit info is unavailable) → `cli: restart`.
- *
- * The commit lookup is best-effort: if we can't read git, we degrade to
- * the plain reason rather than crash the restart path.
  */
 export function buildCliRestartReason(opts: {
   buildCommit: string | null;
@@ -109,7 +96,6 @@ export function buildCliRestartReason(opts: {
     } catch {
       /* subject is optional */
     }
-    // Trim aggressively: the greeting card row gets long fast.
     if (subject.length > 60) subject = `${subject.slice(0, 57)}…`;
     return subject ? `cli: deploying ${headShort} ${subject}` : `cli: deploying ${headShort}`;
   } catch {
@@ -124,71 +110,79 @@ export interface AgentStatus {
   pid: number | null;
 }
 
-function serviceName(name: string): string {
+/**
+ * Compose project name. Matches what `bringUpAgentService` uses — we
+ * pass the same `-p` and `-f` flags so `docker compose` joins the
+ * already-running fleet rather than spawning a parallel project.
+ */
+const COMPOSE_PROJECT = "switchroom";
+
+/** Container name for an agent (set via `container_name:` in compose.ts). */
+function containerName(name: string): string {
   return `switchroom-${name}`;
 }
 
-/**
- * The agent has TWO systemd units: the agent itself (`switchroom-<name>`),
- * which spawns the Claude CLI on demand, and the long-running telegram
- * gateway (`switchroom-<name>-gateway`) which holds the Telegram connection
- * and IPC server.
- *
- * Changes to `telegram-plugin/*` code only take effect when the gateway
- * unit restarts, because bun loads the source at process start. If the CLI
- * only cycles the agent unit, telegram-plugin code changes silently stay
- * stale on a user's machine for hours or days until something else triggers
- * a gateway restart (crash, reboot, manual intervention).
- *
- * Make start/stop/restart always cycle BOTH units so the user never has to
- * reason about "did the gateway also need a kick." Ordering: stop gateway
- * last (so it can accept the agent's final heartbeat); start gateway first
- * (so the agent has someone to talk to on wake).
- */
-function gatewayServiceName(name: string): string {
-  return `switchroom-${name}-gateway`;
-}
-
-function systemctl(args: string[]): string {
-  return execFileSync("systemctl", ["--user", ...args], {
-    encoding: "utf-8",
-    stdio: ["pipe", "pipe", "pipe"],
-  }).trim();
+/** Compose service name (the YAML key under `services:`). */
+function serviceKey(name: string): string {
+  return `agent-${name}`;
 }
 
 /**
- * Silent-ok wrapper for units that may not exist on this host (e.g. a
- * reconfigured agent with a different plugin set, or a non-telegram agent).
- * We want "always cycle both if they exist" semantics, not "fail the whole
- * restart because one unit is absent."
- *
- * Earlier implementation used `list-unit-files --no-legend <unit>` to gate
- * the action, but the unit-name match required `.service` suffix to appear
- * in the output. Passing `switchroom-clerk-gateway` returned empty and the
- * gated restart silently no-op'd. Observed on Pixsoul 2026-04-21: gateway
- * services never actually restarted via `switchroom agent restart`.
- *
- * Simpler fix: just try the action and swallow failures. systemctl exits
- * non-zero with a clear stderr message for missing units; we catch and
- * continue. Safer for the "always cycle both" intent.
+ * Resolve the compose file path. Allows `SWITCHROOM_COMPOSE_FILE` to
+ * override for tests / non-default installs.
  */
-function systemctlIfExists(action: string, unit: string): void {
+function composeFilePath(): string {
+  const override = process.env.SWITCHROOM_COMPOSE_FILE;
+  if (override && override.length > 0) return override;
+  return resolve(resolveSwitchroomHome(), "compose", "docker-compose.yml");
+}
+
+/**
+ * Run `docker` synchronously, capturing stdout. Throws with stderr
+ * included on non-zero exit so callers see honest failure reasons.
+ */
+function dockerSync(args: string[]): string {
   try {
-    // systemctl accepts both `switchroom-x` and `switchroom-x.service` forms.
-    // No explicit existence probe; just fire. Missing unit -> throws -> swallow.
-    systemctl([action, unit]);
+    return execFileSync("docker", args, {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException & { stderr?: Buffer | string };
+    const stderr = e.stderr ? e.stderr.toString().trim() : "";
+    const base = e.message ?? String(err);
+    throw new Error(stderr ? `${base}: ${stderr}` : base);
+  }
+}
+
+/**
+ * Build a `docker compose -p <project> -f <file>` argv prefix.
+ */
+function composeArgs(extra: string[]): string[] {
+  return ["compose", "-p", COMPOSE_PROJECT, "-f", composeFilePath(), ...extra];
+}
+
+/**
+ * Returns true if the agent's container exists (running or stopped).
+ */
+function containerExists(name: string): boolean {
+  try {
+    const out = dockerSync(["ps", "-a", "--format", "{{.Names}}", "--filter", `name=^${containerName(name)}$`]);
+    return out.split("\n").some((l) => l.trim() === containerName(name));
   } catch {
-    // Absent or inactive is fine for start/stop; restart on a non-existent
-    // unit is a no-op. We swallow instead of throwing because the caller
-    // wants "make the right thing happen" not "diagnose per-unit state."
+    return false;
   }
 }
 
 export function startAgent(name: string): void {
   try {
-    // Gateway first so the agent has someone to IPC to on wake.
-    systemctlIfExists("start", gatewayServiceName(name));
-    systemctl(["start", serviceName(name)]);
+    // If the container has never been created, `compose start` errors
+    // out — fall back to `up -d --no-deps` to bring it online.
+    if (containerExists(name)) {
+      dockerSync(composeArgs(["start", serviceKey(name)]));
+    } else {
+      dockerSync(composeArgs(["up", "-d", "--no-deps", serviceKey(name)]));
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to start agent "${name}": ${message}`);
@@ -197,9 +191,7 @@ export function startAgent(name: string): void {
 
 export function stopAgent(name: string): void {
   try {
-    // Agent first so it can flush handoff via gateway IPC before the gateway dies.
-    systemctl(["stop", serviceName(name)]);
-    systemctlIfExists("stop", gatewayServiceName(name));
+    dockerSync(composeArgs(["stop", serviceKey(name)]));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to stop agent "${name}": ${message}`);
@@ -207,31 +199,11 @@ export function stopAgent(name: string): void {
 }
 
 export function restartAgent(name: string, reason?: string): void {
-  // Stamp WHY before killing so the next agent boot can render it in the
-  // greeting card. cleanShutdownMarkerPathForAgent matches the gateway's
-  // own path resolution; writeRestartReasonMarker is a best-effort no-op
-  // if the dir is missing.
+  // Stamp WHY before killing so the next agent boot can render it in
+  // the greeting card. Best-effort — if the dir is missing we swallow.
   if (reason) writeRestartReasonMarker(name, reason);
   try {
-    // ORDERING (#177): agent first, gateway second.
-    //
-    // When this function runs inside a child spawned from the gateway
-    // (e.g. /new from Telegram → spawnSwitchroomDetached → here), the
-    // child can be in the gateway's cgroup. If we restart the gateway
-    // FIRST (the previous order) and the cgroup escape (systemd-run
-    // --scope wrapper) is missing or fails, the child gets cgroup-
-    // killed mid-flight before reaching the second `systemctl` call,
-    // and the agent service is never actually restarted — the user
-    // says "/new" and sees the gateway bounce but their session
-    // doesn't actually rotate.
-    //
-    // With the agent service restarted first, even a worst-case
-    // cgroup kill on the second call still leaves the user's session
-    // rotated. Gateway restart is purely about picking up
-    // telegram-plugin code changes; missing it is annoying but not
-    // user-visible the way "session didn't rotate" is.
-    systemctl(["restart", serviceName(name)]);
-    systemctlIfExists("restart", gatewayServiceName(name));
+    dockerSync(composeArgs(["restart", serviceKey(name)]));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to restart agent "${name}": ${message}`);
@@ -244,8 +216,6 @@ export function restartAgent(name: string, reason?: string): void {
  */
 export function gracefulRestartAgent(name: string): Promise<{ restartedImmediately: boolean; waitingForTurn: boolean }> {
   return new Promise((resolvePromise, reject) => {
-    // Gateway socket is in the agent's telegram directory
-    // (set via TELEGRAM_STATE_DIR in the gateway service unit)
     const agentsDir = process.env.SWITCHROOM_AGENTS_DIR ?? resolveStatePath("agents");
     const agentDir = resolve(agentsDir, name);
     const socketPath = process.env.SWITCHROOM_GATEWAY_SOCKET ?? join(agentDir, "telegram", "gateway.sock");
@@ -308,7 +278,6 @@ export function gracefulRestartAgent(name: string): Promise<{ restartedImmediate
       }
     });
 
-    // Timeout after 5 seconds
     const timeout = setTimeout(() => {
       if (!responseReceived) {
         responseReceived = true;
@@ -317,7 +286,6 @@ export function gracefulRestartAgent(name: string): Promise<{ restartedImmediate
       }
     }, 5000);
 
-    // Clean up timeout if we get a response
     client.once("data", () => {
       if (timeout) clearTimeout(timeout);
     });
@@ -325,27 +293,17 @@ export function gracefulRestartAgent(name: string): Promise<{ restartedImmediate
 }
 
 /**
- * Send a SIGINT to the agent currently running its turn. Used by the
+ * Send SIGINT to the agent currently running its turn. Used by the
  * `!`-prefix Telegram interrupt marker and the `switchroom agent
  * interrupt` CLI.
  *
- * Dual-path policy (since #725 PR-3):
- *   - tmux supervisor (default): prefer `tmux send-keys C-c` to the
- *     agent's pane. This delivers Ctrl-C to whatever is currently
- *     foregrounded — typically the claude REPL, but if claude has
- *     spawned a child Bash tool that's now runaway, the child gets the
- *     C-c. That matches operator intent ("interrupt the thing I see
- *     spinning"), where `systemctl kill --signal=INT` over the cgroup
- *     would also wake the tmux server and supervisor wrappers, and may
- *     not always reach grandchildren cleanly.
- *   - legacy_pty (`experimental.legacy_pty: true`): unchanged — fire
- *     `systemctl --user kill --signal=INT <unit>` over the cgroup.
- *   - Safety net: if send-keys fails for any reason on a tmux agent
- *     (no session, socket missing, timeout), we fall back to the
- *     cgroup kill so the operator always gets *some* interrupt.
- *
- * Public signature unchanged; the optional `opts.config` is provided
- * for tests that want to skip the on-disk config load.
+ * Docker mode policy:
+ *   - tmux supervisor (default): try `sendAgentInterrupt` (host-side
+ *     tmux send-keys via the host-mounted socket if available). If that
+ *     fails, fall back to `docker kill --signal=SIGINT <container>`,
+ *     which delivers SIGINT to PID 1 inside the container — tini, which
+ *     forwards to its child (claude/tmux supervisor).
+ *   - legacy_pty: skip tmux send-keys, go straight to `docker kill`.
  */
 export function interruptAgent(
   name: string,
@@ -358,9 +316,6 @@ export function interruptAgent(
     );
   }
 
-  // Resolve legacy_pty so we know which path to take. Best-effort:
-  // if config can't be loaded for any reason, fall through to the
-  // historical cgroup path.
   let useTmuxSendKeys = false;
   try {
     const config = opts.config ?? loadConfig();
@@ -374,7 +329,6 @@ export function interruptAgent(
       useTmuxSendKeys = resolved.experimental?.legacy_pty !== true;
     }
   } catch {
-    // Config unreadable — keep the legacy cgroup path.
     useTmuxSendKeys = false;
   }
 
@@ -388,15 +342,14 @@ export function interruptAgent(
     }
     console.error(
       `[interrupt] ${name}: tmux send-keys failed (${sendResult.error}); ` +
-        `falling back to systemctl kill --signal=INT`,
+        `falling back to docker kill --signal=SIGINT`,
     );
-    // fall through to cgroup path
   }
 
   try {
-    systemctl(["kill", "--signal=INT", serviceName(name)]);
+    dockerSync(["kill", "--signal=SIGINT", containerName(name)]);
     console.log(
-      `[interrupt] ${name}: delivered SIGINT via systemctl kill --signal=INT`,
+      `[interrupt] ${name}: delivered SIGINT via docker kill --signal=SIGINT`,
     );
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -408,24 +361,15 @@ export function interruptAgent(
 }
 
 /**
- * Parse the SWITCHROOM_AGENT_START_SHA value out of `systemctl show
- * --property=Environment` output. Exported so tests can exercise the parser
- * directly without shelling out to systemctl.
- *
- * Returns null when no Environment= line carries the key.
+ * Parse SWITCHROOM_AGENT_START_SHA out of a systemd `Environment=` block.
+ * Retained because pre-v0.7 tests and external callers may still hand us
+ * systemd-shaped output. The new docker code path uses
+ * {@link parseAgentStartShaFromEnv}.
  */
 export function parseAgentStartShaFromSystemctl(output: string): string | null {
-  // The output looks like:
-  //   Environment=VAR1=val1 VAR2=val2 SWITCHROOM_AGENT_START_SHA=abc1234 TZ=UTC
-  // Each word may itself contain = so we need to split carefully.
   for (const line of output.split("\n")) {
     if (!line.startsWith("Environment=")) continue;
     const envBlock = line.slice("Environment=".length);
-    // Split on whitespace boundaries between KEY= tokens. \S+ is safe here
-    // because the value is always a hex git SHA (no whitespace, no quotes) —
-    // generateUnit emits it literally without quoting. If the value format
-    // ever changes to embed spaces, this regex must change to handle
-    // systemd's quoted-value syntax.
     const match = envBlock.match(/(?:^|\s)SWITCHROOM_AGENT_START_SHA=(\S+)/);
     if (match) return match[1];
   }
@@ -433,195 +377,197 @@ export function parseAgentStartShaFromSystemctl(output: string): string | null {
 }
 
 /**
- * Read the SWITCHROOM_AGENT_START_SHA from the running unit's environment.
+ * Parse a `KEY=VALUE` env array (the shape `docker inspect
+ * --format '{{json .Config.Env}}'` returns) for SWITCHROOM_AGENT_START_SHA.
+ */
+export function parseAgentStartShaFromEnv(env: string[]): string | null {
+  for (const entry of env) {
+    if (!entry.startsWith("SWITCHROOM_AGENT_START_SHA=")) continue;
+    const v = entry.slice("SWITCHROOM_AGENT_START_SHA=".length).trim();
+    if (v.length > 0) return v;
+  }
+  return null;
+}
+
+/**
+ * Read the agent's start SHA from the running container. Resolution order:
  *
- * systemd stores the unit's baked-in Environment= lines and can return them
- * via `systemctl --user show --property=Environment`.
+ *   1. Container env var SWITCHROOM_AGENT_START_SHA (set in compose.ts at
+ *      install time once #850-style wiring lands).
+ *   2. Container label `switchroom.commit` (compose-level override).
+ *   3. Image label `org.opencontainers.image.revision` (the standard
+ *      OCI "what git ref was this image built from" label, set by the
+ *      GHCR publish workflow).
  *
- * Returns null if the unit isn't running, the env var isn't set (pre-#66
- * units), or parsing fails.
+ * Returns null if none are present (or the container isn't running).
+ * Logs a one-line warning to stderr on the null path so operators can
+ * correlate "? in version output" with the missing-label state.
  */
 export function getAgentStartSha(name: string): string | null {
-  const service = serviceName(name);
+  const cn = containerName(name);
+
+  // 1. container env
   try {
-    const output = systemctl(["show", service, "--property=Environment"]);
-    return parseAgentStartShaFromSystemctl(output);
+    const out = dockerSync([
+      "inspect",
+      "--format",
+      "{{range .Config.Env}}{{println .}}{{end}}",
+      cn,
+    ]);
+    const env = out.split("\n").map((s) => s.trim()).filter(Boolean);
+    const fromEnv = parseAgentStartShaFromEnv(env);
+    if (fromEnv) return fromEnv;
   } catch {
+    // container missing — nothing more to try
     return null;
+  }
+
+  // 2. container labels
+  try {
+    const labelVal = dockerSync([
+      "inspect",
+      "--format",
+      "{{index .Config.Labels \"switchroom.commit\"}}",
+      cn,
+    ]);
+    if (labelVal && labelVal !== "<no value>") return labelVal;
+  } catch {
+    /* fall through */
+  }
+
+  // 3. image label (org.opencontainers.image.revision)
+  try {
+    const image = dockerSync(["inspect", "--format", "{{.Config.Image}}", cn]);
+    if (image) {
+      const rev = dockerSync([
+        "inspect",
+        "--format",
+        "{{index .Config.Labels \"org.opencontainers.image.revision\"}}",
+        image,
+      ]);
+      if (rev && rev !== "<no value>") return rev;
+    }
+  } catch {
+    /* fall through */
+  }
+
+  process.stderr.write(
+    `[switchroom] getAgentStartSha: no SWITCHROOM_AGENT_START_SHA env, ` +
+      `no switchroom.commit label, and no org.opencontainers.image.revision ` +
+      `label found for container=${cn}; version row will show "?"\n`,
+  );
+  return null;
+}
+
+/**
+ * Resolve the agent process PID inside its container.
+ *
+ * `docker inspect --format '{{.State.Pid}}'` returns the host-namespace
+ * PID of the container's PID 1 (tini under our docker image). For the
+ * tmux supervisor case this is good enough for "is the agent up" — we
+ * don't try to reach into the container's PID namespace to find the
+ * heaviest-RSS claude process the way the systemd path used to (cgroup
+ * walk semantics differ inside containers, and the value isn't surfaced
+ * in any UI as "claude RSS specifically"). Returns null if the container
+ * is missing; returns 0 (per the v0.7 PR-C1 spec) if the container
+ * exists but is stopped.
+ */
+export function resolveAgentPid(name: string): number {
+  try {
+    const out = dockerSync([
+      "inspect",
+      "--format",
+      "{{.State.Pid}}",
+      containerName(name),
+    ]);
+    const parsed = parseInt(out, 10);
+    if (!Number.isFinite(parsed) || parsed < 0) return 0;
+    return parsed;
+  } catch {
+    return 0;
   }
 }
 
 /**
- * Resolve the "real" agent PID for a given systemd unit.
+ * Per-agent status row used by `switchroom version` and the web
+ * dashboard. The shape is preserved from the systemd-era contract; the
+ * field meanings translate as:
  *
- * Under the legacy ExecStart (`script -qfc claude ...`), MainPID points
- * at the script wrapper which immediately re-execs into claude — so for
- * status display purposes MainPID is "good enough" (claude is the same
- * process).
+ *   - `active`: docker container State.Status, normalised so
+ *     "running" → "active" (preserving the systemd-era convention so
+ *     downstream `s.active === "active"` checks keep working). Other
+ *     statuses pass through verbatim ("exited", "restarting", "paused",
+ *     "created", "dead", "inactive").
+ *   - `uptime`: container State.StartedAt (ISO-8601). The CLI/web
+ *     formatters parse this into "5m"/"4h"/"2d" the same way they did
+ *     for systemd's ActiveEnterTimestamp.
+ *   - `memory`: usage from `docker stats --no-stream` (best-effort —
+ *     returns null if stats are unavailable, e.g. container stopped).
+ *   - `pid`: container PID 1 in host namespace, via State.Pid.
  *
- * Under the tmux supervisor (the default as of #725 PR-1), MainPID points at the
- * tmux server (~2MB RSS) which spawns claude inside a session — that's
- * misleading for an operator looking at "how much memory is the agent
- * using?". Walk the cgroup and pick the heaviest-RSS pid; that's
- * reliably claude. Mirrors `agent_main_pid()` in
- * `bin/bridge-watchdog.sh:187-208`.
- *
- * Falls back to MainPID if cgroup walk fails (boot window, cgroup v2
- * not at `/sys/fs/cgroup`, or no resolvable claude process yet).
+ * The second `tmuxSupervisor` arg is retained for source-compat with
+ * the systemd-era signature; under docker we ignore it (the pid we
+ * return is always the container's PID 1).
  */
-export function resolveAgentPid(unitName: string, useTmux: boolean = true): number | null {
-  const mainPidFromSystemd = (): number | null => {
-    try {
-      const out = execFileSync(
-        "systemctl",
-        ["--user", "show", unitName, "-p", "MainPID", "--value"],
-        { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-      ).trim();
-      const parsed = parseInt(out, 10);
-      return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
-    } catch {
-      return null;
-    }
-  };
+export function getAgentStatus(name: string, _tmuxSupervisor = true): AgentStatus {
+  const cn = containerName(name);
 
-  if (!useTmux) {
-    return mainPidFromSystemd();
-  }
-
-  // tmux supervisor path — walk the unit's cgroup and pick the
-  // heaviest-RSS process whose comm matches `claude` (or `node`,
-  // since claude-cli is a node script). Prefer claude/node; fall back
-  // to plain heaviest-RSS.
-  try {
-    const cgroup = execFileSync(
-      "systemctl",
-      ["--user", "show", unitName, "-p", "ControlGroup", "--value"],
-      { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-    ).trim();
-    if (!cgroup) return mainPidFromSystemd();
-    const procsPath = `/sys/fs/cgroup${cgroup}/cgroup.procs`;
-    if (!existsSync(procsPath)) return mainPidFromSystemd();
-    const pidsRaw = readFileSync(procsPath, "utf-8");
-    const pids = pidsRaw.split("\n").map((s) => s.trim()).filter(Boolean);
-    if (pids.length === 0) return mainPidFromSystemd();
-
-    type Candidate = { pid: number; rss: number; comm: string };
-    const candidates: Candidate[] = [];
-    for (const pidStr of pids) {
-      const pid = parseInt(pidStr, 10);
-      if (!Number.isFinite(pid) || pid <= 0) continue;
-      let rss = 0;
-      let comm = "";
-      try {
-        const status = readFileSync(`/proc/${pid}/status`, "utf-8");
-        const rssLine = status.split("\n").find((l) => l.startsWith("VmRSS:"));
-        if (rssLine) {
-          const m = rssLine.match(/(\d+)/);
-          if (m) rss = parseInt(m[1], 10) || 0;
-        }
-      } catch {
-        continue;
-      }
-      try {
-        comm = readFileSync(`/proc/${pid}/comm`, "utf-8").trim();
-      } catch {
-        // ignore
-      }
-      candidates.push({ pid, rss, comm });
-    }
-    if (candidates.length === 0) return mainPidFromSystemd();
-
-    // Prefer claude/node; exclude tmux/expect/script wrappers.
-    const isAgent = (c: Candidate): boolean =>
-      c.comm === "claude" || c.comm === "node";
-    const isWrapper = (c: Candidate): boolean =>
-      c.comm === "tmux" ||
-      c.comm.startsWith("tmux:") ||
-      c.comm === "expect" ||
-      c.comm === "script" ||
-      c.comm === "bash" ||
-      c.comm === "sh";
-
-    const agentCandidates = candidates.filter(isAgent);
-    if (agentCandidates.length > 0) {
-      agentCandidates.sort((a, b) => b.rss - a.rss);
-      return agentCandidates[0].pid;
-    }
-    // No claude/node yet — return the heaviest non-wrapper, else fall back.
-    const nonWrapper = candidates.filter((c) => !isWrapper(c));
-    if (nonWrapper.length > 0) {
-      nonWrapper.sort((a, b) => b.rss - a.rss);
-      return nonWrapper[0].pid;
-    }
-    // We enumerated candidates but every one was a wrapper (tmux/expect/
-    // script/bash/sh) — no claude pid yet. Emit a single-line breadcrumb
-    // so operators can correlate "PID looks wrong" with this state via
-    // journalctl. We DO NOT log when the cgroup walk found zero processes
-    // (the legitimate boot-window race) — that path returns earlier.
-    process.stderr.write(
-      `[switchroom] resolveAgentPid: cgroup walk found ${candidates.length} processes, no claude match — falling back to MainPID for unit=${unitName}\n`,
-    );
-    return mainPidFromSystemd();
-  } catch {
-    return mainPidFromSystemd();
-  }
-}
-
-export function getAgentStatus(name: string, tmuxSupervisor = true): AgentStatus {
-  const service = serviceName(name);
-
-  let active = "unknown";
-  try {
-    active = systemctl(["is-active", service]);
-  } catch {
-    active = "inactive";
-  }
-
+  let active = "inactive";
   let uptime: string | null = null;
-  let memory: string | null = null;
   let pid: number | null = null;
 
   try {
-    const output = systemctl(
-      ["show", service, "--property=ActiveEnterTimestamp,MemoryCurrent,MainPID"]
-    );
-
-    for (const line of output.split("\n")) {
-      const [key, ...rest] = line.split("=");
-      const value = rest.join("=").trim();
-
-      switch (key?.trim()) {
-        case "ActiveEnterTimestamp":
-          uptime = value || null;
-          break;
-        case "MemoryCurrent":
-          if (value && value !== "[not set]") {
-            const bytes = parseInt(value, 10);
-            if (!isNaN(bytes)) {
-              memory = `${Math.round(bytes / 1024 / 1024)}MB`;
-            }
-          }
-          break;
-        case "MainPID":
-          if (value && value !== "0") {
-            const parsed = parseInt(value, 10);
-            if (!isNaN(parsed) && parsed > 0) {
-              pid = parsed;
-            }
-          }
-          break;
-      }
+    // Bundle the inspect into a single call for speed.
+    const out = dockerSync([
+      "inspect",
+      "--format",
+      "{{.State.Status}}|{{.State.StartedAt}}|{{.State.Pid}}",
+      cn,
+    ]);
+    const [status, startedAt, pidStr] = out.split("|");
+    if (status) {
+      active = status === "running" ? "active" : status;
+    }
+    if (startedAt && startedAt !== "0001-01-01T00:00:00Z") {
+      uptime = startedAt;
+    }
+    if (pidStr) {
+      const parsed = parseInt(pidStr, 10);
+      if (Number.isFinite(parsed) && parsed > 0) pid = parsed;
     }
   } catch {
-    // Status details unavailable — return what we have
+    // No container — return inactive shell.
+    return { active: "inactive", uptime: null, memory: null, pid: null };
   }
 
-  // Under tmux supervisor, MainPID is the tmux server (~2MB) — resolve
-  // the heavier claude pid via cgroup walk for an honest status line.
-  if (tmuxSupervisor && active === "active") {
-    const resolved = resolveAgentPid(service, true);
-    if (resolved && resolved > 0) {
-      pid = resolved;
+  let memory: string | null = null;
+  if (active === "active") {
+    try {
+      const stats = dockerSync([
+        "stats",
+        "--no-stream",
+        "--format",
+        "{{.MemUsage}}",
+        cn,
+      ]);
+      // docker stats prints e.g. "12.34MiB / 4GiB" — take the first token.
+      const first = stats.split("/")[0]?.trim();
+      if (first) {
+        // Normalise "12.34MiB" → "12MB" to match the systemd-era format.
+        const m = first.match(/([\d.]+)\s*([KMG]i?B)/i);
+        if (m) {
+          const val = parseFloat(m[1]);
+          const unit = m[2].toUpperCase();
+          let mb = val;
+          if (unit.startsWith("K")) mb = val / 1024;
+          else if (unit.startsWith("G")) mb = val * 1024;
+          memory = `${Math.round(mb)}MB`;
+        } else {
+          memory = first;
+        }
+      }
+    } catch {
+      // stats unavailable — leave null
     }
   }
 
@@ -633,10 +579,6 @@ export function getAllAgentStatuses(
 ): Record<string, AgentStatus> {
   const statuses: Record<string, AgentStatus> = {};
   for (const agentName of Object.keys(config.agents)) {
-    // Cascade through profile/defaults so the legacy_pty flag can be set
-    // at any layer. The Zod transform on `experimental` (schema.ts) has
-    // already normalised any deprecated `tmux_supervisor` keys into
-    // `legacy_pty`, so this is the single read site.
     const resolved = resolveAgentConfig(
       config.defaults,
       config.profiles,
@@ -648,58 +590,53 @@ export function getAllAgentStatuses(
   return statuses;
 }
 
+/**
+ * Attach to the agent — under docker this means dropping into the
+ * container's tmux session (the supervisor case) or tailing
+ * `docker logs -f` (legacy_pty).
+ */
 export function attachAgent(name: string, tmuxSupervisor = true): void {
-  const agentsDir = process.env.SWITCHROOM_AGENTS_DIR ?? resolveStatePath("agents");
-
-  // #725 Phase 1 — when the agent opted into the tmux supervisor, attach
-  // means "drop into the live REPL inside tmux", not "tail a log". The
-  // legacy tail path stays the default for unflagged agents so existing
-  // operators see no behaviour change.
   if (tmuxSupervisor) {
     const tmuxSocket = `switchroom-${name}`;
     const result = spawnSync(
-      "/usr/bin/tmux",
-      ["-L", tmuxSocket, "attach", "-t", name],
+      "docker",
+      [
+        "exec",
+        "-it",
+        containerName(name),
+        "tmux",
+        "-L",
+        tmuxSocket,
+        "attach",
+        "-t",
+        name,
+      ],
       { stdio: "inherit" },
     );
     if (result.error) {
-      throw new Error(`Failed to tmux-attach to agent "${name}": ${result.error.message}`);
+      throw new Error(`Failed to attach to agent "${name}": ${result.error.message}`);
     }
     return;
   }
 
-  const logFile = resolve(agentsDir, name, "service.log");
-
-  if (!existsSync(logFile)) {
-    throw new Error(
-      `No service log found for agent "${name}" at ${logFile}. Is the agent running?`
-    );
-  }
-
-  // Tail the service log interactively
-  const result = spawnSync("tail", ["-f", logFile], {
+  const result = spawnSync("docker", ["logs", "-f", containerName(name)], {
     stdio: "inherit",
   });
-
   if (result.error) {
     throw new Error(`Failed to tail logs for agent "${name}": ${result.error.message}`);
   }
 }
 
 export function getAgentLogs(name: string, follow: boolean): void {
-  const service = serviceName(name);
-  const args = ["--user", "-u", service];
-  if (follow) {
-    args.push("-f");
-  }
+  const args = ["logs"];
+  if (follow) args.push("-f");
+  args.push(containerName(name));
 
-  const child = spawn("journalctl", args, {
-    stdio: "inherit",
-  });
-
+  const child = spawn("docker", args, { stdio: "inherit" });
   child.on("error", (err) => {
     throw new Error(
       `Failed to get logs for agent "${name}": ${err.message}`
     );
   });
 }
+

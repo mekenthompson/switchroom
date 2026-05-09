@@ -3,6 +3,7 @@ import type {
   ClientToGateway,
   GatewayToClient,
   HeartbeatMessage,
+  InjectInboundMessage,
   OperatorEventForward,
   PermissionRequestForward,
   PtyPartialForward,
@@ -30,6 +31,15 @@ export interface IpcServerOptions {
    * messages will be silently dropped at dispatch.
    */
   onPtyPartial?: (client: IpcClient, msg: PtyPartialForward) => void;
+  /**
+   * Phase 2 cron-fold-in: invoked when a privileged in-container client
+   * (the agent-scheduler sibling) asks the gateway to forward a
+   * synthesized InboundMessage to a registered bridge. The handler is
+   * expected to call `ipcServer.sendToAgent(msg.agentName, msg.inbound)`
+   * (or its own equivalent). Optional: gateways that don't run the
+   * inline scheduler simply ignore inject_inbound messages.
+   */
+  onInjectInbound?: (client: IpcClient, msg: InjectInboundMessage) => void;
   log?: (msg: string) => void;
   /**
    * How long (in ms) to wait without a heartbeat before force-closing the
@@ -161,6 +171,27 @@ export function validateClientMessage(msg: unknown): msg is ClientToGateway {
       // ipc-protocol.ts for context.
       return typeof m.chatId === "string" && (m.chatId as string).length > 0
         && typeof m.text === "string" && (m.text as string).length <= 8192;
+    case "inject_inbound": {
+      // Phase 2 cron-fold-in. The wrapped `inbound` is forwarded
+      // verbatim to the bridge as a `type: "inbound"` envelope, so
+      // we validate the same fields the bridge's
+      // validateGatewayMessage cares about (`chatId`, `text`) plus
+      // the basic structural shape every InboundMessage carries.
+      if (typeof m.agentName !== "string"
+        || !AGENT_NAME_RE.test(m.agentName as string)) return false;
+      if (typeof m.inbound !== "object" || m.inbound === null) return false;
+      const inb = m.inbound as Record<string, unknown>;
+      return inb.type === "inbound"
+        && typeof inb.chatId === "string"
+        && (inb.chatId as string).length > 0
+        && typeof inb.text === "string"
+        && typeof inb.messageId === "number"
+        && typeof inb.user === "string"
+        && typeof inb.userId === "number"
+        && typeof inb.ts === "number"
+        && typeof inb.meta === "object"
+        && inb.meta !== null;
+    }
     default:
       return false;
   }
@@ -178,6 +209,7 @@ export function createIpcServer(options: IpcServerOptions): IpcServer {
     onScheduleRestart,
     onOperatorEvent,
     onPtyPartial,
+    onInjectInbound,
     log = () => {},
     heartbeatTimeoutMs = 30_000,
   } = options;
@@ -262,6 +294,9 @@ export function createIpcServer(options: IpcServerOptions): IpcServer {
         break;
       case "pty_partial":
         if (onPtyPartial) onPtyPartial(client, msg as PtyPartialForward);
+        break;
+      case "inject_inbound":
+        if (onInjectInbound) onInjectInbound(client, msg as InjectInboundMessage);
         break;
       case "update_placeholder":
         // Legacy recall.py IPC — placeholder UX was removed in #553 PR 5.

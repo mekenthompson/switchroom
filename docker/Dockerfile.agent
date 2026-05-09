@@ -57,6 +57,20 @@ COPY telegram-plugin/dist /opt/switchroom/telegram-plugin/dist
 COPY telegram-plugin/start.js /opt/switchroom/telegram-plugin/start.js
 COPY telegram-plugin/package.json /opt/switchroom/telegram-plugin/package.json
 
+# Phase 2 cron-fold-in: the in-agent scheduler bundle plus its node-cron
+# runtime dep. Started by start.sh as a third supervised sidecar (after
+# gateway + autoaccept-poll) only when SWITCHROOM_INLINE_SCHEDULER=1 —
+# off by default until Phase 4 cuts the singleton over. Bundle is built
+# by scripts/build.mjs with --external node-cron, so the image must
+# provide it. node-cron is pure JS (no native compilation), so install
+# is fast and arch-independent.
+COPY dist/agent-scheduler/index.js /opt/switchroom/agent-scheduler/index.js
+WORKDIR /opt/switchroom/agent-scheduler
+RUN npm init -y >/dev/null \
+ && node -e "const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json'));p.type='module';fs.writeFileSync('package.json',JSON.stringify(p,null,2));" \
+ && npm install --omit=dev --build-from-source=false node-cron@^3.0.3
+WORKDIR /
+
 # tini handles zombies + signal forwarding. The actual command is
 # /state/agent/start.sh, which the scaffold renders into the bind-mount.
 ENTRYPOINT ["/usr/bin/tini", "--"]

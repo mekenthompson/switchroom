@@ -55,7 +55,10 @@ import {
 const RUN_ID = newRunId();
 
 const TAG = "phase1b-test";
-const IMAGES = ["base", "agent", "broker", "kernel", "scheduler"].map(
+// Phase 4 (#893) retired the singleton scheduler image. Listing it
+// here would make `imagesOk` false in any environment that doesn't
+// build the (now-deleted) image, silently skipping the whole suite.
+const IMAGES = ["base", "agent", "broker", "kernel"].map(
   (n) => `switchroom/${n}:${TAG}`,
 );
 const PROJECT = `phase1c-iso-${process.pid}`;
@@ -150,7 +153,6 @@ function buildTestCompose(agents: string[], cfgPath: string): string {
     .replace(/- \$\{HOME\}\/\.switchroom\/vault:\/state\/vault\b/g, "- vault-state:/state/vault")
     .replace(/- \$\{HOME\}\/\.switchroom\/approvals:\/state\/approvals\b/g, "- approvals-state:/state/approvals")
     .replace(/- \$\{HOME\}\/\.switchroom:\/state\/config:ro\b/g, `- ${cfgPath}:/state/config/switchroom.yaml:ro`)
-    .replace(/- \$\{HOME\}\/\.switchroom\/scheduler:\/state\/scheduler\b/g, "- scheduler-state:/state/scheduler")
     .replace(/- \$\{HOME\}\/\.switchroom\/agents\/[^:]+:\/state\/agent\b/g, "- agent-state:/state/agent")
     .replace(/- \$\{HOME\}\/\.claude\/projects\/[^:]+:\/state\/\.claude\b/g, "- claude-state:/state/.claude");
   for (const a of agents) {
@@ -169,7 +171,7 @@ function buildTestCompose(agents: string[], cfgPath: string): string {
   ]);
   yml = yml.replace(/(  vault-broker:[\s\S]*?volumes:\n)/, `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`);
   yml = yml.replace(/(  approval-kernel:[\s\S]*?volumes:\n)/, `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`);
-  yml += "  vault-state:\n  approvals-state:\n  scheduler-state:\n  agent-state:\n  claude-state:\n";
+  yml += "  vault-state:\n  approvals-state:\n  agent-state:\n  claude-state:\n";
   // CLAUDE.md HARD RULES: every test container carries the
   // `switchroom.test=phase1c` label + per-run UUID. Note this fires
   // before appendAdversarialServices() so we re-inject after that

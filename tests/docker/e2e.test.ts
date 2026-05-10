@@ -56,7 +56,9 @@ const IMAGES = {
   agent: `switchroom/agent:${TAG}`,
   broker: `switchroom/broker:${TAG}`,
   kernel: `switchroom/kernel:${TAG}`,
-  scheduler: `switchroom/scheduler:${TAG}`,
+  // Phase 4 (#893) retired the singleton scheduler image. Keeping it
+  // here would make `imagesOk` false in any environment that doesn't
+  // build the (now-deleted) image, silently skipping this whole suite.
 };
 
 function hasDocker(): boolean {
@@ -198,20 +200,9 @@ describe.skipIf(!dockerOk || !allImagesPresent)(
       }
     });
 
-    it("scheduler image's bundled index.js loads under node and better-sqlite3 prebuilt opens an in-memory DB", () => {
-      const script = [
-        `const Database = require('better-sqlite3');`,
-        `const db = new Database(':memory:');`,
-        `db.exec('CREATE TABLE t(x INTEGER)');`,
-        `db.prepare('INSERT INTO t VALUES (?)').run(7);`,
-        `const row = db.prepare('SELECT x FROM t').get();`,
-        `console.log('sqlite_ok=' + row.x);`,
-      ].join("");
-      const out = execSync(
-        `docker run --rm ${LABELS} --entrypoint node ${IMAGES.scheduler} -e ${JSON.stringify(script)}`,
-      ).toString();
-      expect(out.trim()).toBe("sqlite_ok=7");
-    });
+    // scheduler-image test removed in #893 (Phase 4 cron-fold-in
+    // cutover). better-sqlite3 prebuilt-binary loading is now exercised
+    // inside the agent image via the bundled agent-scheduler sidecar.
 
     it("agent image enforces read-only rootfs (touch /etc/passwd → EROFS)", () => {
       const r = spawnSync(

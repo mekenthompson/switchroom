@@ -383,13 +383,90 @@ describe("runApply", () => {
       // The block names the right number and points at the two real
       // escape hatches: sudo and --compose-only.
       expect(out).toMatch(/Scaffolded 0\/2.*2 failed/s);
-      expect(out).toMatch(/sudo -E switchroom apply/);
+      expect(out).toMatch(/Re-run interactively/);
       expect(out).toMatch(/--compose-only/);
-      // Regression: deliberately does NOT advertise "run interactively"
-      // as a fix for this case. scaffoldAgent runs before alignAgentUid
-      // so the sudo prompt never fires on an already-aligned fleet.
-      // See the doc-comment on formatScaffoldFailureResolution.
-      expect(out).not.toMatch(/interactive shell/i);
+      // Regression: deliberately does NOT tell the operator to type
+      // out the `sudo -E bun /path/to/dist/...` incantation by hand
+      // anymore — the CLI does it for them via #920 self-elevate.
+      expect(out).not.toMatch(/sudo -E switchroom apply/);
+    });
+  });
+
+  describe("self-elevate (#920)", () => {
+    it("findUnwritableAgentDirs returns empty when no per-agent start.sh exists yet", async () => {
+      const { mkdtempSync, rmSync } = await import("node:fs");
+      const { tmpdir } = await import("node:os");
+      const { join } = await import("node:path");
+      const dir = mkdtempSync(join(tmpdir(), "self-elev-"));
+      try {
+        const { findUnwritableAgentDirs } = await import("./apply.js");
+        const config = {
+          switchroom: {
+            version: 1,
+            agents_dir: join(dir, "agents"),
+            skills_dir: join(dir, "skills"),
+          },
+          telegram: { bot_token: "x", forum_chat_id: "-100" },
+          vault: { path: join(dir, "vault.enc") },
+          agents: { alice: {}, bob: {} },
+        };
+        // No start.sh yet → fresh fleet; alignAgentUid will chown into
+        // place when apply runs. Nothing for us to flag.
+        expect(findUnwritableAgentDirs(config as never, {})).toEqual([]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("findUnwritableAgentDirs flags agents whose start.sh we can't write to", async () => {
+      const {
+        mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync,
+      } = await import("node:fs");
+      const { tmpdir } = await import("node:os");
+      const { join } = await import("node:path");
+      const dir = mkdtempSync(join(tmpdir(), "self-elev-blocked-"));
+      try {
+        const agentsDir = join(dir, "agents");
+        for (const name of ["alice", "bob"]) {
+          mkdirSync(join(agentsDir, name), { recursive: true });
+          const startSh = join(agentsDir, name, "start.sh");
+          writeFileSync(startSh, "#!/bin/bash\n");
+          // Read-only file with no write bits for ANY user. We're not
+          // root in tests, so accessSync(W_OK) errors here.
+          chmodSync(startSh, 0o400);
+        }
+        const { findUnwritableAgentDirs } = await import("./apply.js");
+        const config = {
+          switchroom: { version: 1, agents_dir: agentsDir, skills_dir: dir },
+          telegram: { bot_token: "x", forum_chat_id: "-100" },
+          vault: { path: join(dir, "vault.enc") },
+          agents: { alice: {}, bob: {} },
+        };
+        expect(findUnwritableAgentDirs(config as never, {}).sort())
+          .toEqual(["alice", "bob"]);
+        // --only narrows the scope.
+        expect(findUnwritableAgentDirs(config as never, { only: "alice" }))
+          .toEqual(["alice"]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("buildSelfElevateArgv preserves env vars and adds the --skip-self-elevate guard", async () => {
+      const { buildSelfElevateArgv } = await import("./apply.js");
+      const argv = buildSelfElevateArgv();
+      // First arg = preserve-env list including HOME so ~/.switchroom
+      // resolves under sudo (sudo-rs ignores -E).
+      expect(argv[0]).toMatch(/^--preserve-env=.*\bHOME\b/);
+      expect(argv[0]).toMatch(/SWITCHROOM_CONFIG/);
+      expect(argv[0]).toMatch(/PATH/);
+      // Then the absolute interpreter path (not 'bun' on PATH, so
+      // sudo's secure PATH doesn't need to know about ~/.bun/bin).
+      expect(argv[1]).toBe(process.execPath);
+      // Followed by the script path argv[1] of the parent.
+      expect(argv[2]).toBe(process.argv[1]);
+      // Last arg is the recursion guard.
+      expect(argv[argv.length - 1]).toBe("--skip-self-elevate");
     });
   });
 });

@@ -17,8 +17,10 @@
  */
 import type { Command } from "commander";
 import chalk from "chalk";
-import { copyFileSync, existsSync, writeFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, copyFileSync, existsSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
+import { spawnSync as childSpawnSync } from "node:child_process";
+import readline from "node:readline";
 // Embed example configs as text imports so they survive `bun build --compile`.
 // `import.meta.dirname` resolves to `/$bunfs/root` inside a compiled binary,
 // which means resolve(import.meta.dirname, "../../examples/...") points at a
@@ -486,8 +488,12 @@ export function formatScaffoldFailureResolution(
   lines.push("escalation.");
   lines.push("");
   lines.push("Resolutions:");
-  lines.push("  1. Run with sudo (refreshes start.sh / .mcp.json / settings.json):");
-  lines.push("       sudo -E switchroom apply --non-interactive");
+  lines.push("  1. Re-run interactively — apply will prompt to escalate via sudo:");
+  lines.push("       switchroom apply");
+  lines.push("     (Auto-detects unwritable per-agent dirs, prompts before");
+  lines.push("     re-execing under sudo, then refreshes start.sh / .mcp.json /");
+  lines.push("     settings.json. Avoids the `sudo -E bun /path/to/dist/...`");
+  lines.push("     incantation #920 used to require.)");
   lines.push("");
   lines.push("  2. Regenerate compose only, skip per-agent scaffold:");
   lines.push("       switchroom apply --non-interactive --compose-only");
@@ -544,6 +550,134 @@ function copyExampleConfig(name: string): void {
   console.log(chalk.green(`Copied ${name}.yaml -> switchroom.yaml`));
 }
 
+// ─── Self-elevation (#920) ────────────────────────────────────────────────
+//
+// Per-agent state dirs are mode 0700 owned by per-agent UIDs in the
+// v0.7+ docker model. `apply` needs to write start.sh / .mcp.json /
+// settings.json into them, so it has to run as root. Pre-fix, the
+// operator was told to invoke `sudo -E switchroom apply` — which has
+// three failure modes in practice:
+//
+//   1. sudo-rs strips `-E`. HOME doesn't propagate, CLI looks for
+//      config in /root/.switchroom/.
+//   2. sudo's secure PATH excludes ~/.bun/bin; the `switchroom`
+//      symlink isn't found.
+//   3. The `#!/usr/bin/env bun` shebang fails — bun isn't on root's
+//      PATH either.
+//
+// The escape valve is `sudo HOME=$HOME PATH=... bun /path/to/dist/cli/
+// switchroom.js apply --non-interactive`, which is hostile to remember.
+//
+// Self-elevation flips this: when `apply` detects it can't write to a
+// per-agent dir, it re-execs itself under sudo with the right argv0,
+// HOME preserved, and a `--skip-self-elevate` guard to prevent loops.
+
+/**
+ * Find the operator's per-agent dirs that we'd need to write into.
+ * Returns ones we currently lack write access to.
+ *
+ * Pre-check, not post-fail: we need to know BEFORE invoking the
+ * scaffold loop whether to escalate, because scaffoldAgent fails with
+ * EACCES partway through and leaves the fleet in a half-applied
+ * state.
+ */
+export function findUnwritableAgentDirs(
+  config: SwitchroomConfig,
+  opts: { only?: string },
+): string[] {
+  const agentsDir = resolveAgentsDir(config);
+  const targets = opts.only
+    ? [opts.only]
+    : Object.keys(config.agents ?? {});
+  const unwritable: string[] = [];
+  for (const name of targets) {
+    const startSh = join(agentsDir, name, "start.sh");
+    if (!existsSync(startSh)) continue; // fresh agent; alignAgentUid will chown
+    try {
+      accessSync(startSh, fsConstants.W_OK);
+    } catch {
+      unwritable.push(name);
+    }
+  }
+  return unwritable;
+}
+
+/**
+ * Build the sudo argv that re-execs this process under root with the
+ * same arguments + a `--skip-self-elevate` guard. Exposed for tests
+ * and for `--print-sudo-cmd`.
+ *
+ * Notes on the cross-flavour sudo dance:
+ *   - sudo-rs ignores `-E` (warns and proceeds without preservation).
+ *     Both sudo and sudo-rs accept `--preserve-env=VAR1,VAR2,...` so
+ *     we use that uniformly. Preserved vars are the minimal set the
+ *     CLI actually consults: HOME (for ~/.switchroom resolution),
+ *     SWITCHROOM_CONFIG (override of the default config path), PATH
+ *     (so any child shell-outs find their tools).
+ *   - process.execPath is the absolute path to bun/node, so sudo's
+ *     secure PATH doesn't matter for the interpreter.
+ *   - process.argv[1] is the absolute path to dist/cli/switchroom.js
+ *     under both `bun run dev` and a global install.
+ */
+export function buildSelfElevateArgv(): string[] {
+  const passthrough = process.argv.slice(2);
+  return [
+    "--preserve-env=HOME,SWITCHROOM_CONFIG,PATH",
+    process.execPath,
+    process.argv[1] ?? "",
+    ...passthrough,
+    "--skip-self-elevate",
+  ];
+}
+
+/**
+ * Print one-line confirmation prompt and read a single y/n answer.
+ * Resolves `true` on yes, `false` otherwise. Closes the readline
+ * interface after.
+ */
+async function confirmYesNo(question: string): Promise<boolean> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    const ans: string = await new Promise((res) => {
+      rl.question(question, res);
+    });
+    return /^y(es)?$/i.test(ans.trim());
+  } finally {
+    rl.close();
+  }
+}
+
+/**
+ * Re-exec the current invocation under sudo. Never returns on success;
+ * exits the parent with whatever the child returned.
+ *
+ * If sudo isn't installed (ENOENT), prints a clean error pointing the
+ * operator at `--compose-only` (the no-elevation escape) and exits 1.
+ */
+export function reexecUnderSudo(): never {
+  const args = buildSelfElevateArgv();
+  let result: ReturnType<typeof childSpawnSync>;
+  try {
+    result = childSpawnSync("sudo", args, { stdio: "inherit" });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      process.stderr.write(
+        chalk.red(
+          "\nERROR: sudo not found on PATH. Re-run as root, or use\n" +
+          "       `switchroom apply --compose-only` to skip the per-agent\n" +
+          "       scaffold refresh entirely (compose file still regenerates).\n",
+        ),
+      );
+      process.exit(1);
+    }
+    throw err;
+  }
+  process.exit(result.status ?? 1);
+}
+
 export function registerApplyCommand(program: Command): void {
   program
     .command("apply")
@@ -578,6 +712,13 @@ export function registerApplyCommand(program: Command): void {
       "--compose-only",
       "Skip the per-agent scaffold loop entirely; only (re)generate the compose file. Use in CI / scripts that can't chown into per-agent state dirs (mode 0700, owned by per-agent UIDs in v0.7+ docker mode). The full apply still runs preflight + emits compose; only the start.sh / .mcp.json / settings.json refresh is skipped.",
     )
+    .option(
+      "--print-sudo-cmd",
+      "Print the sudo invocation that `apply` would re-exec itself with when escalation is needed, then exit. Operators who want to script the escalation themselves (CI, custom orchestration) can capture this.",
+    )
+    // Hidden guard flag: set during the re-exec under sudo so the
+    // child doesn't loop back into another sudo prompt.
+    .option("--skip-self-elevate", "", false)
     .action(
       async (opts: {
         buildLocal?: boolean | string;
@@ -587,6 +728,8 @@ export function registerApplyCommand(program: Command): void {
         allowUnaligned?: boolean;
         only?: string;
         composeOnly?: boolean;
+        printSudoCmd?: boolean;
+        skipSelfElevate?: boolean;
       }) => {
         try {
           if (opts.example) {
@@ -597,6 +740,55 @@ export function registerApplyCommand(program: Command): void {
           const config = loadConfig(parentOpts.config);
           const switchroomConfigPath =
             parentOpts.config ?? findConfigFile();
+
+          // ─── Self-elevation pre-check (#920) ────────────────────
+          //
+          // Detect upfront whether we'd EACCES partway through the
+          // scaffold loop, and either re-exec under sudo (after a
+          // confirmation prompt) or print actionable guidance.
+          // --compose-only skips the per-agent loop entirely so it
+          // never needs escalation; --print-sudo-cmd just prints
+          // and exits.
+          if (opts.printSudoCmd) {
+            const argv = ["sudo", ...buildSelfElevateArgv()];
+            process.stdout.write(argv.join(" ") + "\n");
+            process.exit(0);
+          }
+          if (
+            !opts.skipSelfElevate
+            && !opts.composeOnly
+            && process.geteuid?.() !== 0
+          ) {
+            const unwritable = findUnwritableAgentDirs(config, {
+              only: opts.only,
+            });
+            if (unwritable.length > 0) {
+              const summary =
+                `apply needs to refresh per-agent scaffolds, but ${unwritable.length}/${
+                  Object.keys(config.agents ?? {}).length
+                } agents have state dirs the operator can't write to ` +
+                `(mode 0700 owned by per-agent UIDs — v0.7+ docker model).\n` +
+                `Affected: ${unwritable.slice(0, 5).join(", ")}${
+                  unwritable.length > 5 ? `, +${unwritable.length - 5} more` : ""
+                }\n`;
+              process.stderr.write(chalk.yellow(summary));
+              const proceed = opts.nonInteractive
+                ? true
+                : await confirmYesNo(
+                    `Re-exec under sudo to refresh them? [Y/n] `,
+                  );
+              if (!proceed) {
+                process.stderr.write(
+                  chalk.gray(
+                    "Skipping. Re-run with --compose-only to regenerate compose " +
+                    "without touching per-agent files.\n",
+                  ),
+                );
+                process.exit(0);
+              }
+              reexecUnderSudo(); // never returns
+            }
+          }
 
           const buildLocal = !!opts.buildLocal;
           const buildContext =

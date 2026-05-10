@@ -71,6 +71,47 @@ describe("auth status settling (#171 / #176)", () => {
     // Guard: no slot, no legacy file — must NOT return authenticated.
     const status = getAuthStatus("empty-agent", tempDir);
     expect(status.authenticated).toBe(false);
+    // Must NOT mark inaccessible — the file genuinely isn't there
+    // (ENOENT, not EACCES). Inaccessible is reserved for "file
+    // present but unreadable from this UID" — see the EACCES test
+    // below.
+    expect(status.inaccessible).toBeUndefined();
+  });
+
+  it("flags inaccessible=true when credentials/token files exist but are unreadable from this UID (EACCES)", async () => {
+    // Reproduce the 2026-05-10 doctor false-positive: per-agent
+    // state files are mode 0600 owned by the agent UID
+    // (compose.ts allocates 10001-10999), and `switchroom doctor`
+    // running as the host operator can't open(2) them. Pre-fix
+    // getAuthStatus saw the file via existsSync, failed to
+    // readFileSync (EACCES), and returned authenticated=false —
+    // looking identical to the genuine "not authenticated" state.
+    //
+    // The fix: surface an `inaccessible: true` flag so the doctor
+    // can render warn + honest detail instead of fail + "not
+    // authenticated".
+    //
+    // We simulate UID-mismatch with chmod 0o000 (no perms for
+    // anyone), which produces EACCES on read. existsSync still
+    // returns true.
+    const { chmodSync } = await import("node:fs");
+    const claudeDir = resolve(tempDir, ".claude");
+    const credPath = resolve(claudeDir, ".credentials.json");
+    writeFileSync(credPath, JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "sk-ant-faux",
+        expiresAt: Date.now() + 365 * 24 * 60 * 60_000,
+        subscriptionType: "max",
+      },
+    }), { mode: 0o600 });
+    chmodSync(credPath, 0o000);
+    try {
+      const status = getAuthStatus("eacces-agent", tempDir);
+      expect(status.authenticated).toBe(false);
+      expect(status.inaccessible).toBe(true);
+    } finally {
+      chmodSync(credPath, 0o600);
+    }
   });
 
   it("returns authenticated=false when slot token exists but active marker is absent", () => {

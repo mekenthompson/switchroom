@@ -558,19 +558,85 @@ async function checkHindsight(config: SwitchroomConfig): Promise<CheckResult[]> 
 }
 
 /**
+ * Classify a filesystem read error so doctor checks can distinguish
+ * "file genuinely missing" (ENOENT — usually a real config bug worth a
+ * red row) from "file present but the doctor process can't read it"
+ * (EACCES — the doctor is running as the host operator UID, but
+ * per-agent state files are mode 0600 owned by the agent UID
+ * (compose.ts:580ish, agentUid 10001-10999); the agent runtime reads
+ * them just fine, the doctor just can't verify from the host). Pre-fix,
+ * the EACCES path produced a false "missing" fail per agent on every
+ * `switchroom doctor` run on a multi-agent host.
+ * @internal exported for testing
+ */
+export type ReadErrorKind = "enoent" | "eacces" | "other";
+export function classifyReadError(err: unknown): ReadErrorKind {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  if (code === "ENOENT") return "enoent";
+  if (code === "EACCES" || code === "EPERM") return "eacces";
+  return "other";
+}
+
+/**
+ * Result of a host-side read attempt against per-agent state files.
+ * Callers branch on `kind` to render an honest doctor row.
+ *
+ *   ok       — got the content
+ *   enoent   — file is missing (real failure most of the time)
+ *   eacces   — file is there but unreadable from this UID
+ *              (typical when doctor runs as host operator and the
+ *              file is owned by a per-agent UID); agent state likely
+ *              fine; render as `warn`, not `fail`
+ *   other    — anything else (corrupted FS, etc.); rare
+ */
+export type FileReadResult =
+  | { kind: "ok"; content: string }
+  | { kind: "enoent" }
+  | { kind: "eacces"; error: string }
+  | { kind: "other"; error: string };
+
+export function tryReadHostFile(path: string): FileReadResult {
+  try {
+    return { kind: "ok", content: readFileSync(path, "utf-8") };
+  } catch (err: unknown) {
+    const kind = classifyReadError(err);
+    const error = (err as Error)?.message ?? String(err);
+    if (kind === "enoent") return { kind: "enoent" };
+    if (kind === "eacces") return { kind: "eacces", error };
+    return { kind: "other", error };
+  }
+}
+
+/**
  * Parse a simple KEY=VALUE env file. Quotes around values are stripped.
  * Lines starting with `#` and blank lines are ignored.
+ *
+ * Returns an empty object on ANY read error — callers that need to
+ * distinguish ENOENT (real missing) from EACCES (host-perm) should use
+ * `tryReadHostFile()` directly instead.
  * @internal exported for testing
  */
 export function parseEnvFile(path: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  if (!existsSync(path)) return out;
+  if (!existsSync(path)) return {};
   let content: string;
   try {
     content = readFileSync(path, "utf-8");
   } catch {
-    return out;
+    return {};
   }
+  return parseSimpleEnv(content);
+}
+
+/**
+ * Parse pre-read env-file content (KEY=VALUE per line; quotes stripped;
+ * `#`-comments and blanks ignored). Extracted from parseEnvFile so
+ * callers that already have the content (because they read the file
+ * via tryReadHostFile to distinguish EACCES from ENOENT) don't have
+ * to re-read it.
+ * @internal exported for testing
+ */
+export function parseSimpleEnv(content: string): Record<string, string> {
+  const out: Record<string, string> = {};
   for (const line of content.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("#")) continue;
@@ -638,13 +704,31 @@ export async function checkTelegram(config: SwitchroomConfig): Promise<CheckResu
     const plugin = agentConfig.channels?.telegram?.plugin ?? "switchroom";
     if (plugin !== "switchroom") continue;
     const envPath = join(agentsDir, name, "telegram", ".env");
-    const env = parseEnvFile(envPath);
+    const read = tryReadHostFile(envPath);
+    if (read.kind === "eacces") {
+      // The .env file is mode 0600 owned by the per-agent UID; doctor
+      // running as the host operator can't open(2) it. The agent
+      // process itself reads it fine. Surface this as a warn with
+      // honest detail rather than a false "TELEGRAM_BOT_TOKEN missing"
+      // fail (the 2026-05-10 false-positive that polluted the post-
+      // deploy doctor across all 8 agents).
+      results.push({
+        name: `${name}: bot token`,
+        status: "warn",
+        detail: `unreadable from host (${read.error}) — agent reads it fine; cannot verify TELEGRAM_BOT_TOKEN from operator UID`,
+      });
+      continue;
+    }
+    const env = read.kind === "ok" ? parseSimpleEnv(read.content) : {};
     const token = env.TELEGRAM_BOT_TOKEN;
     if (!token) {
       results.push({
         name: `${name}: bot token`,
         status: "fail",
-        detail: `TELEGRAM_BOT_TOKEN missing from ${envPath}`,
+        detail:
+          read.kind === "enoent"
+            ? `TELEGRAM_BOT_TOKEN missing from ${envPath} (file does not exist)`
+            : `TELEGRAM_BOT_TOKEN missing from ${envPath}`,
         fix: `Run \`switchroom agent reconcile ${name}\` and ensure the vault contains telegram_bot_token`,
       });
       continue;
@@ -855,14 +939,28 @@ export function checkAgents(config: SwitchroomConfig, configPath: string): Check
     // 3. Auth
     const auth = authStatuses[name];
     if (!auth?.authenticated) {
-      results.push({
-        name: `${name}: auth`,
-        status: "fail",
-        detail: auth?.pendingAuth
-          ? "pending (auth flow in progress)"
-          : "not authenticated",
-        fix: `Run \`switchroom auth login ${name}\` and complete the OAuth flow`,
-      });
+      if (auth?.inaccessible) {
+        // Per-agent credentials exist but the doctor process can't
+        // open(2) them (UID mismatch — host operator vs. agent UID).
+        // Agent state is almost certainly fine; the host just can't
+        // verify. Render as warn with honest detail rather than the
+        // false "not authenticated" fail that pre-fix polluted the
+        // post-deploy doctor across the full fleet (2026-05-10).
+        results.push({
+          name: `${name}: auth`,
+          status: "warn",
+          detail: "auth state owned by agent UID — unverifiable from host (agent reads it fine)",
+        });
+      } else {
+        results.push({
+          name: `${name}: auth`,
+          status: "fail",
+          detail: auth?.pendingAuth
+            ? "pending (auth flow in progress)"
+            : "not authenticated",
+          fix: `Run \`switchroom auth login ${name}\` and complete the OAuth flow`,
+        });
+      }
     } else {
       // Rich auth detail: plan · expires in · rate-limit tier
       const parts: string[] = [];

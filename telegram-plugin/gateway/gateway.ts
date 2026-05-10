@@ -258,6 +258,7 @@ import { runPipeline } from '../secret-detect/pipeline.js'
 import { StagingMap } from '../secret-detect/staging.js'
 import { maskToken } from '../secret-detect/mask.js'
 import { defaultVaultWrite, defaultVaultList } from '../secret-detect/vault-write.js'
+import { parseVaultCliError, renderVaultCliError } from '../secret-detect/vault-error.js'
 import { detectSecrets } from '../secret-detect/index.js'
 import { classifyAdminGate } from '../admin-commands/index.js'
 import {
@@ -4871,7 +4872,15 @@ async function handleInbound(
         while (existing.has(slug)) slug = `${slugBase}_${n++}`
         const write = defaultVaultWrite(slug, staged.detection.matched_text, cached.passphrase)
         if (!write.ok) {
-          await switchroomReply(ctx, `<b>vault write failed:</b>\n${preBlock(write.output)}`, { html: true })
+          // Route P0a markers (#969) through the structured renderer so
+          // a "new key, needs operator approval" failure surfaces a
+          // host-CLI hint instead of a raw stderr blob.
+          const parsed = parseVaultCliError(write.output)
+          const rendered = renderVaultCliError(parsed, { verb: 'save', key: slug })
+          const body = rendered.suppressRaw
+            ? rendered.html
+            : `<b>vault write failed:</b>\n${preBlock(write.output)}`
+          await switchroomReply(ctx, body, { html: true })
           return
         }
         secretStaging.delete(staged.chat_id, staged.message_id)
@@ -5939,16 +5948,37 @@ function runVaultCli(args: string[], passphrase: string, stdinValue?: string): {
   }
 }
 
+/**
+ * Render a vault-CLI failure as Telegram HTML. Routes recognised P0a
+ * stderr markers (VAULT-SANDBOX-CONTEXT / VAULT-NEEDS-APPROVAL /
+ * VAULT-BROKER-UNREACHABLE / VAULT-BROKER-DENIED) through the structured
+ * renderer; falls back to a raw pre-block for anything else.
+ */
+function renderVaultOpFailure(
+  verbLabel: 'list' | 'get' | 'set' | 'delete',
+  cliOutput: string,
+  key: string | undefined,
+): string {
+  const parsed = parseVaultCliError(cliOutput)
+  // Map the gateway-internal op label onto the renderer's verb. 'delete'
+  // surfaces in the host hint as `switchroom vault remove <key>` (the
+  // canonical CLI name); 'list' has no key.
+  const verb = verbLabel === 'delete' ? 'remove' : verbLabel
+  const rendered = renderVaultCliError(parsed, { verb, key })
+  if (rendered.suppressRaw) return rendered.html
+  return `<b>vault ${verbLabel} failed:</b>\n${preBlock(cliOutput)}`
+}
+
 async function executeVaultOp(ctx: Context, chatId: string, op: 'list' | 'get' | 'set' | 'delete', key: string | undefined, passphrase: string, setValue: string | undefined): Promise<void> {
   if (op === 'list') {
     const r = runVaultCli(['list'], passphrase)
-    if (!r.ok) { await switchroomReply(ctx, `<b>vault list failed:</b>\n${preBlock(r.output)}`, { html: true }); return }
+    if (!r.ok) { await switchroomReply(ctx, renderVaultOpFailure('list', r.output, undefined), { html: true }); return }
     const keys = r.output.split('\n').filter(Boolean)
     if (keys.length === 0) { await switchroomReply(ctx, 'Vault is empty.', { html: true }) }
     else { await switchroomReply(ctx, `<b>Vault keys (${keys.length}):</b>\n${keys.map(k => `• <code>${escapeHtmlForTg(k)}</code>`).join('\n')}`, { html: true }) }
   } else if (op === 'get') {
     const r = runVaultCli(['get', key!], passphrase)
-    if (!r.ok) { await switchroomReply(ctx, `<b>vault get failed:</b>\n${preBlock(r.output)}`, { html: true }); return }
+    if (!r.ok) { await switchroomReply(ctx, renderVaultOpFailure('get', r.output, key), { html: true }); return }
     await switchroomReply(ctx, `<code>${escapeHtmlForTg(key!)}</code> =\n<code>${escapeHtmlForTg(r.output)}</code>`, { html: true })
   } else if (op === 'set') {
     if (setValue === undefined) {
@@ -5957,11 +5987,11 @@ async function executeVaultOp(ctx: Context, chatId: string, op: 'list' | 'get' |
       return
     }
     const r = runVaultCli(['set', key!], passphrase, setValue)
-    if (!r.ok) { await switchroomReply(ctx, `<b>vault set failed:</b>\n${preBlock(r.output)}`, { html: true }) }
+    if (!r.ok) { await switchroomReply(ctx, renderVaultOpFailure('set', r.output, key), { html: true }) }
     else { await switchroomReply(ctx, `✅ <code>${escapeHtmlForTg(key!)}</code> saved to vault.`, { html: true }) }
   } else if (op === 'delete') {
     const r = runVaultCli(['remove', key!], passphrase)
-    if (!r.ok) { await switchroomReply(ctx, `<b>vault delete failed:</b>\n${preBlock(r.output)}`, { html: true }) }
+    if (!r.ok) { await switchroomReply(ctx, renderVaultOpFailure('delete', r.output, key), { html: true }) }
     else { await switchroomReply(ctx, `✅ <code>${escapeHtmlForTg(key!)}</code> removed from vault.`, { html: true }) }
   }
 }
@@ -8087,13 +8117,26 @@ async function executeDeferredSecretSave(
 
   const write = defaultVaultWrite(slug, deferred.text, passphrase)
   if (!write.ok) {
-    // Keep the deferred entry so the user can retry by tapping again.
+    // Classify the failure via the structured stderr markers emitted by
+    // `switchroom vault` (issue #969 P0a). If it's a recognised marker,
+    // render a clean actionable message instead of dumping the raw
+    // "Vault file not found …" / "VAULT-NEEDS-APPROVAL …" blob the CLI
+    // emits — that was the misleading-error half of #968.
+    //
+    // Keep the deferred entry so the user can retry by tapping again
+    // once the underlying condition is fixed (broker started, host
+    // approval granted, etc.).
+    const parsed = parseVaultCliError(write.output)
+    const rendered = renderVaultCliError(parsed, { verb: "save", key: slug })
+    const body = rendered.suppressRaw
+      ? rendered.html
+      : `⚠️ vault write failed:\n<pre>${escapeHtmlForTg(write.output)}</pre>`
     if (cardMessageId != null) {
       await ctx.api
         .editMessageText(
           deferred.chat_id,
           cardMessageId,
-          `⚠️ vault write failed:\n<pre>${escapeHtmlForTg(write.output)}</pre>\n\nRe-tap to retry.`,
+          `${body}\n\nRe-tap to retry.`,
           {
             parse_mode: 'HTML',
             reply_markup: buildDeferredSecretKeyboard(deferKey).inline_keyboard.length > 0

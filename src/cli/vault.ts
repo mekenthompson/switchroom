@@ -405,12 +405,27 @@ export function registerVaultCommand(program: Command): void {
 
       // ── Broker routing ──────────────────────────────────────────────────
       if (useBroker) {
+        // Use the canonical resolver — honors `SWITCHROOM_VAULT_BROKER_SOCK`
+        // env first (set by compose into agent containers), then config
+        // `vault.broker.socket`, then `~/.switchroom/vault-broker.sock`
+        // legacy fallback. Pre-fix this CLI skipped the env entirely and
+        // jumped straight to config → legacy fallback. Inside an agent
+        // container the legacy fallback `~/.switchroom/vault-broker.sock`
+        // is a dangling symlink (via the #910 home-symlink fix), so the
+        // CLI reported "broker not running" even when the broker WAS
+        // reachable on the canonical env path. Surfaced 2026-05-10 as
+        // clerk's calendar skill failing every `switchroom vault get`
+        // even though direct broker IPC worked fine.
         let brokerSocket: string | undefined;
         try {
           const config = loadConfig(parentOpts.config);
-          brokerSocket = resolvePath(config.vault?.broker?.socket ?? "~/.switchroom/vault-broker.sock");
+          brokerSocket = resolveBrokerSocketPath({
+            vaultBrokerSocket: config.vault?.broker?.socket
+              ? resolvePath(config.vault.broker.socket)
+              : undefined,
+          });
         } catch {
-          brokerSocket = resolvePath("~/.switchroom/vault-broker.sock");
+          brokerSocket = resolveBrokerSocketPath();
         }
 
         const brokerOpts = { socket: brokerSocket };

@@ -27,7 +27,7 @@ import { join } from "node:path";
 import YAML from "yaml";
 
 import { findConfigFile, loadConfig, resolvePath } from "../config/loader.js";
-import { statusViaBroker } from "../vault/broker/client.js";
+import { statusViaBroker, resolveBrokerSocketPath } from "../vault/broker/client.js";
 import {
   AutoUnlockDecryptError,
   DEFAULT_AUTO_UNLOCK_PATH,
@@ -163,7 +163,13 @@ export async function applyAutoUnlock(opts: ApplyOptions = {}): Promise<void> {
   }
   log("✓ Restarted vault-broker container (docker compose restart)");
 
-  const socket = resolvePath(config.vault?.broker?.socket ?? "~/.switchroom/vault-broker.sock");
+  // Canonical resolver — env first, then config, then legacy fallback.
+  // Same shape as the other vault CLI files post-fix.
+  const socket = resolveBrokerSocketPath({
+    vaultBrokerSocket: config.vault?.broker?.socket
+      ? resolvePath(config.vault.broker.socket)
+      : undefined,
+  });
   const poll = opts.pollStatus ?? (() => statusViaBroker({ socket }));
 
   const deadline = Date.now() + verifyTimeoutMs;

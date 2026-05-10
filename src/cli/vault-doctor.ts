@@ -22,7 +22,7 @@ import { existsSync } from "node:fs";
 import { analyseVaultHealth, type Diagnostic, type DiagnosticLevel } from "../vault/doctor.js";
 import { openVault, VaultError } from "../vault/vault.js";
 import { loadConfig, resolvePath } from "../config/loader.js";
-import { statusViaBroker } from "../vault/broker/client.js";
+import { statusViaBroker, resolveBrokerSocketPath } from "../vault/broker/client.js";
 
 function levelGlyph(level: DiagnosticLevel): string {
   switch (level) {
@@ -140,9 +140,16 @@ export function registerVaultDoctorCommand(vault: Command, program: Command): vo
       let brokerRunning: boolean | undefined = undefined;
 
       if (brokerConfigured) {
-        const socketPath = resolvePath(
-          config.vault?.broker?.socket ?? "~/.switchroom/vault-broker.sock"
-        );
+        // Use the canonical resolver — honors SWITCHROOM_VAULT_BROKER_SOCK
+        // env (set by compose into agent containers). Pre-fix this read
+        // only the config + legacy fallback, which inside an agent
+        // container resolved to a dangling symlink → "broker not running"
+        // false-positive on every `switchroom vault doctor` invocation.
+        const socketPath = resolveBrokerSocketPath({
+          vaultBrokerSocket: config.vault?.broker?.socket
+            ? resolvePath(config.vault.broker.socket)
+            : undefined,
+        });
         const status = await statusViaBroker({ socket: socketPath, timeoutMs: 1500 });
         brokerRunning = status !== null;
       }

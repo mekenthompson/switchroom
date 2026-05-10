@@ -31,7 +31,7 @@ import { dirname, resolve, join, basename } from "node:path";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SwitchroomConfig } from "../../config/schema.js";
-import { openVault, type VaultEntry } from "../vault.js";
+import { openVault, saveVault, type VaultEntry } from "../vault.js";
 import { resolvePath } from "../../config/loader.js";
 import {
   AutoUnlockDecryptError,
@@ -111,6 +111,26 @@ export interface BrokerTestOpts {
 
 export class VaultBroker {
   private secrets: Record<string, VaultEntry> | null = null;
+  /**
+   * The vault passphrase, retained in memory for the broker's lifetime
+   * to support `op:put` (agent-driven key rotation). Without retention,
+   * the broker can decrypt the vault at unlock time and serve reads from
+   * the in-memory `secrets` dict, but it cannot re-encrypt to write a
+   * new entry — write requires the passphrase to re-derive the AES key.
+   *
+   * Trade-off: a pwn of the broker process now exposes the passphrase
+   * in addition to the already-exposed decrypted secrets. The marginal
+   * expansion is small — an attacker who can read process memory can
+   * already exfiltrate every secret; retaining the passphrase
+   * additionally lets them re-encrypt the on-disk vault. We accept this
+   * to enable agent-driven key rotation (e.g. OAuth refresh tokens),
+   * which is the only practical way for skills like clerk's calendar
+   * skill to keep their refresh-token rotation self-healing without
+   * operator hand-holding.
+   *
+   * Zeroed on lock(); set on unlockFromPassphrase().
+   */
+  private passphrase: string | null = null;
   private config: SwitchroomConfig | null = null;
   private startedAt: number = Date.now();
   private server: net.Server | null = null;
@@ -284,9 +304,12 @@ export class VaultBroker {
   unlockFromPassphrase(passphrase: string): void {
     const secrets = openVault(passphrase, this.vaultPath);
     this.secrets = secrets;
-    // Overwrite the passphrase string in place (best-effort; JS strings are
-    // immutable but we ensure the reference is dropped immediately).
-    // The caller should also zero their copy.
+    // Retain the passphrase to enable op:put (agent-driven rotation).
+    // See the doc-comment on `passphrase` above for the trade-off. The
+    // caller should still zero their own copy to minimise overall
+    // lifetime; the broker's retained reference is the only authorised
+    // long-lived store.
+    this.passphrase = passphrase;
   }
 
   /**
@@ -307,6 +330,10 @@ export class VaultBroker {
       }
       this.secrets = null;
     }
+    // Drop the retained passphrase reference too. Same JS-string-immutability
+    // caveat as the secret values above — the underlying bytes survive in the
+    // string-pool until GC, but the broker's only reference is gone.
+    this.passphrase = null;
   }
 
   /**
@@ -974,6 +1001,145 @@ export class VaultBroker {
         result: "allowed",
       });
       socket.write(encodeResponse(entryResponse(entry)));
+      return;
+    }
+
+    // ── Put — agent-driven key rotation ─────────────────────────────────────
+    //
+    // Same ACL as get: an agent that can read a key via schedule.secrets[]
+    // can also rotate (write) it. Refuses to introduce new keys (operator-
+    // only); refuses to change an entry's `kind` (string ↔ binary). The
+    // motivating use case is OAuth refresh-token rotation in skills like
+    // clerk's calendar skill — the skill reads its token via broker,
+    // exchanges with the IDP for a fresh access_token + possibly-new
+    // refresh_token, and now needs to persist the rotation. Pre-fix the
+    // skill's `_vault_set` step failed every time because vault writes
+    // required the operator passphrase that agents don't have. Post-fix
+    // the skill's `switchroom vault set` routes through the broker and
+    // the rotation is self-healing.
+    if (req.op === "put") {
+      // Vault must be unlocked to encrypt the new value.
+      if (this.secrets === null || this.passphrase === null) {
+        socket.write(encodeResponse(errorResponse("LOCKED", "Vault is locked")));
+        return;
+      }
+      // Identity required — agentName from path-as-identity is the canonical
+      // signal for per-agent ACL. Token-based grants don't yet support put
+      // (deliberate — grant tokens are read-only by design; introducing
+      // write-grants is a separate design discussion).
+      if (agentName === null) {
+        socket.write(
+          encodeResponse(errorResponse("DENIED", "put requires path-as-identity (token-based grants are read-only)")),
+        );
+        return;
+      }
+      // Same ACL as get — schedule.secrets[] gates write too.
+      if (this.config === null) {
+        socket.write(
+          encodeResponse(errorResponse("INTERNAL", "Broker config not loaded")),
+        );
+        return;
+      }
+      const aclResult = checkAclByAgent(this.config, agentName, req.key);
+      if (!aclResult.allow) {
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "put",
+          key: req.key,
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: `denied:${aclResult.reason}`,
+        });
+        socket.write(encodeResponse(errorResponse("DENIED", aclResult.reason)));
+        return;
+      }
+      // Refuse to introduce new keys — operator-only territory. Agents can
+      // only update entries that already exist, preserving the "operator
+      // decides what goes in vault" boundary.
+      const existing = this.secrets[req.key];
+      if (existing === undefined) {
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "put",
+          key: req.key,
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: "denied:unknown_key",
+        });
+        socket.write(
+          encodeResponse(
+            errorResponse(
+              "UNKNOWN_KEY",
+              `Key not found: ${req.key} (broker put cannot introduce new keys; ask operator to set it once via 'switchroom vault set' from the host)`,
+            ),
+          ),
+        );
+        return;
+      }
+      // Refuse to change the kind (string ↔ binary). The protocol union
+      // already excludes 'files' from put. Agents rotating values must keep
+      // the same shape.
+      if (existing.kind !== req.entry.kind) {
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "put",
+          key: req.key,
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: `denied:kind_mismatch ${existing.kind}→${req.entry.kind}`,
+        });
+        socket.write(
+          encodeResponse(
+            errorResponse(
+              "BAD_REQUEST",
+              `kind mismatch: existing entry is '${existing.kind}', new entry is '${req.entry.kind}'`,
+            ),
+          ),
+        );
+        return;
+      }
+      // Update in-memory + persist. saveVault re-encrypts the full secrets
+      // dict and atomic-writes the vault file. On failure (disk full, perm
+      // error, encrypted-write race with another writer), the in-memory
+      // state is also rolled back — otherwise the broker would serve an
+      // entry that isn't on disk and the next reload would lose it.
+      const previousEntry = existing;
+      this.secrets[req.key] = req.entry;
+      try {
+        saveVault(this.passphrase, this.vaultPath, this.secrets);
+      } catch (err: unknown) {
+        // Roll back in-memory state.
+        this.secrets[req.key] = previousEntry;
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "put",
+          key: req.key,
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: `error:${(err as Error)?.message ?? "save failed"}`,
+        });
+        socket.write(
+          encodeResponse(
+            errorResponse("INTERNAL", `Failed to persist: ${(err as Error)?.message ?? "unknown"}`),
+          ),
+        );
+        return;
+      }
+      // Successful put — log only the key, NEVER the value.
+      this.auditLogger.write({
+        ts: new Date().toISOString(),
+        op: "put",
+        key: req.key,
+        caller: auditCaller,
+        pid: auditPid,
+        cgroup: auditCgroup,
+        result: "allowed",
+      });
+      socket.write(encodeResponse({ ok: true, put: true, key: req.key }));
       return;
     }
 

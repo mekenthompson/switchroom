@@ -20,6 +20,7 @@ import {
 import { registerVaultSweep } from "./vault-sweep.js";
 import {
   getViaBrokerStructured,
+  putViaBroker,
   statusViaBroker,
   unlockViaBroker,
   resolveBrokerSocketPath,
@@ -206,16 +207,94 @@ export function registerVaultCommand(program: Command): void {
           formatHint = opts.format as VaultFormatHint;
         }
 
-        // When stdin is piped we need to consume it for the secret value,
-        // so the passphrase must come from the env var rather than a prompt.
-        if (!process.stdin.isTTY && !process.env.SWITCHROOM_VAULT_PASSPHRASE && !opts.file) {
+        // ── Broker-mediated put (agent-driven rotation) ─────────────────────
+        //
+        // When stdin is piped, no passphrase is set, and the operator hasn't
+        // requested scope changes (--allow / --deny), try the broker's
+        // `op:put` first. This is the path the calendar skill (and any
+        // OAuth-style skill that rotates refresh tokens) needs: agents
+        // can't acquire the operator passphrase, so direct vault writes are
+        // off-limits. The broker's put-ACL is the same as the read-ACL
+        // (schedule.secrets[]) — agents that can read a key can rotate it.
+        //
+        // Pre-fix this branch errored with "requires SWITCHROOM_VAULT_PASSPHRASE
+        // to be set", which the calendar skill's ms_graph_token.py hit on
+        // every refresh, dropping freshly-rotated tokens on the floor.
+        if (
+          !process.stdin.isTTY
+          && !process.env.SWITCHROOM_VAULT_PASSPHRASE
+          && !opts.file
+          && opts.allow === undefined
+          && opts.deny === undefined
+        ) {
+          // Read the new value from stdin first — broker put needs the
+          // value as a string/binary kind. Multi-line preserved.
+          const value = await readStdinToEnd();
+          if (!value) {
+            console.error(chalk.red("Error: Value cannot be empty"));
+            process.exit(1);
+          }
+          if (formatHint) {
+            const validationError = validateFormatHint(value, formatHint);
+            if (validationError) {
+              console.error(
+                chalk.red(`Error: format validation failed for --format ${formatHint}: ${validationError}`),
+              );
+              process.exit(1);
+            }
+          }
+          let brokerSocket: string | undefined;
+          try {
+            const config = loadConfig(parentOpts.config);
+            brokerSocket = resolveBrokerSocketPath({
+              vaultBrokerSocket: config.vault?.broker?.socket
+                ? resolvePath(config.vault.broker.socket)
+                : undefined,
+            });
+          } catch {
+            brokerSocket = resolveBrokerSocketPath();
+          }
+          const result = await putViaBroker(
+            key,
+            { kind: "string", value },
+            { socket: brokerSocket },
+          );
+          if (result.kind === "ok") {
+            return;
+          }
+          if (result.kind === "unreachable") {
+            // Broker isn't there — surface the same passphrase-required
+            // error as the legacy path so operators get a familiar message
+            // and the legacy fallback path isn't accidentally triggered.
+            console.error(
+              chalk.red(
+                "Error: piping a value to `vault set` requires SWITCHROOM_VAULT_PASSPHRASE " +
+                "to be set OR a reachable vault-broker (broker " +
+                (result.msg ?? "unreachable") + ")",
+              ),
+            );
+            process.exit(1);
+          }
+          // denied or not_found — broker reached and refused. Print
+          // the structured reason so the caller can act on it.
           console.error(
             chalk.red(
-              "Error: piping a value to `vault set` requires SWITCHROOM_VAULT_PASSPHRASE to be set"
-            )
+              `VAULT-BROKER-DENIED [${result.code}]: ${result.msg}`,
+            ),
           );
-          process.exit(1);
+          if (result.kind === "not_found") {
+            console.error(
+              chalk.yellow(
+                `Hint: broker put cannot introduce new keys. Run ` +
+                `'switchroom vault set ${key}' once from the host (with the ` +
+                `vault passphrase) to create the entry; agents can rotate it ` +
+                `from then on.`,
+              ),
+            );
+          }
+          process.exit(2);
         }
+
         const passphrase = await getPassphrase();
 
         let value: string;

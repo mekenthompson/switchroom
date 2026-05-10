@@ -157,6 +157,27 @@ describe("cronMatchesDate", () => {
       expect(normalizeAliases("MON", "hour")).toBe("MON");
       expect(normalizeAliases("MON", "dom")).toBe("MON");
     });
+
+    it("handles mixed alias + numeric forms in the same field", () => {
+      // The most likely user-written form to regress: half the field
+      // is named, half is numeric. Each letter-run substitutes
+      // independently, numerics pass through.
+      expect(normalizeAliases("MON,3,FRI", "dow")).toBe("1,3,5");
+      expect(normalizeAliases("1,WED,5", "dow")).toBe("1,3,5");
+      const monday = new Date("2026-05-11T08:00:00");
+      const wed = new Date("2026-05-13T08:00:00");
+      expect(cronMatchesDate("0 8 * * MON,3,FRI", monday)).toBe(true);
+      expect(cronMatchesDate("0 8 * * MON,3,FRI", wed)).toBe(true);
+    });
+
+    it("normalizes dow=7 (Sunday) chained after alias substitution", () => {
+      // Operator might write the literal '7' alongside aliases. The
+      // substitute-then-normalize-7 order (in cronMatchesDate) must
+      // not double-process: SUN already became 0; 7 also becomes 0.
+      expect(normalizeAliases("MON,7", "dow")).toBe("1,7");
+      const sun = new Date("2026-05-10T08:00:00");
+      expect(cronMatchesDate("0 8 * * MON,7", sun)).toBe(true);
+    });
   });
 });
 

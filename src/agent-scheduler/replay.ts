@@ -62,8 +62,16 @@ const DOW_ALIASES: Record<string, string> = {
 /**
  * Substitute month/dow name aliases (`JAN`, `MON`, etc.) with their
  * numeric equivalents. Operates on a single cron field; idempotent
- * for already-numeric input. Word-boundary regex so a stray `MON` in
- * a malformed expression doesn't cross-pollute adjacent characters.
+ * for already-numeric input. Letter-run regex so contiguous alpha
+ * tokens substitute as a unit and field separators (`-`, `,`, `/`)
+ * partition the runs cleanly — `MON-FRI` becomes `1-5`, not `1-FRI`.
+ *
+ * Known minor divergence from node-cron 3.x: `MON-FRI/2` expands to
+ * `1-5/2` here (matchPart steps from lo=1 yielding {1,3,5}), whereas
+ * node-cron's convert-expression emits {2,4}. Stepped weekday ranges
+ * with aliases are rare; operators who need them should write the
+ * numeric form. Filed as a known-quirk rather than a bug because
+ * Vixie cron's own behaviour is the {1,3,5} expansion.
  */
 export function normalizeAliases(field: string, kind: FieldKind): string {
   const map = kind === "month" ? MONTH_ALIASES : kind === "dow" ? DOW_ALIASES : null;

@@ -6466,18 +6466,69 @@ bot.command('update', async ctx => {
       return
     }
   }
+  // Debounce vs concurrent self-restart commands (/restart, /new, /reset
+  // and other /update). Reading + writing the SAME restart marker means
+  // a double-tap of /update apply is rejected, AND a /restart fired
+  // mid-update is rejected (and vice versa). 15s window matches the
+  // /restart handler.
+  const existing = readRestartMarker()
+  if (existing && Date.now() - existing.ts < 15_000) {
+    await switchroomReply(
+      ctx,
+      `⏳ Self-restart already in progress (started ${Math.round(
+        (Date.now() - existing.ts) / 1000,
+      )}s ago) — ignoring duplicate.`,
+      { html: true },
+    )
+    return
+  }
   const chatId = String(ctx.chat!.id)
   const threadId = resolveThreadId(chatId, ctx.message?.message_thread_id)
-  await switchroomReply(
-    ctx,
+  // Send the ack and capture its message_id so the post-restart
+  // greeting card can edit/reply into the same message. Mirrors the
+  // /restart handler (gateway.ts ~6273) so the boot-card lookup
+  // (gateway.ts ~10393) finds chat_id + ack_message_id in the marker.
+  const ackText =
     `🚀 <b>update started</b> — running ${[
       '<code>switchroom update</code>',
       ...passthrough.map((t) => `<code>${escapeHtmlForTg(t)}</code>`),
     ].join(' ')}\n` +
     `\nThe gateway will restart as part of the recreate step; watch ` +
-    `for the post-restart greeting card to confirm completion.`,
-    { html: true },
-  )
+    `for the post-restart greeting card to confirm completion.`
+  let ackId: number | null = null
+  try {
+    const sent = await lockedBot.api.sendMessage(chatId, ackText, {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      ...(threadId != null ? { message_thread_id: threadId } : {}),
+    })
+    ackId = sent.message_id
+    if (HISTORY_ENABLED) {
+      try {
+        recordOutbound({
+          chat_id: chatId,
+          thread_id: threadId ?? null,
+          message_ids: [sent.message_id],
+          texts: [`🚀 update started`],
+          attachment_kinds: [],
+        })
+      } catch {}
+    }
+  } catch {}
+  writeRestartMarker({
+    chat_id: chatId,
+    thread_id: threadId ?? null,
+    ack_message_id: ackId,
+    ts: Date.now(),
+  })
+  // Reason banner for the post-restart greeting card. Without this the
+  // banner falls back to whatever the CLI's clean-shutdown marker
+  // stamped — usually 'unknown' or a docker-compose-restart string.
+  stampUserRestartReason('user: /update from chat')
+  // Unpin progress cards + clear active reactions before we die. The
+  // pinned-progress-card surface is the headline feature per CLAUDE.md;
+  // leaving one pinned across the recreate would surprise the operator.
+  await sweepBeforeSelfRestart()
   spawnSwitchroomDetached(
     ['update', ...passthrough],
     notifyDetachedFailure(chatId, threadId ?? null, 'update'),

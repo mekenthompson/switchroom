@@ -142,7 +142,12 @@ export function registerVaultGrantCommands(vault: Command, program: Command): vo
     )
     .option(
       "--keys <keys>",
-      "Comma-separated list of vault key names the token may access",
+      "Comma-separated list of vault key names the token may READ (broker GET).",
+    )
+    .option(
+      "--write <keys>",
+      "Comma-separated list of key names or prefix-globs (e.g. 'OPENAI_*') the token may WRITE (broker PUT). " +
+      "Write-grants can introduce new keys — they're the canonical capability for agent-initiated saves (#969 P1b).",
     )
     .option(
       "--duration <duration>",
@@ -156,20 +161,27 @@ export function registerVaultGrantCommands(vault: Command, program: Command): vo
     .action(
       async (
         agent: string,
-        opts: { keys?: string; duration?: string; description?: string },
+        opts: { keys?: string; write?: string; duration?: string; description?: string },
       ) => {
         const parentOpts = program.opts();
         const brokerOpts = getBrokerOpts(parentOpts.config);
 
-        // Parse key list
+        // Parse read-key list
         const keys: string[] = opts.keys
           ? opts.keys.split(",").map((k) => k.trim()).filter((k) => k.length > 0)
           : [];
 
-        if (keys.length === 0) {
+        // Parse write-key list (#969 P1b). Independent of --keys: a grant
+        // can be write-only by passing only --write, or read+write, or
+        // read-only (legacy --keys behaviour).
+        const write_keys: string[] = opts.write
+          ? opts.write.split(",").map((k) => k.trim()).filter((k) => k.length > 0)
+          : [];
+
+        if (keys.length === 0 && write_keys.length === 0) {
           console.error(
             chalk.red(
-              "Error: --keys is required. Specify at least one vault key name.",
+              "Error: at least one of --keys or --write is required (specify what the token may access).",
             ),
           );
           process.exit(1);
@@ -190,6 +202,7 @@ export function registerVaultGrantCommands(vault: Command, program: Command): vo
           keys,
           ttl_seconds,
           description: opts.description,
+          ...(write_keys.length > 0 ? { write_keys } : {}),
         });
 
         if (result.kind === "unreachable") {

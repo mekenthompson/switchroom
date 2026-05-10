@@ -1,5 +1,89 @@
 # Changelog
 
+## v0.7.13 — v0.7.12 deploy hotfix + Playwright in agent image
+
+Two-part patch release. The vault hotfix is forced by the v0.7.12
+deploy regression caught when self-deploying against the operator's
+fleet (clean unit-test pass, but real-world EACCES on the broker
+container's RW write to the host vault dir). The Playwright bake
+rides along since v0.7.13 is recreating containers anyway.
+
+### Vault deploy hotfix (#958)
+
+Two bugs in v0.7.12's apply / compose-gen path:
+
+**Bug 1 — vault-dir contents guard scanned the wrong directory.**
+`apply.ts` used `dirname(customVaultPath)` to derive the dir to
+scan against `KNOWN_VAULT_ARTIFACT_NAMES`. For operators whose
+configured `vault.path` was the legacy `~/.switchroom/vault.enc`
+(very common — the v0.7.0–.11 default), `customVaultPath`
+resolved to that path, so `dirname` returned `~/.switchroom`
+itself — the parent of the LEGACY file, NOT the new bind-mount
+target. The operator's actual `~/.switchroom/` contains many
+sibling dirs (approvals, web-token, worktrees, plus assorted
+backups and dotfiles) and the guard correctly refused to mount
+because none are in the artifact whitelist.
+
+Fix: only use `dirname(customVaultPath)` for genuinely custom
+paths (state `custom-path-skipped`). For default-config
+operators, the bind-mount target is always the new canonical
+`~/.switchroom/vault/` parent — derive that explicitly.
+
+**Bug 2 — broker couldn't WRITE to the host-owned vault dir.**
+`cap_drop: ALL` strips DAC_OVERRIDE. Without it,
+container-root (broker runs as uid 0) could READ via
+DAC_READ_SEARCH (kept since v0.7.4) but rejected mkdir + write
+into the operator's host vault dir. Surfaced as
+`EACCES: permission denied, mkdir '/state/vault/vault.enc.lock'`
+when the broker's saveVault flock-sentinel-dir step ran.
+
+Fix: add `DAC_OVERRIDE` to broker `cap_add`. Trust posture is
+consistent — broker already holds the passphrase + decrypted
+secrets in memory; allowing write capability is not an
+expansion of access, just of operations.
+
+Both bugs caught by self-deploying v0.7.12 against the
+operator's fleet (not by unit tests). After the hotfix:
+end-to-end calendar-skill refresh works (broker put → write
+persists → re-read returns fresh token → MS Graph 200), and a
+real calendar event was created via `calendar.py create-event`
+to confirm the full chain.
+
+### Playwright in agent image (#956)
+
+Skills using browser automation (calendar, scrape, UI-test)
+called `npx playwright`, which triggered an on-demand download
+of chromium binaries (~150MB) into `~/.cache/ms-playwright/`
+per agent on first call (~30s latency, plus N copies across
+the fleet's home dirs).
+
+v0.7.13 pre-bakes Playwright + chromium into the agent image
+via `playwright@^1.49.0` + `playwright install --with-deps
+chromium`. `PLAYWRIGHT_BROWSERS_PATH=/opt/playwright/browsers`
+puts the binaries in an image layer so they're shared across
+the fleet, not duplicated per-agent. First-call latency drops
+from ~30s to ~0s.
+
+Operators wanting Firefox / Webkit can install them per-agent
+via `npx playwright install <browser>` from inside the
+agent — chromium is just the bake-in default.
+
+Image size grows ~150MB; net savings on the fleet (one image
+layer vs N per-agent home-dir caches). CI rebuilds the image
+on each main merge so the playwright npm version + browser
+binary stay in lockstep.
+
+Non-blocking follow-up: `switchroom doctor`'s chromium probe
+still scans `~/.cache/ms-playwright/`. With the new
+`PLAYWRIGHT_BROWSERS_PATH`, the probe will say "chromium: not
+found" even though it's baked. Soft warning only ("only
+required for playwright-based skills"); fix tracked for v0.7.14.
+
+### Operator action
+
+`switchroom update` runs the migration auto-step and recreates
+containers. v0.7.12 → v0.7.13 is a transparent upgrade.
+
 ## v0.7.12 — vault layout: dir-mount + atomic-rename + flock (closes #951, #952, #954)
 
 v0.7.11 introduced broker-mediated vault writes (`op:put`) so OAuth-shaped

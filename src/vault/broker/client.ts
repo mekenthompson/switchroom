@@ -463,9 +463,16 @@ export type PutResult =
 export async function putViaBroker(
   key: string,
   entry: { kind: "string"; value: string } | { kind: "binary"; value: string },
-  opts?: BrokerClientOpts,
+  opts?: BrokerClientOpts & { token?: string },
 ): Promise<PutResult> {
-  const result = await rpc({ v: 1, op: "put", key, entry }, opts);
+  // Include the token in the wire payload only when present. The broker
+  // checks it via validateGrantForWrite (issue #969 P1b) — if the grant
+  // authorizes write for this key, it can also introduce new keys.
+  const token = opts?.token;
+  const result = await rpc(
+    { v: 1, op: "put", key, entry, ...(token ? { token } : {}) },
+    opts,
+  );
   if (result.kind === "unreachable") {
     return { kind: "unreachable", msg: result.msg };
   }
@@ -603,6 +610,12 @@ export interface MintGrantOpts extends BrokerClientOpts {
   keys: string[];
   ttl_seconds: number | null;
   description?: string;
+  /**
+   * Keys/globs this grant authorizes for WRITE. Empty (default) = read-only.
+   * Patterns ending in `*` match by prefix (e.g. `OPENAI_*`).
+   * Issue #969 P1b.
+   */
+  write_keys?: string[];
 }
 
 export type MintGrantResult =
@@ -624,6 +637,7 @@ export async function mintGrantViaBroker(
       keys: opts.keys,
       ttl_seconds: opts.ttl_seconds,
       description: opts.description,
+      ...(opts.write_keys !== undefined ? { write_keys: opts.write_keys } : {}),
     },
     opts,
   );

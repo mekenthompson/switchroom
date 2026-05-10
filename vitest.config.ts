@@ -53,6 +53,9 @@ export default defineConfig({
       "**/src/watchdog/state.test.ts",
       "**/src/watchdog/policy.test.ts",
       "**/src/vault/broker/server-grants.test.ts",
+      // Write-grant suites (issue #969 P1b) also use bun:sqlite — run via test:bun.
+      "**/src/vault/write-grants.test.ts",
+      "**/src/vault/broker/server-write-grants.test.ts",
       "**/src/vault/broker/client-token.test.ts",
       "**/src/vault/broker/server-unlock.test.ts",
       "**/src/vault/broker/auto-unlock.test.ts",

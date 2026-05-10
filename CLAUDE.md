@@ -13,31 +13,41 @@ Pro/Max subscription via OAuth (no API keys, no custom runtime around
 claude). The headline feature is a live **progress card** that pins into
 each Telegram topic while an agent works.
 
-**v0.7+ ships agents in Docker containers** — one per agent, plus three
-shared singletons (`vault-broker`, `approval-kernel`, `switchroom-cron`)
-brought up by `docker compose`. v0.6 was systemd-user units; v0.7 is the
-docker migration. The `claude` CLI runs unmodified inside each agent
-container — Docker is for *distribution and isolation*, not a custom
-runtime around claude (the vision's "no Docker-as-runtime" line in
+**v0.7+ ships agents in Docker containers** — one per agent, plus two
+shared singletons (`vault-broker`, `approval-kernel`) brought up by
+`docker compose`. v0.6 was systemd-user units; v0.7 is the docker
+migration. The `claude` CLI runs unmodified inside each agent container
+— Docker is for *distribution and isolation*, not a custom runtime
+around claude (the vision's "no Docker-as-runtime" line in
 `reference/vision.md` is preserved).
+
+> **Cron-fold-in note (v0.8 / Phase 4).** Earlier releases had a third
+> singleton, `switchroom-cron`, that fired every agent's scheduled
+> tasks via `docker exec`. The cutover (PRs #890–#893) retired that
+> container; cron now runs in-container in every agent as a sibling
+> of the gateway, delivering fires through the same `InboundMessage`
+> IPC path Telegram uses (synthesized turns tagged `meta.source="cron"`).
+> See `docs/scheduling.md` for the post-cutover model.
 
 See `README.md` for the user-facing description.
 
-## v0.7 runtime architecture (read this before touching docker/compose/broker code)
+## v0.7+ runtime architecture (read this before touching docker/compose/broker code)
 
 ```
                   ┌─ vault-broker (root, cap_drop=ALL + CHOWN/FOWNER/DAC_READ_SEARCH)
                   │    /etc/machine-id mount → auto-unlock derives AES key
                   │    binds /run/switchroom/broker/<agent>/sock per agent (chowned to UID)
+                  │    healthcheck: bind-presence probe (PR #898)
                   │
 docker compose ───┼─ approval-kernel (root, mirror of broker socket model)
 project=switchroom│    binds /run/switchroom/kernel/<agent>/sock per agent
-                  │
-                  ├─ switchroom-cron (scheduler, mounts /var/run/docker.sock RW)
+                  │    healthcheck: bind-presence probe (PR #898)
                   │
                   └─ agent-<name> ✕ N (per-agent UID 10001-10999, network_mode: host)
                        tini → start.sh → tmux server+client → bash → claude
+                                              ↑ telegram-plugin gateway sidecar
                                               ↑ autoaccept-poll sidecar (sibling to tmux)
+                                              ↑ agent-scheduler sidecar (cron, since Phase 4)
 ```
 
 **Agent container process tree** (since v0.7.5): `tini` is PID 1.
@@ -157,6 +167,13 @@ src/                    TypeScript source for the `switchroom` CLI
   config/               YAML loader + three-layer cascade (defaults → profiles → agents)
   memory/               Hindsight memory integration
   runtime-mode.ts       isDockerRuntime() — v0.7.3 unified host-shell + in-container detection
+  scheduler/            Cron synthesis primitives — collectScheduleEntries,
+                        dispatchAsInbound, JsonlAuditSink. Shared by the in-agent
+                        scheduler (no host-side scheduler runtime since Phase 4).
+  agent-scheduler/      In-container cron sibling — index.ts (entrypoint), ipc-client.ts
+                        (NDJSON-over-UDS to gateway), lock.ts (pidfile dedup),
+                        replay.ts (at-least-once boot replay). Bundled into
+                        dist/agent-scheduler/index.js, baked into the agent image.
   setup/                Interactive `switchroom setup` wizard
   telegram/             Shared telegram helpers used by the CLI
   vault/                AES-256-GCM encrypted secrets store
@@ -173,9 +190,11 @@ telegram-plugin/        The enhanced MCP Telegram plugin (own Bun tests)
   auto-fallback.ts      Quota-exhaustion auto-fallback
   tests/                Bun tests
 
-docker/                 Dockerfiles (base, agent, broker, kernel, scheduler).
-                        Built via `--build-local` flag on `switchroom apply`,
-                        OR pulled from GHCR (`ghcr.io/switchroom/switchroom-*:latest`).
+docker/                 Dockerfiles (base, agent, broker, kernel). Built via
+                        `--build-local` flag on `switchroom apply`, OR pulled
+                        from GHCR (`ghcr.io/switchroom/switchroom-*:latest`).
+                        Dockerfile.scheduler was retired in Phase 4 of the
+                        cron-fold-in (#893) along with the singleton container.
 profiles/               Built-in agent profiles (CLAUDE.md.hbs + SOUL.md.hbs)
                         _base/start.sh.hbs is the agent entry script template
                         (includes the docker-mode tmux preamble, since v0.7.5).
@@ -344,16 +363,33 @@ contract" above. The pointers below are for *implementation*.)
   subdir `<agent>/sock` (what compose emits). ACL is bind-time, never
   wire-time.
 - **"How does an agent boot inside a container?"** →
-  `profiles/_base/start.sh.hbs` (the docker-mode preamble at the top
-  forks autoaccept-poll + re-execs into tmux), `docker/Dockerfile.agent`
-  (CMD = `/state/agent/start.sh` under tini ENTRYPOINT, COPYs
-  autoaccept-poll bundle to `/opt/switchroom/`), `src/agents/compose.ts`
-  for the env / volumes / caps.
+  `profiles/_base/start.sh.hbs` (docker-mode preamble forks three
+  supervised sidecars — telegram-plugin gateway, autoaccept-poll,
+  agent-scheduler — then re-execs into tmux). `docker/Dockerfile.agent`
+  copies the bundles to `/opt/switchroom/{telegram-plugin/dist/,
+  autoaccept-poll.js, agent-scheduler/index.js}` and sets CMD to
+  `/state/agent/start.sh` under tini. `src/agents/compose.ts` emits
+  the env / volumes / caps and the broker/kernel healthchecks.
 - **"How does autoaccept dispatch first-run prompts?"** →
   `src/agents/autoaccept.ts` (tmux capture-pane + send-keys, regex
   prompts in `PROMPTS`). Bundle entry at `src/cli/autoaccept-poll.ts`.
-  Same code runs under v0.6 systemd (host-side) and v0.7 docker
+  Same code runs under v0.6 systemd (host-side) and v0.7+ docker
   (in-container sidecar) — only the supervisor location changed.
+- **"How does cron work post-Phase-4?"** → `src/agent-scheduler/`.
+  `index.ts` is the entrypoint, supervised by start.sh. Cron fires
+  call `dispatchAsInbound` (`src/scheduler/dispatch.ts`) to synthesize
+  an `InboundMessage` tagged `meta.source="cron"`, then send it via
+  `inject_inbound` IPC (`telegram-plugin/gateway/ipc-protocol.ts`)
+  to the local gateway, which forwards it to the bridge as a
+  synthesized turn. Audit at `/state/agent/scheduler.jsonl`; at-least-once
+  boot replay is bounded to past 30 min by default. See
+  `docs/scheduling.md` and the cron-fold-in PRs (#890–#893).
+- **"How do I know if a singleton (broker / kernel) is healthy?"** →
+  `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml ps`
+  shows the new health column. Probe is bind-presence on
+  `/run/switchroom/<svc>/*/sock` (PR #898). Empty fleets correctly
+  read as unhealthy — a singleton with no agents to serve isn't
+  doing useful work.
 - **"Why does a host-shell `switchroom agent list` differ from
   inside a container?"** → `src/runtime-mode.ts:isDockerRuntime()`.
   Both signals (env var + compose-file presence) flip the answer.

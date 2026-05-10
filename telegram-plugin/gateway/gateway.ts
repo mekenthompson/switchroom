@@ -6421,6 +6421,69 @@ async function handleNewOrResetCommand(ctx: Context, kind: 'new' | 'reset'): Pro
 bot.command('new', async ctx => handleNewOrResetCommand(ctx, 'new'))
 bot.command('reset', async ctx => handleNewOrResetCommand(ctx, 'reset'))
 
+// /update — host update from Telegram (#919). Default = dry-run plan
+// (`switchroom update --check`); explicit `apply` triggers the real
+// thing via spawnSwitchroomDetached so the gateway can be killed
+// mid-flight by the recreate-containers step without orphaning the
+// update. Admin-gated via ADMIN_COMMAND_NAMES.
+bot.command('update', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const arg = ctx.match?.trim() || ''
+  if (arg === '' || arg === 'check' || arg === '--check') {
+    await runSwitchroomCommand(ctx, ['update', '--check'], 'update --check')
+    await switchroomReply(
+      ctx,
+      'Reply with <code>/update apply</code> to execute, or <code>/update apply --skip-images</code> to skip the image pull.',
+      { html: true },
+    )
+    return
+  }
+  // Parse `apply` (with optional --skip-images / --rebuild passthrough).
+  // `/update apply` and `/update apply --skip-images` are the supported
+  // forms; everything else surfaces a usage hint.
+  const tokens = arg.split(/\s+/)
+  if (tokens[0] !== 'apply' && tokens[0] !== '--apply') {
+    await switchroomReply(
+      ctx,
+      'Usage: <code>/update</code> (dry-run) or <code>/update apply [--skip-images] [--rebuild]</code>',
+      { html: true },
+    )
+    return
+  }
+  // Whitelist passthrough flags. Anything outside the allowlist is
+  // refused — operators should not be able to inject arbitrary CLI
+  // args via Telegram (defense in depth even though admin-gated).
+  const ALLOWED_FLAGS = new Set(['--skip-images', '--rebuild'])
+  const passthrough = tokens.slice(1)
+  for (const tok of passthrough) {
+    if (!ALLOWED_FLAGS.has(tok)) {
+      await switchroomReply(
+        ctx,
+        `Refusing to pass unknown flag: <code>${escapeHtmlForTg(tok)}</code>. ` +
+        `Allowed: <code>--skip-images</code>, <code>--rebuild</code>.`,
+        { html: true },
+      )
+      return
+    }
+  }
+  const chatId = String(ctx.chat!.id)
+  const threadId = resolveThreadId(chatId, ctx.message?.message_thread_id)
+  await switchroomReply(
+    ctx,
+    `🚀 <b>update started</b> — running ${[
+      '<code>switchroom update</code>',
+      ...passthrough.map((t) => `<code>${escapeHtmlForTg(t)}</code>`),
+    ].join(' ')}\n` +
+    `\nThe gateway will restart as part of the recreate step; watch ` +
+    `for the post-restart greeting card to confirm completion.`,
+    { html: true },
+  )
+  spawnSwitchroomDetached(
+    ['update', ...passthrough],
+    notifyDetachedFailure(chatId, threadId ?? null, 'update'),
+  )
+})
+
 // ─── /approve, /deny, /pending ────────────────────────────────────────────
 // Slash-command alternatives to the inline-button approval flow (useful for
 // desktop-only sessions and power-users). Share pendingPermissions state

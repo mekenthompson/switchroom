@@ -91,6 +91,36 @@ describe("generateCompose", () => {
     expect(out).toContain("container_name: switchroom-coach");
   });
 
+  it("defaults container_name prefix to 'switchroom' (production behavior)", () => {
+    const out = generateCompose({ config: makeConfig({ coach: {} }) });
+    expect(out).toContain("container_name: switchroom-vault-broker");
+    expect(out).toContain("container_name: switchroom-approval-kernel");
+    expect(out).toContain("container_name: switchroom-coach");
+  });
+
+  it("honors containerNamePrefix override (test prod-safety guard)", () => {
+    // Phase tests pass their own per-pid project name to keep singleton
+    // names from colliding with a live production fleet on a shared
+    // host. See tests/docker/_prod-snapshot.ts:productionFleetIsLive
+    // for the broader story.
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+      containerNamePrefix: "phase1c-iso-12345",
+    });
+    expect(out).toContain("container_name: phase1c-iso-12345-vault-broker");
+    expect(out).toContain("container_name: phase1c-iso-12345-approval-kernel");
+    expect(out).toContain("container_name: phase1c-iso-12345-alice");
+    expect(out).toContain("container_name: phase1c-iso-12345-bob");
+    // Prefix MUST NOT leak into compose project name, service keys,
+    // socket paths, or labels — those stay fixed on the production
+    // shape so operator tooling and runtime contracts don't drift.
+    expect(out).toContain("name: switchroom\n");
+    expect(out).toContain("  vault-broker:");
+    expect(out).toContain("  approval-kernel:");
+    expect(out).toContain("/run/switchroom/broker/alice/sock");
+    expect(out).toContain('switchroom.fleet: "switchroom"');
+  });
+
   it("emits agents in sorted order", () => {
     const out = generateCompose({ config: makeConfig({ zebra: {}, alpha: {}, mango: {} }) });
     const a = out.indexOf("agent-alpha:");

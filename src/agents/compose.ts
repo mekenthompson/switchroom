@@ -138,6 +138,33 @@ export interface ComposeGeneratorOptions {
    * mount (back-compat with pre-fix generated compose).
    */
   switchroomConfigPath?: string;
+  /**
+   * Prefix for `container_name:` values. Defaults to `"switchroom"` —
+   * production behavior is unchanged. Setting this to a unique
+   * per-test-run value (typical pattern: `phase1c-iso-${process.pid}`)
+   * lets phase tests bring up their own broker/kernel/agent fleet
+   * without colliding with the production singletons' fixed names on
+   * a shared host.
+   *
+   * Belt-and-braces with `productionFleetIsLive()` skipIf guards in
+   * `tests/docker/_prod-snapshot.ts`: even if a test forgets to skip
+   * on a host with a live fleet, the parametrized name means it
+   * creates `phase1c-iso-NNN-vault-broker` instead of clobbering
+   * `switchroom-vault-broker`. Closes the test/prod-clobber regression
+   * surfaced when PR #916 un-skipped the destructive docker phase
+   * tests.
+   *
+   * Affects three name slots:
+   *   `container_name: <prefix>-vault-broker`
+   *   `container_name: <prefix>-approval-kernel`
+   *   `container_name: <prefix>-<agent-name>` for each agent
+   *
+   * Does NOT affect compose project name (`name: switchroom` at file
+   * scope), service names (`vault-broker:`, `approval-kernel:`, the
+   * agent service keys), socket paths, or labels — those stay fixed
+   * because the runtime / operator UX depends on them.
+   */
+  containerNamePrefix?: string;
 }
 
 /** Resolve the image ref for one of the four service images. */
@@ -225,6 +252,12 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // preserves the older `${HOME}` shape for callers that haven't been
   // updated.
   const homePrefix = opts.homeDir ?? "${HOME}";
+  // Default container_name prefix matches the compose project name and
+  // every operator command in the docs (`docker exec -it switchroom-
+  // vault-broker ...`, `journalctl --user -u switchroom-vault-broker`).
+  // Tests override this so phase fleets get unique names that can't
+  // collide with a production install on the same host.
+  const containerNamePrefix = opts.containerNamePrefix ?? "switchroom";
   // For existsSync() decisions on optional bind-mount sources (#907):
   // emission uses `homePrefix` (which may be the literal "${HOME}" so
   // sudo-bake works), but the existsSync probe must use the real host
@@ -258,7 +291,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // ── vault-broker (singleton) ───────────────────────────────────────
   lines.push(`  vault-broker:`);
   emitImageOrBuild(lines, "broker", imageTag, buildMode, buildContext);
-  lines.push(`    container_name: switchroom-vault-broker`);
+  lines.push(`    container_name: ${containerNamePrefix}-vault-broker`);
   // Fleet labels for ad-hoc selection (e.g. `docker ps --filter label=switchroom.role=agent`).
   lines.push(`    labels:`);
   lines.push(`      switchroom.role: "broker"`);
@@ -359,7 +392,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // ── approval-kernel (singleton) ────────────────────────────────────
   lines.push(`  approval-kernel:`);
   emitImageOrBuild(lines, "kernel", imageTag, buildMode, buildContext);
-  lines.push(`    container_name: switchroom-approval-kernel`);
+  lines.push(`    container_name: ${containerNamePrefix}-approval-kernel`);
   lines.push(`    labels:`);
   lines.push(`      switchroom.role: "kernel"`);
   lines.push(`      switchroom.fleet: "switchroom"`);
@@ -421,7 +454,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
     if (a.strippedCaps.length > 0) {
       warn(`compose: stripping cap_add ${JSON.stringify(a.strippedCaps)} from agent "${a.name}" (Docker mode forbids capability extras; see RFC §security)`);
     }
-    emitAgentService(lines, a, imageTag, buildMode, buildContext, homePrefix, hostHomeForChecks, switchroomConfigPath);
+    emitAgentService(lines, a, imageTag, buildMode, buildContext, homePrefix, hostHomeForChecks, switchroomConfigPath, containerNamePrefix);
   }
 
   // ── volumes ────────────────────────────────────────────────────────
@@ -444,10 +477,11 @@ function emitAgentService(
   homePrefix: string,
   hostHomeForChecks: string,
   switchroomConfigPath: string | undefined,
+  containerNamePrefix: string,
 ): void {
   lines.push(`  agent-${a.name}:`);
   emitImageOrBuild(lines, "agent", imageTag, buildMode, buildContext);
-  lines.push(`    container_name: switchroom-${a.name}`);
+  lines.push(`    container_name: ${containerNamePrefix}-${a.name}`);
   lines.push(`    labels:`);
   lines.push(`      switchroom.role: "agent"`);
   lines.push(`      switchroom.fleet: "switchroom"`);

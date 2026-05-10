@@ -59,8 +59,15 @@ import {
   safeLabelTeardown,
   mergeServiceEnv,
 } from "./_label-helpers.js";
+import { productionFleetIsLive, assertNoProductionFleet } from "./_prod-snapshot.js";
 
 const RUN_ID = newRunId();
+// See per-agent-isolation.test.ts:PROD_FLEET_LIVE — same prod-clobber
+// guard. This file ALSO reads `switchroom-vault-broker` /
+// `switchroom-approval-kernel` by their fixed names throughout the
+// test body, so running it on a host with a live production fleet
+// produces undefined cross-talk.
+const PROD_FLEET_LIVE = productionFleetIsLive();
 
 const TAG = "phase1b-test";
 // Phase 4 cron-fold-in cutover removed the singleton scheduler image.
@@ -130,7 +137,17 @@ function makeConfig(agents: string[]): SwitchroomConfig {
  *   - emit minimal switchroom.yaml inside a tmpfs the kernel/broker can read
  */
 function buildTestCompose(agents: string[], cfgPath: string): string {
-  let yml = generateCompose({ config: makeConfig(agents), imageTag: TAG });
+  // containerNamePrefix=PROJECT defends against the production-name
+  // collision regression (#916 un-skip → 2026-05-10 klanker incident).
+  // Emitted names become `phase1c-race-${pid}-vault-broker` etc., so
+  // even if a production fleet is up the test names cannot collide
+  // with `switchroom-vault-broker`. The describe.skipIf still gates
+  // the suite — this is the second layer.
+  let yml = generateCompose({
+    config: makeConfig(agents),
+    imageTag: TAG,
+    containerNamePrefix: PROJECT,
+  });
   // Rewrite registry refs to local tags. The compose generator points at
   // ghcr.io/switchroom/<image>:<tag>; for this test we want the locally
   // built switchroom/<image>:phase1b-test.
@@ -330,18 +347,25 @@ function releaseFleetLock(): void {
 
 beforeAll(() => {
   if (!imagesOk) return;
+  // Belt to the describe.skipIf(PROD_FLEET_LIVE) braces — refuse to
+  // run if a live production fleet is present (this test file ALSO
+  // reads/writes switchroom-vault-broker by fixed name).
+  assertNoProductionFleet();
   acquireFleetLock("/tmp/switchroom-docker-fleet.lock");
   composeDown(); // belt + braces
-  // Forcefully remove any leftover singletons from a sibling test file
-  // (per-agent-isolation) — they use fixed container_name: so projects
-  // collide. Scope: ONLY the singleton names this PR introduces.
+  // Force-remove any leftover *project-scoped* containers from a
+  // crashed prior run. ALL names here are prefixed with `${PROJECT}`,
+  // which is `phase1c-race-${process.pid}` — so this CANNOT touch
+  // `switchroom-vault-broker` or any other production container.
+  // Pre-fix this loop included production-named singletons and would
+  // clobber a live fleet (the 2026-05-10 klanker incident).
   for (const c of [
-    "switchroom-vault-broker",
-    "switchroom-approval-kernel",
-    "switchroom-alice",
-    "switchroom-bob",
-    "switchroom-carol",
-    "switchroom-newbie",
+    `${PROJECT}-vault-broker`,
+    `${PROJECT}-approval-kernel`,
+    `${PROJECT}-alice`,
+    `${PROJECT}-bob`,
+    `${PROJECT}-carol`,
+    `${PROJECT}-newbie`,
   ]) {
     try { execSync(`docker rm -f ${c}`, { stdio: "pipe" }); } catch { /* */ }
   }
@@ -399,7 +423,7 @@ afterAll(() => {
 // the container with the new volume) makes newbie's socket actually
 // bindable. The compose-fixture rot that previously masked this was
 // already addressed in PR-D3.
-describe.skipIf(!imagesOk)(
+describe.skipIf(!imagesOk || PROD_FLEET_LIVE)(
   "phase1c broker-IPC race — newbie agent online during sustained kernel IPC",
   () => {
     it(
@@ -413,7 +437,7 @@ describe.skipIf(!imagesOk)(
         const aliceSock = (() => {
           try {
             return execSync(
-              "docker exec switchroom-alice ls /run/switchroom/kernel/sock",
+              `docker exec ${PROJECT}-alice ls /run/switchroom/kernel/sock`,
             ).toString().trim();
           } catch (e) { return `MISSING (${(e as Error).message})`; }
         })();
@@ -421,16 +445,16 @@ describe.skipIf(!imagesOk)(
 
         // Snapshot RestartCount before any topology mutation.
         const startCounts = {
-          broker: getRestartCount("switchroom-vault-broker"),
-          kernel: getRestartCount("switchroom-approval-kernel"),
+          broker: getRestartCount(`${PROJECT}-vault-broker`),
+          kernel: getRestartCount(`${PROJECT}-approval-kernel`),
         };
         // Also capture the kernel container ID — the live-add procedure
         // recreates the kernel container (`docker compose up -d` picks
         // up the new kernel-newbie-sock volume mount), which resets
         // RestartCount to 0 on the new container. We assert recreation
         // by container-ID change instead of restart-count bump (#857).
-        const startKernelId = getContainerId("switchroom-approval-kernel");
-        const startBrokerId = getContainerId("switchroom-vault-broker");
+        const startKernelId = getContainerId(`${PROJECT}-approval-kernel`);
+        const startBrokerId = getContainerId(`${PROJECT}-vault-broker`);
 
         const results: Array<{ idx: number; ok: boolean; durationMs: number; err?: string }> = [];
         let newbieFirstReplyAt: number | null = null;
@@ -530,8 +554,8 @@ describe.skipIf(!imagesOk)(
         // disturbance (broker must still be untouched; the singleton
         // scheduler was retired in Phase 4 #893).
         const stabilityCounts = {
-          broker: getRestartCount("switchroom-vault-broker"),
-          kernel: getRestartCount("switchroom-approval-kernel"),
+          broker: getRestartCount(`${PROJECT}-vault-broker`),
+          kernel: getRestartCount(`${PROJECT}-approval-kernel`),
         };
 
         // Phase 3c F-#811 — split newbie-readiness from topology-stability.
@@ -577,13 +601,13 @@ describe.skipIf(!imagesOk)(
             while (Date.now() < deadline) {
               const probe = spawnSync(
                 "docker",
-                ["exec", "switchroom-newbie", "ls", "/run/switchroom/kernel/sock"],
+                ["exec", `${PROJECT}-newbie`, "ls", "/run/switchroom/kernel/sock"],
                 { encoding: "utf8", timeout: 4000 },
               );
               if (probe.status === 0 && probe.stdout.includes("/run/switchroom/kernel/sock")) {
                 // Socket bound — issue newbie's first real lookup against
                 // newbie's OWN kernel socket.
-                const r = kernelLookup("newbie", "switchroom-newbie");
+                const r = kernelLookup("newbie", `${PROJECT}-newbie`);
                 if (r.ok) {
                   newbieReadyAt = Date.now();
                   newbieReadyLatencyMs = newbieReadyAt - readinessStart;
@@ -598,8 +622,8 @@ describe.skipIf(!imagesOk)(
         }
 
         const endCounts = {
-          broker: getRestartCount("switchroom-vault-broker"),
-          kernel: getRestartCount("switchroom-approval-kernel"),
+          broker: getRestartCount(`${PROJECT}-vault-broker`),
+          kernel: getRestartCount(`${PROJECT}-approval-kernel`),
         };
 
         // Diagnostic line for vitest output
@@ -647,8 +671,8 @@ describe.skipIf(!imagesOk)(
         // Pre-#857 the test used `docker compose restart` and asserted
         // RestartCount+1; that didn't actually recreate the container,
         // so newbie's volume mount never appeared inside the kernel.
-        const endKernelId = getContainerId("switchroom-approval-kernel");
-        const endBrokerId = getContainerId("switchroom-vault-broker");
+        const endKernelId = getContainerId(`${PROJECT}-approval-kernel`);
+        const endBrokerId = getContainerId(`${PROJECT}-vault-broker`);
         expect(endBrokerId).toBe(startBrokerId);
         expect(endCounts.broker).toBe(startCounts.broker);
         expect(endKernelId).not.toBe(startKernelId);

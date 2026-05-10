@@ -64,6 +64,8 @@ import { newRunId, safeLabelTeardown } from "./_label-helpers.js";
 import {
   captureProdSnapshot,
   expectNoProdDrift,
+  productionFleetIsLive,
+  assertNoProductionFleet,
   type ProdSnapshot,
 } from "./_prod-snapshot.js";
 
@@ -164,6 +166,12 @@ function fixtureYaml(switchroomHome: string): string {
 
 beforeAll(() => {
   if (!enabled || !imagesOk) return;
+  // Belt to the SKIP_REASON braces — even if a future refactor drops
+  // the productionFleetIsLive() check from the skip computation, this
+  // throw stops the destructive setup before the apply+up step
+  // collides with `switchroom-vault-broker` / `switchroom-approval-
+  // kernel` singleton names from the production compose generator.
+  assertNoProductionFleet();
 
   const prodSnapshot = captureProdSnapshot();
 
@@ -249,7 +257,9 @@ const SKIP_REASON = !enabled
     ? "docker daemon unreachable"
     : !imagesOk
       ? "phase1b-test images not built — run `bash tests/docker/build-images.sh`"
-      : "";
+      : productionFleetIsLive()
+        ? "live switchroom production fleet detected on host — refusing to clobber singletons (run `docker compose -p switchroom down` first)"
+        : "";
 
 describe.skipIf(SKIP_REASON !== "")(
   "v0.7 install path — apply → compose up → assert healthy",

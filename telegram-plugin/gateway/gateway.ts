@@ -6646,11 +6646,13 @@ bot.command('update', async ctx => {
   )
 })
 
-// /upgrade-status — read-only snapshot of where this host stands (#927).
+// /upgradestatus — read-only snapshot of where this host stands (#927).
 // Wraps `switchroom update --status` synchronously and posts the
 // formatted output. NOT admin-gated: read-only fleet metadata is safe
 // for any allowFrom user to see, and the answer "is something behind?"
 // is the missing companion to /update's "trigger an update".
+// (Telegram slash-commands forbid hyphens, hence /upgradestatus not
+// /upgrade-status. The /upgrade alias just below redirects.)
 bot.command('upgradestatus', async ctx => {
   if (!isAuthorizedSender(ctx)) return
   await runSwitchroomCommand(ctx, ['update', '--status'], 'update --status')

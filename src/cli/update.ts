@@ -34,7 +34,7 @@
  */
 import type { Command } from "commander";
 import chalk from "chalk";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -252,25 +252,43 @@ function defaultStatusProbe(composePath: string): StatusReport {
   let cliVersion = "unknown";
   let cliBuiltAt: string | null = null;
   try {
-    const scriptPath = process.argv[1] ?? "";
+    // Resolve symlinks first — `~/.bun/bin/switchroom` is typically a
+    // symlink to `dist/cli/switchroom.js` inside the workspace
+    // checkout. Walking up from the symlink's argv[1] would land in
+    // `~/.bun/bin/` which has no package.json ancestor (#938 reviewer).
+    const rawScriptPath = process.argv[1] ?? "";
+    let scriptPath = rawScriptPath;
+    try {
+      if (rawScriptPath) scriptPath = realpathSync(rawScriptPath);
+    } catch { /* nothing to do — fall back to raw argv[1] */ }
+
     if (scriptPath) {
-      // Look for package.json in the script's repo / install dir.
+      // Use mtime of the resolved script as the "built at" time —
+      // portable across BSD/macOS/Linux unlike the prior `stat -c %Y`
+      // shellout (#938 reviewer).
+      try {
+        cliBuiltAt = new Date(statSync(scriptPath).mtimeMs).toISOString();
+      } catch { /* nothing to do */ }
+
+      // Walk up from the script's directory looking for package.json.
+      // 8 levels is generous — the deepest realistic path is
+      // workspace/dist/cli/switchroom.js → 3 levels.
       let dir = dirname(scriptPath);
       for (let i = 0; i < 8; i++) {
         const pkgPath = join(dir, "package.json");
         if (existsSync(pkgPath)) {
           try {
-            const stat = spawnSync("stat", ["-c", "%Y", scriptPath], { encoding: "utf-8" });
-            if (stat.status === 0) {
-              const mtime = Number(stat.stdout.trim()) * 1000;
-              if (Number.isFinite(mtime)) cliBuiltAt = new Date(mtime).toISOString();
-            }
-          } catch { /* nothing to do */ }
-          try {
-            const fs = require("node:fs") as typeof import("node:fs");
-            const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8")) as { version?: string };
+            // Direct ESM read — was previously `require("node:fs")`
+            // which is undefined under true ESM and threw silently
+            // (#938 reviewer blocker). readFileSync now in the
+            // top-of-file import.
+            const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { version?: string };
             if (typeof pkg.version === "string") cliVersion = pkg.version;
-          } catch { /* nothing to do */ }
+          } catch (err) {
+            warnings.push(
+              `read ${pkgPath} failed: ${(err as Error).message}`,
+            );
+          }
           break;
         }
         const parent = dirname(dir);
@@ -278,7 +296,17 @@ function defaultStatusProbe(composePath: string): StatusReport {
         dir = parent;
       }
     }
-  } catch { warnings.push("could not resolve CLI version + build time"); }
+  } catch (err) {
+    warnings.push(`CLI version probe failed: ${(err as Error).message}`);
+  }
+  if (cliVersion === "unknown") {
+    // Inner probes have their own try/catch; surface a single
+    // diagnostic when they all bottom out so 'CLI: unknown' is never
+    // silent (#938 reviewer concern C3).
+    warnings.push(
+      "could not resolve CLI version (no package.json found above the resolved script path)",
+    );
+  }
 
   // Docker probe — list services from compose, then docker inspect each.
   const services: ServiceState[] = [];
@@ -424,6 +452,16 @@ async function runUpdate(opts: UpdateOptions): Promise<number> {
       stdout(formatStatusReport(report) + "\n");
     }
     return 0;
+  }
+  if (opts.json) {
+    // --json without --status is unsupported (the apply / pull / up
+    // pipeline streams human output; piping JSON through a multi-step
+    // shellout is not coherent). Fail loud rather than silently
+    // ignoring (#938 reviewer nit).
+    stderr(chalk.red(
+      "--json is only honored under --status. Drop --json or add --status.\n",
+    ));
+    return 2;
   }
 
   const steps = planUpdate(opts);

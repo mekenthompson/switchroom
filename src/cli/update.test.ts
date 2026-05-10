@@ -141,6 +141,21 @@ describe("--status (#927)", () => {
     expect(out.join("")).toContain("CLI: test");
   });
 
+  it("runUpdate --json without --status fails loud (exit 2) — #938 reviewer", async () => {
+    const { runUpdate } = await import("./update.js");
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runUpdate({
+      json: true,
+      composePath: "/x.yml",
+      stdout: (s) => out.push(s),
+      stderr: (s) => err.push(s),
+      runner: () => ({ status: 0 }),
+    });
+    expect(code).toBe(2);
+    expect(err.join("")).toMatch(/--json is only honored under --status/);
+  });
+
   it("runUpdate --status --json emits parseable JSON with the report shape", async () => {
     const { runUpdate } = await import("./update.js");
     const out: string[] = [];

@@ -1391,6 +1391,9 @@ type PendingVaultOp =
     }
   // Issue #228: waiting for confirmation before revoking a grant.
   | { kind: 'revoke_confirm'; grantId: string; agent: string; keys: string[]; startedAt: number }
+  // Issue #969 P1a: user tapped "Rename" on a vault_request_save card;
+  // the next message becomes the new key name for the staged save.
+  | { kind: 'rename-vault-save'; stageId: string; startedAt: number }
 const VAULT_INPUT_TTL_MS = 5 * 60 * 1000
 const pendingVaultOps = new Map<string, PendingVaultOp>()
 
@@ -1426,6 +1429,40 @@ interface DeferredSecret {
   kernel_request_id?: string
 }
 const deferredSecrets = new Map<string, DeferredSecret>()
+
+/**
+ * Agent-initiated save staging (issue #969 P1a). When an agent calls the
+ * `vault_request_save` MCP tool, we stage the value here, render an
+ * approval card to the user, and write to vault only on tap. The value
+ * is held in gateway memory ONLY — never echoed back to the agent and
+ * never logged.
+ */
+interface PendingVaultRequestSave {
+  /** Agent that requested the save (process.env.SWITCHROOM_AGENT_NAME). */
+  agent: string
+  /** Chat to edit when the user taps. */
+  chat_id: string
+  /** Card message id (filled in after we send the card). */
+  card_message_id?: number
+  /** Currently-suggested slug; may be renamed by the user. */
+  key: string
+  /** Storage shape — 'string' (default) or 'binary'. */
+  kind: 'string' | 'binary'
+  /** The secret value, held in memory until the user approves/discards. */
+  value: string
+  /** Optional rationale shown on the card. */
+  why?: string
+  /** Unix-ms timestamp; entries are reaped after VAULT_REQUEST_SAVE_TTL_MS. */
+  staged_at: number
+}
+const pendingVaultRequestSaves = new Map<string, PendingVaultRequestSave>()
+const VAULT_REQUEST_SAVE_TTL_MS = 10 * 60 * 1000
+function sweepPendingVaultRequestSaves(): void {
+  const cutoff = Date.now() - VAULT_REQUEST_SAVE_TTL_MS
+  for (const [k, v] of pendingVaultRequestSaves) {
+    if (v.staged_at < cutoff) pendingVaultRequestSaves.delete(k)
+  }
+}
 
 /**
  * Mint an approval-kernel decision row for a deferred-secret card
@@ -2374,6 +2411,7 @@ const ALLOWED_TOOLS = new Set([
   'send_checklist', 'update_checklist',
   'ask_user',
   'send_sticker', 'send_gif',
+  'vault_request_save',
 ])
 
 async function executeToolCall(tool: string, args: Record<string, unknown>): Promise<unknown> {
@@ -2413,6 +2451,8 @@ async function executeToolCall(tool: string, args: Record<string, unknown>): Pro
       return executeSendSticker(args)
     case 'send_gif':
       return executeSendGif(args)
+    case 'vault_request_save':
+      return executeVaultRequestSave(args)
     default:
       throw new Error(`unknown tool: ${tool}`)
   }
@@ -3386,6 +3426,105 @@ async function publishToTelegraph(
   }
   process.stderr.write(`telegram gateway: telegraph published url=${page.value.url} title=${JSON.stringify(title)} chars=${text.length}\n`)
   return page.value.url
+}
+
+/**
+ * Build the inline keyboard for the agent-initiated vault-save approval card.
+ * Issue #969 P1a. Callback prefix `vrs:` (vault-request-save).
+ *
+ * Buttons must fit Telegram's 64-byte callback_data limit. Stage IDs are
+ * 8 hex chars (32 bits of entropy), so each callback comfortably fits.
+ */
+function buildVaultRequestSaveKeyboard(stageId: string): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ Save once', callback_data: `vrs:save:${stageId}` },
+        { text: '🚫 Discard', callback_data: `vrs:discard:${stageId}` },
+      ],
+      [
+        { text: '✏️ Rename', callback_data: `vrs:rename:${stageId}` },
+      ],
+    ],
+  }
+}
+
+function renderVaultRequestSaveCard(req: PendingVaultRequestSave, agentSlug: string): string {
+  const lines: string[] = []
+  lines.push(`🔐 <b>${escapeHtmlForTg(agentSlug)}</b> wants to save a secret`)
+  lines.push(`key: <code>${escapeHtmlForTg(req.key)}</code>`)
+  if (req.why && req.why.length > 0) {
+    lines.push(`why: <i>${escapeHtmlForTg(req.why)}</i>`)
+  }
+  lines.push('')
+  lines.push(`<i>Tap Save to write to the host vault, Rename to change the key name, or Discard to drop it. The value is held in this chat's gateway memory until you decide.</i>`)
+  return lines.join('\n')
+}
+
+/**
+ * `vault_request_save` tool — agent surfaces an approval card asking
+ * the user to confirm saving a secret. The value is staged here and
+ * written to vault only on user tap. See #969 P1a.
+ */
+async function executeVaultRequestSave(args: Record<string, unknown>): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const chat_id = args.chat_id as string
+  if (!chat_id) throw new Error('vault_request_save: chat_id is required')
+  const key = args.key as string
+  if (!key || typeof key !== 'string') throw new Error('vault_request_save: key is required')
+  const value = args.value as string
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new Error('vault_request_save: value is required and must be a non-empty string')
+  }
+  const why = typeof args.why === 'string' ? args.why : undefined
+  const kindRaw = typeof args.kind === 'string' ? args.kind : 'string'
+  if (kindRaw !== 'string' && kindRaw !== 'binary') {
+    throw new Error('vault_request_save: kind must be "string" or "binary"')
+  }
+  assertAllowedChat(chat_id)
+
+  // Validate slug shape — vault keys must match a tight charset so the
+  // host CLI hints render cleanly and reference resolution stays
+  // predictable. Same shape as `validateVaultKey` in the broker, kept
+  // local here to avoid pulling in the broker import.
+  if (!/^[A-Za-z0-9_.-]{1,200}$/.test(key)) {
+    throw new Error('vault_request_save: key must match [A-Za-z0-9_.-]{1,200}')
+  }
+
+  const agentSlug = process.env.SWITCHROOM_AGENT_NAME || 'agent'
+
+  // Stage the request server-side. The value never leaves gateway memory
+  // until the user approves.
+  const stageId = randomBytes(4).toString('hex')
+  const pending: PendingVaultRequestSave = {
+    agent: agentSlug,
+    chat_id,
+    key,
+    kind: kindRaw,
+    value,
+    why,
+    staged_at: Date.now(),
+  }
+  pendingVaultRequestSaves.set(stageId, pending)
+  sweepPendingVaultRequestSaves()
+
+  // Send the approval card.
+  const text = renderVaultRequestSaveCard(pending, agentSlug)
+  const threadId = args.message_thread_id != null ? Number(args.message_thread_id) : undefined
+  const sent = await lockedBot.api.sendMessage(chat_id, text, {
+    parse_mode: 'HTML',
+    reply_markup: buildVaultRequestSaveKeyboard(stageId),
+    ...(threadId != null && Number.isFinite(threadId) ? { message_thread_id: threadId } : {}),
+  })
+  pending.card_message_id = sent.message_id
+
+  return {
+    content: [
+      {
+        type: 'text',
+        text: `vault_request_save: card sent (stage_id=${stageId}, key=${key}). The user must tap a button before the secret is persisted; do not assume success until you see the user's next message confirming the outcome.`,
+      },
+    ],
+  }
 }
 
 async function executeReact(args: Record<string, unknown>): Promise<unknown> {
@@ -4836,6 +4975,35 @@ async function handleInbound(
         if (codeBlockMatch) value = codeBlockMatch[1]!
         if (msgId != null) await deleteSensitiveMessage(chat_id, msgId, 'vault secret value')
         await executeVaultOp(ctx, chat_id, 'set', pendingVault.key, pendingVault.passphrase, value.trim())
+      } else if (pendingVault.kind === 'rename-vault-save') {
+        // Issue #969 P1a: user tapped Rename on a vault_request_save
+        // card and is now telling us the new key name. Validate the
+        // slug, update the staged entry, refresh the card.
+        const newKey = text.trim()
+        const staged = pendingVaultRequestSaves.get(pendingVault.stageId)
+        if (!staged) {
+          await switchroomReply(ctx, '⌛ That save card expired before you renamed. Ask the agent to re-issue.', { html: true })
+          return
+        }
+        if (!/^[A-Za-z0-9_.-]{1,200}$/.test(newKey)) {
+          // Re-arm the pending state so the user can try again.
+          pendingVaultOps.set(chat_id, { ...pendingVault, startedAt: Date.now() })
+          await switchroomReply(ctx, '⚠️ Key must match <code>[A-Za-z0-9_.-]</code> and be ≤ 200 chars. Send a different name.', { html: true })
+          return
+        }
+        staged.key = newKey
+        if (msgId != null) await deleteSensitiveMessage(chat_id, msgId, 'vault rename input')
+        // Edit the card in place with the new suggested key + same buttons.
+        if (staged.card_message_id != null) {
+          await ctx.api
+            .editMessageText(
+              staged.chat_id,
+              staged.card_message_id,
+              renderVaultRequestSaveCard(staged, staged.agent),
+              { parse_mode: 'HTML', reply_markup: buildVaultRequestSaveKeyboard(pendingVault.stageId) },
+            )
+            .catch(() => {})
+        }
       }
       return
     }
@@ -7509,6 +7677,152 @@ function resolveAgentDirForName(agent: string): string | null {
  * Authorization mirrors the operator-event callback: only senders on the
  * configured allowlist get to act on the buttons.
  */
+/**
+ * Issue #969 P1a — handle the agent-initiated vault-save approval card
+ * (`vault_request_save` MCP tool).
+ *
+ * Callbacks:
+ *   vrs:save:<stageId>     — confirm save; write to vault using broker put
+ *                            with operator-passphrase attestation (#969 P1a)
+ *                            so even new keys go through in one tap.
+ *   vrs:discard:<stageId>  — drop the staged secret; never touches disk.
+ *   vrs:rename:<stageId>   — set up a pending-op intercept so the user's
+ *                            next message is taken as a new key name.
+ */
+async function handleVaultRequestSaveCallback(ctx: Context, data: string): Promise<void> {
+  const senderId = String(ctx.from?.id ?? '')
+  const access = loadAccess()
+  if (!access.allowFrom.includes(senderId)) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+
+  const parts = data.split(':')
+  if (parts.length < 3) {
+    await ctx.answerCallbackQuery({ text: 'Bad request' }).catch(() => {})
+    return
+  }
+  const action = parts[1]
+  const stageId = parts.slice(2).join(':')
+  const pending = pendingVaultRequestSaves.get(stageId)
+  if (!pending) {
+    await ctx.answerCallbackQuery({ text: 'Card expired — ask the agent to re-send.' }).catch(() => {})
+    if (ctx.callbackQuery?.message) {
+      await ctx.api
+        .editMessageText(
+          ctx.callbackQuery.message.chat.id,
+          ctx.callbackQuery.message.message_id,
+          '⌛ <i>This vault-save card expired before you tapped. Ask the agent to re-issue if you still want to save.</i>',
+          { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+        )
+        .catch(() => {})
+    }
+    return
+  }
+
+  if (action === 'discard') {
+    pendingVaultRequestSaves.delete(stageId)
+    await ctx.answerCallbackQuery({ text: '🚫 Discarded' }).catch(() => {})
+    if (pending.card_message_id != null) {
+      await ctx.api
+        .editMessageText(
+          pending.chat_id,
+          pending.card_message_id,
+          `🚫 <i>Discarded. The secret was not written to the vault.</i>`,
+          { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+        )
+        .catch(() => {})
+    }
+    return
+  }
+
+  if (action === 'rename') {
+    // Set up a pending-op intercept so the user's next message is read
+    // as the new key name. Same shape as the existing /vault set value
+    // capture (gateway.ts uses pendingVaultOps for this).
+    pendingVaultOps.set(pending.chat_id, {
+      kind: 'rename-vault-save',
+      stageId,
+      startedAt: Date.now(),
+    } as PendingVaultOp)
+    await ctx.answerCallbackQuery({ text: 'Send the new key name as your next message.' }).catch(() => {})
+    return
+  }
+
+  if (action === 'save') {
+    // Acknowledge the tap immediately so Telegram doesn't show a
+    // stale "spinning" state on the button while we run the write.
+    await ctx.answerCallbackQuery({ text: '⏳ Saving…' }).catch(() => {})
+
+    // Fetch the cached passphrase for this chat. If the gateway hasn't
+    // seen the user unlock the vault yet, we can't attest the write —
+    // surface the unlock card via the same path the deferred-secret
+    // flow uses (issue #44).
+    const cached = vaultPassphraseCache.get(pending.chat_id)
+    if (!cached || cached.expiresAt <= Date.now()) {
+      if (pending.card_message_id != null) {
+        await ctx.api
+          .editMessageText(
+            pending.chat_id,
+            pending.card_message_id,
+            `🔒 <b>Vault is locked.</b> Run <code>/vault unlock</code> (or any /vault command) to cache the passphrase, then tap Save again on the next card.`,
+            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+          )
+          .catch(() => {})
+      }
+      pendingVaultRequestSaves.delete(stageId)
+      return
+    }
+
+    // Run the write. defaultVaultWrite spawns `switchroom vault set
+    // <key>` with the passphrase env set; the CLI in turn forwards the
+    // passphrase to the broker put as operator-attestation (#969 P1a),
+    // which authorizes new-key creation.
+    const write = defaultVaultWrite(pending.key, pending.value, cached.passphrase)
+
+    if (!write.ok) {
+      // Route through the structured-error renderer from #969 P0b so
+      // failures show the actionable host hint instead of a raw blob.
+      const parsed = parseVaultCliError(write.output)
+      const rendered = renderVaultCliError(parsed, { verb: 'save', key: pending.key })
+      const body = rendered.suppressRaw
+        ? rendered.html
+        : `⚠️ vault write failed:\n<pre>${escapeHtmlForTg(write.output)}</pre>`
+      if (pending.card_message_id != null) {
+        await ctx.api
+          .editMessageText(
+            pending.chat_id,
+            pending.card_message_id,
+            `${body}\n\n<i>Tap a fresh card after fixing the underlying issue.</i>`,
+            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+          )
+          .catch(() => {})
+      }
+      // Leave the staged secret in memory until TTL — operator might
+      // retry by re-invoking the same MCP tool, but the value will be
+      // re-staged with a new ID. Drop the current stage.
+      pendingVaultRequestSaves.delete(stageId)
+      return
+    }
+
+    // Success — mask the value in the card for visual confirmation.
+    pendingVaultRequestSaves.delete(stageId)
+    if (pending.card_message_id != null) {
+      await ctx.api
+        .editMessageText(
+          pending.chat_id,
+          pending.card_message_id,
+          `✅ saved as <code>vault:${escapeHtmlForTg(pending.key)}</code> (masked: <code>${escapeHtmlForTg(maskToken(pending.value))}</code>)\n<i>The agent can now reference this as <code>vault:${escapeHtmlForTg(pending.key)}</code>.</i>`,
+          { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+        )
+        .catch(() => {})
+    }
+    return
+  }
+
+  await ctx.answerCallbackQuery({ text: 'Unknown action' }).catch(() => {})
+}
+
 async function handleVaultDeferCallback(ctx: Context, data: string): Promise<void> {
   const senderId = String(ctx.from?.id ?? '')
   const access = loadAccess()
@@ -8995,6 +9309,15 @@ bot.on('callback_query:data', async ctx => {
   // vg:cancel:<id> — dismiss
   if (data.startsWith('vg:')) {
     await handleVaultGrantCallback(ctx, data)
+    return
+  }
+
+  // Issue #969 P1a: agent-initiated vault-save approval card.
+  // vrs:save:<stageId>     — write the staged value, edit card to success
+  // vrs:discard:<stageId>  — drop the staged value, edit card to discarded
+  // vrs:rename:<stageId>   — prompt for a new key name, then resume
+  if (data.startsWith('vrs:')) {
+    await handleVaultRequestSaveCallback(ctx, data)
     return
   }
 

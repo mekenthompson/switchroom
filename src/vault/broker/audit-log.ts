@@ -51,11 +51,12 @@ export interface AuditEntry {
   /** Outcome: "allowed", "denied:<reason>", or "error:<detail>" */
   result: string;
   /**
-   * Access method — "peercred" for the normal cron-unit path, "grant" when
-   * a capability token was used. Omitted for ops that don't involve secret
-   * access (lock, unlock, status).
+   * Access method — "peercred" for the normal cron-unit path, "grant"
+   * when a capability token was used, "passphrase" when the operator
+   * passphrase was forwarded as attestation (issue #969 P1a). Omitted
+   * for ops that don't involve secret access (lock, unlock, status).
    */
-  method?: "peercred" | "grant";
+  method?: "peercred" | "grant" | "passphrase";
   /**
    * Grant ID (e.g. "vg_a1b2c3") when method === "grant". Never contains
    * the secret half — only the ID prefix is logged.

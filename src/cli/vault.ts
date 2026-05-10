@@ -337,17 +337,28 @@ export function registerVaultCommand(program: Command): void {
           } catch {
             brokerSocket = resolveBrokerSocketPath();
           }
-          // Forward the agent's capability token to the broker. The broker
-          // checks it via validateGrantForWrite (#969 P1b) — if the grant
-          // authorizes write for this key, the broker also allows new-key
-          // creation. Without a write-grant we fall back to the legacy
-          // path-as-identity rotate-only behaviour.
+          // Forward the agent's capability token to the broker (#969 P1b)
+          // and any operator-passphrase attestation (#969 P1a). The broker
+          // checks them in this priority:
+          //   1. passphrase attestation → operator-attested, allows new keys
+          //   2. write-grant token       → capability-attested, allows new keys
+          //   3. path-as-identity        → rotate-only for keys in
+          //                                schedule.secrets[]
+          // The gateway sets SWITCHROOM_VAULT_PASSPHRASE in the env when
+          // routing a user-approved save through this CLI — passing it
+          // here is what makes the one-tap Telegram save flow succeed
+          // for new keys without requiring a pre-minted write-grant.
           const agentSlug = process.env.SWITCHROOM_AGENT_NAME;
           const token = agentSlug ? readVaultTokenFile(agentSlug) ?? undefined : undefined;
+          const passphraseEnv = process.env.SWITCHROOM_VAULT_PASSPHRASE;
           const result = await putViaBroker(
             key,
             { kind: "string", value },
-            { socket: brokerSocket, token },
+            {
+              socket: brokerSocket,
+              token,
+              ...(passphraseEnv ? { passphrase: passphraseEnv } : {}),
+            },
           );
           if (result.kind === "ok") {
             return;

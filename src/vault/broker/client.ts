@@ -463,14 +463,28 @@ export type PutResult =
 export async function putViaBroker(
   key: string,
   entry: { kind: "string"; value: string } | { kind: "binary"; value: string },
-  opts?: BrokerClientOpts & { token?: string },
+  opts?: BrokerClientOpts & { token?: string; passphrase?: string },
 ): Promise<PutResult> {
   // Include the token in the wire payload only when present. The broker
   // checks it via validateGrantForWrite (issue #969 P1b) — if the grant
   // authorizes write for this key, it can also introduce new keys.
+  //
+  // Optionally also forward an operator passphrase (issue #969 P1a).
+  // When it matches the broker's loaded passphrase, the broker treats
+  // the call as operator-attested and bypasses path-as-identity / ACL /
+  // unknown-key checks. The Telegram gateway uses this path for one-tap
+  // user-approved saves of new keys.
   const token = opts?.token;
+  const passphrase = opts?.passphrase;
   const result = await rpc(
-    { v: 1, op: "put", key, entry, ...(token ? { token } : {}) },
+    {
+      v: 1,
+      op: "put",
+      key,
+      entry,
+      ...(token ? { token } : {}),
+      ...(passphrase ? { passphrase } : {}),
+    },
     opts,
   );
   if (result.kind === "unreachable") {

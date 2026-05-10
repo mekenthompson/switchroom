@@ -40,11 +40,24 @@ const DEFAULT_PID_FILE = "~/.switchroom/vault-broker.pid";
 const DEFAULT_SOCKET_PATH = "~/.switchroom/vault-broker.sock";
 
 function getSocketPath(configPath?: string): string {
+  // Use the canonical resolver — honors `SWITCHROOM_VAULT_BROKER_SOCK`
+  // env first, then `vault.broker.socket` config, then the legacy
+  // `~/.switchroom/vault-broker.sock` fallback. Same fix as the other
+  // vault CLI files: pre-fix this skipped the env entirely so
+  // `switchroom vault broker status` from inside an agent container
+  // saw the dangling-symlink fallback and reported the broker as
+  // unreachable even when it was fine on the canonical path.
   try {
     const config = loadConfig(configPath);
-    return resolvePath(config.vault?.broker?.socket ?? DEFAULT_SOCKET_PATH);
+    return resolveBrokerSocketPath({
+      vaultBrokerSocket: config.vault?.broker?.socket
+        ? resolvePath(config.vault.broker.socket)
+        : resolvePath(DEFAULT_SOCKET_PATH),
+    });
   } catch {
-    return resolvePath(DEFAULT_SOCKET_PATH);
+    return resolveBrokerSocketPath({
+      vaultBrokerSocket: resolvePath(DEFAULT_SOCKET_PATH),
+    });
   }
 }
 

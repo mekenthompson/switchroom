@@ -1,0 +1,114 @@
+name: docker-e2e
+
+# CI gate for the docker integration suite (tests/docker/*.test.ts).
+# Builds the phase1b-test / phase2a-test / phase2b-test image set
+# locally, then runs vitest against tests/docker/. Phase 2c includes
+# the op:put round-trip + DAC_OVERRIDE + vault-dir guard cases that
+# the v0.7.12 deploy regression (#958) would have caught.
+#
+# Triggers narrowly so PRs to e.g. docs/ don't pay the docker-build
+# cost. The path filter matches the files whose changes can break
+# the e2e shape:
+#   - src/vault/**       (broker server, protocol, vault file format)
+#   - src/agents/compose.ts (compose generator — caps, mounts, env)
+#   - src/agent-scheduler/** (in-container scheduler IPC shape)
+#   - docker/Dockerfile.{base,broker,kernel,agent}
+#   - tests/docker/**     (test infra itself)
+#   - .github/workflows/docker-e2e.yml (this file)
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/vault/**"
+      - "src/agents/compose.ts"
+      - "src/agent-scheduler/**"
+      - "docker/Dockerfile.base"
+      - "docker/Dockerfile.broker"
+      - "docker/Dockerfile.kernel"
+      - "docker/Dockerfile.agent"
+      - "tests/docker/**"
+      - ".github/workflows/docker-e2e.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install deps + build dist/
+        run: |
+          bun install
+          npm run build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build phase1b-test images (base, agent, broker, kernel)
+        # Build single-arch (amd64) for speed — the e2e test runs on
+        # ubuntu-latest which is amd64. Cross-arch validation lives in
+        # docker-images.yml.
+        run: |
+          bash tests/docker/build-images.sh
+
+      - name: Tag phase2a-test / phase2b-test aliases
+        # tests/docker/phase2c-vault-integration.test.ts looks for
+        # broker:phase2a-test and kernel:phase2b-test. They're the
+        # same image bytes as phase1b-test; the version suffix is just
+        # a hashable name for skip-discipline.
+        run: |
+          docker tag switchroom/broker:phase1b-test switchroom/broker:phase2a-test
+          docker tag switchroom/kernel:phase1b-test switchroom/kernel:phase2b-test
+
+      - name: Run docker e2e suite
+        # Restricted to tests/docker/. Other vitest projects run in the
+        # main `test` workflow (not shown here). The op:put round-trip
+        # is in phase2c-vault-integration.test.ts.
+        run: |
+          npx vitest run tests/docker/
+
+      - name: Capture broker / kernel logs on failure
+        if: failure()
+        run: |
+          echo "::group::docker ps -a"
+          docker ps -a || true
+          echo "::endgroup::"
+          for c in $(docker ps -aq --filter label=switchroom.test=phase2c); do
+            echo "::group::logs $c"
+            docker logs "$c" 2>&1 | tail -200 || true
+            echo "::endgroup::"
+          done
+
+      - name: Label-scoped teardown
+        if: always()
+        run: |
+          # Belt-and-braces — afterAll() inside the tests already does
+          # this. Strict label filter; never touches anything else on
+          # the runner.
+          for label in switchroom.test=phase1b switchroom.test=phase2a switchroom.test=phase2b switchroom.test=phase2c; do
+            ids=$(docker ps -aq --filter label=$label 2>/dev/null || true)
+            if [ -n "$ids" ]; then
+              docker rm -f $ids 2>/dev/null || true
+            fi
+          done

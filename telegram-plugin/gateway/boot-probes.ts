@@ -1203,7 +1203,14 @@ export async function probeBroker(
   socketPath?: string,
   opts: { dockerMode?: boolean; connectImpl?: (path: string) => Promise<void> } = {},
 ): Promise<ProbeResult> {
-  return probeUds('Broker', socketPath ?? process.env.SWITCHROOM_BROKER_SOCKET, opts)
+  // SWITCHROOM_VAULT_BROKER_SOCK is the canonical client-side env name
+  // — matches what src/vault/broker/client.ts:293 and the secret-guard
+  // hook (telegram-plugin/hooks/secret-guard-pretool.mjs:36) read.
+  // The broker SERVER reads SWITCHROOM_BROKER_SOCKET as its bind-path
+  // env (in the broker container only). Pre-fix the probe + compose
+  // both used SWITCHROOM_BROKER_SOCKET in the agent container — wrong
+  // name, fell through to dangling-symlink fallback, false-failed.
+  return probeUds('Broker', socketPath ?? process.env.SWITCHROOM_VAULT_BROKER_SOCK, opts)
 }
 
 export async function probeKernel(

@@ -584,8 +584,35 @@ function emitAgentService(
     PIP_BREAK_SYSTEM_PACKAGES: "1",
     PIP_USER: "1",
     SWITCHROOM_AGENT_NAME: a.name,
-    SWITCHROOM_BROKER_SOCKET: `/run/switchroom/broker/${a.name}/sock`,
-    SWITCHROOM_KERNEL_SOCKET: `/run/switchroom/kernel/${a.name}/sock`,
+    // Broker / kernel socket paths inside the agent container. The
+    // per-agent volume is mounted at `/run/switchroom/broker` (and
+    // `/run/switchroom/kernel`) — directly at the parent dir, NOT
+    // at the broker-side `/run/switchroom/broker/<agent>` subdir
+    // (compose.ts:370 vs compose.ts:607). So from inside the agent
+    // the socket is at `/run/switchroom/broker/sock`, one level
+    // shallower than the broker container sees it.
+    //
+    // Two pre-fix bugs were stacked:
+    //   1. The path values here were `/run/switchroom/broker/<name>
+    //      /sock` — the broker's view, which does not exist inside
+    //      the agent container at all.
+    //   2. The broker env NAME was `SWITCHROOM_BROKER_SOCKET` — but
+    //      the broker CLIENT (`src/vault/broker/client.ts:293`) and
+    //      the secret-guard hook (`telegram-plugin/hooks/secret-
+    //      guard-pretool.mjs:36`) both read
+    //      `SWITCHROOM_VAULT_BROKER_SOCK`. So clients silently fell
+    //      through to the `~/.switchroom/vault-broker.sock` legacy
+    //      fallback (a dangling symlink inside the container) and
+    //      reported "broker not running" even when the broker was
+    //      up and the socket was bound at the correct in-container
+    //      path. Operator-visible on 2026-05-10 as klanker's
+    //      "VAULT-BROKER-DENIED" after the test-clobber incident
+    //      restored the broker container.
+    // Kernel side already used the correct env name (matches
+    // `src/vault/approvals/client.ts:60`) but had the same wrong
+    // path value. Both fixed here.
+    SWITCHROOM_VAULT_BROKER_SOCK: `/run/switchroom/broker/sock`,
+    SWITCHROOM_KERNEL_SOCKET: `/run/switchroom/kernel/sock`,
     SWITCHROOM_RUNTIME: "docker",
   };
   // SWITCHROOM_CONFIG: the in-container telegram-plugin gateway daemon

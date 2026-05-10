@@ -64,7 +64,7 @@ if [ "$SWITCHROOM_RUNTIME" = "docker" ] && [ -z "$SWITCHROOM_DOCKER_TMUX_INNER" 
   #    Polls Telegram, writes gateway.sock for the in-claude MCP
   #    sidecar to bridge through. Mirrors the v0.6 sibling
   #    switchroom-<name>-gateway.service unit. Talks to the broker
-  #    over SWITCHROOM_BROKER_SOCKET (set by compose) for the bot
+  #    over SWITCHROOM_VAULT_BROKER_SOCK (set by compose) for the bot
   #    token. Failure modes: vault locked → gateway boots, fails to
   #    fetch token, exits non-zero, supervisor respawns; bot token
   #    invalid → 401 from Telegram, gateway exits, same loop. The

@@ -767,11 +767,14 @@ describe.skipIf(!imagesOk)(
         ).trim().split(/\s+/)[0];
         expect(postSha, "vault.enc bytes unchanged after op:put — broker never re-encrypted").not.toBe(preSha);
 
-        // 5. Sentinel-dir flock leak check — `vault.enc.lock` is a
-        //    directory created by proper-lockfile during saveVault and
-        //    cleaned up on release. If it's still on disk post-write,
+        // 5. Flock leak check — `vault.enc.lock` is a PID-file written
+        //    by saveVault (since v0.7.15 / #964; previously a
+        //    proper-lockfile sentinel-dir from v0.7.12-v0.7.14) and
+        //    unlinked on release. If it's still on disk post-write,
         //    saveVault's finally{} didn't run (process crash or unhandled
-        //    rejection) and the next writer will retry-loop forever.
+        //    rejection) and the next writer hits stale-lock recovery
+        //    or — if the holder PID happens to be reused — waits the
+        //    full retry budget for nothing.
         const lockProbe = spawnSync(
           "docker",
           [

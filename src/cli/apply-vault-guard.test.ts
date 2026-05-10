@@ -154,7 +154,20 @@ describe("inspectVaultBindMountDir (#961)", () => {
     expect(inspectVaultBindMountDir(tmp).kind).toBe("ok");
   });
 
-  it("dir with proper-lockfile sentinel-dir → kind:'ok'", () => {
+  it("dir with PID-file flock (v0.7.15+) → kind:'ok'", () => {
+    // saveVault's flock is now a regular file containing the holder
+    // PID, replacing v0.7.12-v0.7.14's proper-lockfile sentinel
+    // directory. Whitelist still matches by name.
+    writeFileSync(join(tmp, "vault.enc"), "blob");
+    writeFileSync(join(tmp, "vault.enc.lock"), "12345\n1700000000000\nswitchroom\n");
+    expect(inspectVaultBindMountDir(tmp).kind).toBe("ok");
+  });
+
+  it("dir with legacy v0.7.14 sentinel-dir flock → kind:'ok' (migration tolerated)", () => {
+    // In-flight migration from v0.7.14 to v0.7.15: the sentinel dir
+    // may exist on disk until the first v0.7.15 save runs. The
+    // artifact-whitelist accepts both file and dir flavors so apply
+    // doesn't refuse to mount mid-migration.
     writeFileSync(join(tmp, "vault.enc"), "blob");
     mkdirSync(join(tmp, "vault.enc.lock"), { recursive: true });
     expect(inspectVaultBindMountDir(tmp).kind).toBe("ok");

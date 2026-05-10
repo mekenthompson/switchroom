@@ -11,7 +11,7 @@ import {
   closeSync,
 } from "node:fs";
 import { dirname, basename, resolve } from "node:path";
-import lockfile from "proper-lockfile";
+import { acquireLock, DEFAULT_LOCK_RETRY_MS, VaultBusyError } from "./flock.js";
 
 /**
  * Filename patterns that saveVault and the migration helper produce
@@ -26,13 +26,16 @@ import lockfile from "proper-lockfile";
  *   - regex-match: `^\.vault\.enc\.\d+\.\d+\.tmp$`
  *     (atomicWriteFileSync sibling-tmp pattern)
  *   - exact: `.vault.enc.symlink-tmp` (migration helper)
- *   - dir: `vault.enc.lock/` (proper-lockfile sentinel-dir)
+ *   - file: `vault.enc.lock` (PID-file flock from src/vault/flock.ts;
+ *     v0.7.12-v0.7.14 was a directory of the same name from
+ *     proper-lockfile — the flock module's acquire path lazily
+ *     migrates the dir to a file on first save)
  */
 export const KNOWN_VAULT_ARTIFACT_NAMES: ReadonlySet<string> = new Set([
   "vault.enc",
   "vault.enc.bak",
   "vault.enc.tmp",
-  "vault.enc.lock", // proper-lockfile sentinel-dir, also the file-flavor
+  "vault.enc.lock", // PID-file flock (file post-v0.7.15, dir pre-v0.7.15)
   ".vault.enc.symlink-tmp",
 ]);
 export const KNOWN_VAULT_ARTIFACT_PATTERNS: ReadonlyArray<RegExp> = [
@@ -41,7 +44,7 @@ export const KNOWN_VAULT_ARTIFACT_PATTERNS: ReadonlyArray<RegExp> = [
 ];
 
 /** Lock retry budget for saveVault flock acquisition. */
-const SAVE_VAULT_LOCK_RETRY_MS = 5000;
+const SAVE_VAULT_LOCK_RETRY_MS = DEFAULT_LOCK_RETRY_MS;
 
 /**
  * scrypt cost parameters. N=2^15=32768 (~32 MB, ~100ms on modern hardware)
@@ -69,9 +72,24 @@ function atomicWriteFileSync(path: string, data: string, mode: number): void {
 }
 
 export class VaultError extends Error {
-  constructor(message: string) {
+  /**
+   * The underlying error, when this VaultError wraps a more specific
+   * vault-layer exception (currently only `VaultBusyError` from the
+   * flock acquisition path). Consumers that want structured access
+   * to lock-contention details (holder PID, acquired-ago, lock path)
+   * can `instanceof VaultBusyError` against this field instead of
+   * re-parsing the error message.
+   *
+   * Note: TC39 `Error.prototype.cause` is supported in Node ≥16.9 but
+   * we keep an explicit field for IDE clarity and to document the
+   * contract — only the flock path sets it.
+   */
+  readonly cause?: unknown;
+
+  constructor(message: string, options?: { cause?: unknown }) {
     super(message);
     this.name = "VaultError";
+    if (options?.cause !== undefined) this.cause = options.cause;
   }
 }
 
@@ -363,47 +381,31 @@ export function saveVault(
 
   // Acquire an exclusive lock before reading the existing vault file so
   // a concurrent writer (broker vs host CLI race window introduced by
-  // op:put — see plan v3 §4) doesn't cause a lost update. proper-lockfile
-  // creates a sentinel directory `vault.enc.lock/` next to the file;
-  // stale locks are auto-recovered (mtime + pid liveness check). Retry
-  // budget 5s — typical hold time is <100ms for ~38KB encrypt + write.
-  // On contention timeout we surface "vault busy" with the holder PID
-  // and path (closes #954 ask for diagnosable EBUSY-shaped errors).
-  // proper-lockfile's lockSync doesn't support a `retries` option (its
-  // sync API is bare). Roll a small retry loop ourselves: try up to
-  // ~50 times with a ~100ms gap between attempts, totaling the
-  // documented 5s budget. Use Atomics.wait on a SharedArrayBuffer to
-  // sleep — keeps the loop sync-safe (no setTimeout, which would need
-  // async) without burning CPU.
+  // op:put — see plan v3 §4) doesn't cause a lost update.
+  //
+  // The lock is a PID-file at `${vaultPath}.lock`. Acquisition is
+  // O_CREAT|O_EXCL with the holder's PID written to the file content
+  // for forensic readability — closes plan v3 §11's ask for
+  // diagnosable busy errors that name the offending writer. See
+  // `src/vault/flock.ts` for the full implementation rationale and
+  // the v0.7.14 → v0.7.15 sentinel-dir → PID-file migration logic.
+  //
+  // Retry budget 5s — typical hold time is <100ms for ~38KB encrypt
+  // + write. acquireLock surfaces a `VaultBusyError` on timeout with
+  // structured holder fields the gateway error-renderer (#972) can
+  // format directly without re-parsing the message.
   let releaseLock: (() => void) | null = null;
-  const lockStart = Date.now();
-  let lastErr: unknown = null;
-  const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
-  while (Date.now() - lockStart < SAVE_VAULT_LOCK_RETRY_MS) {
-    try {
-      releaseLock = lockfile.lockSync(vaultPath, {
-        stale: SAVE_VAULT_LOCK_RETRY_MS * 2,
-        realpath: true,
-      }) as unknown as () => void;
-      lastErr = null;
-      break;
-    } catch (err: unknown) {
-      lastErr = err;
-      const code = (err as NodeJS.ErrnoException)?.code ?? "";
-      if (code !== "ELOCKED") throw err;
-      // 100ms sleep between retries — Atomics.wait blocks without
-      // burning CPU. Bounded by the 5s outer budget. In practice the
-      // contended writer releases in <100ms (small encrypt + write).
-      Atomics.wait(sleepBuf, 0, 0, 100);
+  try {
+    releaseLock = acquireLock(vaultPath, { budgetMs: SAVE_VAULT_LOCK_RETRY_MS }).release;
+  } catch (err: unknown) {
+    if (err instanceof VaultBusyError) {
+      // Wrap with cause so callers retain access to the structured
+      // fields (holderPid, heldForMs, lockPath, budgetMs) without
+      // re-parsing the message string. Gateway error renderer in
+      // #972 reads `.cause` to format the Telegram reply.
+      throw new VaultError(err.message, { cause: err });
     }
-  }
-  if (releaseLock === null) {
-    if (lastErr) {
-      throw new VaultError(
-        `vault busy: another writer holds the lock at ${vaultPath} ` +
-        `(retried for ${SAVE_VAULT_LOCK_RETRY_MS}ms). Try again in a moment.`,
-      );
-    }
+    throw err;
   }
 
   try {
@@ -429,10 +431,13 @@ export function saveVault(
 
     atomicWriteFileSync(vaultPath, JSON.stringify(vaultFile, null, 2), 0o600);
   } finally {
-    // proper-lockfile's lockSync returns the release fn; call it to
-    // remove the sentinel dir. Best-effort: a release failure leaves a
-    // stale-lock that the next writer's stale-detection clears.
-    try { (releaseLock as unknown as () => void)(); } catch { /* */ }
+    // acquireLock returns a release fn; call it to close the FD and
+    // unlink the lock file. Best-effort: a release failure leaves a
+    // stale lock file that the next writer's PID-liveness check
+    // clears.
+    if (releaseLock !== null) {
+      try { releaseLock(); } catch { /* */ }
+    }
   }
 }
 
@@ -447,26 +452,20 @@ export function saveVault(
  * (plan v3 §2 + R3 round 2).
  */
 export function acquireVaultLock(vaultPath: string): () => void {
-  // Same retry shape as saveVault — proper-lockfile's sync API
-  // doesn't support retries natively. Atomics.wait between attempts.
-  const start = Date.now();
-  const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
-  while (Date.now() - start < SAVE_VAULT_LOCK_RETRY_MS) {
-    try {
-      return lockfile.lockSync(vaultPath, {
-        stale: SAVE_VAULT_LOCK_RETRY_MS * 2,
-        realpath: true,
-      }) as unknown as () => void;
-    } catch (err: unknown) {
-      const code = (err as NodeJS.ErrnoException)?.code ?? "";
-      if (code !== "ELOCKED") throw err;
-      Atomics.wait(sleepBuf, 0, 0, 100);
+  // Delegates to the shared PID-file flock so the migration helper
+  // and saveVault contend on the same lock shape.
+  try {
+    return acquireLock(vaultPath, { budgetMs: SAVE_VAULT_LOCK_RETRY_MS }).release;
+  } catch (err: unknown) {
+    if (err instanceof VaultBusyError) {
+      // Wrap with cause so callers retain access to the structured
+      // fields (holderPid, heldForMs, lockPath, budgetMs) without
+      // re-parsing the message string. Gateway error renderer in
+      // #972 reads `.cause` to format the Telegram reply.
+      throw new VaultError(err.message, { cause: err });
     }
+    throw err;
   }
-  throw new VaultError(
-    `vault busy: another writer holds the lock at ${vaultPath} ` +
-    `(retried for ${SAVE_VAULT_LOCK_RETRY_MS}ms).`,
-  );
 }
 
 export function setSecret(

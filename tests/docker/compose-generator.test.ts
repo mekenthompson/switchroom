@@ -323,6 +323,19 @@ describe("generateCompose", () => {
     expect(block).toContain("FOWNER");
   });
 
+  it("kernel has DAC_READ_SEARCH so the healthcheck probe can read 0700 agent dirs", () => {
+    // The bind-presence healthcheck (PR #898) runs as root inside the
+    // kernel container, but per-agent socket dirs are mode 0700 owned
+    // by the agent UID after the kernel chowns them. Without
+    // DAC_READ_SEARCH, root can't traverse those dirs, so the probe
+    // always fails — kernel reports unhealthy in production while
+    // actually serving traffic correctly. Verified against the live
+    // fleet on 2026-05-10.
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const block = /approval-kernel:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toContain("DAC_READ_SEARCH");
+  });
+
 });
 
 describe("agent service env (Phase 2c F2 — IPC wiring)", () => {

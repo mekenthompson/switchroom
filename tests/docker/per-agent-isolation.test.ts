@@ -51,8 +51,16 @@ import {
   safeLabelTeardown,
   mergeServiceEnv,
 } from "./_label-helpers.js";
+import { productionFleetIsLive, assertNoProductionFleet } from "./_prod-snapshot.js";
 
 const RUN_ID = newRunId();
+// Hard guard against the 2026-05-10 production-clobber incident: this
+// test's setup force-removes `switchroom-vault-broker` and
+// `switchroom-approval-kernel` by name (lines below), which collides
+// with a live production fleet on a shared host. Skip the suite
+// entirely when production singletons are detected. CI clean-room
+// runs see no fleet → tests proceed normally.
+const PROD_FLEET_LIVE = productionFleetIsLive();
 
 const TAG = "phase1b-test";
 // Phase 4 (#893) retired the singleton scheduler image. Listing it
@@ -144,7 +152,18 @@ function makeConfig(agents: string[]): SwitchroomConfig {
 /** Same compose-rewrite shape as the race test. Agents stay alive on
  *  a sleep loop so we can `docker exec` into them. */
 function buildTestCompose(agents: string[], cfgPath: string): string {
-  let yml = generateCompose({ config: makeConfig(agents), imageTag: TAG });
+  // containerNamePrefix=PROJECT defends against the production-name
+  // collision regression (PR #916 un-skipped this test on a host with
+  // a live production fleet → singletons clobbered). With the prefix,
+  // emitted names are `phase1c-iso-${pid}-vault-broker` etc., which
+  // can't collide with `switchroom-vault-broker` even if a production
+  // fleet is up. The describe.skipIf still gates the suite — this
+  // parametrization is the second layer.
+  let yml = generateCompose({
+    config: makeConfig(agents),
+    imageTag: TAG,
+    containerNamePrefix: PROJECT,
+  });
   // Generator emits ghcr.io/switchroom/switchroom-<name>:<tag>; locally
   // built test images are tagged switchroom/<name>:phase1b-test.
   yml = yml.replace(/ghcr\.io\/switchroom\/switchroom-/g, "switchroom/");
@@ -239,28 +258,34 @@ let ctx: FleetCtx | null = null;
 
 beforeAll(() => {
   if (!imagesOk) return;
+  // Belt to the describe.skipIf(PROD_FLEET_LIVE) braces below — if a
+  // future test forgets the skipIf, the throw here stops the
+  // destructive setup before the `docker rm -f switchroom-vault-broker`
+  // line wrecks production.
+  assertNoProductionFleet();
   // Belt-and-braces project-scoped down (does NOT touch other containers).
   try { execSync(`docker compose -p ${PROJECT} down -v --remove-orphans`, { stdio: "pipe" }); } catch { /* */ }
-  // Forcefully remove any leftover singletons from a sibling test file
-  // (race test) — they use fixed container_name: so projects collide.
-  // Scope: ONLY the switchroom singleton names this PR introduces.
-  // We do NOT touch unrelated containers on the host.
-  // Acquire a cross-fork lock — vitest runs test files in parallel
-  // forks, and both this file + broker-ipc-race.test.ts use the same
-  // `container_name:` from the shared compose generator. The lock is
-  // an atomic mkdir on a fixed path under /tmp; whichever fork claims
-  // it first gets to run; the other waits.
+  // Cross-fork lock — vitest runs test files in parallel forks, and
+  // both this file + broker-ipc-race.test.ts touch the same singleton
+  // container_name slots (under different prefixes since the prod-
+  // safety fix, but still benefit from serialised fleet bring-up).
   const LOCK_DIR = "/tmp/switchroom-docker-fleet.lock";
   acquireFleetLock(LOCK_DIR);
-  // Belt-and-braces: forcefully remove any leftover singletons.
+  // Force-remove any leftover *project-scoped* containers from a
+  // crashed prior run. ALL names here are prefixed with `${PROJECT}`,
+  // which is `phase1c-iso-${process.pid}` — so this CANNOT touch
+  // `switchroom-vault-broker` or any other production container.
+  // Pre-fix, this loop included the production-named singletons
+  // (`switchroom-vault-broker`, `switchroom-approval-kernel`) and
+  // would clobber a live production fleet on a shared host
+  // (the 2026-05-10 klanker incident).
   for (const c of [
-    "switchroom-vault-broker",
-    "switchroom-approval-kernel",
-    "switchroom-cron",
-    "switchroom-alice",
-    "switchroom-bob",
-    "switchroom-carol",
-    "switchroom-newbie",
+    `${PROJECT}-vault-broker`,
+    `${PROJECT}-approval-kernel`,
+    `${PROJECT}-alice`,
+    `${PROJECT}-bob`,
+    `${PROJECT}-carol`,
+    `${PROJECT}-newbie`,
   ]) {
     try { execSync(`docker rm -f ${c}`, { stdio: "pipe" }); } catch { /* */ }
   }
@@ -327,14 +352,14 @@ function dockerExec(c: string, cmd: string): { code: number; out: string } {
   return { code: r.status ?? -1, out: (r.stdout ?? "") + (r.stderr ?? "") };
 }
 
-describe.skipIf(!imagesOk)(
+describe.skipIf(!imagesOk || PROD_FLEET_LIVE)(
   "phase1c per-agent isolation — production-equivalent adversarial matrix",
   () => {
     it("agent-A cannot see agent-B's broker socket dir (compose discipline boundary)", () => {
       // From alice's container, /run/switchroom/broker/bob/sock should
       // not exist — the bob volume is NOT mounted into alice.
       const r = dockerExec(
-        "switchroom-alice",
+        `${PROJECT}-alice`,
         "ls /run/switchroom/broker/bob/sock 2>&1",
       );
       expect(r.code).not.toBe(0);
@@ -343,7 +368,7 @@ describe.skipIf(!imagesOk)(
 
     it("agent-A cannot see agent-B's kernel socket dir (compose discipline boundary)", () => {
       const r = dockerExec(
-        "switchroom-alice",
+        `${PROJECT}-alice`,
         "ls /run/switchroom/kernel/bob/sock 2>&1",
       );
       expect(r.code).not.toBe(0);

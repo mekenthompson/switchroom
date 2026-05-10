@@ -96,3 +96,62 @@ function filterPhaseTestContainers(raw: string): string {
     .sort()
     .join("\n");
 }
+
+/**
+ * Probe whether a live switchroom production fleet is running on the
+ * host. The compose generator emits fixed `container_name:` values for
+ * the singletons (`switchroom-vault-broker`, `switchroom-approval-
+ * kernel`) — so a phase test that creates singletons under its own
+ * project name COLLIDES with those names and will either fail to start
+ * or, worse, clobber the production containers. PR #916 un-skipped
+ * `e2e.test.ts` + `per-agent-isolation.test.ts` + `broker-ipc-race.test
+ * .ts`; on 2026-05-10 that took the operator's klanker offline because
+ * those tests force-remove `switchroom-vault-broker` in their
+ * `beforeAll`.
+ *
+ * Detection is by the `switchroom.fleet=switchroom` label that the
+ * compose generator stamps on every production service
+ * (src/agents/compose.ts:264-265, 365-366, 459-460), NOT by container
+ * name — so a phase test running under a `switchroom-*` name is
+ * correctly NOT flagged. Returns true if at least one production
+ * singleton or agent is alive.
+ *
+ * Tests that destructively touch singleton names should
+ * `describe.skipIf(productionFleetIsLive())` at suite level, so a
+ * phase test never wrecks a live production fleet on a shared host.
+ * CI clean-room runs see no production fleet → tests proceed normally.
+ */
+export function productionFleetIsLive(): boolean {
+  try {
+    const out = execSync(
+      "docker ps --filter label=switchroom.fleet=switchroom --format '{{.Names}}'",
+      { stdio: ["ignore", "pipe", "pipe"] },
+    ).toString().trim();
+    return out.length > 0;
+  } catch {
+    // No docker, or sudo required and unavailable — fail closed:
+    // assume NO fleet so tests can still run on dev machines without
+    // docker access. The destructive operation will fail loudly later
+    // if docker is genuinely unreachable.
+    return false;
+  }
+}
+
+/**
+ * Hard guard for destructive phase-test setup. Throws when a live
+ * production fleet is detected. Belt to the
+ * `describe.skipIf(productionFleetIsLive())` braces — call from
+ * `beforeAll` so a future test that forgets the skipIf still bails out
+ * before the `docker rm -f switchroom-vault-broker` line.
+ */
+export function assertNoProductionFleet(): void {
+  if (productionFleetIsLive()) {
+    throw new Error(
+      "REFUSING TO RUN: a live switchroom production fleet was detected on this host " +
+      "(containers labeled switchroom.fleet=switchroom). This phase test would clobber " +
+      "the production singletons by name. Stop the production fleet with " +
+      "`docker compose -p switchroom down` before running this test, or run the suite " +
+      "on a host without a production switchroom install.",
+    );
+  }
+}

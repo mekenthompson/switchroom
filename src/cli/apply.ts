@@ -733,6 +733,10 @@ export function registerApplyCommand(program: Command): void {
       "Skip the per-agent scaffold loop entirely; only (re)generate the compose file. Use in CI / scripts that can't chown into per-agent state dirs (mode 0700, owned by per-agent UIDs in v0.7+ docker mode). The full apply still runs preflight + emits compose; only the start.sh / .mcp.json / settings.json refresh is skipped.",
     )
     .option(
+      "--no-doctor",
+      "Skip the post-apply doctor sweep that surfaces stale start.sh / unhealthy agents (#929). Default: doctor runs after a successful scaffold so the operator sees whether the v0.7+ post-Phase-4 supervisor block is now in place. `switchroom update` passes this internally to avoid running doctor twice (it has its own doctor step).",
+    )
+    .option(
       "--print-sudo-cmd",
       "Print the sudo invocation that `apply` would re-exec itself with when escalation is needed, then exit. Operators who want to script the escalation themselves (CI, custom orchestration) can capture this. Note: tokens are space-separated and not shell-quoted; re-quote arguments if pasting into a shell.",
     )
@@ -753,6 +757,8 @@ export function registerApplyCommand(program: Command): void {
         composeOnly?: boolean;
         printSudoCmd?: boolean;
         skipSelfElevate?: boolean;
+        // Commander auto-coerces --no-doctor → opts.doctor = false; default true.
+        doctor?: boolean;
       }) => {
         try {
           if (opts.example) {
@@ -866,6 +872,40 @@ export function registerApplyCommand(program: Command): void {
               ),
             );
             process.exit(1);
+          }
+
+          // Post-apply doctor sweep (#929). Surfaces the stale-start.sh
+          // diagnostic from #911 so an operator running `apply` directly
+          // (not via `switchroom update`) sees whether the v0.7+
+          // supervisor block is present after the scaffold refresh.
+          // Informational only — does NOT change apply's exit code.
+          // Skipped on --compose-only (no scaffold to verify) and
+          // --no-doctor (`update` passes this so doctor doesn't run
+          // twice — `update` calls it as its own step 5).
+          if (
+            (opts.doctor ?? true)
+            && !opts.composeOnly
+          ) {
+            // Lazy import for startup-perf — doctor.ts is large
+            // (~1500 lines) and transitively pulls runDockerChecks,
+            // probeHindsight, manifest drift loaders. Apply paths
+            // that DON'T need doctor (--no-doctor, --compose-only)
+            // shouldn't pay that import cost. Not for circular-import
+            // avoidance — doctor.ts has no dependency on apply.ts.
+            const { checkAgents, printSection } = await import("./doctor.js");
+            const results = checkAgents(config, switchroomConfigPath ?? "");
+            const hasNoise = results.some(
+              (r) => r.status === "warn" || r.status === "fail",
+            );
+            if (hasNoise) {
+              printSection("Agent health", results);
+              process.stderr.write(
+                chalk.gray(
+                  "\n(Doctor findings are informational; apply succeeded. " +
+                  "Run `switchroom doctor` for the full sweep.)\n",
+                ),
+              );
+            }
           }
         } catch (err) {
           await captureException(err, { action: "apply" });

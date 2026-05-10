@@ -436,6 +436,53 @@ export async function getViaBrokerStructured(
 }
 
 /**
+ * Put a vault entry via the broker — agent-driven key rotation.
+ *
+ * Wire-shape result, mirroring `GetResult`:
+ *   - { kind: "ok" }                     — entry persisted
+ *   - { kind: "unreachable", msg }       — broker socket / network
+ *   - { kind: "denied", code, msg }      — LOCKED, DENIED, BAD_REQUEST,
+ *                                          INTERNAL (caller can fall back
+ *                                          to direct vault write with
+ *                                          passphrase if interactive)
+ *   - { kind: "not_found", code, msg }   — UNKNOWN_KEY: broker refuses
+ *                                          to introduce new keys; the
+ *                                          operator must run
+ *                                          `switchroom vault set` once
+ *                                          from the host first
+ *
+ * The kind discrimination matches `getViaBrokerStructured` so CLI / hook
+ * call sites can branch on it consistently.
+ */
+export type PutResult =
+  | { kind: "ok" }
+  | { kind: "unreachable"; msg: string }
+  | { kind: "denied"; code: ErrorCode; msg: string }
+  | { kind: "not_found"; code: ErrorCode; msg: string };
+
+export async function putViaBroker(
+  key: string,
+  entry: { kind: "string"; value: string } | { kind: "binary"; value: string },
+  opts?: BrokerClientOpts,
+): Promise<PutResult> {
+  const result = await rpc({ v: 1, op: "put", key, entry }, opts);
+  if (result.kind === "unreachable") {
+    return { kind: "unreachable", msg: result.msg };
+  }
+  const resp = result.resp;
+  if (resp.ok && "put" in resp) {
+    return { kind: "ok" };
+  }
+  if (!resp.ok) {
+    if (resp.code === "UNKNOWN_KEY") {
+      return { kind: "not_found", code: resp.code, msg: resp.msg };
+    }
+    return { kind: "denied", code: resp.code, msg: resp.msg };
+  }
+  return { kind: "unreachable", msg: "unexpected broker response shape" };
+}
+
+/**
  * Get a vault entry via the broker. Legacy shape: returns the entry on
  * success or `null` on any failure. Prefer `getViaBrokerStructured()` in
  * new code so the caller can tell unreachable from denied from not-found.

@@ -154,15 +154,24 @@ export interface ComposeGeneratorOptions {
    * surfaced when PR #916 un-skipped the destructive docker phase
    * tests.
    *
-   * Affects three name slots:
+   * Affects four slots:
    *   `container_name: <prefix>-vault-broker`
    *   `container_name: <prefix>-approval-kernel`
    *   `container_name: <prefix>-<agent-name>` for each agent
+   *   `switchroom.fleet: "<prefix>"` label on every service
+   *
+   * The fleet label parametrization (added 2026-05-10 follow-up to PR
+   * #939) lets `productionFleetIsLive()` distinguish a live production
+   * fleet from a sibling phase test's fleet running in a parallel
+   * vitest fork — the detection filter is `label=switchroom.fleet=
+   * switchroom`, which now matches ONLY production. Without this, a
+   * phase fleet from one fork looked like production to another fork
+   * and produced spurious skip-with-"production-detected" reasons.
    *
    * Does NOT affect compose project name (`name: switchroom` at file
    * scope), service names (`vault-broker:`, `approval-kernel:`, the
-   * agent service keys), socket paths, or labels — those stay fixed
-   * because the runtime / operator UX depends on them.
+   * agent service keys), or socket paths — those stay fixed because
+   * the runtime / operator UX depends on them.
    */
   containerNamePrefix?: string;
 }
@@ -295,7 +304,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // Fleet labels for ad-hoc selection (e.g. `docker ps --filter label=switchroom.role=agent`).
   lines.push(`    labels:`);
   lines.push(`      switchroom.role: "broker"`);
-  lines.push(`      switchroom.fleet: "switchroom"`);
+  lines.push(`      switchroom.fleet: "${containerNamePrefix}"`);
   lines.push(`    restart: unless-stopped`);
   // Liveness probe — bind-presence. The broker creates per-agent
   // socket directories at startup and binds `<dir>/sock` for each
@@ -395,7 +404,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`    container_name: ${containerNamePrefix}-approval-kernel`);
   lines.push(`    labels:`);
   lines.push(`      switchroom.role: "kernel"`);
-  lines.push(`      switchroom.fleet: "switchroom"`);
+  lines.push(`      switchroom.fleet: "${containerNamePrefix}"`);
   lines.push(`    restart: unless-stopped`);
   // Mirror the broker's bind-presence healthcheck — same failure-mode
   // surface (kernel binds per-agent sockets at
@@ -484,7 +493,7 @@ function emitAgentService(
   lines.push(`    container_name: ${containerNamePrefix}-${a.name}`);
   lines.push(`    labels:`);
   lines.push(`      switchroom.role: "agent"`);
-  lines.push(`      switchroom.fleet: "switchroom"`);
+  lines.push(`      switchroom.fleet: "${containerNamePrefix}"`);
   lines.push(`      switchroom.agent: "${a.name}"`);
   // Share the host's network namespace.
   //

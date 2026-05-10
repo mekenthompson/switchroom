@@ -109,12 +109,18 @@ function filterPhaseTestContainers(raw: string): string {
  * those tests force-remove `switchroom-vault-broker` in their
  * `beforeAll`.
  *
- * Detection is by the `switchroom.fleet=switchroom` label that the
- * compose generator stamps on every production service
- * (src/agents/compose.ts:264-265, 365-366, 459-460), NOT by container
- * name — so a phase test running under a `switchroom-*` name is
- * correctly NOT flagged. Returns true if at least one production
- * singleton or agent is alive.
+ * Detection is by the `switchroom.fleet=switchroom` label, NOT by
+ * container name. The compose generator stamps the fleet label with
+ * the value of `containerNamePrefix` (defaults `"switchroom"` for
+ * production, parametrized to the test PROJECT name for phase tests
+ * — see `src/agents/compose.ts:ComposeGeneratorOptions
+ * .containerNamePrefix`). So a phase test running in one vitest fork
+ * carries `switchroom.fleet=phase1c-iso-NNN` and is NOT flagged by
+ * another fork's `productionFleetIsLive()` — closing the parallel-
+ * fork false-positive PR #939's reviewer flagged.
+ *
+ * Returns true if at least one container with `switchroom.fleet=
+ * switchroom` is alive.
  *
  * Tests that destructively touch singleton names should
  * `describe.skipIf(productionFleetIsLive())` at suite level, so a

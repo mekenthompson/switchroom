@@ -34,7 +34,7 @@
  */
 import type { Command } from "commander";
 import chalk from "chalk";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
@@ -43,6 +43,11 @@ interface UpdateOptions {
   check?: boolean;
   skipImages?: boolean;
   rebuild?: boolean;
+  /** Read-only mode: report current version + image/container state without
+   *  invoking any update steps. Wired by Telegram /upgrade-status (#927). */
+  status?: boolean;
+  /** JSON output (currently only honored under --status). */
+  json?: boolean;
   /** Hidden / legacy flags — kept so v0.6-era invocations don't crash. */
   phase?: string;
   force?: boolean;
@@ -53,6 +58,8 @@ interface UpdateOptions {
   stderr?: (s: string) => void;
   /** Test seam — replace step.run with a fake. */
   runner?: (cmd: string, args: string[]) => { status: number };
+  /** Test seam — replace docker inspect / package.json reads. */
+  statusProbe?: (composePath: string) => StatusReport;
 }
 
 interface UpdateStep {
@@ -204,9 +211,259 @@ function defaultRunner(cmd: string, args: string[]): { status: number } {
   return { status: r.status ?? 1 };
 }
 
+// ─── --status mode (#927) ────────────────────────────────────────────────
+//
+// Read-only snapshot of "where this host stands" for the operator who
+// wants to know whether they should run `update`. Wired by Telegram
+// /upgrade-status — the bot command is one line: shell `switchroom
+// update --status` and post the output.
+//
+// Intentional v1 limitation: does NOT query upstream (GitHub API) for
+// commits-ahead/behind. Adding that needs gh auth, network, and
+// per-host opt-in. Instead, the operator can `/update` (dry-run) which
+// shows what `docker compose pull` would change. Filed as a follow-up.
+
+export interface ServiceState {
+  name: string;
+  image: string | null;          // e.g. "ghcr.io/switchroom/switchroom-agent:latest"
+  imageDigestShort: string | null; // first 12 of the image's content hash
+  imagePulledAt: string | null;  // ISO ts, when the image's local pull happened
+  containerCreatedAt: string | null; // ISO ts, when the running container was started
+  status: string;                // "running" | "exited" | "<unknown>"
+}
+
+export interface StatusReport {
+  cliVersion: string;
+  cliBuiltAt: string | null;     // ISO ts (mtime of the running script)
+  services: ServiceState[];
+  /** Soft warnings — e.g. compose missing, docker unreachable. Render-only. */
+  warnings: string[];
+}
+
+/**
+ * Probe the host for current update state. No side effects. Heavy on
+ * docker shellouts but each is bounded by spawnSync's default timeout.
+ */
+function defaultStatusProbe(composePath: string): StatusReport {
+  const warnings: string[] = [];
+
+  // CLI version + build time. Walk up from process.argv[1] looking
+  // for package.json (covers both bun-run-dev and installed paths).
+  let cliVersion = "unknown";
+  let cliBuiltAt: string | null = null;
+  try {
+    // Resolve symlinks first — `~/.bun/bin/switchroom` is typically a
+    // symlink to `dist/cli/switchroom.js` inside the workspace
+    // checkout. Walking up from the symlink's argv[1] would land in
+    // `~/.bun/bin/` which has no package.json ancestor (#938 reviewer).
+    const rawScriptPath = process.argv[1] ?? "";
+    let scriptPath = rawScriptPath;
+    try {
+      if (rawScriptPath) scriptPath = realpathSync(rawScriptPath);
+    } catch { /* nothing to do — fall back to raw argv[1] */ }
+
+    if (scriptPath) {
+      // Use mtime of the resolved script as the "built at" time —
+      // portable across BSD/macOS/Linux unlike the prior `stat -c %Y`
+      // shellout (#938 reviewer).
+      try {
+        cliBuiltAt = new Date(statSync(scriptPath).mtimeMs).toISOString();
+      } catch { /* nothing to do */ }
+
+      // Walk up from the script's directory looking for package.json.
+      // 8 levels is generous — the deepest realistic path is
+      // workspace/dist/cli/switchroom.js → 3 levels.
+      let dir = dirname(scriptPath);
+      for (let i = 0; i < 8; i++) {
+        const pkgPath = join(dir, "package.json");
+        if (existsSync(pkgPath)) {
+          try {
+            // Direct ESM read — was previously `require("node:fs")`
+            // which is undefined under true ESM and threw silently
+            // (#938 reviewer blocker). readFileSync now in the
+            // top-of-file import.
+            const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { version?: string };
+            if (typeof pkg.version === "string") cliVersion = pkg.version;
+          } catch (err) {
+            warnings.push(
+              `read ${pkgPath} failed: ${(err as Error).message}`,
+            );
+          }
+          break;
+        }
+        const parent = dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+      }
+    }
+  } catch (err) {
+    warnings.push(`CLI version probe failed: ${(err as Error).message}`);
+  }
+  if (cliVersion === "unknown") {
+    // Inner probes have their own try/catch; surface a single
+    // diagnostic when they all bottom out so 'CLI: unknown' is never
+    // silent (#938 reviewer concern C3).
+    warnings.push(
+      "could not resolve CLI version (no package.json found above the resolved script path)",
+    );
+  }
+
+  // Docker probe — list services from compose, then docker inspect each.
+  const services: ServiceState[] = [];
+  if (!existsSync(composePath)) {
+    warnings.push(`compose file not found at ${composePath}; service status unknown`);
+    return { cliVersion, cliBuiltAt, services, warnings };
+  }
+  let serviceList: string[] = [];
+  try {
+    const r = spawnSync(
+      "docker",
+      ["compose", "-p", "switchroom", "-f", composePath, "config", "--services"],
+      { encoding: "utf-8", timeout: 10_000 },
+    );
+    if (r.status !== 0) {
+      warnings.push(`docker compose config --services failed: ${r.stderr?.trim() ?? r.error?.message ?? "unknown"}`);
+      return { cliVersion, cliBuiltAt, services, warnings };
+    }
+    serviceList = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean).sort();
+  } catch (err) {
+    warnings.push(`docker not reachable: ${(err as Error).message}`);
+    return { cliVersion, cliBuiltAt, services, warnings };
+  }
+
+  for (const svc of serviceList) {
+    // Map service → container name. Compose generator uses
+    // `switchroom-<svc-without-agent-prefix>` for agents, or the bare
+    // service name for singletons (vault-broker / approval-kernel).
+    const containerName = svc.startsWith("agent-")
+      ? `switchroom-${svc.slice("agent-".length)}`
+      : `switchroom-${svc}`;
+    let image: string | null = null;
+    let containerCreatedAt: string | null = null;
+    let status = "<unknown>";
+    try {
+      const r = spawnSync(
+        "docker",
+        ["inspect", "-f", "{{.Config.Image}}|{{.Created}}|{{.State.Status}}", containerName],
+        { encoding: "utf-8", timeout: 5_000 },
+      );
+      if (r.status === 0) {
+        const [img, created, st] = r.stdout.trim().split("|");
+        image = img ?? null;
+        containerCreatedAt = created ?? null;
+        status = st ?? "<unknown>";
+      } else {
+        status = "absent";
+      }
+    } catch { status = "<probe failed>"; }
+
+    let imageDigestShort: string | null = null;
+    let imagePulledAt: string | null = null;
+    if (image) {
+      try {
+        const r = spawnSync(
+          "docker",
+          ["image", "inspect", "-f", "{{.Id}}|{{.Created}}|{{.Metadata.LastTagTime}}", image],
+          { encoding: "utf-8", timeout: 5_000 },
+        );
+        if (r.status === 0) {
+          const [id, created, lastTag] = r.stdout.trim().split("|");
+          imageDigestShort = id?.replace(/^sha256:/, "").slice(0, 12) ?? null;
+          // LastTagTime is when this tag was last bumped locally
+          // (i.e. when `docker pull` last brought a newer image
+          // under this tag). Falls back to image Created if absent.
+          imagePulledAt = lastTag && lastTag !== "0001-01-01T00:00:00Z" ? lastTag
+            : (created ?? null);
+        }
+      } catch { /* nothing to do */ }
+    }
+
+    services.push({
+      name: svc,
+      image,
+      imageDigestShort,
+      imagePulledAt,
+      containerCreatedAt,
+      status,
+    });
+  }
+
+  return { cliVersion, cliBuiltAt, services, warnings };
+}
+
+function formatRelative(iso: string | null, now: number = Date.now()): string {
+  if (!iso) return "<unknown>";
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "<unparseable>";
+  const ageSec = Math.max(0, Math.floor((now - t) / 1000));
+  if (ageSec < 60) return `${ageSec}s ago`;
+  if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
+  if (ageSec < 86400) return `${Math.floor(ageSec / 3600)}h ago`;
+  return `${Math.floor(ageSec / 86400)}d ago`;
+}
+
+function formatStatusReport(rep: StatusReport): string {
+  const lines: string[] = [];
+  lines.push(`Switchroom on this host`);
+  lines.push("");
+  lines.push(`CLI: ${rep.cliVersion}` + (rep.cliBuiltAt
+    ? ` (built ${formatRelative(rep.cliBuiltAt)})`
+    : ""));
+  lines.push("");
+  if (rep.services.length === 0) {
+    lines.push("Services: <none reachable>");
+  } else {
+    lines.push("Services:");
+    const maxNameLen = Math.max(...rep.services.map((s) => s.name.length));
+    for (const s of rep.services) {
+      const namePad = s.name.padEnd(maxNameLen);
+      const containerAge = formatRelative(s.containerCreatedAt);
+      const imageAge = formatRelative(s.imagePulledAt);
+      const digest = s.imageDigestShort ? `[${s.imageDigestShort}]` : "[?]";
+      lines.push(
+        `  ${namePad}  ${s.status.padEnd(8)}  ${digest}  pulled ${imageAge}  container ${containerAge}`,
+      );
+    }
+  }
+  if (rep.warnings.length > 0) {
+    lines.push("");
+    lines.push("Warnings:");
+    for (const w of rep.warnings) lines.push(`  ⚠ ${w}`);
+  }
+  lines.push("");
+  lines.push(`Run \`switchroom update --check\` to see what an update would do, or \`/update\` from Telegram.`);
+  return lines.join("\n");
+}
+
 async function runUpdate(opts: UpdateOptions): Promise<number> {
   const stdout = opts.stdout ?? ((s) => process.stdout.write(s));
   const stderr = opts.stderr ?? ((s) => process.stderr.write(s));
+
+  // --status: read-only snapshot, no plan execution. Wired by Telegram
+  // /upgrade-status (#927). JSON output for machine readers; human
+  // output otherwise.
+  if (opts.status) {
+    const composePath = opts.composePath ?? DEFAULT_COMPOSE_PATH;
+    const probe = opts.statusProbe ?? defaultStatusProbe;
+    const report = probe(composePath);
+    if (opts.json) {
+      stdout(JSON.stringify(report, null, 2) + "\n");
+    } else {
+      stdout(formatStatusReport(report) + "\n");
+    }
+    return 0;
+  }
+  if (opts.json) {
+    // --json without --status is unsupported (the apply / pull / up
+    // pipeline streams human output; piping JSON through a multi-step
+    // shellout is not coherent). Fail loud rather than silently
+    // ignoring (#938 reviewer nit).
+    stderr(chalk.red(
+      "--json is only honored under --status. Drop --json or add --status.\n",
+    ));
+    return 2;
+  }
+
   const steps = planUpdate(opts);
 
   if (opts.check) {
@@ -252,6 +509,14 @@ export function registerUpdateCommand(program: Command): void {
       "--rebuild",
       "Source-checkout users: also git pull + bun install + npm run build before applying. Auto-skipped when the CLI is an installed binary.",
     )
+    .option(
+      "--status",
+      "Read-only snapshot: report local CLI version, image digest + pull time, container creation time per service. Does NOT invoke any update steps. Wired by Telegram /upgrade-status (#927).",
+    )
+    .option(
+      "--json",
+      "Output as JSON (currently only honored under --status; other modes ignore).",
+    )
     // Legacy v0.6 flags — accepted as no-ops so a stale operator
     // muscle-memory invocation doesn't crash. The --phase=post-build
     // path was the in-flight v0.6→v0.7 self-reexec; that's dead now,
@@ -275,4 +540,11 @@ export function registerUpdateCommand(program: Command): void {
     });
 }
 
-export { runUpdate, defaultRunner, DEFAULT_COMPOSE_PATH };
+export {
+  runUpdate,
+  defaultRunner,
+  defaultStatusProbe,
+  formatStatusReport,
+  formatRelative,
+  DEFAULT_COMPOSE_PATH,
+};

@@ -20,6 +20,7 @@
 
 import { createHash } from "node:crypto";
 import type { ScheduleEntry, SwitchroomConfig } from "../config/schema.js";
+import { resolveAgentConfig } from "../config/merge.js";
 
 export interface SchedulerEntry {
   agent: string;
@@ -31,8 +32,17 @@ export interface SchedulerEntry {
 }
 
 /**
- * Walk the resolved config and produce a flat list of (agent, index)
- * schedule entries that the cron loop registers. Pure function: no IO.
+ * Walk the cascade-resolved config and produce a flat list of (agent,
+ * index) schedule entries that the cron loop registers. Pure function:
+ * no IO.
+ *
+ * Cascade resolution is load-bearing — `schedule` is a `concatenate`
+ * cascade key (defaults.schedule + profile.schedule + agent.schedule).
+ * Walking raw `config.agents[name].schedule` (as the pre-fix code did)
+ * silently dropped entries declared in defaults or in a profile's
+ * extends-chain, leaving the in-agent scheduler with "no schedule
+ * entries" — which then triggered the start.sh supervisor's
+ * restart-cap and silently killed cron for the affected agent.
  *
  * Deterministic order: agents sorted by name, then schedule entries by
  * declared index. Important for snapshot tests of the audit log shape.
@@ -43,7 +53,10 @@ export function collectScheduleEntries(
   const out: SchedulerEntry[] = [];
   const agentNames = Object.keys(config.agents).sort();
   for (const agent of agentNames) {
-    const schedule: ScheduleEntry[] = config.agents[agent]?.schedule ?? [];
+    const raw = config.agents[agent];
+    if (!raw) continue;
+    const resolved = resolveAgentConfig(config.defaults, config.profiles, raw);
+    const schedule: ScheduleEntry[] = resolved.schedule ?? [];
     for (let i = 0; i < schedule.length; i++) {
       const entry = schedule[i]!;
       out.push({

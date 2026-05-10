@@ -148,13 +148,13 @@ console.log("[build] bundling telegram-plugin/{server,gateway,bridge} -> telegra
 execSync(`node ${JSON.stringify(pluginScript)}`, { stdio: "inherit", cwd: root });
 
 // Phase 1b: bundle the long-running server entry points that ship inside
-// the docker images (broker / kernel / scheduler). The Dockerfiles' CMDs
-// reference /opt/switchroom/dist/{vault/broker/server.js,
-// vault/approvals/kernel-server.js, scheduler/index.js}; without these
-// bundles the containers boot to MODULE_NOT_FOUND. Native deps
-// (better-sqlite3) are marked external — they're npm-installed inside
-// the scheduler image so the prebuilt binary matches the linux/glibc
-// runtime, not the host that ran `npm run build`.
+// the docker images (broker / kernel / agent-scheduler). The Dockerfiles'
+// CMDs reference /opt/switchroom/dist/{vault/broker/server.js,
+// vault/approvals/kernel-server.js, agent-scheduler/index.js}; without
+// these bundles the containers boot to MODULE_NOT_FOUND. Native deps
+// (better-sqlite3, node-cron) are marked external — they're
+// npm-installed inside the agent image so the prebuilt binary matches
+// the linux/glibc runtime, not the host that ran `npm run build`.
 const serverEntries = [
   { src: "src/vault/broker/server.ts", out: "dist/vault/broker/server.js" },
   // Phase 1c: kernel-server entrypoint. Closes the Phase 1b carry-forward

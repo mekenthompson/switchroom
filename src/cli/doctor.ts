@@ -27,9 +27,9 @@ import { isDockerMode, runDockerChecks } from "./doctor-docker.js";
 /**
  * Result of a single doctor check.
  */
-type CheckStatus = "ok" | "warn" | "fail";
+export type CheckStatus = "ok" | "warn" | "fail";
 
-interface CheckResult {
+export interface CheckResult {
   name: string;
   status: CheckStatus;
   detail?: string;

@@ -886,6 +886,12 @@ export function registerApplyCommand(program: Command): void {
             (opts.doctor ?? true)
             && !opts.composeOnly
           ) {
+            // Lazy import for startup-perf — doctor.ts is large
+            // (~1500 lines) and transitively pulls runDockerChecks,
+            // probeHindsight, manifest drift loaders. Apply paths
+            // that DON'T need doctor (--no-doctor, --compose-only)
+            // shouldn't pay that import cost. Not for circular-import
+            // avoidance — doctor.ts has no dependency on apply.ts.
             const { checkAgents, printSection } = await import("./doctor.js");
             const results = checkAgents(config, switchroomConfigPath ?? "");
             const hasNoise = results.some(

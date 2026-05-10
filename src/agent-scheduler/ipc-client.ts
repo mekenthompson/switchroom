@@ -53,6 +53,14 @@ export interface InjectIpcClient {
    */
   sendInjectInbound(msg: InjectInboundMessage): boolean;
   isConnected(): boolean;
+  /**
+   * Resolve to true once the client is connected, false on timeout.
+   * Used by the boot-time replay path to avoid attempting
+   * `sendInjectInbound` before the gateway socket is up — a misfire
+   * there would be audited as "no agent client connected" and trigger
+   * an unnecessary replay loop on next boot.
+   */
+  waitForConnect(timeoutMs: number): Promise<boolean>;
   close(): void;
 }
 
@@ -159,6 +167,29 @@ export function createInjectIpcClient(
     },
     isConnected(): boolean {
       return connected;
+    },
+    waitForConnect(timeoutMs: number): Promise<boolean> {
+      if (connected) return Promise.resolve(true);
+      if (closed) return Promise.resolve(false);
+      return new Promise<boolean>((resolve) => {
+        const start = Date.now();
+        const timer = setInterval(() => {
+          if (connected) {
+            clearInterval(timer);
+            resolve(true);
+            return;
+          }
+          if (closed || Date.now() - start >= timeoutMs) {
+            clearInterval(timer);
+            resolve(connected);
+          }
+        }, 50);
+        // Don't keep the event loop alive for this — the caller's
+        // shutdown path will close() the client and unblock us.
+        if (typeof (timer as unknown as { unref?: () => void }).unref === "function") {
+          (timer as unknown as { unref: () => void }).unref();
+        }
+      });
     },
     close(): void {
       closed = true;

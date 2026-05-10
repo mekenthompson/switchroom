@@ -29,11 +29,16 @@ import { resolve } from "node:path";
 // Mirror the regexes embedded in each module's entry guard. If you
 // change a guard regex in src/, mirror the change here — divergence is
 // the bug we're guarding against.
+//
+// Phase 4 cron-fold-in cutover removed the singleton scheduler bundle
+// (`src/scheduler/index.ts`'s standalone main()) and added the in-agent
+// scheduler at `src/agent-scheduler/index.ts`. The regex tracks the new
+// path; the old `scheduler` entry was retired with the singleton.
 const guards: Record<string, RegExp> = {
   broker: /(?:^|[/\\])(?:vault[/\\]broker[/\\])?server\.(?:js|ts)$/,
   "approval-kernel":
     /(?:^|[/\\])(?:vault[/\\]approvals[/\\])?kernel-server\.(?:js|ts)$/,
-  scheduler: /(?:^|[/\\])scheduler[/\\]index\.(?:js|ts)$/,
+  "agent-scheduler": /(?:^|[/\\])agent-scheduler[/\\]index\.(?:js|ts)$/,
 };
 
 describe("entry-guard regexes — per-module (Phase 3a-1)", () => {
@@ -73,18 +78,25 @@ describe("entry-guard regexes — per-module (Phase 3a-1)", () => {
     ).toBe(false);
   });
 
-  it("scheduler regex accepts its own bundle/source paths", () => {
-    expect(guards.scheduler.test("/opt/sr/dist/scheduler/index.js")).toBe(
+  it("agent-scheduler regex accepts its own bundle/source paths", () => {
+    expect(
+      guards["agent-scheduler"].test("/opt/sr/dist/agent-scheduler/index.js"),
+    ).toBe(true);
+    expect(guards["agent-scheduler"].test("src/agent-scheduler/index.ts")).toBe(
       true,
     );
-    expect(guards.scheduler.test("src/scheduler/index.ts")).toBe(true);
   });
 
-  it("scheduler regex rejects the merged CLI bundle and a generic index.js", () => {
-    expect(guards.scheduler.test("/opt/sr/dist/cli/switchroom.js")).toBe(
+  it("agent-scheduler regex rejects the merged CLI bundle and a generic index.js", () => {
+    expect(
+      guards["agent-scheduler"].test("/opt/sr/dist/cli/switchroom.js"),
+    ).toBe(false);
+    expect(guards["agent-scheduler"].test("/opt/sr/dist/foo/index.js")).toBe(
       false,
     );
-    expect(guards.scheduler.test("/opt/sr/dist/foo/index.js")).toBe(false);
+    // The retired singleton's own path is now also rejected.
+    expect(guards["agent-scheduler"].test("/opt/sr/dist/scheduler/index.js"))
+      .toBe(false);
   });
 });
 

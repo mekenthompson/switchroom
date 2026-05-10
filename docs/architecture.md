@@ -10,20 +10,20 @@ The v0.7+ runtime is Docker on Linux. The legacy systemd path was removed in v0.
 
 ## Per-agent process model (containers)
 
-A switchroom fleet is a small set of containers wired together by a generated `docker-compose.yml` (`~/.switchroom/compose/docker-compose.yml`). Five published images on GHCR cover the whole stack:
+A switchroom fleet is a small set of containers wired together by a generated `docker-compose.yml` (`~/.switchroom/compose/docker-compose.yml`). Four published images on GHCR cover the whole stack:
 
 - `ghcr.io/switchroom/switchroom-base` — shared base layer
-- `ghcr.io/switchroom/switchroom-agent` — the per-agent claude REPL
-- `ghcr.io/switchroom/switchroom-broker` — vault broker (cron secrets)
+- `ghcr.io/switchroom/switchroom-agent` — the per-agent claude REPL (also runs the in-container scheduler sibling for that agent's scheduled tasks)
+- `ghcr.io/switchroom/switchroom-broker` — vault broker
 - `ghcr.io/switchroom/switchroom-kernel` — approval kernel
-- `ghcr.io/switchroom/switchroom-scheduler` — per-agent cron container
 
 Per agent, compose brings up:
 
-- `switchroom-<agent>` — the agent container (claude REPL + gateway + telegram MCP, single-spine process tree under `tini` as PID 1).
-- `switchroom-<agent>-scheduler` — cron container for that agent's scheduled tasks.
+- `switchroom-<agent>` — the agent container (claude REPL + gateway + telegram MCP + agent-scheduler sidecar, single-spine process tree under `tini` as PID 1).
 
-Plus one shared service per host: `switchroom-broker` (vault). All containers run with `restart: unless-stopped` and a healthcheck. Compose is the supervisor — a crashed agent is brought back automatically.
+Plus shared services per host: `switchroom-vault-broker` (vault) and `switchroom-approval-kernel` (approval grants). All containers run with `restart: unless-stopped`. Compose is the supervisor — a crashed agent is brought back automatically.
+
+> **Cron-fold-in note.** Older releases shipped a singleton `switchroom-cron` container that fired every agent's scheduled tasks via `docker exec`. As of v0.8 (Phase 4 of the cron-fold-in), cron runs in-container in every agent as a sibling of the gateway, delivering fires through the same `InboundMessage` IPC path Telegram uses (synthesized turns tagged `meta.source="cron"`). The singleton image and container were removed in that cutover.
 
 ### Inside the agent container
 
@@ -102,10 +102,11 @@ The MCP child never makes direct HTTP calls to Telegram — all Telegram API cal
 
 The main agent loop does **not** use `claude -p`. Agents run interactive (`--continue`).
 
-`claude -p` is used in exactly two places, both short-lived and headless:
+`claude -p` is used in exactly one place, short-lived and headless:
 
-- **Scheduled cron tasks** — one-shot prompts fired by the scheduler container. Exit on completion.
 - **Handoff summarization** (`src/agents/handoff-summarizer.ts`) — generates a cross-session handoff summary on demand. Exit on completion.
+
+(Pre-v0.8, scheduled cron tasks were also dispatched via `claude -p` from the singleton scheduler container. As of the cron-fold-in cutover (Phase 4), cron tasks arrive in the running agent's session as synthesized inbound turns through the gateway IPC — same path as Telegram messages — so they appear in the agent's transcript and Hindsight context as ordinary turns tagged `meta.source="cron"`.)
 
 ---
 

@@ -84,17 +84,20 @@ if [ "$SWITCHROOM_RUNTIME" = "docker" ] && [ -z "$SWITCHROOM_DOCKER_TMUX_INNER" 
       bun /opt/switchroom/autoaccept-poll.js "{{name}}" &
   fi
 
-  # 3) agent-scheduler (Phase 2 cron-fold-in, opt-in via env).
-  #    Long-running. Replaces the singleton switchroom-cron container
-  #    once SWITCHROOM_INLINE_SCHEDULER=1 is set per agent (Phase 3
-  #    canary) and then defaulted on (Phase 4). Running as a sibling
-  #    of the gateway means cron fires arrive in this agent's
-  #    transcript through the SAME inbound path as Telegram messages
-  #    — synthesized turns tagged meta.source="cron". The bundle
-  #    connects to the gateway socket above, so the gateway must be
-  #    up before fires can deliver; the supervisor's respawn loop
-  #    handles the early-boot race naturally.
-  if [ "$SWITCHROOM_INLINE_SCHEDULER" = "1" ] \
+  # 3) agent-scheduler (cron-fold-in cutover, default-on since Phase 4).
+  #    Long-running. The singleton switchroom-cron container is gone;
+  #    every agent runs cron in-container as a sibling of the gateway,
+  #    delivering fires through the SAME inbound path as Telegram
+  #    messages (synthesized turns tagged meta.source="cron"). The
+  #    bundle connects to the gateway socket above, so the gateway
+  #    must be up before fires can deliver; the supervisor's respawn
+  #    loop handles the early-boot race naturally.
+  #
+  #    Kill switch: an operator can opt OUT by setting
+  #    SWITCHROOM_INLINE_SCHEDULER=0 at the container level (compose
+  #    env or `docker run -e ...`). Default behaviour is enabled —
+  #    we used to gate on `=1`, the gate is now `!=0`.
+  if [ "$SWITCHROOM_INLINE_SCHEDULER" != "0" ] \
      && [ -f /opt/switchroom/agent-scheduler/index.js ] \
      && command -v bun >/dev/null 2>&1; then
     _switchroom_supervise agent-scheduler /var/log/switchroom/agent-scheduler.log \

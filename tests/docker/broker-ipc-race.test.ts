@@ -31,7 +31,7 @@
  *   1. All 45 lookups succeed (each returns ok=true, even for
  *      no_decision/expired states — the wire round-trip is what
  *      matters; the response state is irrelevant).
- *   2. broker / kernel / scheduler containers' RestartCount stays 0
+ *   2. broker / kernel containers' RestartCount stays 0
  *      across the topology change.
  *   3. newbie reaches "first kernel-lookup answered via its own
  *      kernel socket" within 60s wall-clock from `up -d` invocation.
@@ -63,7 +63,9 @@ import {
 const RUN_ID = newRunId();
 
 const TAG = "phase1b-test";
-const IMAGES = ["base", "agent", "broker", "kernel", "scheduler"].map(
+// Phase 4 cron-fold-in cutover removed the singleton scheduler image.
+// Cron now runs in-container in every agent (see start.sh.hbs).
+const IMAGES = ["base", "agent", "broker", "kernel"].map(
   (n) => `switchroom/${n}:${TAG}`,
 );
 const PROJECT = `phase1c-race-${process.pid}`;
@@ -105,10 +107,10 @@ function makeConfig(agents: string[]): SwitchroomConfig {
         {
           topic_name: name,
           extends: undefined,
-          // Single far-future schedule entry so the scheduler container
-          // stays alive (it exits 0 when zero tasks are registered, and
-          // `restart: unless-stopped` then bumps RestartCount on every
-          // exit — false-positive for our topology-change assertion).
+          // Single far-future schedule entry so the in-agent scheduler
+          // sibling has work to register (otherwise it exits cleanly,
+          // and the supervisor's restart-cap could be reached during
+          // a long test run).
           schedule: [{ cron: "0 0 1 1 *", prompt: "noop", secrets: [] }],
           tools: { allow: [], deny: [] },
           hooks: undefined,
@@ -146,8 +148,6 @@ function buildTestCompose(agents: string[], cfgPath: string): string {
              "- approvals-state:/state/approvals")
     .replace(/- \$\{HOME\}\/\.switchroom:\/state\/config:ro\b/g,
              `- ${cfgPath}:/state/config/switchroom.yaml:ro`)
-    .replace(/- \$\{HOME\}\/\.switchroom\/scheduler:\/state\/scheduler\b/g,
-             "- scheduler-state:/state/scheduler")
     .replace(/- \$\{HOME\}\/\.switchroom\/agents\/[^:]+:\/state\/agent\b/g,
              "- agent-state:/state/agent")
     .replace(/- \$\{HOME\}\/\.claude\/projects\/[^:]+:\/state\/\.claude\b/g,
@@ -190,16 +190,14 @@ function buildTestCompose(agents: string[], cfgPath: string): string {
     /(  approval-kernel:[\s\S]*?volumes:\n)/,
     `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`,
   );
-  // Scheduler already gets SWITCHROOM_CONFIG via compose, but its volume
-  // line points at $HOME/.switchroom — we re-bound that to the
-  // single-file mount above. Make sure the scheduler-cron container has
-  // a writable scheduler-state volume; that's handled by the
-  // ${HOME}/.switchroom/scheduler → scheduler-state replacement.
+  // Phase 4 cron-fold-in cutover: the singleton scheduler container
+  // is gone. Cron now runs in-agent under the supervised sidecar
+  // started by start.sh; it writes its JSONL audit to the agent's
+  // own /state/agent bind mount, so no extra volume is needed.
 
   // Append the named volumes we introduced.
   yml += "  vault-state:\n";
   yml += "  approvals-state:\n";
-  yml += "  scheduler-state:\n";
   yml += "  agent-state:\n";
   yml += "  claude-state:\n";
 
@@ -334,7 +332,6 @@ beforeAll(() => {
   for (const c of [
     "switchroom-vault-broker",
     "switchroom-approval-kernel",
-    "switchroom-cron",
     "switchroom-alice",
     "switchroom-bob",
     "switchroom-carol",
@@ -422,7 +419,6 @@ describe.skipIf(!imagesOk || !raceOptIn)(
         const startCounts = {
           broker: getRestartCount("switchroom-vault-broker"),
           kernel: getRestartCount("switchroom-approval-kernel"),
-          scheduler: getRestartCount("switchroom-cron"),
         };
 
         const results: Array<{ idx: number; ok: boolean; durationMs: number; err?: string }> = [];
@@ -523,7 +519,6 @@ describe.skipIf(!imagesOk || !raceOptIn)(
         const stabilityCounts = {
           broker: getRestartCount("switchroom-vault-broker"),
           kernel: getRestartCount("switchroom-approval-kernel"),
-          scheduler: getRestartCount("switchroom-cron"),
         };
 
         // Phase 3c F-#811 — split newbie-readiness from topology-stability.
@@ -578,7 +573,6 @@ describe.skipIf(!imagesOk || !raceOptIn)(
         const endCounts = {
           broker: getRestartCount("switchroom-vault-broker"),
           kernel: getRestartCount("switchroom-approval-kernel"),
-          scheduler: getRestartCount("switchroom-cron"),
         };
 
         // Diagnostic line for vitest output

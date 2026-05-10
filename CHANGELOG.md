@@ -1,5 +1,99 @@
 # Changelog
 
+## v0.7.14 — tier-1 follow-ups + docker e2e CI gate
+
+Five issues from the v0.7.12 / v0.7.13 sprint, closed in PR #966.
+
+### Unit + e2e coverage for the #958 deploy regression class (#961, #962)
+
+The v0.7.12 deploy hotfix (#958) shipped without unit coverage for
+the failure mode it fixed — both bugs were caught only by self-
+deploying against the operator's actual fleet. v0.7.14 closes the
+test gap on two layers.
+
+**Unit (#961).** `apply.ts`'s inline vault-bind-mount-dir guard is
+now two pure helpers (`resolveVaultBindMountDir`,
+`inspectVaultBindMountDir`) covered by `apply-vault-guard.test.ts`.
+Sixteen cases pin the four enumerated path-resolution branches
+(default legacy, default new canonical, custom path, no path)
+plus the six MigrationResult kinds and the artifact-whitelist
+inspection (ok, missing, lockfile, sentinel-dir, atomic-write
+sibling-tmp, unexpected operator backups).
+
+**E2e (#962).** `phase2c-vault-integration.test.ts` now exercises
+the full op:put rotation flow against a live broker container:
+alice rotates her own scoped key, the broker re-encrypts the vault
+on disk, the next op:get returns the new value. Asserts the
+vault.enc sha changed, the proper-lockfile sentinel-dir was
+cleaned up post-write, no cross-agent smear, plus the denial
+cases (cross-agent ACL, unknown-key, kind-mismatch). The full
+chain runs under the exact mount geometry + cap_drop/cap_add
+shape compose emits — both #958-A (missing DAC_OVERRIDE) and
+#958-B (wrong vault-dir guard path) would have failed the test
+instead of shipping.
+
+### CI gate for docker e2e (#962)
+
+New workflow at `.github/workflows/docker-e2e.yml`. Builds the
+phase1b-test image set on a clean-room runner, aliases them as
+phase2a/2b-test, runs `tests/docker/` against real containers.
+Triggered narrowly: PRs touching `src/vault/**`,
+`src/cli/apply.ts`, `src/agents/compose.ts`,
+`src/agent-scheduler/**`, the broker/agent/kernel/base
+Dockerfiles, or `tests/docker/**`.
+
+Two pre-existing test-isolation bugs were fixed to make the full
+suite green in CI:
+
+  - `broker-ipc-race.test.ts:265` — `kernelLookup` defaulted its
+    `container` argument to the production container shape
+    `switchroom-${agent}`. On a clean-room runner that container
+    doesn't exist (every exec returned exit=1, manifesting as
+    "0/45 succeed"); on the operator's box where the production
+    fleet runs, the test would silently exec into the live
+    production kernel socket. Default removed, all callsites pass
+    the project-prefixed test fleet container.
+  - `_prod-snapshot.ts:27` — the prod-drift filter regex only
+    matched `switchroom-phase<digit>` (single-container pattern).
+    It missed the compose-project pattern `phase<digit><letter>-`
+    used by broker-ipc-race and per-agent-isolation, so any
+    orphan from a failed fleet test cascaded into the prod-drift
+    assertion of every subsequent docker test. Filter now
+    matches both shapes.
+
+### Doctor probe + doc backfill (#960, #963)
+
+**#960.** `switchroom doctor` chromium probe honors
+`$PLAYWRIGHT_BROWSERS_PATH` (the env var set by v0.7.13's baked
+image at `/opt/playwright/browsers/`) and recognizes the modern
+`chrome-linux64/chrome` (Playwright >=1.40) plus
+`headless_shell` binary variants. Before v0.7.14, the probe only
+checked the legacy `~/.cache/ms-playwright/<entry>/chrome-linux/chrome`
+path and reported missing on the v0.7.13 layout even though the
+binary was present.
+
+**#963.** Plan v3 §12 deferred docs caught up to the v0.7.12
+vault layout:
+
+  - `CLAUDE.md` runtime-architecture section gained a paragraph
+    on the file→directory migration, the 5-state migration
+    machine in `src/vault/migrate-layout.ts`, and the
+    bind-mount artifact whitelist.
+  - `README.md` corrected the stale
+    `~/.switchroom/vault-broker.sock` reference (post-v0.7 it's
+    per-agent at `/run/switchroom/broker/<agent>/sock`) and the
+    `switchroom-broker` container name (compose emits
+    `switchroom-vault-broker`).
+  - `reference/share-auth-across-the-fleet.md` cross-links the
+    vault op:put rotation flow as the broker-pattern precedent
+    for the proposed auth-broker design.
+
+### Migration
+
+None. Patch release. Update via `switchroom update` from any
+operator host; in-Telegram via `/update apply` (docker hosts:
+host-side CLI, per the v0.7.13 docker-availability guard).
+
 ## v0.7.13 — v0.7.12 deploy hotfix + Playwright in agent image
 
 Two-part patch release. The vault hotfix is forced by the v0.7.12

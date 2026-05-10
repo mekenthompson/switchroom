@@ -107,10 +107,15 @@ export function readContainerBootTimeMs(): number | null {
     const btimeSec = Number(btimeLine.split(/\s+/)[1]);
     if (!Number.isFinite(btimeSec)) return null;
 
-    // CLK_TCK is 100 on every kernel switchroom ships against (the
-    // default is universally 100; node doesn't expose sysconf). A
-    // wrong CLK_TCK by 2.5× would misplace boot time by single-digit
-    // seconds at most — bounded by the safety margin in acquireLock.
+    // /proc/[pid]/stat's starttime is in units of sysconf(_SC_CLK_TCK)
+    // = USER_HZ, which the kernel ABI hardcodes to 100 on every arch
+    // switchroom plausibly ships to (x86/x86_64/arm/arm64/mips — see
+    // include/uapi/asm-generic/param.h; only Alpha differs). nsec_to_
+    // clock_t() converts to USER_HZ before exposing starttime, so this
+    // is independent of CONFIG_HZ (which DOES vary — 250 on Debian
+    // server, 1000 on Ubuntu desktop). Hardcoding 100 is correct, not
+    // a heuristic; the 2s safety margin in acquireLock covers
+    // mtime-vs-/proc clock skew, NOT a wrong CLK_TCK.
     const CLK_TCK = 100;
     return (btimeSec + starttimeTicks / CLK_TCK) * 1000;
   } catch {

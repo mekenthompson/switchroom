@@ -128,10 +128,13 @@ describe("acquireLock / releaseLock", () => {
     it("readContainerBootTimeMs returns a finite recent timestamp on Linux", () => {
       // Smoke test the auto-detect path. On non-Linux runners this
       // returns null; on the Linux CI box it returns the real boot
-      // time (seconds-to-days ago, depending on uptime).
+      // time. Tight upper bound (≤now+1s) and a within-last-year
+      // lower bound — the latter catches a unit-conversion regression
+      // (e.g. seconds returned where ms expected would be ~1970).
       const v = readContainerBootTimeMs();
       if (v == null) return; // non-Linux — not applicable
-      expect(v).toBeGreaterThan(0);
+      const oneYearMs = 365 * 24 * 3600 * 1000;
+      expect(v).toBeGreaterThan(Date.now() - oneYearMs);
       expect(v).toBeLessThanOrEqual(Date.now() + 1000);
     });
   });

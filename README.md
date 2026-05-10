@@ -254,7 +254,7 @@ See [docs/configuration.md](docs/configuration.md) for the full reference.
 
 ## Vault broker (cron secrets)
 
-Scheduled tasks run headless inside the agent container, so they can't prompt for the vault passphrase. The vault broker is a long-running container (`switchroom-broker`) that holds the vault decrypted in memory after a one-time interactive unlock. Cron tasks fetch the specific keys they declare via a host-shared unix socket. The passphrase never sits on disk.
+Scheduled tasks run headless inside the agent container, so they can't prompt for the vault passphrase. The vault broker is a long-running container (`switchroom-vault-broker`) that holds the vault decrypted in memory after a one-time interactive unlock. Cron tasks fetch the specific keys they declare via a per-agent unix socket. The passphrase never sits on disk.
 
 **Declare per-cron secrets in `switchroom.yaml`:**
 
@@ -273,17 +273,17 @@ agents:
 
 ```bash
 switchroom apply                        # writes broker into docker-compose.yml
-docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d switchroom-broker
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d switchroom-vault-broker
 switchroom vault broker unlock          # prompt for passphrase, primes broker
 ```
 
 Or just run `switchroom vault get <key>` from a TTY. The broker offers to take the unlocked state with `[Y/n]` so you don't have to remember a separate unlock command.
 
-**Identity model.** The broker reads `/proc/<pid>/cgroup` on the host to find the connecting cron's container (`switchroom-<agent>-scheduler` or `switchroom-<agent>`), which Docker sets unspoofably from userspace, so a compromised agent cannot pose as another agent's cron and read its keys. macOS (Docker Desktop) degrades to UID-only via the socket file mode 0600. Fine for desktop use, not recommended for production cron.
+**Identity model (v0.7+).** Path-as-identity. The broker binds one socket per agent at `/run/switchroom/broker/<agent>/sock` inside its own container, hosted via a per-agent named volume that's also mounted at `/run/switchroom/broker/` inside `agent-<agent>`. The agent name is parsed unspoofably from the bind path — see `src/vault/broker/peercred.ts:socketPathToAgent()`. A compromised agent cannot pose as another agent's cron because it only ever sees its own socket on its mount. ACL is bind-time, never wire-time.
 
 The broker locks on `SIGTERM` (so a container restart zeros the in-memory state) and on demand via `switchroom vault broker lock`. Use `switchroom vault get <key> --no-broker` to bypass and prompt locally.
 
-Broker socket lives at `~/.switchroom/vault-broker.sock` (host-mounted into every agent container).
+Vault file (post-v0.7.12) lives at `~/.switchroom/vault/vault.enc` — a directory, not a single file, so atomic rename can use the parent as the staging dir. See [docs/vault.md](docs/vault.md) for the layout rationale.
 
 ### Auto-unlock on boot (opt-in)
 

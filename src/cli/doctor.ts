@@ -275,12 +275,22 @@ function checkNodeVersion(): CheckResult {
 
 /**
  * Look for a chromium binary on PATH, then fall back to the Playwright
- * browser cache at ~/.cache/ms-playwright/. Returns the path to the
- * first match, or null.
+ * browser cache. Returns the path to the first match, or null.
+ *
+ * Search order for the Playwright cache:
+ *   1. $PLAYWRIGHT_BROWSERS_PATH (set in v0.7.13+ agent images at
+ *      `/opt/playwright/browsers/`; placed in an image layer so the
+ *      browser binary is shared across the fleet rather than
+ *      per-agent in HOME).
+ *   2. $HOME/.cache/ms-playwright (legacy on-demand cache from
+ *      pre-v0.7.13 hosts where every agent ran `npx playwright`
+ *      and downloaded chromium into its own home dir).
+ *
  * @internal exported for testing
  */
 export function findChromium(
   homeDir: string = process.env.HOME ?? "",
+  envBrowsersPath: string | undefined = process.env.PLAYWRIGHT_BROWSERS_PATH,
 ): string | null {
   const candidates = [
     "chromium",
@@ -293,23 +303,39 @@ export function findChromium(
     if (path) return path;
   }
 
-  const playwrightCache = join(homeDir, ".cache", "ms-playwright");
-  if (!existsSync(playwrightCache)) return null;
-  try {
-    const entries = readdirSync(playwrightCache).filter((e) =>
-      e.startsWith("chromium"),
-    );
-    for (const entry of entries) {
-      const linuxPath = join(
-        playwrightCache,
-        entry,
-        "chrome-linux",
-        "chrome",
+  // Search Playwright cache locations in priority order: env-set
+  // location first (v0.7.13+ baked layout), then legacy ~/.cache/.
+  const cacheLocations: string[] = [];
+  if (envBrowsersPath && envBrowsersPath.length > 0) {
+    cacheLocations.push(envBrowsersPath);
+  }
+  cacheLocations.push(join(homeDir, ".cache", "ms-playwright"));
+
+  for (const cacheDir of cacheLocations) {
+    if (!existsSync(cacheDir)) continue;
+    try {
+      const entries = readdirSync(cacheDir).filter((e) =>
+        e.startsWith("chromium"),
       );
-      if (existsSync(linuxPath)) return linuxPath;
+      for (const entry of entries) {
+        // Try both the modern `chrome-linux64` (Playwright >=1.40
+        // restructured) and legacy `chrome-linux` layouts. v0.7.13's
+        // bake (Playwright 1.59) uses chrome-linux64; older caches
+        // use chrome-linux.
+        const candidates = [
+          join(cacheDir, entry, "chrome-linux64", "chrome"),
+          join(cacheDir, entry, "chrome-linux", "chrome"),
+          // chromium_headless_shell-* uses the headless_shell binary.
+          join(cacheDir, entry, "chrome-linux64", "headless_shell"),
+          join(cacheDir, entry, "chrome-linux", "headless_shell"),
+        ];
+        for (const path of candidates) {
+          if (existsSync(path)) return path;
+        }
+      }
+    } catch {
+      /* unreadable */
     }
-  } catch {
-    /* unreadable */
   }
   return null;
 }

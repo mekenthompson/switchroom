@@ -462,7 +462,81 @@ describe("findChromium", () => {
     const origPath = process.env.PATH;
     process.env.PATH = "";
     try {
-      expect(findChromium(tempHome)).toBe(chromePath);
+      expect(findChromium(tempHome, "")).toBe(chromePath);
+    } finally {
+      process.env.PATH = origPath;
+    }
+  });
+
+  it("honors PLAYWRIGHT_BROWSERS_PATH for v0.7.13+ baked layout (closes #960)", () => {
+    // v0.7.13 baked Playwright + chromium into the agent image with
+    // browsers at /opt/playwright/browsers/. Pre-fix the doctor probe
+    // only checked ~/.cache/ms-playwright/ which is empty in the
+    // baked-image case, producing 'chromium: not found' noise on
+    // every doctor run inside an agent. The fix consults
+    // PLAYWRIGHT_BROWSERS_PATH first, then falls back to ~/.cache/.
+    const bakedDir = join(tempHome, "opt", "playwright", "browsers");
+    const browserDir = join(bakedDir, "chromium-1217", "chrome-linux64");
+    mkdirSync(browserDir, { recursive: true });
+    const chromePath = join(browserDir, "chrome");
+    writeFileSync(chromePath, "#!/bin/sh\nexit 0\n");
+    chmodSync(chromePath, 0o755);
+
+    const origPath = process.env.PATH;
+    process.env.PATH = "";
+    try {
+      // Pass the env value directly so the test doesn't depend on
+      // the host's actual PLAYWRIGHT_BROWSERS_PATH.
+      expect(findChromium(tempHome, bakedDir)).toBe(chromePath);
+    } finally {
+      process.env.PATH = origPath;
+    }
+  });
+
+  it("PLAYWRIGHT_BROWSERS_PATH wins over ~/.cache/ms-playwright when both exist", () => {
+    // Edge case: operator upgrades to v0.7.13 on a host that has the
+    // legacy on-demand cache from earlier. Both paths exist; baked
+    // path takes priority because that's what the running browser is.
+    const bakedDir = join(tempHome, "opt", "playwright", "browsers");
+    const bakedBin = join(
+      bakedDir, "chromium-1217", "chrome-linux64", "chrome",
+    );
+    mkdirSync(join(bakedDir, "chromium-1217", "chrome-linux64"), { recursive: true });
+    writeFileSync(bakedBin, "#!/bin/sh\nexit 0\n");
+    chmodSync(bakedBin, 0o755);
+
+    const legacyDir = join(tempHome, ".cache", "ms-playwright");
+    const legacyBin = join(
+      legacyDir, "chromium-1134", "chrome-linux", "chrome",
+    );
+    mkdirSync(join(legacyDir, "chromium-1134", "chrome-linux"), { recursive: true });
+    writeFileSync(legacyBin, "#!/bin/sh\nexit 0\n");
+    chmodSync(legacyBin, 0o755);
+
+    const origPath = process.env.PATH;
+    process.env.PATH = "";
+    try {
+      expect(findChromium(tempHome, bakedDir)).toBe(bakedBin);
+    } finally {
+      process.env.PATH = origPath;
+    }
+  });
+
+  it("finds chromium_headless_shell binaries (Playwright >=1.40 layout)", () => {
+    // Playwright 1.40+ ships a separate `chromium_headless_shell-*`
+    // browser whose binary is `headless_shell`, not `chrome`. v0.7.13's
+    // bake includes this directory.
+    const bakedDir = join(tempHome, "opt", "playwright", "browsers");
+    const shellDir = join(bakedDir, "chromium_headless_shell-1217", "chrome-linux64");
+    mkdirSync(shellDir, { recursive: true });
+    const shellBin = join(shellDir, "headless_shell");
+    writeFileSync(shellBin, "#!/bin/sh\nexit 0\n");
+    chmodSync(shellBin, 0o755);
+
+    const origPath = process.env.PATH;
+    process.env.PATH = "";
+    try {
+      expect(findChromium(tempHome, bakedDir)).toBe(shellBin);
     } finally {
       process.env.PATH = origPath;
     }

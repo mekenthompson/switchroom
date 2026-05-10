@@ -115,8 +115,12 @@ describe("lifecycle (docker mode): start/stop/restart shellouts", () => {
     ]);
   });
 
-  it("restartAgent calls `compose restart agent-<name>`", () => {
-    const calls = recordingStub({ "compose restart": () => "" });
+  it("restartAgent calls `compose up -d --no-deps agent-<name>` (#932)", () => {
+    // Was `compose restart` pre-#932 — swapped to `up -d --no-deps`
+    // so the recreate semantics pick up new volume mounts / compose-
+    // entry diffs (the same lesson learned in #857 / #916 for the
+    // test path). --no-deps prevents recreating sibling services.
+    const calls = recordingStub({ "compose up": () => "" });
     restartAgent("foo");
     expect(calls[0].args).toEqual([
       "compose",
@@ -124,7 +128,9 @@ describe("lifecycle (docker mode): start/stop/restart shellouts", () => {
       "switchroom",
       "-f",
       "/tmp/sw-test-compose.yml",
-      "restart",
+      "up",
+      "-d",
+      "--no-deps",
       "agent-foo",
     ]);
   });

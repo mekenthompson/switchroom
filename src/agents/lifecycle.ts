@@ -203,7 +203,20 @@ export function restartAgent(name: string, reason?: string): void {
   // the greeting card. Best-effort — if the dir is missing we swallow.
   if (reason) writeRestartReasonMarker(name, reason);
   try {
-    dockerSync(composeArgs(["restart", serviceKey(name)]));
+    // `up -d --no-deps` not `restart` (#932). `restart` only stops +
+    // starts the existing container with its existing volume mounts;
+    // it does NOT recreate. So if `apply` regenerated the compose
+    // file with new bind-mounts (e.g. the #912 skills/credentials
+    // mounts; or future per-agent mounts not yet conceived),
+    // `restart` would leave the running container with the OLD
+    // mounts despite the on-disk compose having the new ones.
+    // `up -d --no-deps` detects the compose-entry diff and recreates
+    // when needed, no-ops when not. `--no-deps` prevents recreating
+    // sibling services (broker / kernel / other agents) that this
+    // restart shouldn't touch. The lesson is fresh from #857 / #916
+    // where the same primitive had to be swapped in test code for
+    // identical reasons.
+    dockerSync(composeArgs(["up", "-d", "--no-deps", serviceKey(name)]));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to restart agent "${name}": ${message}`);

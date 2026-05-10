@@ -38,6 +38,10 @@ import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { isVaultReference } from "../vault/resolver.js";
+import {
+  migrateVaultLayout,
+  formatDivergentRecoveryMessage,
+} from "../vault/migrate-layout.js";
 import { resolvePath } from "../config/loader.js";
 import {
   loadConfig,
@@ -271,6 +275,7 @@ export async function runApply(
   switchroomConfigPath?: string,
 ): Promise<ApplyResult> {
   const writeOut = deps.writeOut ?? ((s) => process.stdout.write(s));
+  const writeErr = deps.writeErr ?? ((s) => process.stderr.write(s));
 
   // Fail-fast on missing prerequisites before we touch anything.
   // Both checks throw with operator-actionable messages; the action
@@ -396,6 +401,51 @@ export async function runApply(
   // preflight already errors; auto-unlock missing => broker falls
   // back to interactive unlock).
   await ensureHostMountSources(config);
+
+  // ── 2c. Vault layout migration (v0.7.12) ─────────────────────────
+  //
+  // Move the legacy single-file vault layout (~/.switchroom/vault.enc)
+  // to a parent-dir layout (~/.switchroom/vault/vault.enc + symlink at
+  // the legacy path). Single-file bind mount made atomic-rename
+  // impossible inside the broker container (#954), and that blocked
+  // op:put rotation (#952 dead-on-arrival). Parent-dir mount fixes
+  // both. State machine + flock + recovery message in
+  // `src/vault/migrate-layout.ts`.
+  //
+  // State E (divergence) is fatal: print recovery recipe + exit. If
+  // operator follows the recipe and re-runs, state becomes A/D and
+  // apply proceeds.
+  const vaultPathConfigured = config.vault?.path;
+  const customVaultPath = vaultPathConfigured
+    ? resolvePath(vaultPathConfigured)
+    : undefined;
+  const migrationResult = migrateVaultLayout(homedir(), {
+    customVaultPath,
+  });
+  switch (migrationResult.kind) {
+    case "no-vault":
+      // Fresh install. Nothing to do; broker will fall through to
+      // interactive unlock.
+      break;
+    case "already-migrated":
+      // Operator re-ran apply; layout already correct.
+      break;
+    case "completed-partial":
+      writeOut(chalk.green("✓ Completed partial vault layout migration\n"));
+      break;
+    case "migrated":
+      writeOut(chalk.green("✓ Migrated vault to ~/.switchroom/vault/vault.enc\n"));
+      writeOut(chalk.gray("  Legacy path is now a symlink for v0.7.10/.11 CLI compatibility (sunset in v0.7.14)\n"));
+      break;
+    case "custom-path-skipped":
+      writeOut(chalk.gray(
+        `Skipped vault layout migration: custom vault.path = ${migrationResult.path}\n`,
+      ));
+      break;
+    case "divergent":
+      writeErr(formatDivergentRecoveryMessage(migrationResult.details));
+      process.exit(4);
+  }
 
   // ── 3. Generate compose file ──────────────────────────────────────
   const composePath = options.outPath ?? DEFAULT_COMPOSE_PATH;

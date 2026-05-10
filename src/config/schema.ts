@@ -1353,8 +1353,15 @@ export const MemoryBackendConfigSchema = z.object({
 export const VaultConfigSchema = z.object({
   path: z
     .string()
-    .default("~/.switchroom/vault.enc")
-    .describe("Path to encrypted vault file"),
+    .default("~/.switchroom/vault/vault.enc")
+    .describe(
+      "Path to encrypted vault file. v0.7.12+ canonical default is " +
+      "`~/.switchroom/vault/vault.enc` (parent-dir bind-mount enables " +
+      "atomic-rename writes from the broker container). Older installs " +
+      "with `~/.switchroom/vault.enc` are auto-migrated on `switchroom " +
+      "apply`; the legacy path becomes a symlink for v0.7.10/.11 CLI " +
+      "compatibility (sunset in v0.7.14).",
+    ),
   broker: z
     .object({
       socket: z

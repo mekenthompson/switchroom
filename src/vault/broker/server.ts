@@ -300,8 +300,19 @@ export class VaultBroker {
   /**
    * Unlock the vault using the given passphrase.
    * Throws VaultError on bad passphrase or unreadable vault.
+   *
+   * Defends against state-E layout divergence (plan v3 §5 companion):
+   * if the broker's resolved vault path is a symlink target inside a
+   * dir that ALSO contains a sibling regular `vault.enc` with
+   * different content, the broker refuses to unlock with a fatal
+   * error pointing at `switchroom apply`. Catches the case where an
+   * older switchroom CLI wrote to the legacy path AFTER migration ran
+   * (rename-replaces-symlink), leaving broker and CLI writing to
+   * different files. Without this check the broker would happily
+   * serve stale data until the next `apply`.
    */
   unlockFromPassphrase(passphrase: string): void {
+    detectVaultLayoutDrift(this.vaultPath);
     const secrets = openVault(passphrase, this.vaultPath);
     this.secrets = secrets;
     // Retain the passphrase to enable op:put (agent-driven rotation).
@@ -1810,6 +1821,73 @@ export class VaultBroker {
       });
     } catch { /* non-fatal */ }
   }
+}
+
+// ─── Vault layout drift detection (plan v3 §5 companion) ────────────────────
+
+/**
+ * Defend against state-E layout divergence: an older switchroom CLI
+ * wrote to the legacy `~/.switchroom/vault.enc` path AFTER migration
+ * ran, replacing the symlink with a fresh regular file. Broker and
+ * CLI now write to different files; without this check the broker
+ * would serve stale data unbounded.
+ *
+ * Heuristic: if the resolved vault path's parent dir contains a
+ * sibling regular file at `<parent>/../vault.enc` (the legacy path),
+ * AND that file's content differs from what we're about to open,
+ * refuse to unlock with a clear error.
+ *
+ * Only triggers when the layout is the canonical
+ * `~/.switchroom/vault/vault.enc` form. Custom vault paths and
+ * pre-migration single-file paths skip the check.
+ *
+ * Throws `VaultError` on detected drift; caller's existing
+ * VaultError handling surfaces the message to logs / stderr.
+ */
+function detectVaultLayoutDrift(vaultPath: string): void {
+  const fs = require("node:fs") as typeof import("node:fs");
+  const path = require("node:path") as typeof import("node:path");
+  const crypto = require("node:crypto") as typeof import("node:crypto");
+
+  // Only meaningful when the resolved vault path is at the canonical
+  // dir-mount layout: <something>/vault/vault.enc. Inside the broker
+  // container that's typically /state/vault/vault.enc.
+  const dir = path.dirname(vaultPath);
+  if (path.basename(dir) !== "vault") return;
+  if (path.basename(vaultPath) !== "vault.enc") return;
+
+  // Look for a sibling at <parent-of-dir>/vault.enc — the legacy path.
+  const parent = path.dirname(dir);
+  const legacyPath = path.join(parent, "vault.enc");
+  if (!fs.existsSync(legacyPath)) return;
+  let legacyStat;
+  try { legacyStat = fs.lstatSync(legacyPath); } catch { return; }
+  // Symlink: probably ours, points back at vault/vault.enc — fine.
+  if (legacyStat.isSymbolicLink()) return;
+  if (!legacyStat.isFile()) return;
+
+  // Both exist as regular files. Compare hashes.
+  let canonicalHash: string;
+  let legacyHash: string;
+  try {
+    canonicalHash = crypto.createHash("sha256").update(fs.readFileSync(vaultPath)).digest("hex");
+    legacyHash = crypto.createHash("sha256").update(fs.readFileSync(legacyPath)).digest("hex");
+  } catch {
+    // Read failure on either file — don't block boot on a
+    // detection-helper hiccup. Worst case: we serve data the broker
+    // already had access to.
+    return;
+  }
+  if (canonicalHash === legacyHash) return; // State C — equivalent, fine
+
+  // State E — drift. Refuse to unlock.
+  throw new Error(
+    `Vault layout divergence detected: ${legacyPath} and ${vaultPath} ` +
+    `are both regular files with different content. An older switchroom ` +
+    `CLI may have written to the legacy path after migration ran. ` +
+    `Run \`switchroom apply\` from the host to surface the recovery recipe ` +
+    `(state E refusal with literal \`mv\` commands).`,
+  );
 }
 
 // ─── Top-level graceful shutdown ─────────────────────────────────────────────

@@ -1,5 +1,138 @@
 # Changelog
 
+## v0.7.12 — vault layout: dir-mount + atomic-rename + flock (closes #951, #952, #954)
+
+v0.7.11 introduced broker-mediated vault writes (`op:put`) so OAuth-shaped
+skills could rotate their refresh tokens without the operator passphrase.
+The feature was correct; the **deployment was DOA** because of how the
+broker container bind-mounted the vault.
+
+### What was wrong (per #954 RCA)
+
+The broker container had `~/.switchroom/vault.enc` bind-mounted as a
+**single-file mount** at `/state/vault.enc`. Two problems stacked:
+
+1. **`:ro` flag** prevented writes outright.
+2. **Single-file bind-mount = different filesystem device** than the
+   parent dir inside the container (`stat`: `device=66306` for the
+   bind-mount target, `device=4194306` for `/state/`).
+   `atomicWriteFileSync` writes a sibling temp file in the parent dir
+   and `rename()` to the destination. Cross-fs rename is `EXDEV`;
+   Linux surfaces it as `EBUSY` for an in-use bind-mount target.
+
+Surface symptom: clerk's calendar skill failing every refresh with
+`VAULT-BROKER-DENIED [INTERNAL]: Failed to persist: EBUSY: resource
+busy or locked, rename '/state/.vault.enc.7.<ms>.tmp' -> '/state/vault.enc'`.
+The bug was structural, not transient — broker did NOT auto-recover;
+every retry produced the same EBUSY because the mount layout was the
+same. (#954 listed three suspects — process holding fd, fs-lock, sd_notify
+— all wrong; the actual cause is the cross-fs rename.)
+
+### Fix — vault parent directory bind-mounted RW
+
+The compose generator now mounts `~/.switchroom/vault/` (parent dir,
+RW) at `/state/vault/` instead of mounting `vault.enc` directly.
+`saveVault`'s write-temp-then-rename works because temp + dest are on
+the same filesystem.
+
+### Layout migration
+
+Existing operators have `~/.switchroom/vault.enc` as a regular file.
+`switchroom apply` runs a state-machine migration helper before
+compose generation:
+
+| State | Old path | New path | hashes equal? | Action |
+|---|---|---|---|---|
+| **A: virgin** | absent | absent | — | no-op |
+| **B: pre-migration** | regular file | absent | — | migrate |
+| **C: partial-finished** | regular file | regular file | yes | finish symlink |
+| **D: post-migration** | symlink → vault/vault.enc | regular file | — | no-op |
+| **E: divergent** | regular file | regular file | no | REFUSE; print recovery |
+
+State E catches the case where an older switchroom CLI wrote to the
+legacy path AFTER migration ran (Linux `rename()` does not follow a
+symlink at the destination — it REPLACES the symlink with the new
+regular file). The recovery message names exact `mv` commands for
+operator-side resolution.
+
+The migration helper acquires the same flock saveVault uses, before
+hashing both paths — defeats the broker-writes-between-hashes TOCTOU.
+
+After migration, `~/.switchroom/vault.enc` is a symlink to
+`vault/vault.enc`. v0.7.10 and v0.7.11 CLIs reading through the
+symlink keep working. The symlink is **sunset in v0.7.14**.
+
+### Concurrent writes — flock in saveVault
+
+Post-#952 (op:put), broker AND host CLI both write the vault file.
+`saveVault` now acquires an exclusive lock via `proper-lockfile` with
+a 5s retry budget. Migration helper acquires the same lock during
+hash-compare so a concurrent broker write doesn't perturb the state
+detection.
+
+### Broker-side state-E detection
+
+If `switchroom apply` isn't run (e.g. an older CLI just wrote to the
+legacy path), broker startup ALSO checks for the divergent state and
+refuses to unlock — producing a fatal error pointing at `switchroom
+apply`. Drift is caught either at next apply OR at next broker
+restart, whichever comes first.
+
+### Symlink sunset schedule
+
+| Version | Behavior |
+|---|---|
+| **v0.7.12** | Migration runs; symlink created at old path |
+| **v0.7.13** | Migration runs (idempotent); CLI emits warning if writes resolve through the symlink |
+| **v0.7.14** | Migration runs (full state machine **plus** cleanup pass); after migration, symlink is removed |
+
+**Critical:** Every v0.7.x release ≥ v0.7.12 runs the full migration
+state machine on apply. An operator who pins `switchroom@^0.7` and
+skips .12 and .13 → lands on .14 → still gets the full migration
+(plus cleanup), not cleanup-only.
+
+### Operator action required: none
+
+The migration runs automatically on the next `switchroom update` /
+`switchroom apply`. State A (virgin install) and state D
+(already-migrated) are no-ops. State B/C are auto-resolved. State E
+is fatal and prints a recovery recipe — one short manual `mv` + `rm`
+sequence the operator runs to pick which file to keep.
+
+### Backup tooling note
+
+Backup tools that don't follow symlinks (rsync default, restic, tar
+default) will start backing up the symlink at `~/.switchroom/vault.enc`
+instead of the file content. Either update your backup path to
+`~/.switchroom/vault/vault.enc`, or pass `--copy-links` / `-L`.
+
+### Threat-model trade-off
+
+#952 added passphrase retention in broker memory. v0.7.12 adds vault
+file write capability inside the broker container. A pwned broker
+that previously could exfiltrate decrypted secrets can now ALSO
+persist correctly-encrypted poison content. Mitigations: audit log
+every `op:put` (already in #952; ship logs off-broker as a follow-up);
+vault-writer sidecar pattern (Option C in plan v3) deferred until CIS
+hardening or write-grants are needed.
+
+### Closes
+
+- **#951** asks 1 + 3 (write-capable broker path + auto-refresh-on-stale)
+- **#952** end-to-end deployment (was DOA pre-this-release)
+- **#954** EBUSY-loop RCA (root cause: cross-fs single-file bind-mount)
+
+### Test plan
+
+- 5270 vitest pass + 6 new flock concurrency tests + 5 new broker-side
+  drift detection tests + 16 migration-helper state-machine tests.
+- Compose-gen test pins the new mount shape (RW dir-mount, no legacy
+  single-file).
+- Manual end-to-end smoke deferred until post-deploy: clerk runs
+  ms_graph_token.py → token rotates → broker put persists → next read
+  returns the fresh token → calendar event creation against MS Graph
+  succeeds.
+
 ## v0.7.11 — broker `op:put` for agent-driven vault rotation (closes the OAuth refresh-token loop)
 
 This release makes OAuth-shaped skills self-healing. Until now, agents

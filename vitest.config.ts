@@ -56,6 +56,9 @@ export default defineConfig({
       "**/src/vault/broker/client-token.test.ts",
       "**/src/vault/broker/server-unlock.test.ts",
       "**/src/vault/broker/auto-unlock.test.ts",
+      // drift-detection imports server.ts which uses bun:sqlite for the
+      // grants DB. Run via test:bun.
+      "**/src/vault/broker/drift-detection.test.ts",
       // `.claude/worktrees/<slug>/` are checkout copies created by sub-agent
       // sessions. Their tests duplicate the canonical ones and run against
       // stale code — never discover them from the canonical repo.

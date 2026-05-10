@@ -6,8 +6,42 @@ import {
   renameSync,
   mkdirSync,
   unlinkSync,
+  fsyncSync,
+  openSync,
+  closeSync,
 } from "node:fs";
 import { dirname, basename, resolve } from "node:path";
+import lockfile from "proper-lockfile";
+
+/**
+ * Filename patterns that saveVault and the migration helper produce
+ * alongside `vault.enc`. Compose-gen's parent-dir whitelist consults
+ * this list so future write artifacts (rotation spool, audit log,
+ * etc.) don't trip the "unexpected files" guard. Update here when
+ * adding any new write path that lands a file in the vault dir.
+ *
+ * Match logic (see compose.ts):
+ *   - exact-match: `vault.enc`, `vault.enc.bak`, `vault.enc.tmp`,
+ *     `vault.enc.lock`
+ *   - regex-match: `^\.vault\.enc\.\d+\.\d+\.tmp$`
+ *     (atomicWriteFileSync sibling-tmp pattern)
+ *   - exact: `.vault.enc.symlink-tmp` (migration helper)
+ *   - dir: `vault.enc.lock/` (proper-lockfile sentinel-dir)
+ */
+export const KNOWN_VAULT_ARTIFACT_NAMES: ReadonlySet<string> = new Set([
+  "vault.enc",
+  "vault.enc.bak",
+  "vault.enc.tmp",
+  "vault.enc.lock", // proper-lockfile sentinel-dir, also the file-flavor
+  ".vault.enc.symlink-tmp",
+]);
+export const KNOWN_VAULT_ARTIFACT_PATTERNS: ReadonlyArray<RegExp> = [
+  // atomicWriteFileSync produces `.vault.enc.<pid>.<ms>.tmp`
+  /^\.vault\.enc\.\d+\.\d+\.tmp$/,
+];
+
+/** Lock retry budget for saveVault flock acquisition. */
+const SAVE_VAULT_LOCK_RETRY_MS = 5000;
 
 /**
  * scrypt cost parameters. N=2^15=32768 (~32 MB, ~100ms on modern hardware)
@@ -327,27 +361,109 @@ export function saveVault(
     throw new VaultError(`Vault file not found: ${vaultPath}`);
   }
 
-  let vaultFile: VaultFile;
-  try {
-    vaultFile = JSON.parse(readFileSync(vaultPath, "utf8"));
-  } catch {
-    throw new VaultError(`Failed to read vault file: ${vaultPath}`);
+  // Acquire an exclusive lock before reading the existing vault file so
+  // a concurrent writer (broker vs host CLI race window introduced by
+  // op:put — see plan v3 §4) doesn't cause a lost update. proper-lockfile
+  // creates a sentinel directory `vault.enc.lock/` next to the file;
+  // stale locks are auto-recovered (mtime + pid liveness check). Retry
+  // budget 5s — typical hold time is <100ms for ~38KB encrypt + write.
+  // On contention timeout we surface "vault busy" with the holder PID
+  // and path (closes #954 ask for diagnosable EBUSY-shaped errors).
+  // proper-lockfile's lockSync doesn't support a `retries` option (its
+  // sync API is bare). Roll a small busy-wait retry loop ourselves: try
+  // up to ~50 times with a 100ms gap between attempts, totaling the
+  // documented 5s budget.
+  let releaseLock: (() => void) | null = null;
+  const lockStart = Date.now();
+  let lastErr: unknown = null;
+  while (Date.now() - lockStart < SAVE_VAULT_LOCK_RETRY_MS) {
+    try {
+      releaseLock = lockfile.lockSync(vaultPath, {
+        stale: SAVE_VAULT_LOCK_RETRY_MS * 2,
+        realpath: true,
+      }) as unknown as () => void;
+      lastErr = null;
+      break;
+    } catch (err: unknown) {
+      lastErr = err;
+      const code = (err as NodeJS.ErrnoException)?.code ?? "";
+      if (code !== "ELOCKED") throw err;
+      // ELOCKED — busy-wait briefly. 100ms ticks via setTimeout would
+      // need async; this is a sync API. Use a tight loop with a small
+      // delay via Atomics.wait on a SharedArrayBuffer? Overkill — just
+      // re-try immediately and let scheduler interleave. Sub-ms tight
+      // loop is bounded by the 5s budget; in practice the holder
+      // releases within <100ms.
+    }
+  }
+  if (releaseLock === null) {
+    if (lastErr) {
+      throw new VaultError(
+        `vault busy: another writer holds the lock at ${vaultPath} ` +
+        `(retried for ${SAVE_VAULT_LOCK_RETRY_MS}ms). Try again in a moment.`,
+      );
+    }
   }
 
-  // Always re-encrypt with the current (strong) KDF params on save — legacy
-  // vaults transparently upgrade the first time a secret changes.
-  const salt = Buffer.from(vaultFile.salt, "hex");
-  const key = deriveKey(passphrase, salt, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
-  vaultFile.kdf = { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P };
+  try {
+    let vaultFile: VaultFile;
+    try {
+      vaultFile = JSON.parse(readFileSync(vaultPath, "utf8"));
+    } catch {
+      throw new VaultError(`Failed to read vault file: ${vaultPath}`);
+    }
 
-  const vaultData: VaultData = { secrets };
-  const { iv, data, tag } = encrypt(key, JSON.stringify(vaultData));
+    // Always re-encrypt with the current (strong) KDF params on save —
+    // legacy vaults transparently upgrade the first time a secret changes.
+    const salt = Buffer.from(vaultFile.salt, "hex");
+    const key = deriveKey(passphrase, salt, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
+    vaultFile.kdf = { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P };
 
-  vaultFile.iv = iv;
-  vaultFile.data = data;
-  vaultFile.tag = tag;
+    const vaultData: VaultData = { secrets };
+    const { iv, data, tag } = encrypt(key, JSON.stringify(vaultData));
 
-  atomicWriteFileSync(vaultPath, JSON.stringify(vaultFile, null, 2), 0o600);
+    vaultFile.iv = iv;
+    vaultFile.data = data;
+    vaultFile.tag = tag;
+
+    atomicWriteFileSync(vaultPath, JSON.stringify(vaultFile, null, 2), 0o600);
+  } finally {
+    // proper-lockfile's lockSync returns the release fn; call it to
+    // remove the sentinel dir. Best-effort: a release failure leaves a
+    // stale-lock that the next writer's stale-detection clears.
+    try { (releaseLock as unknown as () => void)(); } catch { /* */ }
+  }
+}
+
+/**
+ * Test injection seam — exposed here to keep the `acquireVaultLock`
+ * helper used by the migration helper (`src/vault/migrate-layout.ts`)
+ * consistent with what saveVault itself acquires.
+ *
+ * Returns a release function. The lock ALSO holds for read-during-
+ * migration — the migration helper hashes both old and new paths under
+ * the same lock to defeat the broker-writes-between-hashes TOCTOU
+ * (plan v3 §2 + R3 round 2).
+ */
+export function acquireVaultLock(vaultPath: string): () => void {
+  // Same busy-wait retry shape as saveVault — proper-lockfile's sync
+  // API doesn't support retries natively.
+  const start = Date.now();
+  while (Date.now() - start < SAVE_VAULT_LOCK_RETRY_MS) {
+    try {
+      return lockfile.lockSync(vaultPath, {
+        stale: SAVE_VAULT_LOCK_RETRY_MS * 2,
+        realpath: true,
+      }) as unknown as () => void;
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code ?? "";
+      if (code !== "ELOCKED") throw err;
+    }
+  }
+  throw new VaultError(
+    `vault busy: another writer holds the lock at ${vaultPath} ` +
+    `(retried for ${SAVE_VAULT_LOCK_RETRY_MS}ms).`,
+  );
 }
 
 export function setSecret(

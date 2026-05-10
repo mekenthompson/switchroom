@@ -488,7 +488,19 @@ export async function runApply(
   // KNOWN_VAULT_ARTIFACT_NAMES + KNOWN_VAULT_ARTIFACT_PATTERNS in
   // src/vault/vault.ts so future write artifacts are picked up
   // without editing two places.
-  const vaultDir = customVaultPath
+  //
+  // Path derivation: the dir we're about to BIND-MOUNT is always the
+  // POST-MIGRATION canonical parent (`~/.switchroom/vault/`) for
+  // default-config operators. Custom-path operators (where migration
+  // was skipped) use `dirname(customVaultPath)`. Pre-fix this used
+  // `dirname(customVaultPath)` unconditionally, which for the legacy
+  // configured path `~/.switchroom/vault.enc` resolved to
+  // `~/.switchroom/` (parent of the legacy file, not the new mount
+  // target). Caught when self-deploying v0.7.12 against the operator's
+  // own ~/.switchroom which has many sibling dirs (approvals/, logs/,
+  // etc.) that legitimately don't belong in the vault dir.
+  const isCustomPath = migrationResult.kind === "custom-path-skipped";
+  const vaultDir = isCustomPath && customVaultPath
     ? dirname(customVaultPath)
     : join(homedir(), ".switchroom", "vault");
   if (existsSync(vaultDir)) {

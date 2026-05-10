@@ -349,12 +349,24 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   //    boots, hits "Permission denied" on `/state/vault-auto-unlock`,
   //    logs `auto-unlock decrypt failed (io)`, and falls back to
   //    interactive unlock — i.e. auto-unlock is silently broken under
-  //    docker. Read-only is enough; we don't need DAC_OVERRIDE which
-  //    would also bypass write checks.
+  //    docker.
+  //  - DAC_OVERRIDE: bypass DAC checks for WRITE access to the vault
+  //    dir (post-v0.7.12 op:put rotation). Without it, broker can
+  //    READ the operator-owned vault dir (DAC_READ_SEARCH) but
+  //    rejects mkdir/write into it because the host dir is mode 0700
+  //    owned by the operator UID and the broker's container-root UID
+  //    isn't recognized as the owner. Caught when self-deploying
+  //    v0.7.12 against the operator's fleet: ms_graph_token.py
+  //    succeeded reading the token but EACCES'd on writing the
+  //    rotated value via `op:put`. The cap is consistent with the
+  //    broker's existing trust posture (it already holds the
+  //    passphrase + decrypted secrets in memory; allowing write is
+  //    not an expansion of access, just of operations).
   lines.push(`    cap_add:`);
   lines.push(`      - "CHOWN"`);
   lines.push(`      - "FOWNER"`);
   lines.push(`      - "DAC_READ_SEARCH"`);
+  lines.push(`      - "DAC_OVERRIDE"`);
   lines.push(`    environment:`);
   if (switchroomConfigPath) {
     lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);

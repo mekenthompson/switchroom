@@ -31,7 +31,8 @@ import { dirname, resolve, join, basename } from "node:path";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SwitchroomConfig } from "../../config/schema.js";
-import { openVault, saveVault, type VaultEntry } from "../vault.js";
+import { openVault, saveVault, VaultError, type VaultEntry } from "../vault.js";
+import { inspectVaultLayout } from "../migrate-layout.js";
 import { resolvePath } from "../../config/loader.js";
 import {
   AutoUnlockDecryptError,
@@ -1832,62 +1833,45 @@ export class VaultBroker {
  * CLI now write to different files; without this check the broker
  * would serve stale data unbounded.
  *
- * Heuristic: if the resolved vault path's parent dir contains a
- * sibling regular file at `<parent>/../vault.enc` (the legacy path),
- * AND that file's content differs from what we're about to open,
- * refuse to unlock with a clear error.
+ * Reuses the canonical state machine in `migrate-layout.ts` rather
+ * than re-implementing the hash-comparison logic. The check only
+ * triggers when:
+ *   - The resolved vault path is the canonical
+ *     `<home>/.switchroom/vault/vault.enc` shape.
+ *   - The state machine reports `divergent` (state E).
  *
- * Only triggers when the layout is the canonical
- * `~/.switchroom/vault/vault.enc` form. Custom vault paths and
- * pre-migration single-file paths skip the check.
- *
- * Throws `VaultError` on detected drift; caller's existing
- * VaultError handling surfaces the message to logs / stderr.
+ * Throws `VaultError` on detected drift — caller's existing VaultError
+ * handling surfaces the message to logs / stderr (broker process
+ * exits non-zero from the unlock failure, surfacing to the
+ * compose `restart: unless-stopped` loop + healthcheck).
  */
 function detectVaultLayoutDrift(vaultPath: string): void {
-  const fs = require("node:fs") as typeof import("node:fs");
-  const path = require("node:path") as typeof import("node:path");
-  const crypto = require("node:crypto") as typeof import("node:crypto");
+  // Only meaningful when the layout is the canonical
+  // `<home>/.switchroom/vault/vault.enc` shape. Custom paths and
+  // pre-migration single-file paths skip the check.
+  const dir = dirname(vaultPath);
+  if (basename(dir) !== "vault") return;
+  if (basename(vaultPath) !== "vault.enc") return;
+  // Re-derive the home from the path: vault/vault.enc lives at
+  // <home>/.switchroom/vault/vault.enc.
+  const switchroomDir = dirname(dir);
+  if (basename(switchroomDir) !== ".switchroom") return;
+  const home = dirname(switchroomDir);
 
-  // Only meaningful when the resolved vault path is at the canonical
-  // dir-mount layout: <something>/vault/vault.enc. Inside the broker
-  // container that's typically /state/vault/vault.enc.
-  const dir = path.dirname(vaultPath);
-  if (path.basename(dir) !== "vault") return;
-  if (path.basename(vaultPath) !== "vault.enc") return;
-
-  // Look for a sibling at <parent-of-dir>/vault.enc — the legacy path.
-  const parent = path.dirname(dir);
-  const legacyPath = path.join(parent, "vault.enc");
-  if (!fs.existsSync(legacyPath)) return;
-  let legacyStat;
-  try { legacyStat = fs.lstatSync(legacyPath); } catch { return; }
-  // Symlink: probably ours, points back at vault/vault.enc — fine.
-  if (legacyStat.isSymbolicLink()) return;
-  if (!legacyStat.isFile()) return;
-
-  // Both exist as regular files. Compare hashes.
-  let canonicalHash: string;
-  let legacyHash: string;
-  try {
-    canonicalHash = crypto.createHash("sha256").update(fs.readFileSync(vaultPath)).digest("hex");
-    legacyHash = crypto.createHash("sha256").update(fs.readFileSync(legacyPath)).digest("hex");
-  } catch {
-    // Read failure on either file — don't block boot on a
-    // detection-helper hiccup. Worst case: we serve data the broker
-    // already had access to.
-    return;
+  const result = inspectVaultLayout(home);
+  if (result.kind === "divergent") {
+    throw new VaultError(
+      `Vault layout divergence detected at boot: ` +
+      `${result.details.oldPath} and ${result.details.newPath} ` +
+      `are both regular files with different content. An older switchroom ` +
+      `CLI may have written to the legacy path after migration ran. ` +
+      `Run \`switchroom apply\` from the host to surface the recovery recipe ` +
+      `(state E refusal with literal \`mv\` commands). ` +
+      `See docs/operators/state-e-recovery.md.`,
+    );
   }
-  if (canonicalHash === legacyHash) return; // State C — equivalent, fine
-
-  // State E — drift. Refuse to unlock.
-  throw new Error(
-    `Vault layout divergence detected: ${legacyPath} and ${vaultPath} ` +
-    `are both regular files with different content. An older switchroom ` +
-    `CLI may have written to the legacy path after migration ran. ` +
-    `Run \`switchroom apply\` from the host to surface the recovery recipe ` +
-    `(state E refusal with literal \`mv\` commands).`,
-  );
+  // States A / B / C / D / migrated / custom-path-skipped — all fine
+  // for the broker's read path.
 }
 
 // ─── Top-level graceful shutdown ─────────────────────────────────────────────

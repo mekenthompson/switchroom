@@ -370,12 +370,15 @@ export function saveVault(
   // On contention timeout we surface "vault busy" with the holder PID
   // and path (closes #954 ask for diagnosable EBUSY-shaped errors).
   // proper-lockfile's lockSync doesn't support a `retries` option (its
-  // sync API is bare). Roll a small busy-wait retry loop ourselves: try
-  // up to ~50 times with a 100ms gap between attempts, totaling the
-  // documented 5s budget.
+  // sync API is bare). Roll a small retry loop ourselves: try up to
+  // ~50 times with a ~100ms gap between attempts, totaling the
+  // documented 5s budget. Use Atomics.wait on a SharedArrayBuffer to
+  // sleep — keeps the loop sync-safe (no setTimeout, which would need
+  // async) without burning CPU.
   let releaseLock: (() => void) | null = null;
   const lockStart = Date.now();
   let lastErr: unknown = null;
+  const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
   while (Date.now() - lockStart < SAVE_VAULT_LOCK_RETRY_MS) {
     try {
       releaseLock = lockfile.lockSync(vaultPath, {
@@ -388,12 +391,10 @@ export function saveVault(
       lastErr = err;
       const code = (err as NodeJS.ErrnoException)?.code ?? "";
       if (code !== "ELOCKED") throw err;
-      // ELOCKED — busy-wait briefly. 100ms ticks via setTimeout would
-      // need async; this is a sync API. Use a tight loop with a small
-      // delay via Atomics.wait on a SharedArrayBuffer? Overkill — just
-      // re-try immediately and let scheduler interleave. Sub-ms tight
-      // loop is bounded by the 5s budget; in practice the holder
-      // releases within <100ms.
+      // 100ms sleep between retries — Atomics.wait blocks without
+      // burning CPU. Bounded by the 5s outer budget. In practice the
+      // contended writer releases in <100ms (small encrypt + write).
+      Atomics.wait(sleepBuf, 0, 0, 100);
     }
   }
   if (releaseLock === null) {
@@ -446,9 +447,10 @@ export function saveVault(
  * (plan v3 §2 + R3 round 2).
  */
 export function acquireVaultLock(vaultPath: string): () => void {
-  // Same busy-wait retry shape as saveVault — proper-lockfile's sync
-  // API doesn't support retries natively.
+  // Same retry shape as saveVault — proper-lockfile's sync API
+  // doesn't support retries natively. Atomics.wait between attempts.
   const start = Date.now();
+  const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
   while (Date.now() - start < SAVE_VAULT_LOCK_RETRY_MS) {
     try {
       return lockfile.lockSync(vaultPath, {
@@ -458,6 +460,7 @@ export function acquireVaultLock(vaultPath: string): () => void {
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException)?.code ?? "";
       if (code !== "ELOCKED") throw err;
+      Atomics.wait(sleepBuf, 0, 0, 100);
     }
   }
   throw new VaultError(

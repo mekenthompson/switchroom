@@ -49,7 +49,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { acquireVaultLock } from "./vault.js";
 
 export type MigrationResult =
@@ -291,7 +291,7 @@ function sha256File(path: string): string {
  * before creating fresh).
  */
 function atomicReplaceWithSymlink(target: string, linkTarget: string): void {
-  const tmp = join(dirname(target), `.${require("path").basename(target)}.symlink-tmp`);
+  const tmp = join(dirname(target), `.${basename(target)}.symlink-tmp`);
   if (existsSync(tmp)) {
     try { unlinkSync(tmp); } catch { /* */ }
   }

@@ -17,7 +17,7 @@
  */
 import { Option, type Command } from "commander";
 import chalk from "chalk";
-import { accessSync, constants as fsConstants, copyFileSync, existsSync, writeFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, copyFileSync, existsSync, readdirSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { spawnSync as childSpawnSync } from "node:child_process";
 import readline from "node:readline";
@@ -40,8 +40,14 @@ import { execFileSync } from "node:child_process";
 import { isVaultReference } from "../vault/resolver.js";
 import {
   migrateVaultLayout,
+  inspectVaultLayout,
   formatDivergentRecoveryMessage,
+  type MigrationResult,
 } from "../vault/migrate-layout.js";
+import {
+  KNOWN_VAULT_ARTIFACT_NAMES,
+  KNOWN_VAULT_ARTIFACT_PATTERNS,
+} from "../vault/vault.js";
 import { resolvePath } from "../config/loader.js";
 import {
   loadConfig,
@@ -445,6 +451,67 @@ export async function runApply(
     case "divergent":
       writeErr(formatDivergentRecoveryMessage(migrationResult.details));
       process.exit(4);
+  }
+
+  // ── 2d. Post-migration verification (plan v3 §6 invariant) ───────
+  //
+  // Re-inspect disk state — must report A (fresh install with no
+  // vault yet), D (post-migration), or custom-path-skipped before
+  // compose-gen runs. Any other state means the migration step
+  // didn't converge to a state the broker can serve, which would
+  // produce a confusing failure later. Guard with a clear error
+  // surfacing what state we landed in.
+  const postMigrationInspect = inspectVaultLayout(homedir());
+  const acceptable: Array<MigrationResult["kind"]> = [
+    "no-vault",
+    "already-migrated",
+    "custom-path-skipped",
+    "migrated",          // dry-run inspect of state-B reports "migrated" too
+    "completed-partial", // dry-run inspect of state-C reports the same
+  ];
+  if (!acceptable.includes(postMigrationInspect.kind)) {
+    writeErr(chalk.red(
+      `Post-migration verification failed: state is ${postMigrationInspect.kind}\n` +
+      `Expected one of: ${acceptable.join(", ")}\n` +
+      `This is a switchroom bug — please file an issue with the apply log.\n`,
+    ));
+    process.exit(5);
+  }
+
+  // ── 2e. Vault dir contents guard (plan v3 §3 + R3 round 2) ─────
+  //
+  // Refuse to bind-mount the vault parent dir if it contains files
+  // outside saveVault's known-artifacts list. Prevents docker from
+  // bind-mounting unexpected operator content into the broker
+  // container (e.g. an editor's swap file, a misplaced backup) AND
+  // surfaces operator-side oddities loudly. Whitelist sourced from
+  // KNOWN_VAULT_ARTIFACT_NAMES + KNOWN_VAULT_ARTIFACT_PATTERNS in
+  // src/vault/vault.ts so future write artifacts are picked up
+  // without editing two places.
+  const vaultDir = customVaultPath
+    ? dirname(customVaultPath)
+    : join(homedir(), ".switchroom", "vault");
+  if (existsSync(vaultDir)) {
+    const entries = readdirSync(vaultDir);
+    const unknown: string[] = [];
+    for (const name of entries) {
+      if (KNOWN_VAULT_ARTIFACT_NAMES.has(name)) continue;
+      if (KNOWN_VAULT_ARTIFACT_PATTERNS.some((re) => re.test(name))) continue;
+      unknown.push(name);
+    }
+    if (unknown.length > 0) {
+      writeErr(chalk.red(
+        `Vault directory ${vaultDir} contains unexpected files:\n` +
+        unknown.map((n) => `  - ${n}\n`).join("") +
+        `Refusing to bind-mount: a docker bind-mount source is the\n` +
+        `entire directory, so unexpected files would be visible inside\n` +
+        `the broker container. Move them out, then re-run apply.\n` +
+        `Known artifacts: vault.enc, vault.enc.bak, vault.enc.tmp,\n` +
+        `vault.enc.lock (sentinel-dir from saveVault flock), and\n` +
+        `.vault.enc.<pid>.<ms>.tmp (atomicWriteFileSync sibling-tmp).\n`,
+      ));
+      process.exit(6);
+    }
   }
 
   // ── 3. Generate compose file ──────────────────────────────────────

@@ -5,6 +5,31 @@ secrets used by agents and scheduled cron tasks.  This guide covers the
 architecture, how to declare and scope secrets, Telegram commands for runtime
 management, the audit log, and the threat model.
 
+> ## v0.7.12 layout change
+>
+> As of **v0.7.12**, the canonical vault path is
+> `~/.switchroom/vault/vault.enc` (parent-dir bind-mount enables
+> atomic-rename writes from the broker container — closes #954).
+> Legacy `~/.switchroom/vault.enc` becomes a symlink during the
+> auto-migration on `switchroom apply`. **Operator action: none.**
+>
+> **Backup tooling:** if you back up `~/.switchroom/vault.enc` with
+> rsync / restic / tar in their default modes, they'll start backing
+> up the symlink instead of the file content. Either:
+>
+> - Update your backup path to `~/.switchroom/vault/vault.enc`, or
+> - Pass `--copy-links` (rsync) / `-L` (tar) / equivalent.
+>
+> **Symlink sunset:** v0.7.12 creates / v0.7.13 warns / v0.7.14
+> removes. Update backup tooling before v0.7.14 to avoid silent
+> drops.
+>
+> **Recovery from divergence:**
+> [`docs/operators/state-e-recovery.md`](operators/state-e-recovery.md)
+>
+> **Rollback to v0.7.11:**
+> [`docs/operators/rollback-v0.7.12.md`](operators/rollback-v0.7.12.md)
+
 ---
 
 ## Architecture

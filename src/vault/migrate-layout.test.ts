@@ -256,5 +256,67 @@ describe("migrateVaultLayout", () => {
       const msg = formatDivergentRecoveryMessage(sampleDetails);
       expect(msg).toContain(".divergent.bak file is your safety net");
     });
+
+    it("matches the byte-for-byte fixture (round-3 reviewer pin)", () => {
+      // Pin the EXACT message text. Future doc-polish PRs touching
+      // formatDivergentRecoveryMessage need to update this fixture
+      // simultaneously, AND keep docs/operators/state-e-recovery.md
+      // in sync. Small inconvenience; high payoff for catching
+      // accidental copy-paste regressions in the operator-facing
+      // recovery recipe.
+      const msg = formatDivergentRecoveryMessage(sampleDetails);
+      const expected =
+        `✗ Vault layout divergence detected — refusing to proceed.\n` +
+        `\n` +
+        `Two distinct vault files exist:\n` +
+        `\n` +
+        `  /home/op/.switchroom/vault.enc\n` +
+        `    sha256: 0123456789abcdef...\n` +
+        `    mtime:  2026-05-10T11:00:00.000Z\n` +
+        `    size:   12345\n` +
+        `\n` +
+        `  /home/op/.switchroom/vault/vault.enc\n` +
+        `    sha256: fedcba9876543210...\n` +
+        `    mtime:  2026-05-11T12:00:00.000Z\n` +
+        `    size:   12378\n` +
+        `\n` +
+        `This usually means an old version of the switchroom CLI wrote to the\n` +
+        `legacy path AFTER migration ran, replacing the symlink with a fresh\n` +
+        `regular file. The broker has been writing to the new path; the legacy\n` +
+        `path now has stale or independent state.\n` +
+        `\n` +
+        `Pick one to keep:\n` +
+        `\n` +
+        `  a) Keep the NEW path (recommended if broker writes are the source\n` +
+        `     of truth — e.g. you've been using vault from inside agent\n` +
+        `     containers since the migration):\n` +
+        `\n` +
+        `       cp /home/op/.switchroom/vault.enc /home/op/.switchroom/vault.enc.divergent.bak\n` +
+        `       rm /home/op/.switchroom/vault.enc\n` +
+        `       ln -s vault/vault.enc /home/op/.switchroom/vault.enc\n` +
+        `       switchroom apply\n` +
+        `\n` +
+        `  b) Keep the OLD path (recommended if you wrote to the legacy path\n` +
+        `     deliberately and want to discard broker-side rotations):\n` +
+        `\n` +
+        `       cp /home/op/.switchroom/vault/vault.enc /home/op/.switchroom/vault/vault.enc.divergent.bak\n` +
+        `       cp /home/op/.switchroom/vault.enc /home/op/.switchroom/vault/vault.enc\n` +
+        `       rm /home/op/.switchroom/vault.enc\n` +
+        `       ln -s vault/vault.enc /home/op/.switchroom/vault.enc\n` +
+        `       switchroom apply\n` +
+        `\n` +
+        `  c) If unsure, decrypt both and diff (you'll be prompted for the\n` +
+        `     vault passphrase twice):\n` +
+        `\n` +
+        `       switchroom vault list --no-broker --vault-path \\\n` +
+        `         /home/op/.switchroom/vault.enc | sort > /tmp/legacy-keys.txt\n` +
+        `       switchroom vault list --no-broker --vault-path \\\n` +
+        `         /home/op/.switchroom/vault/vault.enc | sort > /tmp/new-keys.txt\n` +
+        `       diff /tmp/legacy-keys.txt /tmp/new-keys.txt\n` +
+        `\n` +
+        `In every case, the .divergent.bak file is your safety net. Verify\n` +
+        `your fleet works after \`switchroom apply\`, then delete it.\n`;
+      expect(msg).toBe(expected);
+    });
   });
 });

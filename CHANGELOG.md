@@ -1,5 +1,47 @@
 # Changelog
 
+## v0.7.9 — broker socket env: canonical name + agent-perspective path
+
+Single-fix patch release for a regression discovered during the
+v0.7.8 deploy. The compose generator was emitting two stacked bugs
+in how the broker / kernel socket paths plumbed into agent
+containers, and an operator-side `VAULT-BROKER-DENIED: broker not
+running` error was the surface symptom even when the broker
+container was up, healthy, and listening.
+
+**Bug 1 — broker env var name drift (#947).** Compose emitted
+`SWITCHROOM_BROKER_SOCKET` into agent containers, but the broker
+*client* (`src/vault/broker/client.ts:293`) and the secret-guard
+hook (`telegram-plugin/hooks/secret-guard-pretool.mjs:36`) both
+read `SWITCHROOM_VAULT_BROKER_SOCK`. The set name was the broker
+*server*'s bind-path env (which is set inside the broker container,
+where the daemon needs it). Clients in agent containers silently
+fell through to the legacy `~/.switchroom/vault-broker.sock`
+fallback — a dangling symlink inside the container — and reported
+"broker not running" even when the broker was fine. Kernel side
+was already correct.
+
+**Bug 2 — wrong path value, both broker and kernel (#947).** Compose
+emitted `/run/switchroom/broker/<name>/sock` and `/run/switchroom/
+kernel/<name>/sock`, the per-agent subdir as seen by the broker /
+kernel containers. But the agent mounts the per-agent volume at
+`/run/switchroom/broker` and `/run/switchroom/kernel` directly
+(one level shallower than the broker / kernel see it), so inside
+the agent the actual sockets are at `/run/switchroom/broker/sock`
+and `/run/switchroom/kernel/sock`. Even with the right env name
+the value was a path that didn't exist inside the agent.
+
+**Operator impact.** Existing v0.7.8 fleets were running with the
+broken env — most workflows didn't notice because vault access
+goes through several routes and not all of them hit this lookup.
+The secret-guard hook (which gates tool calls that touch vault-
+ref'd keys) was the surface that consistently failed. Operators
+running `switchroom update` will pick up the new env vars
+automatically; agents will reconnect to the broker on the next
+request without further intervention.
+
+**No new features in this release** — only the regression fix.
+
 ## v0.7.8 — Phase 4 cron-fold-in, honest doctor, host-update CLI
 
 This release closes the v0.7 docker migration with the cron-fold-in

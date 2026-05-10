@@ -240,6 +240,16 @@ export async function main(): Promise<void> {
     // restart re-runs main() and re-reads config, so a future
     // `apply` that adds schedule entries gets picked up cleanly.
     setInterval(() => { /* idle */ }, 1 << 30);
+    // Release the lock cleanly on SIGTERM/SIGINT so a subsequent
+    // boot doesn't have to fall back to the stale-lock reclaim path
+    // in acquireLock. Only matters for log cleanliness — the reclaim
+    // path works either way (#895 boot-time freshness check).
+    const cleanup = (): never => {
+      releaseLock(lockPath);
+      process.exit(0);
+    };
+    process.once("SIGTERM", cleanup);
+    process.once("SIGINT", cleanup);
     return;
   }
 

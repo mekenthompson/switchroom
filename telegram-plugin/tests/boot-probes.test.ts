@@ -561,9 +561,94 @@ describe('probeScheduler', () => {
       dockerMode: true,
       fs,
       isAlive: () => true,
+      // Disable settle softening so the verdict is the hard fail —
+      // the "boot still settling" case is covered by the dedicated
+      // test below.
+      containerBootTimeMs: null,
     })
     expect(result.status).toBe('fail')
     expect(result.detail).toContain('no lockfile')
+  })
+
+  it('softens fail to degraded when container booted recently (still-settling window)', async () => {
+    // No lockfile, but container PID 1 started 5 s ago — the supervisor
+    // is still bringing the scheduler up. /status hit at this instant
+    // should NOT show 🔴 for a non-issue.
+    const now = 1_700_000_000_000
+    const fs = makeSchedulerFs({})
+    const result = await probeScheduler('clerk', {
+      dockerMode: true,
+      fs,
+      isAlive: () => true,
+      now: () => now,
+      containerBootTimeMs: now - 5_000,
+    })
+    expect(result.status).toBe('degraded')
+    expect(result.detail).toContain('still settling')
+  })
+
+  it('does NOT soften when container booted long ago (real wedge, not a flap)', async () => {
+    // Container has been up for an hour; missing lockfile is a real
+    // problem, not a settle window. Hard fail expected.
+    const now = 1_700_000_000_000
+    const fs = makeSchedulerFs({})
+    const result = await probeScheduler('clerk', {
+      dockerMode: true,
+      fs,
+      isAlive: () => true,
+      now: () => now,
+      containerBootTimeMs: now - 60 * 60_000,
+    })
+    expect(result.status).toBe('fail')
+    expect(result.detail).not.toContain('still settling')
+  })
+
+  it('honors SWITCHROOM_AGENT_SCHEDULER_LOCK env override', async () => {
+    const customLock = '/custom/sched.lock'
+    const fs = makeSchedulerFs({
+      [customLock]: { content: '1234' },
+    })
+    const oldEnv = process.env.SWITCHROOM_AGENT_SCHEDULER_LOCK
+    process.env.SWITCHROOM_AGENT_SCHEDULER_LOCK = customLock
+    try {
+      const result = await probeScheduler('clerk', {
+        dockerMode: true,
+        fs,
+        isAlive: (pid) => pid === 1234,
+        containerBootTimeMs: null,
+      })
+      expect(result.status).toBe('ok')
+      expect(result.detail).toContain('pid 1234')
+    } finally {
+      if (oldEnv === undefined) delete process.env.SWITCHROOM_AGENT_SCHEDULER_LOCK
+      else process.env.SWITCHROOM_AGENT_SCHEDULER_LOCK = oldEnv
+    }
+  })
+
+  it('honors SWITCHROOM_AGENT_SCHEDULER_JSONL env override for freshness hint', async () => {
+    const lockPath = '/state/agent/scheduler.lock'
+    const customJsonl = '/custom/audit.jsonl'
+    const now = 1_700_000_000_000
+    const fs = makeSchedulerFs({
+      [lockPath]: { content: '5555' },
+      [customJsonl]: { content: '{}\n', mtimeMs: now - 90_000 },
+    })
+    const oldEnv = process.env.SWITCHROOM_AGENT_SCHEDULER_JSONL
+    process.env.SWITCHROOM_AGENT_SCHEDULER_JSONL = customJsonl
+    try {
+      const result = await probeScheduler('clerk', {
+        dockerMode: true,
+        fs,
+        isAlive: () => true,
+        now: () => now,
+        containerBootTimeMs: null,
+      })
+      expect(result.status).toBe('ok')
+      expect(result.detail).toContain('last fire')
+    } finally {
+      if (oldEnv === undefined) delete process.env.SWITCHROOM_AGENT_SCHEDULER_JSONL
+      else process.env.SWITCHROOM_AGENT_SCHEDULER_JSONL = oldEnv
+    }
   })
 
   it('returns ok with last-fire age when lock is held by a live PID', async () => {

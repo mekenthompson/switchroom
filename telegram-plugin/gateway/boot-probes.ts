@@ -940,6 +940,45 @@ const SCHEDULER_LOCK_PATH_DEFAULT = '/state/agent/scheduler.lock'
 const SCHEDULER_JSONL_PATH_DEFAULT = '/state/agent/scheduler.jsonl'
 
 /**
+ * How long after PID 1 started we treat a missing/dead scheduler as
+ * "still settling" rather than a hard fail. Boot-card already has its
+ * own 6 s settle window before probes run, so this only matters for
+ * /status hits during the first ~30 s of a container's life — long
+ * enough to cover supervisor + bun startup on a slow host without
+ * hiding a genuinely wedged scheduler.
+ */
+const SCHEDULER_FRESH_BOOT_MS = 30_000
+
+/**
+ * Read PID 1's start time inside the container (ms since epoch). Used
+ * to soften scheduler probe verdicts during the early-boot window.
+ * Mirrors `readContainerBootTimeMs` from src/agent-scheduler/lock.ts —
+ * we duplicate the small reader here rather than import across the
+ * src/telegram-plugin boundary, since the plugin is built standalone.
+ *
+ * Returns null on any /proc parse failure → caller skips the softening.
+ */
+function readContainerBootTimeMsForProbe(): number | null {
+  try {
+    const stat1 = readFileSync('/proc/1/stat', 'utf8')
+    const lastParen = stat1.lastIndexOf(')')
+    if (lastParen < 0) return null
+    const after = stat1.slice(lastParen + 1).trim().split(/\s+/)
+    const starttimeTicks = Number(after[19])
+    if (!Number.isFinite(starttimeTicks)) return null
+    const procStat = readFileSync('/proc/stat', 'utf8')
+    const btimeLine = procStat.split('\n').find((l) => l.startsWith('btime '))
+    if (!btimeLine) return null
+    const btimeSec = Number(btimeLine.split(/\s+/)[1])
+    if (!Number.isFinite(btimeSec)) return null
+    const CLK_TCK = 100
+    return (btimeSec + starttimeTicks / CLK_TCK) * 1000
+  } catch {
+    return null
+  }
+}
+
+/**
  * Filesystem injection point for the scheduler probe. Same shape as
  * ProcFsImpl but read-only against arbitrary paths. Tests inject a
  * synthetic fs to drive lockfile contents and jsonl tails without
@@ -993,11 +1032,24 @@ export async function probeScheduler(
   opts: {
     dockerMode?: boolean
     fs?: SchedulerFsImpl
+    /** Override the lockfile path. Defaults to env
+     *  `SWITCHROOM_AGENT_SCHEDULER_LOCK` (matches the override the
+     *  scheduler itself reads at src/agent-scheduler/index.ts:196), then
+     *  to `/state/agent/scheduler.lock`. */
     lockPath?: string
+    /** Override the audit-jsonl path. Defaults to env
+     *  `SWITCHROOM_AGENT_SCHEDULER_JSONL`, then to
+     *  `/state/agent/scheduler.jsonl` (mirrors index.ts:194). */
     jsonlPath?: string
     /** Liveness check for the holder PID — defaults to process.kill(pid, 0). */
     isAlive?: (pid: number) => boolean
     now?: () => number
+    /** Container PID-1 start time in ms since epoch. When set AND the
+     *  current time is within `SCHEDULER_FRESH_BOOT_MS` of it, scheduler
+     *  fail/degraded verdicts are softened to "still settling". Pass
+     *  `null` to disable the softening (e.g. unit tests pinning a hard
+     *  fail). Defaults to `readContainerBootTimeMsForProbe()`. */
+    containerBootTimeMs?: number | null
   } = {},
 ): Promise<ProbeResult> {
   if (!opts.dockerMode) {
@@ -1005,15 +1057,32 @@ export async function probeScheduler(
   }
   return withTimeout('Scheduler', (async (): Promise<ProbeResult> => {
     const fs = opts.fs ?? realSchedulerFs
-    const lockPath = opts.lockPath ?? SCHEDULER_LOCK_PATH_DEFAULT
-    const jsonlPath = opts.jsonlPath ?? SCHEDULER_JSONL_PATH_DEFAULT
+    const lockPath = opts.lockPath
+      ?? process.env.SWITCHROOM_AGENT_SCHEDULER_LOCK
+      ?? SCHEDULER_LOCK_PATH_DEFAULT
+    const jsonlPath = opts.jsonlPath
+      ?? process.env.SWITCHROOM_AGENT_SCHEDULER_JSONL
+      ?? SCHEDULER_JSONL_PATH_DEFAULT
     const now = opts.now ?? Date.now
     const isAlive = opts.isAlive ?? ((pid: number) => {
       try { process.kill(pid, 0); return true } catch { return false }
     })
+    const bootTimeMs = 'containerBootTimeMs' in opts
+      ? opts.containerBootTimeMs
+      : readContainerBootTimeMsForProbe()
+    const stillSettling = bootTimeMs != null
+      && (now() - bootTimeMs) < SCHEDULER_FRESH_BOOT_MS
+    const settlingNote = stillSettling ? ' (still settling)' : ''
 
     if (!fs.exists(lockPath)) {
-      return { status: 'fail', label: 'Scheduler', detail: 'sidecar not running (no lockfile)' }
+      // During the first ~30 s of a container's life, "no lockfile" is
+      // the supervisor + bun still starting up. /status hit at that
+      // moment shouldn't show 🔴 for a non-issue.
+      return {
+        status: stillSettling ? 'degraded' : 'fail',
+        label: 'Scheduler',
+        detail: `sidecar not running (no lockfile)${settlingNote}`,
+      }
     }
     let holderPid: number | null = null
     try {

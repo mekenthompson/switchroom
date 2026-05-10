@@ -1,5 +1,53 @@
 # Changelog
 
+## v0.7.10 — `switchroom vault` CLI honors `SWITCHROOM_VAULT_BROKER_SOCK`
+
+Companion patch to v0.7.9. v0.7.9 fixed compose to emit
+`SWITCHROOM_VAULT_BROKER_SOCK` (canonical client-side env name) into
+agent containers, and verified the broker client + secret-guard hook
++ boot-card probe were all reading it. But the **`switchroom vault`
+CLI subcommands** had their own manual broker socket resolution that
+**skipped the env entirely** — going straight from
+`config.vault?.broker?.socket` to the legacy `~/.switchroom/vault-
+broker.sock` fallback (which is a dangling symlink inside an agent
+container, via the #910 home-symlink fix).
+
+Operator surface: clerk's calendar skill called `switchroom vault
+get microsoft/ken-tokens`, the CLI ignored the canonical env that
+v0.7.9 just set, fell through to the dangling fallback, and reported
+`VAULT-BROKER-DENIED: broker not running`. Direct broker IPC from
+the same container returned the token cleanly. The skill saw "no
+token" and refused to add the calendar item.
+
+**Fix (#949).** Five CLI files routed through the canonical
+`resolveBrokerSocketPath()` from `src/vault/broker/client.ts`:
+
+  - `src/cli/vault.ts` — vault get/list/put main surface
+  - `src/cli/vault-broker.ts` — broker management
+  - `src/cli/vault-doctor.ts` — vault doctor
+  - `src/cli/vault-grant.ts` — grant management
+  - `src/cli/vault-auto-unlock.ts` — auto-unlock setup
+
+Each pre-fix branch did `resolvePath(config?.vault?.broker?.socket
+?? "~/.switchroom/vault-broker.sock")`; post-fix uses
+`resolveBrokerSocketPath({ vaultBrokerSocket: ... })` which honors:
+
+  1. `opts.socket` (explicit caller override)
+  2. `SWITCHROOM_VAULT_BROKER_SOCK` env (compose-set; the regression
+     fix)
+  3. `opts.vaultBrokerSocket` (config-derived)
+  4. `~/.switchroom/vault-broker.sock` (legacy default)
+
+**Tests.** New `src/vault/broker/resolve-socket-path.test.ts` pins
+the precedence so a future refactor can't silently drop the env
+step again. 6 cases.
+
+**Operator impact.** Existing v0.7.9 fleets needed `switchroom
+update` to pick up the corrected compose env. v0.7.10's CLI fix
+takes effect inside agent containers automatically once the new
+agent image is pulled — the env is already in place from v0.7.9;
+this patch just makes the CLI read it.
+
 ## v0.7.9 — broker socket env: canonical name + agent-perspective path
 
 Single-fix patch release for a regression discovered during the

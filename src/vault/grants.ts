@@ -152,6 +152,12 @@ function rowToGrant(row: Record<string, unknown>): GrantRow {
  * key names, optionally with a trailing `*` for prefix-glob (e.g.
  * `OPENAI_*` matches `OPENAI_API_KEY` and `OPENAI_TIMEOUT`). No other
  * glob metacharacters are honored — keep the surface tight.
+ *
+ * Operator note: a lone `*` IS a valid prefix-glob with an empty
+ * prefix, which means it matches every key. `vault grant <agent>
+ * --write '*'` mints a vault-wide write capability — useful for
+ * trusted operator-tier agents, dangerous for general agents. Audit
+ * carefully.
  */
 export function keyMatchesPatterns(patterns: string[], key: string): boolean {
   for (const pat of patterns) {

@@ -20,6 +20,11 @@
 import { closeSync, openSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 
+/**
+ * Stable contract: branch on `kind` only — `reason` is diagnostic-
+ * only free-form text intended for operator debugging, NOT for
+ * downstream consumers to parse.
+ */
 export type SchedulerState =
   | { kind: "active"; tasks: number }
   | { kind: "idle" }
@@ -48,8 +53,11 @@ export function getSchedulerState(
     try {
       const chunkSize = Math.min(65536, stat.size);
       const chunk = Buffer.alloc(chunkSize);
-      readSync(fd, chunk, 0, chunkSize, stat.size - chunkSize);
-      buf = chunk.toString("utf-8");
+      // Slice to bytesRead before toString — protects against a
+      // truncate-during-read race that would otherwise leave NUL bytes
+      // in the parsed string (#942 reviewer nit).
+      const bytesRead = readSync(fd, chunk, 0, chunkSize, stat.size - chunkSize);
+      buf = chunk.subarray(0, bytesRead).toString("utf-8");
     } finally {
       closeSync(fd);
     }

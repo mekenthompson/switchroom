@@ -1571,18 +1571,6 @@ export function scaffoldAgent(
   switchroomConfig?: SwitchroomConfig,
   userIdOverride?: string,
   switchroomConfigPath?: string,
-  /**
-   * v0.7+ docker-mode opt-in: when true, `.mcp.json` references the
-   * in-image telegram-plugin path (`/opt/switchroom/telegram-plugin`) and
-   * an in-image `switchroom` shim path; otherwise it resolves the host
-   * dev/install path the way it always has.
-   *
-   * Set by `src/cli/apply.ts` based on whether compose generation is
-   * happening (i.e. `switchroom apply` is being run as part of a docker
-   * fleet bring-up). Backwards-compatible: undefined / false preserves
-   * the v0.6 host-path behavior byte-for-byte.
-   */
-  dockerMode?: boolean,
 ): ScaffoldResult {
   // Apply the full cascade: global defaults → inline profile (from
   // `extends:`) → per-agent config. When switchroom.yaml has no `defaults:`
@@ -1853,27 +1841,15 @@ export function scaffoldAgent(
   // so the enhanced Telegram plugin can be launched as a dev channel.
   if (usesSwitchroomTelegramPlugin(agentConfig)) {
     const mcpJsonPath = join(agentDir, ".mcp.json");
-    // v0.7 docker mode: the agent image (Dockerfile.agent) COPYs the
-    // plugin to a stable in-image path and the running switchroom
-    // CLI is the npm-global one inside the image. Reference those —
-    // the host's repo checkout / npm-global install path is irrelevant
-    // inside the container and would resolve to a non-existent path.
-    // v0.6 systemd / non-docker mode: keep resolving against the host
-    // install layout.
-    const pluginDir = dockerMode
-      ? DOCKER_TELEGRAM_PLUGIN_PATH
-      : resolve(import.meta.dirname, "../../telegram-plugin");
-    const switchroomCliPath = dockerMode
-      ? "/usr/local/bin/switchroom"
-      : resolveSwitchroomCliPath();
-    // In docker, the in-container switchroom.yaml lives at the path
-    // compose bind-mounts it to (see compose.ts). In host mode, fall
-    // back to the existing logic.
-    const resolvedConfigPath = dockerMode
-      ? "/state/config/switchroom.yaml"
-      : (switchroomConfigPath
-          ? resolve(switchroomConfigPath)
-          : resolve(process.cwd(), "switchroom.yaml"));
+    // The agent image (Dockerfile.agent) COPYs the plugin to a stable
+    // in-image path and bakes a `switchroom` symlink at /usr/local/bin.
+    // Reference those — the host's repo checkout / npm-global install
+    // path is irrelevant inside the container and would resolve to a
+    // non-existent path. Compose bind-mounts switchroom.yaml at
+    // /state/config/switchroom.yaml.
+    const pluginDir = DOCKER_TELEGRAM_PLUGIN_PATH;
+    const switchroomCliPath = "/usr/local/bin/switchroom";
+    const resolvedConfigPath = "/state/config/switchroom.yaml";
 
     const mcpServers: Record<string, McpServerConfig> = {
       "switchroom-telegram": {
@@ -1895,15 +1871,9 @@ export function scaffoldAgent(
       }
     }
 
-    // .mcp.json is purely template-driven (every field is a deterministic
-    // function of dockerMode + the resolved CLI/plugin paths + the
-    // configured MCP set). Use writeIfChanged so that a stale file from a
-    // pre-v0.7.6 release — when the plugin path resolution was different —
-    // is rewritten on the next `switchroom apply`. writeIfMissing left
-    // these stale, which is what bit 7 of 8 agents in the v0.6 → v0.7
-    // cutover (#883): claude couldn't spawn the MCP plugin because the
-    // host repo path baked into the old `.mcp.json` doesn't exist inside
-    // the agent container.
+    // .mcp.json is purely template-driven. writeIfChanged so a stale
+    // file from a pre-v0.7.6 release (different plugin path resolution)
+    // is rewritten on the next `switchroom apply`.
     writeIfChanged(
       mcpJsonPath,
       () => JSON.stringify({ mcpServers }, null, 2) + "\n",
@@ -2425,15 +2395,6 @@ export interface ReconcileOptions {
    * as-is, ignoring template updates. Default false (regeneration is default).
    */
   preserveClaudeMd?: boolean;
-  /**
-   * v0.7+ docker-mode opt-in: when true, regenerated `.mcp.json` references
-   * the in-image telegram-plugin path (`/opt/switchroom/telegram-plugin`)
-   * and the in-image switchroom CLI; otherwise it resolves the host
-   * dev/install path the way it always has. Mirrors the same flag on
-   * `scaffoldAgent`. Set by `src/cli/apply.ts` based on whether docker
-   * compose is being generated.
-   */
-  dockerMode?: boolean;
 }
 
 /**
@@ -3363,19 +3324,10 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
   // --- Reconcile .mcp.json (switchroom-telegram plugin agents only) ---
   if (usesSwitchroomTelegramPlugin(agentConfig)) {
     const mcpJsonPath = join(agentDir, ".mcp.json");
-    // Mirror the docker-mode branch in scaffoldAgent — keep both writers
-    // in sync so reconcile under docker emits the in-image paths.
-    const pluginDir = options.dockerMode
-      ? DOCKER_TELEGRAM_PLUGIN_PATH
-      : resolve(import.meta.dirname, "../../telegram-plugin");
-    const switchroomCliPath = options.dockerMode
-      ? "/usr/local/bin/switchroom"
-      : resolveSwitchroomCliPath();
-    const resolvedConfigPath = options.dockerMode
-      ? "/state/config/switchroom.yaml"
-      : (switchroomConfigPath
-          ? resolve(switchroomConfigPath)
-          : resolve(process.cwd(), "switchroom.yaml"));
+    // Mirror scaffoldAgent: in-image plugin + CLI + bind-mounted config.
+    const pluginDir = DOCKER_TELEGRAM_PLUGIN_PATH;
+    const switchroomCliPath = "/usr/local/bin/switchroom";
+    const resolvedConfigPath = "/state/config/switchroom.yaml";
 
     const mcpServers: Record<string, McpServerConfig> = {
       "switchroom-telegram": {

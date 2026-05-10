@@ -38,7 +38,6 @@ import { addAgent, type AgentTopology } from "../agents/add-orchestrator.js";
 import { bringUpAgentService } from "../agents/docker-fleet.js";
 import { execFileSync as dockerExecFile } from "node:child_process";
 import { renameAgent, type HindsightMode } from "../agents/rename-orchestrator.js";
-import { isDockerRuntime } from "../runtime-mode.js";
 import { validateBotTokenMatchesAgent } from "../setup/telegram-api.js";
 import { registerAgentPerfCommand } from "./perf.js";
 import {
@@ -167,102 +166,15 @@ function checkSwitchroomBranch(): string | null {
 }
 
 export function preflightCheck(
-  name: string,
+  _name: string,
   agentDir: string,
-  usesDevChannels: boolean,
+  _usesDevChannels: boolean,
 ): string[] {
   const errors: string[] = [];
 
-  // 1. start.sh exists and is executable
   const startSh = resolve(agentDir, "start.sh");
   if (!existsSync(startSh)) {
     errors.push(`start.sh not found at ${startSh}`);
-  }
-
-  // Docker mode: systemd unit checks (2 / 3 / 4 below) don't apply —
-  // the runtime is a docker compose service, not a systemd unit. Skip
-  // the systemd-shaped checks. Container-existence is verified by the
-  // doctor's runDockerSection (compose file + image refs) rather than
-  // a per-call preflight, so we just exit early here.
-  //
-  // Use the unified `isDockerRuntime()` helper rather than reading the
-  // env var directly: the env var is only set inside containers, but
-  // preflight runs from the operator's host shell where the compose
-  // file's presence is the right signal.
-  if (isDockerRuntime()) {
-    return errors;
-  }
-
-  // 2. systemd unit exists
-  const unitPath = resolve(
-    process.env.HOME ?? "/root",
-    ".config/systemd/user",
-    `switchroom-${name}.service`,
-  );
-  if (!existsSync(unitPath)) {
-    errors.push(
-      `systemd unit not found at ${unitPath}. Run: switchroom agent create ${name}`,
-    );
-  } else if (usesDevChannels) {
-    // 3. If using dev channels, the unit must dispatch the first-run
-    //    TUI prompts somehow — either the legacy `expect` wrapper, or
-    //    the v0.7.0+ `autoaccept-poll.ts` ExecStartPost poller.
-    const unitContent = readFileSync(unitPath, "utf-8");
-    const hasExpect = unitContent.includes("autoaccept.exp");
-    const hasPoller = unitContent.includes("autoaccept-poll");
-    if (!hasExpect && !hasPoller) {
-      errors.push(
-        `systemd unit has no autoaccept handler — dev channels will hang ` +
-        `on the confirmation dialog. Fix: switchroom systemd install ` +
-        `(regenerates the unit)`,
-      );
-    }
-
-    // 4. If the unit uses the legacy expect wrapper, the binary must be
-    //    on PATH. The TS poller path has no extra binary requirement
-    //    beyond tmux (already gated by install.sh).
-    if (hasExpect && !hasPoller) {
-      try {
-        const { execSync: exec } = require("node:child_process");
-        exec("which expect", { stdio: "pipe" });
-      } catch {
-        errors.push(
-          `'expect' binary not found on PATH — required by legacy autoaccept. ` +
-          `Install: sudo apt install expect (or remove ` +
-          `experimental.legacy_autoaccept_expect / legacy_pty to use the ` +
-          `default tmux poller)`,
-        );
-      }
-    }
-  }
-
-  // 5. Bot token file exists and has content
-  const envPath = resolve(agentDir, "telegram", ".env");
-  if (existsSync(envPath)) {
-    const envContent = readFileSync(envPath, "utf-8");
-    if (!envContent.includes("TELEGRAM_BOT_TOKEN=") || envContent.includes("# Set your bot token")) {
-      errors.push(
-        `telegram/.env is missing TELEGRAM_BOT_TOKEN. ` +
-        `Set it or run: switchroom setup`,
-      );
-    }
-  } else {
-    errors.push(`telegram/.env not found at ${envPath}`);
-  }
-
-  // 6. .claude/settings.json exists
-  if (!existsSync(resolve(agentDir, ".claude", "settings.json"))) {
-    errors.push(
-      `.claude/settings.json not found. Run: switchroom agent reconcile ${name}`,
-    );
-  }
-
-  // 7. Claude binary on PATH
-  try {
-    const { execSync: exec } = require("node:child_process");
-    exec("which claude", { stdio: "pipe" });
-  } catch {
-    errors.push(`'claude' binary not found on PATH`);
   }
 
   return errors;
@@ -546,13 +458,6 @@ export async function reconcileAndRestartAgent(
 
   // Reconcile first. If this throws, we stop here — never restart on
   // top of a broken config.
-  //
-  // dockerMode mirrors apply's behavior: when a compose file is present
-  // on the host (the host-shell signal `isDockerRuntime()` checks), the
-  // regenerated .mcp.json must reference the in-image telegram-plugin
-  // path, not the host's switchroom install. Otherwise reconcile would
-  // overwrite a working docker-mode .mcp.json with a host-mode one and
-  // break Telegram routing on the next agent restart.
   const result = deps.reconcileAgent(
     name,
     agentConfig,
@@ -560,7 +465,7 @@ export async function reconcileAndRestartAgent(
     config.telegram,
     config,
     configPath,
-    { dockerMode: isDockerRuntime() },
+    {},
   );
 
   // v0.7: infra-unit regen no longer happens here. Compose-file drift
@@ -1453,7 +1358,7 @@ export function registerAgentCommand(program: Command): void {
               config.telegram,
               config,
               configPath,
-              { preserveClaudeMd: opts.preserveClaudeMd, dockerMode: isDockerRuntime() },
+              { preserveClaudeMd: opts.preserveClaudeMd },
             );
             // v0.7: infra-unit regen no longer runs here. Compose-file
             // drift is reconciled by `switchroom apply` + `docker compose
@@ -1643,7 +1548,7 @@ export function registerAgentCommand(program: Command): void {
           config.telegram,
           config,
           configPath,
-          { dockerMode: isDockerRuntime() },
+          {},
         );
         if (result.changes.length > 0) {
           console.log(chalk.green(`  ${name}: reconciled (${result.changes.length} file(s))`));
@@ -1719,7 +1624,7 @@ export function registerAgentCommand(program: Command): void {
           config.telegram,
           config,
           configPath,
-          { dockerMode: isDockerRuntime() },
+          {},
         );
         if (result.changes.length > 0) {
           console.log(chalk.green(`  ${name}: reconciled (${result.changes.length} file(s))`));

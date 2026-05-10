@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import type { SwitchroomConfig } from "../src/config/schema.js";
 
-// Mock node:child_process so systemctl(...) calls are observable and
+// Mock node:child_process so docker(...) calls are observable and
 // don't escape the test. tmux.js is mocked separately so we can
 // control sendAgentInterrupt's outcome per-case.
 vi.mock("node:child_process", () => ({
@@ -23,22 +23,12 @@ const mockedExec = execFileSync as unknown as ReturnType<typeof vi.fn>;
 const mockedSendInterrupt = sendAgentInterrupt as unknown as ReturnType<typeof vi.fn>;
 
 /**
- * The lifecycle module's `getAgentStatus` shells out to systemctl
- * many times to compute its return value. We don't want to model
- * systemd here, so we just intercept all execFileSync invocations
- * and decide what to do based on argv.
- *
- *   - `systemctl is-active <unit>`     → "active"
- *   - `systemctl show ...`             → MainPID + ControlGroup synthetic data
- *   - `systemctl kill --signal=INT ...` → recorded for assertions, returns ""
- *   - anything else                    → ""
+ * Stub `execFileSync` so docker shellouts behave deterministically:
+ *   - `docker inspect …`        → container State for getAgentStatus
+ *   - `docker kill --signal=…`  → recorded for assertions
+ *   - anything else              → ""
  */
-function installSystemctlStub(opts: { killShouldThrow?: boolean } = {}): void {
-  // Despite the legacy name (kept for diff continuity with the
-  // pre-PR-C1 systemd-era test), this stub now models `docker`
-  // shellouts: `docker inspect` returns container State for
-  // getAgentStatus, and `docker kill --signal=SIGINT` is the new
-  // fallback path interruptAgent takes when tmux send-keys fails.
+function installDockerStub(opts: { killShouldThrow?: boolean } = {}): void {
   mockedExec.mockImplementation((bin: string, args: string[]) => {
     if (bin !== "docker") return "";
     if (args[0] === "inspect" && args.includes("{{.State.Status}}|{{.State.StartedAt}}|{{.State.Pid}}")) {
@@ -73,17 +63,10 @@ describe("interruptAgent dual-path", () => {
   beforeEach(() => {
     mockedExec.mockReset();
     mockedSendInterrupt.mockReset();
-    // interruptAgent calls getAgentStatus to read the running PID.
-    // Post v0.7.3 #871, getAgentStatus host-shell branch goes through
-    // readSystemdUnit (which the test stubs as a docker-aware
-    // `compose exec` path). Force docker mode so the docker `inspect`
-    // branch fires — otherwise status.pid is null and interruptAgent
-    // bails before exercising the dual-path under test.
-    process.env.SWITCHROOM_RUNTIME = "docker";
   });
 
-  it("tmux-supervised agent: prefers tmux send-keys; does NOT fire systemctl kill on success", () => {
-    installSystemctlStub();
+  it("tmux-supervised agent: prefers tmux send-keys; does NOT fire docker kill on success", () => {
+    installDockerStub();
     mockedSendInterrupt.mockReturnValue({ ok: true });
 
     const result = interruptAgent("klanker", { config: makeConfig(false) });
@@ -98,7 +81,7 @@ describe("interruptAgent dual-path", () => {
   });
 
   it("tmux-supervised agent: falls back to docker kill when send-keys errors", () => {
-    installSystemctlStub();
+    installDockerStub();
     mockedSendInterrupt.mockReturnValue({ error: "no server running" });
 
     const result = interruptAgent("klanker", { config: makeConfig(false) });
@@ -116,7 +99,7 @@ describe("interruptAgent dual-path", () => {
   });
 
   it("legacy_pty agent: bypasses tmux send-keys entirely and uses docker kill", () => {
-    installSystemctlStub();
+    installDockerStub();
     mockedSendInterrupt.mockReturnValue({ ok: true });
 
     const result = interruptAgent("klanker", { config: makeConfig(true) });
@@ -131,7 +114,7 @@ describe("interruptAgent dual-path", () => {
   });
 
   it("logs the chosen route on the tmux path", () => {
-    installSystemctlStub();
+    installDockerStub();
     mockedSendInterrupt.mockReturnValue({ ok: true });
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
@@ -144,7 +127,7 @@ describe("interruptAgent dual-path", () => {
   });
 
   it("logs the chosen route on the legacy_pty path", () => {
-    installSystemctlStub();
+    installDockerStub();
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       interruptAgent("klanker", { config: makeConfig(true) });
@@ -158,7 +141,7 @@ describe("interruptAgent dual-path", () => {
   });
 
   it("logs the fallback when tmux send-keys errors", () => {
-    installSystemctlStub();
+    installDockerStub();
     mockedSendInterrupt.mockReturnValue({ error: "no server running" });
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});

@@ -21,7 +21,6 @@ import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
 import { findLatestSessionJsonl } from "./handoff-summarizer.js";
 import { readTurnUsages, summarizeCache } from "./perf.js";
-import { isDockerRuntime } from "../runtime-mode.js";
 
 export type CheckState = "ok" | "fail" | "warn";
 
@@ -105,7 +104,7 @@ export interface AgentStatusReport {
 
 /**
  * Inputs needed to build a status report. Everything is injectable so tests
- * can run without filesystems, systemd, or real HTTP.
+ * can run without filesystems, docker, or real HTTP.
  */
 export interface StatusInputs {
   agentName: string;
@@ -116,11 +115,11 @@ export interface StatusInputs {
   /** Bank ID for Hindsight; usually equals the agent name. */
   hindsightBankId: string;
   /**
-   * Function that fetches Claude process info for the agent. Returns null if
-   * the process isn't running. Real implementation calls systemctl show.
+   * Function that fetches the agent container's process info. Real
+   * implementation calls `docker inspect`.
    */
   getClaudeProcess: () => { pid: number | null; activeEnterTs: number | null; active: string };
-  /** Same shape, for the gateway unit. */
+  /** Same shape, for the gateway. Under docker this is the same container. */
   getGatewayProcess: () => { pid: number | null; activeEnterTs: number | null; active: string };
   /** Called to probe Hindsight; returns bank presence + reachability. */
   probeHindsight: (apiUrl: string, bankId: string) => Promise<HindsightProbeResult>;
@@ -389,8 +388,8 @@ export async function buildAgentStatusReport(
  * actually serveable.
  *
  * "Ready" here means the same thing `formatStatusText` calls green:
- *   - claude systemd unit active with a pid
- *   - gateway systemd unit active with a pid
+ *   - claude container running with a pid
+ *   - gateway sidecar running with a pid
  *   - Hindsight reachable AND its bank exists (when configured for this agent)
  *   - Telegram gateway has logged `polling as @<bot>` without a later failure
  *
@@ -515,89 +514,10 @@ function formatWindowFromIso(first: string | null, last: string | null): string 
 // ---------------------------------------------------------------------------
 
 /**
- * Read process info via `systemctl --user show <service>`. Returns parsed
- * PID + ActiveEnterTimestamp.
- */
-export function readSystemdUnit(
-  serviceName: string,
-): { pid: number | null; activeEnterTs: number | null; active: string } {
-  let active = "unknown";
-  try {
-    active = execFileSync("systemctl", ["--user", "is-active", serviceName], {
-      encoding: "utf-8",
-      stdio: ["pipe", "pipe", "pipe"],
-    }).trim();
-  } catch (err) {
-    // `is-active` exits 3 for inactive — still have a useful answer in stdout
-    const stdout = (err as { stdout?: Buffer | string }).stdout;
-    if (stdout) {
-      active = String(stdout).trim();
-    } else {
-      active = "inactive";
-    }
-  }
-
-  let pid: number | null = null;
-  let activeEnterTs: number | null = null;
-  try {
-    const output = execFileSync(
-      "systemctl",
-      ["--user", "show", serviceName, "--property=MainPID,ActiveEnterTimestamp"],
-      { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"] },
-    );
-    for (const line of output.split("\n")) {
-      const eq = line.indexOf("=");
-      if (eq < 0) continue;
-      const key = line.slice(0, eq).trim();
-      const value = line.slice(eq + 1).trim();
-      if (key === "MainPID" && value && value !== "0") {
-        const parsed = parseInt(value, 10);
-        if (!isNaN(parsed) && parsed > 0) pid = parsed;
-      } else if (key === "ActiveEnterTimestamp" && value) {
-        activeEnterTs = parseSystemdTimestamp(value);
-      }
-    }
-  } catch {
-    // Unit not installed or systemctl unavailable — return what we have.
-  }
-
-  return { pid, activeEnterTs, active };
-}
-
-/**
  * Read the tail of a text file — we only need the polling line, which is
  * typically near the top of a freshly-started gateway's log, but we read
  * the whole file (capped at 256KB) to catch restarts.
  */
-/**
- * Parse a systemd timestamp like "Tue 2026-04-21 16:38:48 AEST" into ms-
- * since-epoch. Date.parse on this input returns NaN on V8 because of the
- * leading weekday + trailing zone abbreviation. We strip the weekday and
- * hand the rest to Date.parse, which is lenient enough for all zone
- * abbreviations systemd emits (AEST, UTC, PDT, etc.). Returns null on
- * parse failure.
- *
- * Exported for unit tests.
- */
-export function parseSystemdTimestamp(raw: string): number | null {
-  if (!raw) return null;
-  // Strip leading weekday abbreviation like "Tue " if present.
-  const stripped = raw.replace(/^[A-Z][a-z]{2}\s+/, "");
-  let ms = Date.parse(stripped);
-  if (!isNaN(ms)) return ms;
-  // Fallback: try the raw value.
-  ms = Date.parse(raw);
-  if (!isNaN(ms)) return ms;
-  // Last resort: parse "YYYY-MM-DD HH:MM:SS" (assume local time) and drop
-  // the zone — better a slightly-off uptime than a null one.
-  const m = stripped.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/);
-  if (m) {
-    ms = Date.parse(`${m[1]}T${m[2]}`);
-    if (!isNaN(ms)) return ms;
-  }
-  return null;
-}
-
 export function readLogFile(logPath: string): string | null {
   if (!existsSync(logPath)) return null;
   try {
@@ -811,8 +731,7 @@ function escapeRegex(s: string): string {
 
 /**
  * Read process info via `docker inspect <container>`. Returns a
- * `{pid, activeEnterTs, active}` triple shaped to match the systemd
- * adapter so the status-builder code can be agnostic to runtime.
+ * `{pid, activeEnterTs, active}` triple consumed by the status builders.
  *
  * Mapping:
  *   - State.Status = "running"   → active = "active"
@@ -867,13 +786,9 @@ export function readDockerContainer(
 
 /**
  * Compose the default (production) StatusInputs for a given agent.
- * Resolves systemd unit names / docker container names, log path,
- * history path, and the Hindsight URL from config. Picks systemd vs
- * docker adapters based on the unified `isDockerRuntime()` helper —
- * env var (set inside containers) OR compose file presence (the
- * operator-shell signal). v0.7.2 only checked the env var, which
- * silently fell back to systemd when the operator ran the CLI from
- * their bare shell on a docker fleet.
+ * Resolves the docker container name, log path, history path, and the
+ * Hindsight URL from config. Claude and the gateway sidecar share a
+ * single container, so both readers point at `switchroom-<name>`.
  */
 export function defaultStatusInputs(params: {
   agentName: string;
@@ -881,19 +796,9 @@ export function defaultStatusInputs(params: {
   hindsightApiUrl: string | null;
   hindsightBankId: string;
 }): StatusInputs {
-  const isDockerMode = isDockerRuntime();
-  const service = `switchroom-${params.agentName}`;
-  const gatewayService = `switchroom-${params.agentName}-gateway`;
-
-  // Docker mode: claude and the gateway plugin share a single container,
-  // so both readers point at the same `switchroom-<name>` container.
-  // Systemd mode: separate units, separate readers.
-  const getClaudeProcess = isDockerMode
-    ? () => readDockerContainer(service)
-    : () => readSystemdUnit(service);
-  const getGatewayProcess = isDockerMode
-    ? () => readDockerContainer(service)
-    : () => readSystemdUnit(gatewayService);
+  const container = `switchroom-${params.agentName}`;
+  const getClaudeProcess = () => readDockerContainer(container);
+  const getGatewayProcess = () => readDockerContainer(container);
 
   return {
     agentName: params.agentName,

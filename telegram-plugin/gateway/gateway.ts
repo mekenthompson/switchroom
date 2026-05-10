@@ -8944,9 +8944,131 @@ bot.command('vault', async ctx => {
       '/vault lock — lock the broker',
       '/vault grant — mint a capability token (inline wizard)',
       '/vault grants [agent] — list active capability grants (tap to revoke)',
+      '/vault audit &lt;agent&gt; — unified view of an agent\'s vault access',
       '',
       'Your passphrase is cached in memory for 30 min after first use.',
     ].join('\n'), { html: true })
+    return
+  }
+
+  // Issue #969 P2c: /vault audit <agent> — unified view of an agent's
+  // vault access (grants + cron-declared schedule.secrets[]). Single
+  // mental model for operators auditing the agent's credential surface.
+  if (sub === 'audit') {
+    const targetAgent = args[1]
+    if (!targetAgent) {
+      await switchroomReply(ctx, 'Usage: /vault audit &lt;agent&gt;', { html: true })
+      return
+    }
+    // Sanity-check the agent name shape — same charset constraint as
+    // assertSafeAgentName, applied here so we don't blindly shell-out
+    // or read filesystem paths derived from user input.
+    if (!/^[a-z][a-z0-9-]{0,62}$/i.test(targetAgent)) {
+      await switchroomReply(ctx, '⚠️ Invalid agent name shape.', { html: true })
+      return
+    }
+
+    // 1. Fetch grants from broker, filtered to this agent.
+    const grantsResult = await listGrantsViaBroker(targetAgent)
+    let readGrants: Array<{ id: string; keys: string[]; expiresAt: number | null }> = []
+    let writeGrants: Array<{ id: string; keys: string[]; expiresAt: number | null }> = []
+    let grantsError: string | null = null
+    if (grantsResult.kind === 'unreachable') {
+      grantsError = 'broker unreachable'
+    } else if (grantsResult.kind === 'error') {
+      grantsError = grantsResult.msg
+    } else {
+      for (const g of grantsResult.grants) {
+        if (g.key_allow.length > 0) {
+          readGrants.push({ id: g.id, keys: g.key_allow, expiresAt: g.expires_at })
+        }
+        if (g.write_allow && g.write_allow.length > 0) {
+          writeGrants.push({ id: g.id, keys: g.write_allow, expiresAt: g.expires_at })
+        }
+      }
+    }
+
+    // 2. Load schedule[i].secrets[] from local config for this agent.
+    let cronEntries: Array<{ index: number; secrets: string[]; cron?: string }> = []
+    let configError: string | null = null
+    try {
+      const cfg = loadSwitchroomConfig()
+      const agentCfg = cfg.agents?.[targetAgent]
+      if (!agentCfg) {
+        configError = `agent '${targetAgent}' not found in switchroom.yaml`
+      } else {
+        const schedule = (agentCfg as { schedule?: Array<{ secrets?: string[]; cron?: string }> }).schedule
+        if (Array.isArray(schedule)) {
+          schedule.forEach((entry, i) => {
+            if (entry?.secrets && Array.isArray(entry.secrets) && entry.secrets.length > 0) {
+              cronEntries.push({
+                index: i,
+                secrets: entry.secrets,
+                cron: typeof entry.cron === 'string' ? entry.cron : undefined,
+              })
+            }
+          })
+        }
+      }
+    } catch (err) {
+      configError = (err instanceof Error ? err.message : String(err))
+    }
+
+    // 3. Compose the rendered audit view.
+    const lines: string[] = [`<b>🔐 ${escapeHtmlForTg(targetAgent)} — vault access</b>`, '']
+
+    if (grantsError) {
+      lines.push(`<i>Grants: ⚠️ ${escapeHtmlForTg(grantsError)}</i>`)
+      lines.push('')
+    } else {
+      lines.push('<b>Read grants:</b>')
+      if (readGrants.length === 0) {
+        lines.push('  <i>none</i>')
+      } else {
+        for (const g of readGrants) {
+          const expiry = g.expiresAt
+            ? new Date(g.expiresAt * 1000).toISOString().slice(0, 10)
+            : 'no expiry'
+          const keysJoined = g.keys.join(', ')
+          lines.push(`  <code>${escapeHtmlForTg(g.id)}</code> · ${escapeHtmlForTg(keysJoined)} · expires ${expiry}`)
+        }
+      }
+      lines.push('')
+      lines.push('<b>Write grants:</b>')
+      if (writeGrants.length === 0) {
+        lines.push('  <i>none</i>')
+      } else {
+        for (const g of writeGrants) {
+          const expiry = g.expiresAt
+            ? new Date(g.expiresAt * 1000).toISOString().slice(0, 10)
+            : 'no expiry'
+          const keysJoined = g.keys.join(', ')
+          lines.push(`  <code>${escapeHtmlForTg(g.id)}</code> · ${escapeHtmlForTg(keysJoined)} · expires ${expiry}`)
+        }
+      }
+      lines.push('')
+    }
+
+    lines.push('<b>Cron-declared secrets:</b>')
+    if (configError) {
+      lines.push(`  <i>⚠️ ${escapeHtmlForTg(configError)}</i>`)
+    } else if (cronEntries.length === 0) {
+      lines.push('  <i>none</i>')
+    } else {
+      for (const entry of cronEntries) {
+        const cronLabel = entry.cron ? ` (<code>${escapeHtmlForTg(entry.cron)}</code>)` : ''
+        const keysJoined = entry.secrets.join(', ')
+        lines.push(`  schedule[${entry.index}]${cronLabel}: ${escapeHtmlForTg(keysJoined)}`)
+      }
+    }
+    lines.push('')
+    lines.push(
+      `<i>Summary: ${readGrants.length} read grant${readGrants.length === 1 ? '' : 's'}, ` +
+      `${writeGrants.length} write grant${writeGrants.length === 1 ? '' : 's'}, ` +
+      `${cronEntries.length} cron entr${cronEntries.length === 1 ? 'y' : 'ies'}.</i>`,
+    )
+
+    await switchroomReply(ctx, lines.join('\n'), { html: true })
     return
   }
 

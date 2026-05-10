@@ -92,30 +92,28 @@ jobs:
           docker tag switchroom/broker:phase1b-test switchroom/broker:phase2a-test
           docker tag switchroom/kernel:phase1b-test switchroom/kernel:phase2b-test
 
-      - name: Run docker e2e suite (op:put + vault + compose generator)
-        # Scoped to the test files that pin the v0.7.12 / v0.7.13
-        # regression surfaces:
-        #   - phase2c-vault-integration: op:put round-trip + cross-agent ACL
-        #   - phase2c                  : kernel + broker + agent stack
-        #   - compose-generator        : emitted compose YAML shape (UID,
-        #     caps, mounts, env)
-        #   - dockerfile-agent-bakes   : Playwright + cap layout
-        #   - e2e                      : image shape (binaries on PATH,
-        #     read-only rootfs, cap_drop semantics)
+      - name: Run docker e2e suite
+        # Full tests/docker/ suite. Two issues that previously made
+        # the broader suite unrunnable on GHA were fixed in the same
+        # PR that introduces this workflow:
         #
-        # Deliberately excluded: broker-ipc-race, v0.7-install-e2e,
-        # per-agent-isolation. Those exercise live-fleet scaling and
-        # are timing-sensitive on GHA's constrained runners. Run them
-        # locally via `npx vitest run tests/docker/` against a real
-        # box. Tracked for expansion once the GHA runner shape is
-        # validated (a follow-up issue can broaden this when the
-        # flake-rate is measured under load).
+        #   1. broker-ipc-race.test.ts:265 — `kernelLookup` defaulted
+        #      its `container` arg to `switchroom-${agent}` (the
+        #      production container name). On a clean-room runner
+        #      that container doesn't exist → every exec returns
+        #      exit=1 → 0/45 succeed → drops != 0. The default is
+        #      now required-by-type; callsites pass the project-
+        #      prefixed container.
+        #
+        #   2. _prod-snapshot.ts:27 — the PHASE_TEST_NAME regex only
+        #      matched `switchroom-phase<digit>` (single-container
+        #      pattern); it didn't match the compose-project pattern
+        #      `phase<digit><letter>-...` used by broker-ipc-race
+        #      and per-agent-isolation. A leaked container from one
+        #      fleet test cascaded into the prod-drift assertion of
+        #      the next test. Filter now covers both shapes.
         run: |
-          npx vitest run \
-            tests/docker/phase2c-vault-integration.test.ts \
-            tests/docker/compose-generator.test.ts \
-            tests/docker/dockerfile-agent-bakes.test.ts \
-            tests/docker/e2e.test.ts
+          npx vitest run tests/docker/
 
       - name: Capture broker / kernel logs on failure
         if: failure()

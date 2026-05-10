@@ -23,8 +23,28 @@
 import { execSync } from "node:child_process";
 import { expect } from "vitest";
 
-/** Filter regex for switchroom phase-test containers (any phase). */
-const PHASE_TEST_NAME = /switchroom-phase\d/;
+/**
+ * Filter regex for switchroom phase-test containers (any phase).
+ *
+ * Two shapes are matched:
+ *   - `switchroom-phase<digit>...` — the per-container `docker run`
+ *     pattern used by single-container tests (e.g. e2e.test.ts).
+ *   - `phase<digit><letter>-<slug>-...` — the compose-project pattern
+ *     used by fleet tests like broker-ipc-race.test.ts (project
+ *     prefix `phase1c-race-${pid}`) and per-agent-isolation.test.ts
+ *     (project prefix `phase1c-iso-${pid}`). Compose names every
+ *     container as `<project>-<service>` so the leading
+ *     `phase<digit><letter>-` is enough to identify them as test
+ *     orphans even when a leaked container survives the test that
+ *     created it.
+ *
+ * Pre-fix, only the first shape was filtered. A failing fleet test
+ * that left containers behind (e.g. broker-ipc-race exiting before
+ * its afterAll teardown) would pollute the next docker test's
+ * before/after snapshot comparison, cascading the failure into
+ * unrelated tests (phase2b-kernel-ipc, phase2c-vault-integration).
+ */
+const PHASE_TEST_NAME = /^switchroom-phase\d|^phase\d[a-z]-/;
 
 /**
  * A snapshot of the host's container list at one moment in time.

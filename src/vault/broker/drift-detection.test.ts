@@ -55,9 +55,8 @@ describe("Broker vault-layout drift detection", () => {
 
     const broker = new VaultBroker({
       _testConfig: { agents: {} } as never,
+      _testVaultPath: newVault,
     });
-    // Inject the path. The broker normally derives this from config.
-    (broker as unknown as { vaultPath: string }).vaultPath = newVault;
     expect(() => broker.unlockFromPassphrase("test-passphrase")).not.toThrow();
     broker.lock();
   });
@@ -77,8 +76,8 @@ describe("Broker vault-layout drift detection", () => {
 
     const broker = new VaultBroker({
       _testConfig: { agents: {} } as never,
+      _testVaultPath: newVault,
     });
-    (broker as unknown as { vaultPath: string }).vaultPath = newVault;
     expect(() => broker.unlockFromPassphrase("test-passphrase"))
       .toThrow(/divergence detected|drift/i);
   });
@@ -95,8 +94,8 @@ describe("Broker vault-layout drift detection", () => {
 
     const broker = new VaultBroker({
       _testConfig: { agents: {} } as never,
+      _testVaultPath: customVault,
     });
-    (broker as unknown as { vaultPath: string }).vaultPath = customVault;
     // No throw — custom path skips the check.
     expect(() => broker.unlockFromPassphrase("test-passphrase")).not.toThrow();
     broker.lock();
@@ -118,8 +117,8 @@ describe("Broker vault-layout drift detection", () => {
 
     const broker = new VaultBroker({
       _testConfig: { agents: {} } as never,
+      _testVaultPath: newVault,
     });
-    (broker as unknown as { vaultPath: string }).vaultPath = newVault;
     expect(() => broker.unlockFromPassphrase("test-passphrase")).not.toThrow();
     broker.lock();
   });
@@ -130,8 +129,8 @@ describe("Broker vault-layout drift detection", () => {
 
     const broker = new VaultBroker({
       _testConfig: { agents: {} } as never,
+      _testVaultPath: newVault,
     });
-    (broker as unknown as { vaultPath: string }).vaultPath = newVault;
     expect(() => broker.unlockFromPassphrase("test-passphrase")).not.toThrow();
     broker.lock();
   });

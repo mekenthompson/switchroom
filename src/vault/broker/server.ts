@@ -108,6 +108,13 @@ export interface BrokerTestOpts {
    * DO NOT set outside tests.
    */
   _testGrantsDb?: Database;
+  /**
+   * If provided, override the resolved vault file path. Used by the
+   * drift-detection test which needs to point the broker at a tmp
+   * vault file without going through `start()`'s arg-handling.
+   * DO NOT set outside tests.
+   */
+  _testVaultPath?: string;
 }
 
 export class VaultBroker {
@@ -161,12 +168,16 @@ export class VaultBroker {
       testOpts._testConfig !== undefined ||
       testOpts._testIdentify !== undefined ||
       testOpts._testAuditLogger !== undefined ||
-      testOpts._testGrantsDb !== undefined;
+      testOpts._testGrantsDb !== undefined ||
+      testOpts._testVaultPath !== undefined;
     if (usingTestOpt && process.env.NODE_ENV !== "test") {
       throw new Error(
-        "VaultBroker: BrokerTestOpts (_testSecrets/_testConfig/_testIdentify/_testAuditLogger/_testGrantsDb) " +
+        "VaultBroker: BrokerTestOpts (_testSecrets/_testConfig/_testIdentify/_testAuditLogger/_testGrantsDb/_testVaultPath) " +
           "must not be set outside tests. Set NODE_ENV=test if you really mean it.",
       );
+    }
+    if (testOpts._testVaultPath !== undefined) {
+      this.vaultPath = testOpts._testVaultPath;
     }
 
     // Use the injected logger for tests; create the real one for production.

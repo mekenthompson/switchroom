@@ -5616,6 +5616,47 @@ function resolveSystemdRunPath(): string | null {
   return _systemdRunPath
 }
 
+/**
+ * Detect whether `docker` is callable from this process — required by
+ * `switchroom update`'s pull-images and recreate-containers steps.
+ *
+ * The gateway runs INSIDE the agent container (cron-fold-in / Phase 4
+ * docker model), which by design has no docker binary AND no socket
+ * mount. We probe both: binary on PATH (via `docker --version`) and
+ * socket on disk (via existsSync). True only if BOTH are present —
+ * mirroring the actual requirements `switchroom update` will hit when
+ * it shells out.
+ *
+ * Cached: docker availability doesn't change at runtime within a
+ * single container generation.
+ */
+let _dockerReachable: boolean | undefined
+function isDockerReachable(): boolean {
+  if (_dockerReachable !== undefined) return _dockerReachable
+  // Cheap socket probe first — if the mount is absent, no need to
+  // pay the execSync cost. Common-case fast-path on docker installs.
+  if (!existsSync('/var/run/docker.sock')) {
+    _dockerReachable = false
+    return _dockerReachable
+  }
+  try {
+    // -version is fast and doesn't require an actual daemon roundtrip
+    // for binary-present probing. Bounded timeout in case the binary
+    // exists but blocks (unlikely but defensive).
+    execSync('docker --version', { stdio: 'ignore', timeout: 2000 })
+    _dockerReachable = true
+  } catch {
+    _dockerReachable = false
+  }
+  return _dockerReachable
+}
+
+// @internal exported for tests — resets the docker-reachable cache so
+// a test can swap underlying state and observe the new probe result.
+export function _resetDockerReachableCache(): void {
+  _dockerReachable = undefined
+}
+
 function spawnSwitchroomDetached(
   args: string[],
   onFailure?: (info: { code: number; tail: string }) => void,
@@ -6511,6 +6552,30 @@ bot.command('update', async ctx => {
       )
       return
     }
+  }
+  // Docker reachability guard (#926). The gateway runs INSIDE the agent
+  // container, which has the switchroom CLI baked in but no docker
+  // binary and no /var/run/docker.sock mount. So `switchroom update`'s
+  // pull-images and recreate-containers steps would fail with
+  // "docker: command not found". Without this guard, the operator
+  // sees an opaque "❌ update failed (exit 127)" via
+  // notifyDetachedFailure ~5s after the ack.
+  //
+  // Surface a clean explanation instead, pointing them at the host
+  // CLI as the working path. /update (dry-run) does NOT need docker
+  // and is unaffected — only /update apply.
+  if (!isDockerReachable()) {
+    await switchroomReply(
+      ctx,
+      `❌ <b>/update apply</b> needs docker access from inside the agent ` +
+      `container, but it's not available (no <code>docker</code> binary on ` +
+      `PATH, no <code>/var/run/docker.sock</code> mount).\n\n` +
+      `On docker installs, run <code>switchroom update</code> from the ` +
+      `host shell instead.\n\n` +
+      `<i>Tracked as #926 — host-side update daemon would close this gap.</i>`,
+      { html: true },
+    )
+    return
   }
   // Debounce vs concurrent self-restart commands (/restart, /new, /reset
   // and other /update). Reading + writing the SAME restart marker means

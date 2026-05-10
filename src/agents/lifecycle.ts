@@ -203,7 +203,34 @@ export function restartAgent(name: string, reason?: string): void {
   // the greeting card. Best-effort — if the dir is missing we swallow.
   if (reason) writeRestartReasonMarker(name, reason);
   try {
-    dockerSync(composeArgs(["restart", serviceKey(name)]));
+    // `up -d --force-recreate --no-deps` not `restart` (#932). All
+    // three flags are load-bearing — DO NOT strip any without
+    // updating the surrounding callers:
+    //
+    // - `up -d` (vs `restart`): `restart` only stops + starts the
+    //   existing container with its EXISTING volume mounts; it does
+    //   NOT recreate. So if `apply` regenerated the compose with new
+    //   bind-mounts (e.g. #912's skills/credentials mounts), `restart`
+    //   leaves the container with the OLD mounts. Same lesson as
+    //   #857 / #916 where this got swapped in test code first.
+    //
+    // - `--force-recreate`: without it, `up -d` no-ops when the
+    //   compose entry is byte-identical (the common case after
+    //   scaffold-CONTENT changes — settings.json / .mcp.json /
+    //   start.sh / SOUL.md / CLAUDE.md — which the agent's bind-
+    //   mounted dir holds but the compose entry doesn't reference
+    //   per-file). claude reads those at process start, so picking
+    //   up edits requires a process bounce. Several callers depend
+    //   on this always-bounce semantics: auth.ts (restart after
+    //   token write), agent.ts grant/dangerous (restart after
+    //   reconcile), restart.ts (the canonical bounce-this-agent
+    //   verb). CLAUDE.md ~298 promises "restart is also a mini-
+    //   deploy of any scaffold changes" — that contract requires
+    //   --force-recreate. Caught by the #944 reviewer; keep this.
+    //
+    // - `--no-deps`: prevents recreating sibling services (broker /
+    //   kernel / other agents) that this restart shouldn't touch.
+    dockerSync(composeArgs(["up", "-d", "--force-recreate", "--no-deps", serviceKey(name)]));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to restart agent "${name}": ${message}`);

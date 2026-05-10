@@ -318,6 +318,13 @@ describe("runApply", () => {
       expect(res.failures[0]!.message).toMatch(/EACCES/);
       // Compose still emitted — partial scaffold doesn't gate compose.
       expect(res.composeBytes).toBeGreaterThan(0);
+      // Regression check: the human-readable per-agent error line is
+      // still printed alongside the new structured collection. A
+      // future refactor that drops failures.push without also dropping
+      // the writeOut would silently re-introduce the old "exit 0 on
+      // partial failure" bug under a different code path.
+      const all = sink.join("");
+      expect(all).toMatch(/x bob.*EACCES/);
     });
 
     it("--compose-only skips the per-agent scaffold loop entirely; compose still emits", async () => {
@@ -373,12 +380,16 @@ describe("runApply", () => {
         0,
         2,
       );
-      // The block names the right number, three resolutions, and
-      // points at the new --compose-only escape hatch.
+      // The block names the right number and points at the two real
+      // escape hatches: sudo and --compose-only.
       expect(out).toMatch(/Scaffolded 0\/2.*2 failed/s);
-      expect(out).toMatch(/interactive shell/);
       expect(out).toMatch(/sudo -E switchroom apply/);
       expect(out).toMatch(/--compose-only/);
+      // Regression: deliberately does NOT advertise "run interactively"
+      // as a fix for this case. scaffoldAgent runs before alignAgentUid
+      // so the sudo prompt never fires on an already-aligned fleet.
+      // See the doc-comment on formatScaffoldFailureResolution.
+      expect(out).not.toMatch(/interactive shell/i);
     });
   });
 });

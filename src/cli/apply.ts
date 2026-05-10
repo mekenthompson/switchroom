@@ -457,10 +457,20 @@ export async function runApply(
 
 /**
  * Resolution block printed when one or more agents fail to scaffold.
- * Tells the operator their three options (interactive run, sudo, or
- * `--compose-only`) so the next step is obvious. Returns the formatted
- * string so the CLI handler can write it directly and tests can pin
- * the shape.
+ * Tells the operator their two real options (sudo or `--compose-only`)
+ * so the next step is obvious. Returns the formatted string so the
+ * CLI handler can write it directly and tests can pin the shape.
+ *
+ * NOTE on what's intentionally NOT in this block: dropping
+ * `--non-interactive` (i.e. running interactive `switchroom apply`)
+ * does NOT fix the post-alignment EACCES. The per-agent loop calls
+ * scaffoldAgent BEFORE alignAgentUid, so on a fleet whose state dirs
+ * are already mode 0700 owned by the per-agent UID (the v0.7+ steady
+ * state), scaffoldAgent fails with EACCES before alignAgentUid's
+ * sudo prompt can ever fire. The interactive sudo-prompt path only
+ * works on a fresh, pre-alignment fleet — exactly the case the bug
+ * doesn't manifest in. Documented here so the next reader doesn't
+ * "helpfully" add a misleading "run interactively" resolution back.
  */
 export function formatScaffoldFailureResolution(
   failures: ScaffoldFailure[],
@@ -475,22 +485,21 @@ export function formatScaffoldFailureResolution(
   );
   lines.push("");
   lines.push(
-    "Per-agent state dirs are owned by per-agent UIDs (the v0.7+ docker model).",
+    "Per-agent state dirs are mode 0700 owned by per-agent UIDs (the v0.7+",
   );
   lines.push(
-    "The operator cannot write into them without privilege escalation.",
+    "docker model). The operator cannot write into them without privilege",
   );
+  lines.push("escalation.");
   lines.push("");
   lines.push("Resolutions:");
-  lines.push("  1. Run from an interactive shell (recommended):");
-  lines.push("       switchroom apply");
-  lines.push("     This will prompt for sudo as needed to chown the dirs.");
-  lines.push("");
-  lines.push("  2. Run with sudo:");
+  lines.push("  1. Run with sudo (refreshes start.sh / .mcp.json / settings.json):");
   lines.push("       sudo -E switchroom apply --non-interactive");
   lines.push("");
-  lines.push("  3. Regenerate compose only, skip per-agent scaffold:");
+  lines.push("  2. Regenerate compose only, skip per-agent scaffold:");
   lines.push("       switchroom apply --non-interactive --compose-only");
+  lines.push("     Use this if you only changed compose-level fields and don't");
+  lines.push("     need to refresh per-agent files.");
   lines.push("");
   return lines.join("\n");
 }

@@ -39,19 +39,22 @@
  * `switchroom agent restart <name>` once, which clears the in-memory
  * supervisor state).
  *
- * Phase 4 follow-up: add a boot-time freshness check by reading PID
- * 1's start time from /proc/1/stat (field 22, starttime in clock-
- * ticks since boot) plus btime from /proc/stat, and treat lockfiles
- * older than that as stale regardless of PID liveness. Not done in
- * Phase 3 because the post-cap missed-cron window is bounded by the
- * canary observation period — by the time we'd hit it in production,
- * Phase 4 will have shipped the fix or rolled back the canary.
+ * Boot-time freshness defence (#895): on EEXIST we ALSO compare the
+ * lockfile's mtime against this container's PID-1 start time (read
+ * from /proc/1/stat field 22 + /proc/stat btime). A pidfile whose
+ * mtime predates this container generation is stale regardless of
+ * what `kill(pid, 0)` says — the live PID is a coincident reuse, not
+ * the original holder. Without this check a SIGKILL'd lock can wedge
+ * the supervisor through 10 restart cycles before it gives up, and
+ * since Phase 4 (#893) deleted the singleton scheduler that path is
+ * the only delivery channel for cron.
  */
 
 import {
   closeSync,
   openSync,
   readFileSync,
+  statSync,
   unlinkSync,
   writeSync,
   mkdirSync,
@@ -64,6 +67,68 @@ export interface LockResult {
   /** When `acquired === false`, the live PID currently holding it. */
   holderPid?: number;
 }
+
+export interface AcquireLockOptions {
+  /**
+   * Container PID-1 start time in ms-since-epoch. When set, a
+   * lockfile whose mtime predates this is treated as stale (defends
+   * against PID reuse across container restarts — see #895). Defaults
+   * to `readContainerBootTimeMs()`. Pass `null` to disable the check
+   * (e.g. tests outside a container, or non-Linux deployments).
+   */
+  containerBootTimeMs?: number | null;
+}
+
+/**
+ * Compute when this container's PID 1 started (ms since epoch). Reads
+ * `/proc/1/stat` field 22 (starttime in clock ticks since system boot)
+ * + `/proc/stat` btime (system boot in seconds since epoch). Returns
+ * null when /proc is unavailable or fields don't parse — caller skips
+ * the freshness check rather than fail open.
+ */
+export function readContainerBootTimeMs(): number | null {
+  try {
+    // /proc/1/stat layout: pid (comm) state ppid ... where (comm) can
+    // contain spaces and parens. Split AFTER the last ')' so the comm
+    // doesn't poison field indexes.
+    const stat1 = readFileSync("/proc/1/stat", "utf8");
+    const lastParen = stat1.lastIndexOf(")");
+    if (lastParen < 0) return null;
+    const after = stat1.slice(lastParen + 1).trim().split(/\s+/);
+    // Field 22 = starttime (clock ticks since system boot). State is
+    // field 3 (index 0 of the post-comm split), so field 22 maps to
+    // index 19.
+    const starttimeTicks = Number(after[19]);
+    if (!Number.isFinite(starttimeTicks)) return null;
+
+    const procStat = readFileSync("/proc/stat", "utf8");
+    const btimeLine = procStat.split("\n").find((l) => l.startsWith("btime "));
+    if (!btimeLine) return null;
+    const btimeSec = Number(btimeLine.split(/\s+/)[1]);
+    if (!Number.isFinite(btimeSec)) return null;
+
+    // /proc/[pid]/stat's starttime is in units of sysconf(_SC_CLK_TCK)
+    // = USER_HZ, which the kernel ABI hardcodes to 100 on every arch
+    // switchroom plausibly ships to (x86/x86_64/arm/arm64/mips — see
+    // include/uapi/asm-generic/param.h; only Alpha differs). nsec_to_
+    // clock_t() converts to USER_HZ before exposing starttime, so this
+    // is independent of CONFIG_HZ (which DOES vary — 250 on Debian
+    // server, 1000 on Ubuntu desktop). Hardcoding 100 is correct, not
+    // a heuristic; the 2s safety margin in acquireLock covers
+    // mtime-vs-/proc clock skew, NOT a wrong CLK_TCK.
+    const CLK_TCK = 100;
+    return (btimeSec + starttimeTicks / CLK_TCK) * 1000;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Conservative margin for CLK_TCK uncertainty + clock skew between
+ * /proc and the lockfile's filesystem mtime. A lock written within
+ * ~2s of boot is treated as fresh either way.
+ */
+const FRESHNESS_MARGIN_MS = 2000;
 
 /**
  * Try to acquire the lockfile. Returns `{acquired: true}` on success.
@@ -80,7 +145,12 @@ export interface LockResult {
 export function acquireLock(
   path: string,
   pid: number = process.pid,
+  options: AcquireLockOptions = {},
 ): LockResult {
+  const bootTimeMs = "containerBootTimeMs" in options
+    ? options.containerBootTimeMs
+    : readContainerBootTimeMs();
+
   // mkdir -p the parent so a fresh /state/agent doesn't trip us up.
   try { mkdirSync(dirname(path), { recursive: true, mode: 0o700 }); } catch {
     // mkdir failures are surfaced by the open() that follows.
@@ -97,7 +167,24 @@ export function acquireLock(
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
     }
-    // EEXIST — read the holder PID and probe.
+    // EEXIST — first check freshness vs container boot time (#895),
+    // THEN probe PID liveness. Boot-time precedes liveness because
+    // PID reuse across container generations can make a stale lock
+    // look live (low PID density inside a container — tini=1, single-
+    // digit siblings).
+    if (bootTimeMs != null) {
+      try {
+        const lockMtime = statSync(path).mtimeMs;
+        if (lockMtime < bootTimeMs - FRESHNESS_MARGIN_MS) {
+          try { unlinkSync(path); } catch { /* nothing to do */ }
+          continue;
+        }
+      } catch {
+        // statSync race (file disappeared between EEXIST and stat) —
+        // fall through; the next openSync will recover.
+      }
+    }
+    // Read the holder PID and probe with kill(pid, 0).
     let holderPid: number | undefined;
     try {
       const raw = readFileSync(path, "utf8").trim();

@@ -41,6 +41,7 @@ import {
   type InjectIpcClient,
 } from "./ipc-client.js";
 import { acquireLock, releaseLock } from "./lock.js";
+import { findMissedFires, readRecentFires } from "./replay.js";
 
 /**
  * Minimum node-cron-shaped surface — same as the host scheduler. The
@@ -236,6 +237,65 @@ export async function main(): Promise<void> {
     log: (m) => process.stderr.write(`agent-scheduler: ${m}\n`),
   });
   const dispatcher = ipcDispatcher(ipcClient);
+
+  // At-least-once replay: if the container restarted across a
+  // scheduled fire, replay it now before the live cron loop starts.
+  // Bounded by SWITCHROOM_AGENT_SCHEDULER_REPLAY_MIN minutes (default
+  // 30) — long enough to cover routine restarts (image pull, OOM
+  // bounce, host reboot) without resurrecting yesterday's morning
+  // briefing if an agent was down for a day.
+  //
+  // We wait briefly for the gateway socket to come up before
+  // dispatching replays — otherwise the replay would be audited as
+  // "no agent client connected" and findMissedFires would re-fire it
+  // again on the next boot.
+  const replayWindowMin = Number.parseInt(
+    process.env.SWITCHROOM_AGENT_SCHEDULER_REPLAY_MIN ?? "30",
+    10,
+  );
+  const recentFires = readRecentFires(resolve(jsonlPath));
+  const missed = findMissedFires({
+    entries,
+    recentFires,
+    now: new Date(),
+    windowMinutes: Number.isFinite(replayWindowMin) ? replayWindowMin : 30,
+  });
+  if (missed.length > 0) {
+    const connected = await ipcClient.waitForConnect(5_000);
+    if (connected) {
+      process.stdout.write(
+        `agent-scheduler: replaying ${missed.length} missed fire(s) ` +
+        `from past ${replayWindowMin}min — ` +
+        missed
+          .map((m) => `[idx=${m.entry.scheduleIndex} key=${m.entry.promptKey}]`)
+          .join(" ") + "\n",
+      );
+      for (const m of missed) {
+        const startedAt = Date.now();
+        const result = dispatchAsInbound(
+          m.entry,
+          { chatId: channel.chatId, threadId: channel.threadId },
+          dispatcher,
+        );
+        sink.recordFire({
+          agent: m.entry.agent,
+          scheduleIndex: m.entry.scheduleIndex,
+          promptKey: m.entry.promptKey,
+          exitCode: result.delivered ? 0 : -1,
+          outputSummary: result.delivered
+            ? `replayed (originally scheduled at ${new Date(m.expectedFireMs).toISOString()})`
+            : "replay attempted but gateway not connected",
+          startedAt,
+          finishedAt: Date.now(),
+        });
+      }
+    } else {
+      process.stderr.write(
+        `agent-scheduler: ${missed.length} missed fire(s) detected but ` +
+        `gateway socket not up after 5s — skipping replay this boot\n`,
+      );
+    }
+  }
 
   // Lazy-resolve node-cron at runtime — it's installed inside the
   // agent image (docker/Dockerfile.agent) and not pulled in as a

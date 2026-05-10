@@ -1668,8 +1668,9 @@ export function registerShutdownHandlers(broker: VaultBroker): void {
 // Dockerfile.broker invokes `bun /opt/switchroom/dist/vault/broker/server.js`.
 // Without a main() + entry guard, the bundle would import VaultBroker, run no
 // listen call, and exit immediately (Phase 1b review blocker). We mirror the
-// scheduler's pattern at src/scheduler/index.ts: read env for socket/config/
-// vault paths, construct a broker, register shutdown handlers, call start().
+// in-agent scheduler's pattern at src/agent-scheduler/index.ts: read env for
+// socket/config/vault paths, construct a broker, register shutdown handlers,
+// call start().
 //
 // Env contract:
 //   SWITCHROOM_BROKER_SOCKET    Path to data socket. Default

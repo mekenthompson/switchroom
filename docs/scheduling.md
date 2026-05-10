@@ -1,6 +1,6 @@
 # Scheduled Tasks
 
-Switchroom runs scheduled tasks via the **`scheduler` container** — a singleton cron service in the docker fleet that dispatches one-shot `claude -p` calls into each agent container at the configured times and sends output to Telegram. Surviving host reboots is handled by docker's restart policy.
+Switchroom runs scheduled tasks via an **in-container scheduler sibling** that lives inside every agent container alongside the gateway. At fire time the sibling injects a synthesized inbound turn into the agent's running session — so cron-triggered work appears in the agent's transcript and Hindsight context as ordinary turns tagged `<channel source="cron">`, not as out-of-band one-shot processes. Surviving host reboots is handled by docker's restart policy plus an at-least-once boot replay (see below).
 
 ## Quick Start
 
@@ -11,39 +11,36 @@ defaults:
       prompt: "Morning briefing: today's calendar, top priorities, and blockers"
     - cron: "0 20 * * 0"
       prompt: "Weekly review: summarize this week's progress and next week's goals"
-      model: claude-opus-4-6    # override for important tasks
 ```
 
-Run `switchroom agent create <name>` or `switchroom agent reconcile <name>` to register the schedule entries with the scheduler.
+Run `switchroom agent create <name>` or `switchroom agent reconcile <name>` to materialize the schedule into the agent container. The change takes effect after the next `switchroom agent restart <name>`.
 
 ## How It Works
 
-The `scheduler` container reads each agent's `schedule:` block from `~/.switchroom/switchroom.yaml` (and the cascade), converts every `cron:` expression to a `node-cron` schedule, and at fire time runs:
+Each agent's container runs a small `agent-scheduler` sidecar (started by `start.sh` as a sibling of the telegram-plugin gateway). The sidecar:
 
-```
-docker exec agent-<name> claude -p "<prompt>" --model <model> --no-session-persistence
-```
+1. Reads its own agent's `schedule:` block from `/state/config/switchroom.yaml` (the cascade-resolved file bind-mounted read-only into every container).
+2. Registers each `cron:` expression with `node-cron`.
+3. On fire, synthesizes an `InboundMessage` envelope tagged `meta.source="cron"`, `meta.schedule_index`, `meta.prompt_key`.
+4. Sends an `inject_inbound` IPC message to the gateway socket inside the same container; the gateway forwards the inbound to the bridge, which delivers it to the agent's running claude session.
+5. Audits each fire to `/state/agent/scheduler.jsonl` (one row per fire, append-only).
 
-against the live agent container. The agent's MCP tools (Telegram, Vault, etc.) are wired the same way they are for an interactive turn, so the dispatched task can call `mcp__switchroom-telegram__reply` directly. The scheduler itself never sees secret values — the agent resolves any vault refs through the broker socket.
+The scheduler itself never reads secrets — the agent resolves any vault refs the prompt needs via the broker socket once the turn starts.
+
+### At-least-once replay
+
+When an agent container restarts (image pull, OOM bounce, host reboot), any cron fires that would have happened during the downtime are replayed on boot — bounded to the past 30 minutes by default (`SWITCHROOM_AGENT_SCHEDULER_REPLAY_MIN`). The scheduler reads its own JSONL audit log, finds the most-recent past minute each cron expression matched, and replays any minute that has no successful audit row within ±90 s.
+
+This is `at-least-once`, not `exactly-once` — a fire that's started but interrupted before audit-write may replay. The window is intentionally small so a long outage doesn't resurrect yesterday's morning briefing.
 
 ## Configuration
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
 | `cron` | Yes | — | Standard 5-field cron expression |
-| `prompt` | Yes | — | The prompt sent to Claude |
-| `model` | No | `claude-sonnet-4-6` | Model for this task |
-| `secrets` | No | `[]` | Vault keys this task may read via the broker. See [configuration.md#vault-broker-linux-only](configuration.md#vault-broker-linux-only). |
-
-> **`suppress_stdout` was removed in [#269](https://github.com/switchroom/switchroom/issues/269).** All cron tasks route their Telegram message through the MCP `reply` tool the agent already uses for interactive turns.
-
-### How cron tasks deliver to Telegram
-
-Cron-scheduled tasks run as one-shot `claude -p` invocations with no live Telegram session. The scheduler executes the configured `prompt` directly — there is no shell-level prompt wrapping, no `HEARTBEAT_OK` sentinel, and no stdout redirection. If the task has something to say, the model calls `mcp__switchroom-telegram__reply` itself; the scheduler captures stdout only to populate the audit-log `output_summary` column.
-
-The MCP `reply` tool applies the same markdown→HTML conversion, smart chunking, and sanitization as a live session, so output renders identically regardless of trigger. If the task has nothing meaningful to deliver (data is dull, all signals nominal), the model can simply not call `reply` — a silent run is correct behaviour, not an error.
-
-This replaces the previous flow (raw `claude -p` stdout piped through `curl ... -d parse_mode=HTML`), which produced broken markdown rendering on phones (literal `**asterisks**`) and the duplicate-message bug tracked in [#251](https://github.com/switchroom/switchroom/issues/251).
+| `prompt` | Yes | — | The prompt that becomes the synthesized turn's text |
+| `model` | No | inherits agent | Model for this task. Honored if you wire it through the prompt; the scheduler does not pass `--model` separately because cron now runs in the agent's existing session |
+| `secrets` | No | `[]` | Vault keys this task may read. See [configuration.md#vault-broker-linux-only](configuration.md#vault-broker-linux-only) |
 
 ### Cron Expression Examples
 
@@ -55,21 +52,11 @@ This replaces the previous flow (raw `claude -p` stdout piped through `curl ... 
 | `0 9,17 * * *` | 9:00 AM and 5:00 PM daily |
 | `0 */3 * * *` | Every 3 hours |
 
-## Model Selection
+## How cron tasks deliver to Telegram
 
-Tasks default to `claude-sonnet-4-6` (cheap, fast). Override per-task for important work:
+Because cron fires arrive as ordinary inbound turns in the running session, the agent's normal reply path runs — `mcp__switchroom-telegram__reply` (or `stream_reply`) writes to the chat the same way it does for a user-typed message. Markdown→HTML conversion, smart chunking, and sanitization are identical. If the agent decides the prompt has nothing meaningful to say, no reply is sent — a silent run is correct behaviour, not an error.
 
-```yaml
-schedule:
-  - cron: "0 8 * * 1-5"
-    prompt: "Quick morning check-in"
-    # uses sonnet (default) — fast, cheap
-
-  - cron: "0 20 * * 5"
-    prompt: "End-of-week deep analysis: review all PRs, summarize decisions"
-    model: claude-opus-4-6
-    # uses opus — complex reasoning, worth the tokens
-```
+This replaces the pre-v0.8 flow (singleton `switchroom-cron` container running `docker exec agent-<name> claude -p ...`), which created a fresh isolated process per fire and had no awareness of the running session.
 
 ## Cascade Behavior
 
@@ -88,41 +75,45 @@ agents:
         prompt: "Daily check-in: sleep, energy"
 ```
 
-The coach agent gets BOTH schedules: the global 8am briefing AND its own 7am check-in.
+The coach agent gets BOTH schedules: the global 8 AM briefing AND its own 7 AM check-in.
 
-## Independence from Agent Sessions
+## Cron fires and the agent session
 
-Scheduled tasks are **not** part of the running agent session. They:
+Pre-v0.8, scheduled tasks ran as **isolated** one-shot `claude -p` calls — no session, no transcript, no memory. Post-fold-in, fires arrive in the running session, so:
 
-- Run as fresh one-shot `claude -p` calls (no persistent session)
-- Don't consume context in the main agent's conversation
-- Fire even if the agent is down, restarting, or in a broken state
-- Use their own model (Sonnet by default) regardless of the agent's model
+- The fire **does** consume context in the agent's conversation (it's just another turn).
+- The fire **sees** the agent's recent conversation history and Hindsight memories.
+- The fire **uses** the agent's configured model (`--model` is no longer per-task).
+- The fire is **rendered** in the transcript as a `<channel source="cron">` turn so the agent (and operator) can tell it apart from human messages.
 
-This means a scheduled task won't see the agent's conversation history or Hindsight memories. It's a clean, isolated execution — ideal for briefings, reminders, and periodic checks.
+Trade-off: scheduled tasks now share session context (better for "remember what we discussed yesterday morning" follow-ups), at the cost of cron fires consuming token budget. For agents that need pure isolation (e.g. an audit role), a separate agent dedicated to scheduled tasks is the cleanest pattern.
+
+If the agent is down at fire time, the in-container sidecar can't deliver — the boot-time replay window catches up to 30 minutes. Anything older than that is dropped: cron is not a queue.
 
 ## Managing the Scheduler
 
 ```bash
-# Confirm the scheduler container is running
-docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml ps scheduler
+# Tail the agent's scheduler audit log (which task fired when)
+tail -f ~/.switchroom/agents/<name>/scheduler.jsonl
 
-# Tail the scheduler's fire log (which task fired when, exit codes)
-docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml logs -f scheduler
+# Tail the agent-scheduler supervisor's stderr/stdout
+docker logs -f switchroom-<name>  # the agent-scheduler line is prefixed "agent-scheduler:"
 
-# Manually trigger a scheduled task by dispatching it directly into the agent
-docker exec agent-<name> claude -p "<prompt>" --model claude-sonnet-4-6 --no-session-persistence
+# Restart the in-container scheduler (e.g. after editing switchroom.yaml + reconciling)
+switchroom agent restart <name>
 
-# Restart the scheduler (e.g. after editing switchroom.yaml + reconciling)
-docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml restart scheduler
+# Disable in-agent scheduling on a single container without removing the schedule
+docker compose -p switchroom \
+  -f ~/.switchroom/compose/docker-compose.yml \
+  exec --env SWITCHROOM_INLINE_SCHEDULER=0 agent-<name> sh
 ```
 
 ## Comparison with Claude Code's Native Scheduling
 
-| | Switchroom (scheduler container) | Claude Code CronCreate | Claude Code Desktop |
+| | Switchroom (in-agent scheduler) | Claude Code CronCreate | Claude Code Desktop |
 |---|---|---|---|
-| **Survives restart** | Yes (docker `restart: unless-stopped`) | No (session-scoped) | Yes (app must be open) |
+| **Survives restart** | Yes (docker `restart: unless-stopped` + at-least-once replay) | No (session-scoped) | Yes (app must be open) |
 | **Headless** | Yes | Yes | No (Desktop app only) |
-| **Model selection** | Per-task | Inherits session | Per-task |
-| **Context isolation** | Fully isolated | Shares session | Isolated |
+| **Model selection** | Inherits agent's model | Inherits session | Per-task |
+| **Context isolation** | Shares session | Shares session | Isolated |
 | **Persistence bug** | No | Yes (#40228) | No |

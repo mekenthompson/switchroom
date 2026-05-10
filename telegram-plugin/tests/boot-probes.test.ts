@@ -724,14 +724,20 @@ describe('probeBroker / probeKernel', () => {
   })
 
   it('probeBroker fails when no socket path is configured', async () => {
-    const oldEnv = process.env.SWITCHROOM_BROKER_SOCKET
-    delete process.env.SWITCHROOM_BROKER_SOCKET
+    // SWITCHROOM_VAULT_BROKER_SOCK is the canonical client-side env
+    // var, matches what src/vault/broker/client.ts and the
+    // secret-guard hook read. (Pre-fix the probe used the wrong name
+    // SWITCHROOM_BROKER_SOCKET — the broker server's bind-path env —
+    // which compose was setting in agent containers but no client
+    // ever read.)
+    const oldEnv = process.env.SWITCHROOM_VAULT_BROKER_SOCK
+    delete process.env.SWITCHROOM_VAULT_BROKER_SOCK
     try {
       const result = await probeBroker(undefined, { dockerMode: true })
       expect(result.status).toBe('fail')
       expect(result.detail).toContain('not configured')
     } finally {
-      if (oldEnv !== undefined) process.env.SWITCHROOM_BROKER_SOCKET = oldEnv
+      if (oldEnv !== undefined) process.env.SWITCHROOM_VAULT_BROKER_SOCK = oldEnv
     }
   })
 

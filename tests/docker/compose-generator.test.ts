@@ -117,7 +117,12 @@ describe("generateCompose", () => {
     expect(out).toContain("name: switchroom\n");
     expect(out).toContain("  vault-broker:");
     expect(out).toContain("  approval-kernel:");
-    expect(out).toContain("/run/switchroom/broker/alice/sock");
+    // Per-agent broker volume mount on the broker side stays
+    // `/run/switchroom/broker/<agent>` regardless of the
+    // containerNamePrefix — it's the broker's view, not a name. The
+    // per-agent socket file (`<dir>/sock`) is created by the broker at
+    // runtime, not emitted into the compose YAML.
+    expect(out).toContain("broker-alice-sock:/run/switchroom/broker/alice");
     // The fleet label IS parametrized (PR #939 follow-up): test
     // fleets carry switchroom.fleet=<prefix>, so a parallel vitest
     // fork's productionFleetIsLive() filter on switchroom.fleet=
@@ -479,30 +484,54 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
     }
   });
 
-  it("sets SWITCHROOM_KERNEL_SOCKET to the per-agent kernel-server bind path", () => {
+  it("sets SWITCHROOM_KERNEL_SOCKET to the agent-perspective socket path", () => {
+    // The agent mounts `kernel-<name>-sock` at `/run/switchroom/kernel`
+    // (compose.ts line ~608 — directly at the parent dir, not at a
+    // per-agent subdir). So the kernel socket inside the agent is at
+    // `/run/switchroom/kernel/sock`, not `/run/switchroom/kernel/
+    // <name>/sock` (which is the kernel CONTAINER's view). Pre-fix
+    // the env value was the kernel-side path → didn't exist inside
+    // the agent → client fell through to the legacy fallback.
     const out = generateCompose({
       config: makeConfig({ alice: {}, bob: {} }),
     });
     for (const a of ["alice", "bob"]) {
       const env = envBlockFor(out, a);
       expect(env).toMatch(
-        new RegExp(
-          `SWITCHROOM_KERNEL_SOCKET:\\s*"/run/switchroom/kernel/${a}/sock"`,
-        ),
+        /SWITCHROOM_KERNEL_SOCKET:\s*"\/run\/switchroom\/kernel\/sock"/,
+      );
+      // Pin the regression: the per-agent-subdir form is the kernel-
+      // side bind path, NOT what should land in agent env.
+      expect(env).not.toMatch(
+        new RegExp(`SWITCHROOM_KERNEL_SOCKET:\\s*"/run/switchroom/kernel/${a}/sock"`),
       );
     }
   });
 
-  it("sets SWITCHROOM_BROKER_SOCKET to the per-agent broker-server bind path", () => {
+  it("sets SWITCHROOM_VAULT_BROKER_SOCK (canonical name) to the agent-perspective path", () => {
+    // The compose generator pre-fix emitted `SWITCHROOM_BROKER_SOCKET`
+    // (the broker SERVER's bind-path env), which the broker CLIENT
+    // (`src/vault/broker/client.ts:293`) and the secret-guard hook
+    // (`telegram-plugin/hooks/secret-guard-pretool.mjs:36`) do NOT
+    // read — they read `SWITCHROOM_VAULT_BROKER_SOCK`. So the env var
+    // was set but ignored. Plus the value was the broker's view of
+    // the per-agent subdir, which doesn't exist inside the agent
+    // container. Both fixed: canonical name + agent-perspective path.
+    // Surfaced as klanker's "VAULT-BROKER-DENIED" on 2026-05-10.
     const out = generateCompose({
       config: makeConfig({ alice: {}, bob: {} }),
     });
     for (const a of ["alice", "bob"]) {
       const env = envBlockFor(out, a);
       expect(env).toMatch(
-        new RegExp(
-          `SWITCHROOM_BROKER_SOCKET:\\s*"/run/switchroom/broker/${a}/sock"`,
-        ),
+        /SWITCHROOM_VAULT_BROKER_SOCK:\s*"\/run\/switchroom\/broker\/sock"/,
+      );
+      // Regression pins:
+      //   1. The wrong NAME (server-side env) is no longer set.
+      //   2. The wrong PATH (broker's per-agent-subdir view) is gone.
+      expect(env).not.toMatch(/SWITCHROOM_BROKER_SOCKET:/);
+      expect(env).not.toMatch(
+        new RegExp(`/run/switchroom/broker/${a}/sock`),
       );
     }
   });

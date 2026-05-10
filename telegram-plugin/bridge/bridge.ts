@@ -401,6 +401,23 @@ const TOOL_SCHEMAS = [
       required: ['chat_id', 'message_id'],
     },
   },
+  {
+    name: 'vault_request_save',
+    description:
+      'Ask the user to confirm saving a secret value to the vault. Use this when the user gave you a credential/token in chat and asked you to save it (or when you discovered one mid-task that the user should curate). Renders a Telegram approval card with [Save once] [Discard] [Rename] buttons; the value is written to the host vault only when the user taps Save. The value never leaves the host — it is staged inside the gateway and never echoed back to the agent. Do NOT use this tool to read secrets — use the standard vault: reference syntax in your scaffolded prompt. Do NOT call this for values the user did not explicitly hand you (no proactive secret discovery from filesystem scans, command output, etc).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chat_id: { type: 'string', description: 'Chat to render the approval card in (use the chat_id of the user message that delivered the secret).' },
+        key: { type: 'string', description: 'Suggested vault key (slug) to store the secret under. The user can override via the [Rename] button. Use lowercase snake_case, e.g. `klanker_telegram_bot_token`.' },
+        value: { type: 'string', description: 'The secret value to save. Will be staged in the gateway and never echoed back to the agent.' },
+        why: { type: 'string', description: 'Short human-readable reason rendered on the card (e.g. "for the klanker UAT bot you asked me to set up"). Helps the user verify intent.' },
+        kind: { type: 'string', enum: ['string', 'binary'], description: 'Storage shape. Default "string". Use "binary" for base64-encoded blobs.' },
+        message_thread_id: { type: 'string', description: 'Forum topic thread ID. Auto-applied from the last inbound message if not specified.' },
+      },
+      required: ['chat_id', 'key', 'value'],
+    },
+  },
 ]
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_SCHEMAS }))

@@ -226,9 +226,31 @@ export async function main(): Promise<void> {
 
   if (entries.length === 0) {
     process.stdout.write(
-      `agent-scheduler: ${agentName} has no schedule entries — exiting cleanly\n`,
+      `agent-scheduler: ${agentName} has no schedule entries — idling ` +
+      `(re-checks on container restart)\n`,
     );
-    process.exit(0);
+    // Stay alive so start.sh's _switchroom_supervise restart-cap
+    // doesn't burn through 10 restarts and give up. An agent that
+    // legitimately has no cron is a perfectly normal state — most
+    // agents in a typical fleet don't have schedule blocks. The
+    // previous `process.exit(0)` produced 10 lines of noise per
+    // schedule-less agent in the supervisor log every container
+    // restart, then permanently wedged the supervisor for that
+    // agent. setInterval is enough to peg the event loop; container
+    // restart re-runs main() and re-reads config, so a future
+    // `apply` that adds schedule entries gets picked up cleanly.
+    setInterval(() => { /* idle */ }, 1 << 30);
+    // Release the lock cleanly on SIGTERM/SIGINT so a subsequent
+    // boot doesn't have to fall back to the stale-lock reclaim path
+    // in acquireLock. Only matters for log cleanliness — the reclaim
+    // path works either way (#895 boot-time freshness check).
+    const cleanup = (): never => {
+      releaseLock(lockPath);
+      process.exit(0);
+    };
+    process.once("SIGTERM", cleanup);
+    process.once("SIGINT", cleanup);
+    return;
   }
 
   const sink: AuditSink = new JsonlAuditSink(resolve(jsonlPath));

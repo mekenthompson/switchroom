@@ -95,7 +95,14 @@ class of bugs goes away.
 - **A new long-running daemon when the existing broker pattern would
   do.** Switchroom already has a `vault-broker` for similar
   "one-writer-many-readers" problems. A new auth-broker should be the
-  same shape, not a new kind of process.
+  same shape, not a new kind of process. The vault broker's *rotation*
+  flow is the closest existing precedent: a single writer (the broker
+  process) holds the canonical credential, `op:put` writes a new value
+  atomically under flock, and every reader picks up the new bytes on
+  the next fetch. The auth-broker fans rotation out a step further
+  (per-agent mirror) but the threading-and-locking story is the same
+  — see `docs/vault.md` § "Atomic rotation" and the v0.7.12 layout
+  notes for the on-disk shape that makes the rotation safe.
 
 ## Decisions
 

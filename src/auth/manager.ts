@@ -41,6 +41,20 @@ export interface AuthStatus {
   rateLimitTier?: string;
   source?: "credentials" | "oauth-token";
   pendingAuth?: boolean;
+  /**
+   * True when the credential / oauth-token files exist on disk but the
+   * current process can't open(2) them (EACCES). Typical case: per-
+   * agent state files are mode 0600 owned by the agent UID
+   * (compose.ts allocates 10001-10999), and the host operator running
+   * `switchroom doctor` is a different UID. Agent state is almost
+   * certainly fine; the host just can't verify.
+   *
+   * Doctor renders `inaccessible: true` as `warn` ("auth state owned
+   * by agent UID — unverifiable from host") instead of `fail` ("not
+   * authenticated"), which was the 2026-05-10 false-positive that
+   * polluted the post-deploy doctor across all 8 agents.
+   */
+  inaccessible?: boolean;
 }
 
 interface CredentialsFile {
@@ -246,6 +260,38 @@ function readOAuthToken(agentDir: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Detect whether the agent's auth state files exist on disk but are
+ * unreadable from the current process (EACCES). Per-agent state is
+ * mode 0600 owned by an agent-specific UID (compose.ts allocates
+ * 10001-10999); when `switchroom doctor` runs as the host operator
+ * the open(2) fails with EACCES even though the agent itself reads
+ * the file fine. Pre-fix this manifested as a per-agent "not
+ * authenticated" fail row on every host-side doctor run (the 2026-
+ * 05-10 false-positive that polluted the post-deploy doctor across
+ * all 8 agents).
+ *
+ * Returns true if EITHER credentials.json or .oauth-token is present
+ * but unreadable. ENOENT (genuinely missing) is NOT treated as
+ * inaccessible — that's a real "not authenticated" state.
+ */
+function authFilesAreInaccessible(agentDir: string): boolean {
+  const probes = [credentialsPath(agentDir), oauthTokenPath(agentDir)];
+  for (const p of probes) {
+    if (!existsSync(p)) continue;
+    try {
+      readFileSync(p, "utf-8");
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "EACCES" || code === "EPERM") return true;
+      // Any other error (corrupted file, FS issue) is a different
+      // problem; let the existing flow fall through to "not
+      // authenticated" rather than masking it as inaccessible.
+    }
+  }
+  return false;
 }
 
 /**
@@ -517,7 +563,14 @@ export function getAuthStatus(name: string, agentDir: string): AuthStatus {
   }
 
   if (!creds?.accessToken) {
-    return { authenticated: false, pendingAuth };
+    // Distinguish "credentials genuinely missing" (real not-authenticated
+    // state) from "credentials present on disk but unreadable from this
+    // UID" (host-side doctor false-positive — agent state is fine).
+    return {
+      authenticated: false,
+      pendingAuth,
+      ...(authFilesAreInaccessible(agentDir) ? { inaccessible: true } : {}),
+    };
   }
 
   const expiresAt = creds.expiresAt;

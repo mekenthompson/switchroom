@@ -17,6 +17,61 @@ import {
 import { findConfigFile } from "../src/config/loader.js";
 import type { SwitchroomConfig } from "../src/config/schema.js";
 
+describe("classifyReadError + tryReadHostFile", () => {
+  let tempDir: string;
+  beforeEach(() => {
+    tempDir = resolve(tmpdir(), `switchroom-doctor-readerr-${Date.now()}`);
+    mkdirSync(tempDir, { recursive: true });
+  });
+  afterEach(() => rmSync(tempDir, { recursive: true, force: true }));
+
+  it("classifies ENOENT correctly", async () => {
+    const { classifyReadError } = await import("../src/cli/doctor.js");
+    expect(classifyReadError({ code: "ENOENT" } as NodeJS.ErrnoException)).toBe("enoent");
+  });
+
+  it("classifies EACCES and EPERM as eacces", async () => {
+    const { classifyReadError } = await import("../src/cli/doctor.js");
+    expect(classifyReadError({ code: "EACCES" } as NodeJS.ErrnoException)).toBe("eacces");
+    expect(classifyReadError({ code: "EPERM" } as NodeJS.ErrnoException)).toBe("eacces");
+  });
+
+  it("classifies unknown codes as other", async () => {
+    const { classifyReadError } = await import("../src/cli/doctor.js");
+    expect(classifyReadError({ code: "EBUSY" } as NodeJS.ErrnoException)).toBe("other");
+    expect(classifyReadError(new Error("totally generic"))).toBe("other");
+  });
+
+  it("tryReadHostFile returns ok with content when readable", async () => {
+    const { tryReadHostFile } = await import("../src/cli/doctor.js");
+    const path = join(tempDir, "ok.txt");
+    writeFileSync(path, "hello\n");
+    const result = tryReadHostFile(path);
+    expect(result.kind).toBe("ok");
+    if (result.kind === "ok") expect(result.content).toBe("hello\n");
+  });
+
+  it("tryReadHostFile returns enoent when file is missing", async () => {
+    const { tryReadHostFile } = await import("../src/cli/doctor.js");
+    const result = tryReadHostFile(join(tempDir, "nope.txt"));
+    expect(result.kind).toBe("enoent");
+  });
+
+  it("tryReadHostFile returns eacces when file exists but is unreadable", async () => {
+    const { tryReadHostFile } = await import("../src/cli/doctor.js");
+    const path = join(tempDir, "secret.txt");
+    writeFileSync(path, "x");
+    chmodSync(path, 0o000);
+    try {
+      const result = tryReadHostFile(path);
+      expect(result.kind).toBe("eacces");
+      if (result.kind === "eacces") expect(result.error).toMatch(/EACCES|permission/i);
+    } finally {
+      chmodSync(path, 0o600);
+    }
+  });
+});
+
 describe("parseEnvFile", () => {
   let tempDir: string;
 
@@ -247,6 +302,35 @@ describe("checkTelegram", () => {
       makeConfig({ other: { plugin: "none" } }),
     );
     expect(results).toHaveLength(0);
+  });
+
+  it("reports warn (not fail) when .env exists but is unreadable from host UID (EACCES)", async () => {
+    // Per-agent state files are mode 0600 owned by the agent UID
+    // (compose.ts allocates 10001-10999); when `switchroom doctor`
+    // runs as the host operator, open(2) fails with EACCES even
+    // though the agent itself reads the file fine. Pre-fix this
+    // produced a false "TELEGRAM_BOT_TOKEN missing" fail per agent
+    // — the 2026-05-10 post-deploy doctor false-positive.
+    //
+    // Simulate by writing the file with mode 0000 (so existsSync
+    // still returns true but readFileSync throws EACCES).
+    writeAgentEnv("assistant", "123:ABC");
+    const envPath = join(tempDir, "assistant", "telegram", ".env");
+    chmodSync(envPath, 0o000);
+    try {
+      const results = await checkTelegram(
+        makeConfig({ assistant: { plugin: "switchroom" } }),
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].status).toBe("warn");
+      expect(results[0].detail).toContain("unreadable from host");
+      expect(results[0].detail).toContain("agent reads it fine");
+      // Crucially: the row must NOT claim TELEGRAM_BOT_TOKEN is "missing".
+      expect(results[0].detail).not.toContain("missing");
+    } finally {
+      // Restore so afterEach's rmSync can clean up.
+      chmodSync(envPath, 0o600);
+    }
   });
 
   it("dedupes tokens across multiple agents sharing one bot", async () => {

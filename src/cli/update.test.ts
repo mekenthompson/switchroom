@@ -88,6 +88,100 @@ describe("planUpdate", () => {
   });
 });
 
+describe("--status (#927)", () => {
+  it("formatStatusReport renders CLI version + per-service ages", async () => {
+    const { formatStatusReport } = await import("./update.js");
+    // Fixed clock for deterministic age strings.
+    const now = Date.parse("2026-05-10T18:00:00Z");
+    const out = formatStatusReport({
+      cliVersion: "0.7.7",
+      cliBuiltAt: new Date(now - 30 * 60 * 1000).toISOString(), // 30m ago
+      services: [
+        {
+          name: "agent-clerk",
+          image: "ghcr.io/x/switchroom-agent:latest",
+          imageDigestShort: "abc123def456",
+          imagePulledAt: new Date(now - 4 * 3600 * 1000).toISOString(), // 4h
+          containerCreatedAt: new Date(now - 1 * 3600 * 1000).toISOString(), // 1h
+          status: "running",
+        },
+      ],
+      warnings: [],
+    });
+    expect(out).toContain("CLI: 0.7.7");
+    expect(out).toContain("agent-clerk");
+    expect(out).toContain("running");
+    expect(out).toContain("[abc123def456]");
+  });
+
+  it("runUpdate --status uses statusProbe seam, never invokes runner", async () => {
+    const { runUpdate } = await import("./update.js");
+    const out: string[] = [];
+    let runnerCalled = false;
+    let probedComposePath = "";
+    const code = await runUpdate({
+      status: true,
+      composePath: "/some/compose.yml",
+      stdout: (s) => out.push(s),
+      stderr: (s) => out.push(s),
+      runner: () => { runnerCalled = true; return { status: 0 }; },
+      statusProbe: (p) => {
+        probedComposePath = p;
+        return {
+          cliVersion: "test",
+          cliBuiltAt: null,
+          services: [],
+          warnings: [],
+        };
+      },
+    });
+    expect(code).toBe(0);
+    expect(runnerCalled).toBe(false); // status mode runs no steps
+    expect(probedComposePath).toBe("/some/compose.yml");
+    expect(out.join("")).toContain("CLI: test");
+  });
+
+  it("runUpdate --json without --status fails loud (exit 2) — #938 reviewer", async () => {
+    const { runUpdate } = await import("./update.js");
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await runUpdate({
+      json: true,
+      composePath: "/x.yml",
+      stdout: (s) => out.push(s),
+      stderr: (s) => err.push(s),
+      runner: () => ({ status: 0 }),
+    });
+    expect(code).toBe(2);
+    expect(err.join("")).toMatch(/--json is only honored under --status/);
+  });
+
+  it("runUpdate --status --json emits parseable JSON with the report shape", async () => {
+    const { runUpdate } = await import("./update.js");
+    const out: string[] = [];
+    await runUpdate({
+      status: true,
+      json: true,
+      composePath: "/x.yml",
+      stdout: (s) => out.push(s),
+      runner: () => ({ status: 0 }),
+      statusProbe: () => ({
+        cliVersion: "0.7.8",
+        cliBuiltAt: "2026-05-10T18:00:00Z",
+        services: [
+          { name: "vault-broker", image: "ghcr.io/x:latest", imageDigestShort: "deadbeef", imagePulledAt: null, containerCreatedAt: null, status: "running" },
+        ],
+        warnings: ["test warning"],
+      }),
+    });
+    const parsed = JSON.parse(out.join(""));
+    expect(parsed.cliVersion).toBe("0.7.8");
+    expect(parsed.services).toHaveLength(1);
+    expect(parsed.services[0].name).toBe("vault-broker");
+    expect(parsed.warnings).toEqual(["test warning"]);
+  });
+});
+
 describe("--rebuild against a non-checkout install fails loudly (#923 reviewer)", () => {
   it("rebuild-source step throws when scriptPath has no .git ancestor", () => {
     const tmp = mkdtempSync(join(tmpdir(), "rebuild-no-git-"));

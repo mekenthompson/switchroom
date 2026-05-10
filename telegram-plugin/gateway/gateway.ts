@@ -5620,11 +5620,12 @@ function resolveSystemdRunPath(): string | null {
  * Detect whether `docker` is callable from this process — required by
  * `switchroom update`'s pull-images and recreate-containers steps.
  *
- * The gateway runs INSIDE the agent container (Phase 4 docker model),
- * which by design has no docker binary or socket mount. So this
- * returns false on the canonical install. It's wired by the /update
- * apply handler to surface a clean error instead of a confusing
- * "docker: not found" exit-127 from the detached child (#926).
+ * The gateway runs INSIDE the agent container (cron-fold-in / Phase 4
+ * docker model), which by design has no docker binary AND no socket
+ * mount. We probe both: binary on PATH (via `docker --version`) and
+ * socket on disk (via existsSync). True only if BOTH are present —
+ * mirroring the actual requirements `switchroom update` will hit when
+ * it shells out.
  *
  * Cached: docker availability doesn't change at runtime within a
  * single container generation.
@@ -5632,17 +5633,28 @@ function resolveSystemdRunPath(): string | null {
 let _dockerReachable: boolean | undefined
 function isDockerReachable(): boolean {
   if (_dockerReachable !== undefined) return _dockerReachable
+  // Cheap socket probe first — if the mount is absent, no need to
+  // pay the execSync cost. Common-case fast-path on docker installs.
+  if (!existsSync('/var/run/docker.sock')) {
+    _dockerReachable = false
+    return _dockerReachable
+  }
   try {
-    // -version is fast and doesn't require socket access just to print.
-    // Sufficient as a "binary present + executable" probe; further
-    // socket calls inside `switchroom update` will surface their own
-    // errors if reachable-binary-but-no-socket.
+    // -version is fast and doesn't require an actual daemon roundtrip
+    // for binary-present probing. Bounded timeout in case the binary
+    // exists but blocks (unlikely but defensive).
     execSync('docker --version', { stdio: 'ignore', timeout: 2000 })
     _dockerReachable = true
   } catch {
     _dockerReachable = false
   }
   return _dockerReachable
+}
+
+// @internal exported for tests — resets the docker-reachable cache so
+// a test can swap underlying state and observe the new probe result.
+export function _resetDockerReachableCache(): void {
+  _dockerReachable = undefined
 }
 
 function spawnSwitchroomDetached(

@@ -418,7 +418,7 @@ describe("runApply", () => {
       }
     });
 
-    it("findUnwritableAgentDirs flags agents whose start.sh we can't write to", async () => {
+    it.skipIf(process.getuid?.() === 0)("findUnwritableAgentDirs flags agents whose start.sh we can't write to", async () => {
       const {
         mkdtempSync, mkdirSync, writeFileSync, chmodSync, rmSync,
       } = await import("node:fs");

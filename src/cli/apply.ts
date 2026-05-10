@@ -15,7 +15,7 @@
  * The systemd path lives behind `switchroom agent` lifecycle verbs
  * (and their `--legacy` flags). `apply` is the docker-first verb.
  */
-import type { Command } from "commander";
+import { Option, type Command } from "commander";
 import chalk from "chalk";
 import { accessSync, constants as fsConstants, copyFileSync, existsSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -603,6 +603,17 @@ export function findUnwritableAgentDirs(
 }
 
 /**
+ * Env vars the CLI consults that must survive the re-exec under sudo.
+ * Single source of truth so adding a new var doesn't drift between the
+ * doc-comment, the argv builder, and the test assertion.
+ */
+export const SELF_ELEVATE_PRESERVED_ENV = [
+  "HOME",              // ~/.switchroom resolution
+  "SWITCHROOM_CONFIG", // override of the default config path
+  "PATH",              // so child shell-outs find their tools
+] as const;
+
+/**
  * Build the sudo argv that re-execs this process under root with the
  * same arguments + a `--skip-self-elevate` guard. Exposed for tests
  * and for `--print-sudo-cmd`.
@@ -610,10 +621,8 @@ export function findUnwritableAgentDirs(
  * Notes on the cross-flavour sudo dance:
  *   - sudo-rs ignores `-E` (warns and proceeds without preservation).
  *     Both sudo and sudo-rs accept `--preserve-env=VAR1,VAR2,...` so
- *     we use that uniformly. Preserved vars are the minimal set the
- *     CLI actually consults: HOME (for ~/.switchroom resolution),
- *     SWITCHROOM_CONFIG (override of the default config path), PATH
- *     (so any child shell-outs find their tools).
+ *     we use that uniformly. Preserved set is in
+ *     SELF_ELEVATE_PRESERVED_ENV.
  *   - process.execPath is the absolute path to bun/node, so sudo's
  *     secure PATH doesn't matter for the interpreter.
  *   - process.argv[1] is the absolute path to dist/cli/switchroom.js
@@ -622,7 +631,7 @@ export function findUnwritableAgentDirs(
 export function buildSelfElevateArgv(): string[] {
   const passthrough = process.argv.slice(2);
   return [
-    "--preserve-env=HOME,SWITCHROOM_CONFIG,PATH",
+    `--preserve-env=${SELF_ELEVATE_PRESERVED_ENV.join(",")}`,
     process.execPath,
     process.argv[1] ?? "",
     ...passthrough,
@@ -634,6 +643,11 @@ export function buildSelfElevateArgv(): string[] {
  * Print one-line confirmation prompt and read a single y/n answer.
  * Resolves `true` on yes, `false` otherwise. Closes the readline
  * interface after.
+ *
+ * Caller must check process.stdin.isTTY before invoking — readline
+ * silently hangs on non-TTY input. The check lives at the call site
+ * because the right fallback (auto-confirm vs auto-decline vs error)
+ * depends on context.
  */
 async function confirmYesNo(question: string): Promise<boolean> {
   const rl = readline.createInterface({
@@ -654,26 +668,32 @@ async function confirmYesNo(question: string): Promise<boolean> {
  * Re-exec the current invocation under sudo. Never returns on success;
  * exits the parent with whatever the child returned.
  *
- * If sudo isn't installed (ENOENT), prints a clean error pointing the
- * operator at `--compose-only` (the no-elevation escape) and exits 1.
+ * If sudo isn't installed, prints a clean error pointing the operator
+ * at `--compose-only` (the no-elevation escape) and exits 1. spawnSync
+ * does NOT throw on ENOENT — it sets `result.error.code === "ENOENT"`
+ * — so the missing-sudo path is detected post-call, not via try/catch.
  */
 export function reexecUnderSudo(): never {
   const args = buildSelfElevateArgv();
-  let result: ReturnType<typeof childSpawnSync>;
-  try {
-    result = childSpawnSync("sudo", args, { stdio: "inherit" });
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      process.stderr.write(
-        chalk.red(
-          "\nERROR: sudo not found on PATH. Re-run as root, or use\n" +
-          "       `switchroom apply --compose-only` to skip the per-agent\n" +
-          "       scaffold refresh entirely (compose file still regenerates).\n",
-        ),
-      );
-      process.exit(1);
-    }
-    throw err;
+  const result = childSpawnSync("sudo", args, { stdio: "inherit" });
+  const errCode = (result.error as NodeJS.ErrnoException | undefined)?.code;
+  if (errCode === "ENOENT") {
+    process.stderr.write(
+      chalk.red(
+        "\nERROR: sudo not found on PATH. Re-run as root, or use\n" +
+        "       `switchroom apply --compose-only` to skip the per-agent\n" +
+        "       scaffold refresh entirely (compose file still regenerates).\n",
+      ),
+    );
+    process.exit(1);
+  }
+  if (result.error) {
+    process.stderr.write(
+      chalk.red(
+        `\nERROR: failed to spawn sudo: ${result.error.message}\n`,
+      ),
+    );
+    process.exit(1);
   }
   process.exit(result.status ?? 1);
 }
@@ -714,11 +734,14 @@ export function registerApplyCommand(program: Command): void {
     )
     .option(
       "--print-sudo-cmd",
-      "Print the sudo invocation that `apply` would re-exec itself with when escalation is needed, then exit. Operators who want to script the escalation themselves (CI, custom orchestration) can capture this.",
+      "Print the sudo invocation that `apply` would re-exec itself with when escalation is needed, then exit. Operators who want to script the escalation themselves (CI, custom orchestration) can capture this. Note: tokens are space-separated and not shell-quoted; re-quote arguments if pasting into a shell.",
     )
-    // Hidden guard flag: set during the re-exec under sudo so the
-    // child doesn't loop back into another sudo prompt.
-    .option("--skip-self-elevate", "", false)
+    // Recursion guard set during the re-exec under sudo. Hidden from
+    // --help output via Option.hideHelp() — only the elevation logic
+    // sets it; operators have no reason to type it.
+    .addOption(
+      new Option("--skip-self-elevate").default(false).hideHelp(),
+    )
     .action(
       async (opts: {
         buildLocal?: boolean | string;
@@ -772,11 +795,19 @@ export function registerApplyCommand(program: Command): void {
                   unwritable.length > 5 ? `, +${unwritable.length - 5} more` : ""
                 }\n`;
               process.stderr.write(chalk.yellow(summary));
-              const proceed = opts.nonInteractive
-                ? true
-                : await confirmYesNo(
+              // TTY guard — readline silently hangs on non-TTY input
+              // (cron, ssh -T, piped scripts). When stdin is not a TTY
+              // we can't prompt, so default to auto-elevate (the
+              // operator clearly meant for `apply` to refresh scaffolds
+              // since they ran it; --non-interactive is the explicit
+              // form of the same intent).
+              const canPrompt =
+                !opts.nonInteractive && process.stdin.isTTY === true;
+              const proceed = canPrompt
+                ? await confirmYesNo(
                     `Re-exec under sudo to refresh them? [Y/n] `,
-                  );
+                  )
+                : true;
               if (!proceed) {
                 process.stderr.write(
                   chalk.gray(

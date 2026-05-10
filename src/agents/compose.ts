@@ -262,6 +262,29 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`      switchroom.role: "broker"`);
   lines.push(`      switchroom.fleet: "switchroom"`);
   lines.push(`    restart: unless-stopped`);
+  // Liveness probe — bind-presence. The broker creates per-agent
+  // socket directories at startup and binds `<dir>/sock` for each
+  // configured agent. If at least one bind has happened, the daemon
+  // is alive enough to take work; if every bind has gone away, the
+  // daemon is wedged or dead and `restart: unless-stopped` should
+  // recycle it. This catches the silent-down failure mode where the
+  // broker exits cleanly (compose then sees process-gone) AS WELL AS
+  // a hung daemon that's still holding the process slot but stopped
+  // listening.
+  //
+  // Trade-off: an empty fleet (no agents → no per-agent dirs → no
+  // sockets) reports unhealthy. Acceptable: a switchroom install
+  // without any agents has no business running the broker; an
+  // operator who's mid-install has minutes-scale exposure to this.
+  // We do NOT speak the broker's app protocol here — that requires
+  // peercred-checked auth and would generate audit-log noise on
+  // every healthcheck tick. Bind-presence is the right level.
+  lines.push(`    healthcheck:`);
+  lines.push(`      test: ["CMD-SHELL", "ls /run/switchroom/broker/*/sock 2>/dev/null | head -1 | grep -q ."]`);
+  lines.push(`      interval: 30s`);
+  lines.push(`      timeout: 5s`);
+  lines.push(`      retries: 3`);
+  lines.push(`      start_period: 20s`);
   lines.push(`    user: "0:0"`);
   lines.push(`    stop_grace_period: 10s`);
   lines.push(`    security_opt:`);
@@ -339,6 +362,16 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`      switchroom.role: "kernel"`);
   lines.push(`      switchroom.fleet: "switchroom"`);
   lines.push(`    restart: unless-stopped`);
+  // Mirror the broker's bind-presence healthcheck — same failure-mode
+  // surface (kernel binds per-agent sockets at
+  // /run/switchroom/kernel/<agent>/sock; silently exits or hangs the
+  // same way) and same empty-fleet trade-off documented above.
+  lines.push(`    healthcheck:`);
+  lines.push(`      test: ["CMD-SHELL", "ls /run/switchroom/kernel/*/sock 2>/dev/null | head -1 | grep -q ."]`);
+  lines.push(`      interval: 30s`);
+  lines.push(`      timeout: 5s`);
+  lines.push(`      retries: 3`);
+  lines.push(`      start_period: 20s`);
   lines.push(`    user: "0:0"`);
   lines.push(`    stop_grace_period: 10s`);
   lines.push(`    security_opt:`);

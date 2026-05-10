@@ -653,6 +653,69 @@ describe("describeAgents", () => {
   });
 });
 
+describe("singleton healthchecks (silent-down regression — see plans/singleton-healthchecks.md)", () => {
+  // The compose file used to emit `restart: unless-stopped` on every
+  // service with NO `healthcheck:` anywhere. Docker could only see
+  // "process running"; a hung-but-not-crashed broker or one that
+  // exited cleanly was invisible to `docker compose ps`. The fix is
+  // a bind-presence probe on each singleton — confirms at least one
+  // per-agent socket has been bound by the daemon.
+  //
+  // We pin the emitted block byte-for-byte so a future operator
+  // can't silently drop the probe with a refactor.
+  function blockFor(yml: string, service: string): string {
+    const re = new RegExp(`  ${service}:[\\s\\S]*?(?=\\n  [a-z]|\\nvolumes:|$)`);
+    return re.exec(yml)?.[0] ?? "";
+  }
+
+  it("emits a healthcheck on vault-broker", () => {
+    const out = generateCompose({ config: makeConfig({ alice: {} }) });
+    const block = blockFor(out, "vault-broker");
+    expect(block).toContain("healthcheck:");
+    // CMD-SHELL form — the probe is shell-piping `ls | head -1 | grep`
+    // and won't work as a bare exec list.
+    expect(block).toMatch(/test:\s*\[\s*"CMD-SHELL"\s*,/);
+    expect(block).toContain("/run/switchroom/broker/*/sock");
+    expect(block).toMatch(/interval:\s*30s/);
+    expect(block).toMatch(/timeout:\s*5s/);
+    expect(block).toMatch(/retries:\s*3/);
+    // start_period gives the broker time to bind its first socket
+    // before the probe starts firing — without it, the broker spends
+    // the first ~10s flagged unhealthy on every cold start.
+    expect(block).toMatch(/start_period:\s*20s/);
+  });
+
+  it("emits a healthcheck on approval-kernel mirroring the broker shape", () => {
+    const out = generateCompose({ config: makeConfig({ alice: {} }) });
+    const block = blockFor(out, "approval-kernel");
+    expect(block).toContain("healthcheck:");
+    expect(block).toMatch(/test:\s*\[\s*"CMD-SHELL"\s*,/);
+    expect(block).toContain("/run/switchroom/kernel/*/sock");
+    expect(block).toMatch(/interval:\s*30s/);
+    expect(block).toMatch(/timeout:\s*5s/);
+    expect(block).toMatch(/retries:\s*3/);
+    expect(block).toMatch(/start_period:\s*20s/);
+  });
+
+  it("does NOT emit healthchecks on agents (higher-fidelity signal lives in boot-card / tmux)", () => {
+    const out = generateCompose({ config: makeConfig({ alice: {}, bob: {} }) });
+    for (const a of ["alice", "bob"]) {
+      const block = blockFor(out, `agent-${a}`);
+      expect(block, `agent-${a} should have no healthcheck:`).not.toMatch(/^\s+healthcheck:/m);
+    }
+  });
+
+  it("probes use the per-agent socket path (path-as-identity invariant)", () => {
+    // The broker/kernel use socketPathToAgent(/run/switchroom/<svc>/<agent>/sock)
+    // for peer auth. The healthcheck must probe the same path shape so
+    // it actually exercises the binding code, not some sibling pidfile
+    // or status sentinel. Pin the exact glob.
+    const out = generateCompose({ config: makeConfig({ alice: {} }) });
+    expect(out).toContain(`"ls /run/switchroom/broker/*/sock 2>/dev/null | head -1 | grep -q ."`);
+    expect(out).toContain(`"ls /run/switchroom/kernel/*/sock 2>/dev/null | head -1 | grep -q ."`);
+  });
+});
+
 describe("Phase 4 cutover: agent-scheduler is default-on", () => {
   // Phase 3 used `experimental.inline_scheduler: true` + a per-agent
   // SWITCHROOM_INLINE_SCHEDULER=1 env emission to canary the in-agent

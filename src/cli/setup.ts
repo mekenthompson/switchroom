@@ -862,7 +862,7 @@ async function stepAutoUnlock(
         `  Credential is encrypted but apply step failed: ${err instanceof Error ? err.message : String(err)}`,
       ),
     );
-    console.log(chalk.gray("  Retry with: switchroom reconcile && systemctl --user restart switchroom-vault-broker.service"));
+    console.log(chalk.gray("  Retry with: switchroom apply && docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml restart vault-broker"));
   }
 }
 

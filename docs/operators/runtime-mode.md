@@ -1,9 +1,8 @@
 # Runtime mode — Docker on Linux
 
-Switchroom v0.7+ runs its agent fleet as Docker containers brought up by
-a generated `docker-compose.yml`. This is the only supported production
-runtime. The legacy systemd path was removed in v0.7 (see
-[`migration-v0.7.md`](./migration-v0.7.md)).
+Switchroom runs its agent fleet as Docker containers brought up by a
+generated `docker-compose.yml`. This is the only supported production
+runtime.
 
 Three commands cover the full lifecycle:
 

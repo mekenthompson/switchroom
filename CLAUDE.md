@@ -13,10 +13,9 @@ Pro/Max subscription via OAuth (no API keys, no custom runtime around
 claude). The headline feature is a live **progress card** that pins into
 each Telegram topic while an agent works.
 
-**v0.7+ ships agents in Docker containers** — one per agent, plus two
-shared singletons (`vault-broker`, `approval-kernel`) brought up by
-`docker compose`. v0.6 was systemd-user units; v0.7 is the docker
-migration. The `claude` CLI runs unmodified inside each agent container
+**Agents ship in Docker containers** — one per agent, plus two shared
+singletons (`vault-broker`, `approval-kernel`) brought up by `docker
+compose`. The `claude` CLI runs unmodified inside each agent container
 — Docker is for *distribution and isolation*, not a custom runtime
 around claude (the vision's "no Docker-as-runtime" line in
 `reference/vision.md` is preserved).
@@ -59,8 +58,7 @@ new-session -A -s <name> bash -l "$0"` — the same script re-enters
 inside tmux with the inner-marker set, skips the wrapper, and runs
 claude. autoaccept-poll uses `tmux capture-pane / send-keys` against
 the same socket+session names to dispatch first-run prompts (dev-channels
-acknowledge, MCP trust, theme picker). v0.6's systemd ExecStart wraps
-the same way; v0.7 just enforces the contract inside the container.
+acknowledge, MCP trust, theme picker).
 
 **Why both halves matter:** without tmux, autoaccept can't reach claude
 (it talks tmux), `switchroom agent attach` can't connect (it does
@@ -90,10 +88,10 @@ unlock` from any agent's Telegram chat with `/vault unlock`, or via
 
 **Networking:** agent containers use `network_mode: host` so scaffolded
 `start.sh` can reach hindsight at `127.0.0.1:18888` and operator LAN
-devices unchanged from v0.6. Tradeoff: agents share the host network
-namespace (no inter-agent isolation). The trust model already assumed
-shared-host operation. Future work: an opt-in strict-isolation mode
-with `extra_hosts: host.docker.internal`.
+devices. Tradeoff: agents share the host network namespace (no
+inter-agent isolation). The trust model already assumed shared-host
+operation. Future work: an opt-in strict-isolation mode with
+`extra_hosts: host.docker.internal`.
 
 ## Docker test discipline (HARD RULES)
 
@@ -159,14 +157,13 @@ src/                    TypeScript source for the `switchroom` CLI
                         compose.ts — generates ~/.switchroom/compose/docker-compose.yml
                         scaffold.ts — renders start.sh, settings.json, .mcp.json per agent
                         autoaccept.ts — tmux capture-pane / send-keys first-run dispatcher
-                        lifecycle.ts — start/stop/restart/status/attach (docker + systemd dual-path)
+                        lifecycle.ts — start/stop/restart/status/attach
   auth/                 OAuth + multi-account slot pool (accounts.ts, manager.ts)
   cli/                  One file per top-level CLI verb (auth, agent,
                         workspace, debug, memory, topics, vault, ...)
                         autoaccept-poll.ts — bun-runnable bundle baked into agent image
   config/               YAML loader + three-layer cascade (defaults → profiles → agents)
   memory/               Hindsight memory integration
-  runtime-mode.ts       isDockerRuntime() — v0.7.3 unified host-shell + in-container detection
   scheduler/            Cron synthesis primitives — collectScheduleEntries,
                         dispatchAsInbound, JsonlAuditSink. Shared by the in-agent
                         scheduler (no host-side scheduler runtime since Phase 4).
@@ -211,12 +208,8 @@ tests/                  Vitest suite for src/
 
 Agent scaffolds are written **outside** this repo (default
 `~/.switchroom/agents/<name>/`) — never commit per-user agent state here.
-
-The generated compose file at `~/.switchroom/compose/docker-compose.yml`
-doubles as a runtime-mode signal: `isDockerRuntime()` (`src/runtime-mode.ts`)
-returns true if either the file exists OR `SWITCHROOM_RUNTIME=docker` is
-set (the env-var path is for in-container code; the file path is for
-host-shell CLI invocations).
+The generated compose file lives at
+`~/.switchroom/compose/docker-compose.yml`.
 
 ## Commands
 
@@ -375,8 +368,7 @@ contract" above. The pointers below are for *implementation*.)
 - **"How does autoaccept dispatch first-run prompts?"** →
   `src/agents/autoaccept.ts` (tmux capture-pane + send-keys, regex
   prompts in `PROMPTS`). Bundle entry at `src/cli/autoaccept-poll.ts`.
-  Same code runs under v0.6 systemd (host-side) and v0.7+ docker
-  (in-container sidecar) — only the supervisor location changed.
+  start.sh forks it as an in-container sidecar.
 - **"How does cron work post-Phase-4?"** → `src/agent-scheduler/`.
   `index.ts` is the entrypoint, supervised by start.sh. Cron fires
   call `dispatchAsInbound` (`src/scheduler/dispatch.ts`) to synthesize
@@ -392,7 +384,3 @@ contract" above. The pointers below are for *implementation*.)
   `/run/switchroom/<svc>/*/sock` (PR #898). Empty fleets correctly
   read as unhealthy — a singleton with no agents to serve isn't
   doing useful work.
-- **"Why does a host-shell `switchroom agent list` differ from
-  inside a container?"** → `src/runtime-mode.ts:isDockerRuntime()`.
-  Both signals (env var + compose-file presence) flip the answer.
-  Doctor / status / lifecycle all branch on this single helper.

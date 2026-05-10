@@ -437,9 +437,11 @@ describe("scaffoldAgent", () => {
       join(result.agentDir, "telegram"),
     );
     expect(mcpJson.mcpServers["switchroom-telegram"].env.SWITCHROOM_CONFIG).toBe(
-      "/fake/switchroom.yaml",
+      "/state/config/switchroom.yaml",
     );
-    expect(mcpJson.mcpServers["switchroom-telegram"].env.SWITCHROOM_CLI_PATH).toBeDefined();
+    expect(mcpJson.mcpServers["switchroom-telegram"].env.SWITCHROOM_CLI_PATH).toBe(
+      "/usr/local/bin/switchroom",
+    );
   });
 
   it("does not write .mcp.json when channels.telegram.plugin is 'official'", () => {
@@ -977,13 +979,7 @@ describe("scaffoldAgent — docker-mode tmux supervisor preamble (v0.7.5)", () =
   });
 });
 
-describe("scaffoldAgent — docker-mode .mcp.json (v0.7.6)", () => {
-  // The .mcp.json command paths are the third leg of the in-container
-  // telegram routing tripod (alongside Dockerfile.agent COPY and
-  // start.sh's docker preamble). When `dockerMode=true`, scaffold must
-  // emit the in-image paths so a fresh user with no host dev checkout
-  // and no host npm-global install gets a working agent on first
-  // compose-up.
+describe("scaffoldAgent — .mcp.json points at in-image paths", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -994,18 +990,9 @@ describe("scaffoldAgent — docker-mode .mcp.json (v0.7.6)", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("docker mode .mcp.json points --cwd at /opt/switchroom/telegram-plugin", () => {
+  it("--cwd resolves to /opt/switchroom/telegram-plugin", () => {
     const config = makeAgentConfig({ topic_id: 1 });
-    const result = scaffoldAgent(
-      "alice",
-      config,
-      tmpDir,
-      telegramConfig,
-      undefined,
-      undefined,
-      undefined,
-      true, // dockerMode
-    );
+    const result = scaffoldAgent("alice", config, tmpDir, telegramConfig);
     const mcp = JSON.parse(
       readFileSync(join(result.agentDir, ".mcp.json"), "utf-8"),
     ) as { mcpServers: Record<string, { args: string[]; env: Record<string, string> }> };
@@ -1015,40 +1002,15 @@ describe("scaffoldAgent — docker-mode .mcp.json (v0.7.6)", () => {
     expect(args[cwdIdx + 1]).toBe("/opt/switchroom/telegram-plugin");
   });
 
-  it("docker mode .mcp.json points SWITCHROOM_CLI_PATH at the in-image binary", () => {
+  it("SWITCHROOM_CLI_PATH and SWITCHROOM_CONFIG point at in-image paths", () => {
     const config = makeAgentConfig({ topic_id: 1 });
-    const result = scaffoldAgent(
-      "bob",
-      config,
-      tmpDir,
-      telegramConfig,
-      undefined,
-      undefined,
-      undefined,
-      true,
-    );
+    const result = scaffoldAgent("bob", config, tmpDir, telegramConfig);
     const mcp = JSON.parse(
       readFileSync(join(result.agentDir, ".mcp.json"), "utf-8"),
     ) as { mcpServers: Record<string, { env: Record<string, string> }> };
     const env = mcp.mcpServers["switchroom-telegram"].env;
     expect(env.SWITCHROOM_CLI_PATH).toBe("/usr/local/bin/switchroom");
     expect(env.SWITCHROOM_CONFIG).toBe("/state/config/switchroom.yaml");
-  });
-
-  it("non-docker mode preserves host-resolved paths (back-compat)", () => {
-    // Operators on v0.6 systemd / dev hosts still get the host
-    // pluginDir + host switchroomCliPath. Anything else would break
-    // existing fleets on reconcile.
-    const config = makeAgentConfig({ topic_id: 1 });
-    const result = scaffoldAgent("carol", config, tmpDir, telegramConfig);
-    const mcp = JSON.parse(
-      readFileSync(join(result.agentDir, ".mcp.json"), "utf-8"),
-    ) as { mcpServers: Record<string, { args: string[]; env: Record<string, string> }> };
-    const args = mcp.mcpServers["switchroom-telegram"].args;
-    const cwdIdx = args.indexOf("--cwd");
-    expect(args[cwdIdx + 1]).not.toBe("/opt/switchroom/telegram-plugin");
-    expect(mcp.mcpServers["switchroom-telegram"].env.SWITCHROOM_CLI_PATH)
-      .not.toBe("/usr/local/bin/switchroom");
   });
 });
 

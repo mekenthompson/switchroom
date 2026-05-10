@@ -4,7 +4,7 @@
 
 One Claude Code REPL per agent, dressed up with Docker Compose and a Telegram bot. Each agent is an unmodified `claude` CLI process running interactively inside its own container, with a separate long-lived gateway process that owns the Telegram connection. Everything else — memory, MCP tools, scheduling — layers on top of that pair.
 
-The v0.7+ runtime is Docker on Linux. The legacy systemd path was removed in v0.7 (see [`operators/migration-v0.7.md`](operators/migration-v0.7.md)).
+The runtime is Docker on Linux.
 
 ---
 

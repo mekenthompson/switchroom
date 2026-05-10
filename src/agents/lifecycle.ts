@@ -8,8 +8,6 @@ import { resolveAgentConfig } from "../config/merge.js";
 import { loadConfig } from "../config/loader.js";
 import { sendAgentInterrupt } from "./tmux.js";
 import { resolveSwitchroomHome } from "./docker-fleet.js";
-import { isDockerRuntime } from "../runtime-mode.js";
-import { readSystemdUnit } from "./status.js";
 
 /**
  * Resolve the per-agent gateway clean-shutdown marker path.
@@ -363,22 +361,6 @@ export function interruptAgent(
 }
 
 /**
- * Parse SWITCHROOM_AGENT_START_SHA out of a systemd `Environment=` block.
- * Retained because pre-v0.7 tests and external callers may still hand us
- * systemd-shaped output. The new docker code path uses
- * {@link parseAgentStartShaFromEnv}.
- */
-export function parseAgentStartShaFromSystemctl(output: string): string | null {
-  for (const line of output.split("\n")) {
-    if (!line.startsWith("Environment=")) continue;
-    const envBlock = line.slice("Environment=".length);
-    const match = envBlock.match(/(?:^|\s)SWITCHROOM_AGENT_START_SHA=(\S+)/);
-    if (match) return match[1];
-  }
-  return null;
-}
-
-/**
  * Parse a `KEY=VALUE` env array (the shape `docker inspect
  * --format '{{json .Config.Env}}'` returns) for SWITCHROOM_AGENT_START_SHA.
  */
@@ -465,14 +447,10 @@ export function getAgentStartSha(name: string): string | null {
  * Resolve the agent process PID inside its container.
  *
  * `docker inspect --format '{{.State.Pid}}'` returns the host-namespace
- * PID of the container's PID 1 (tini under our docker image). For the
- * tmux supervisor case this is good enough for "is the agent up" — we
- * don't try to reach into the container's PID namespace to find the
- * heaviest-RSS claude process the way the systemd path used to (cgroup
- * walk semantics differ inside containers, and the value isn't surfaced
- * in any UI as "claude RSS specifically"). Returns null if the container
- * is missing; returns 0 (per the v0.7 PR-C1 spec) if the container
- * exists but is stopped.
+ * PID of the container's PID 1 (tini under our docker image). Good enough
+ * for "is the agent up" — we don't try to reach into the container's PID
+ * namespace to find the heaviest-RSS claude process. Returns null if the
+ * container is missing; returns 0 if the container exists but is stopped.
  */
 export function resolveAgentPid(name: string): number {
   try {
@@ -492,51 +470,20 @@ export function resolveAgentPid(name: string): number {
 
 /**
  * Per-agent status row used by `switchroom version` and the web
- * dashboard. The shape is preserved from the systemd-era contract; the
- * field meanings translate as:
+ * dashboard.
  *
  *   - `active`: docker container State.Status, normalised so
- *     "running" → "active" (preserving the systemd-era convention so
- *     downstream `s.active === "active"` checks keep working). Other
- *     statuses pass through verbatim ("exited", "restarting", "paused",
- *     "created", "dead", "inactive").
- *   - `uptime`: container State.StartedAt (ISO-8601). The CLI/web
- *     formatters parse this into "5m"/"4h"/"2d" the same way they did
- *     for systemd's ActiveEnterTimestamp.
+ *     "running" → "active" (preserves the convention downstream
+ *     `s.active === "active"` checks rely on). Other statuses pass
+ *     through verbatim ("exited", "restarting", "paused", "created",
+ *     "dead", "inactive").
+ *   - `uptime`: container State.StartedAt (ISO-8601); CLI/web format
+ *     into "5m" / "4h" / "2d".
  *   - `memory`: usage from `docker stats --no-stream` (best-effort —
- *     returns null if stats are unavailable, e.g. container stopped).
+ *     null if stats are unavailable, e.g. container stopped).
  *   - `pid`: container PID 1 in host namespace, via State.Pid.
- *
- * The second `tmuxSupervisor` arg is retained for source-compat with
- * the systemd-era signature; under docker we ignore it (the pid we
- * return is always the container's PID 1).
  */
-function getAgentStatusSystemd(name: string): AgentStatus {
-  const info = readSystemdUnit(`switchroom-${name}`);
-  return {
-    active: info.active === "active" ? "active" : info.active || "inactive",
-    uptime:
-      info.activeEnterTs !== null
-        ? new Date(info.activeEnterTs).toISOString()
-        : null,
-    memory: null,
-    pid: info.pid,
-  };
-}
-
-export function getAgentStatus(name: string, _tmuxSupervisor = true): AgentStatus {
-  // Host-shell + systemd fleet: v0.7 PR-C1 rewrote this function as
-  // docker-only, so on a fleet that hasn't been migrated yet (no compose
-  // file present, no SWITCHROOM_RUNTIME=docker env var) every `docker
-  // inspect` throws and the caller — `switchroom agent list` —
-  // reports every agent as "inactive" even when systemd shows them
-  // running. Mirror the runtime branch that v0.7.3 added in
-  // `defaultStatusInputs` so the list matches reality on systemd hosts
-  // until they cut over.
-  if (!isDockerRuntime()) {
-    return getAgentStatusSystemd(name);
-  }
-
+export function getAgentStatus(name: string): AgentStatus {
   const cn = containerName(name);
 
   let active = "inactive";
@@ -580,7 +527,7 @@ export function getAgentStatus(name: string, _tmuxSupervisor = true): AgentStatu
       // docker stats prints e.g. "12.34MiB / 4GiB" — take the first token.
       const first = stats.split("/")[0]?.trim();
       if (first) {
-        // Normalise "12.34MiB" → "12MB" to match the systemd-era format.
+        // Normalise "12.34MiB" → "12MB".
         const m = first.match(/([\d.]+)\s*([KMG]i?B)/i);
         if (m) {
           const val = parseFloat(m[1]);
@@ -606,13 +553,7 @@ export function getAllAgentStatuses(
 ): Record<string, AgentStatus> {
   const statuses: Record<string, AgentStatus> = {};
   for (const agentName of Object.keys(config.agents)) {
-    const resolved = resolveAgentConfig(
-      config.defaults,
-      config.profiles,
-      config.agents[agentName],
-    );
-    const tmuxSupervisor = resolved.experimental?.legacy_pty !== true;
-    statuses[agentName] = getAgentStatus(agentName, tmuxSupervisor);
+    statuses[agentName] = getAgentStatus(agentName);
   }
   return statuses;
 }

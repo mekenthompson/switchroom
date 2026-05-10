@@ -1,5 +1,86 @@
 # Changelog
 
+## v0.7.11 — broker `op:put` for agent-driven vault rotation (closes the OAuth refresh-token loop)
+
+This release makes OAuth-shaped skills self-healing. Until now, agents
+could read keys from vault via the broker but writes required the
+operator passphrase, which agents don't have. Skills that store
+rotating refresh tokens — clerk's calendar skill is the canonical case;
+any IDP-token pattern is in the same boat — could read their token,
+exchange it for fresh access + (possibly-rotated) refresh, then DROP
+THE NEW TOKENS ON THE FLOOR because `switchroom vault set` failed
+without the passphrase. The skill would silently lose every refresh,
+forever.
+
+**Fix (#952).** The broker grows an `op:put` with the same
+`schedule.secrets[]` ACL that already gates `op:get`. An agent that
+can READ a key can also ROTATE it. Skills that already shell out to
+`switchroom vault set` keep working unchanged — the CLI now tries
+broker put first when no passphrase is available. Result: clerk's
+calendar refresh + persist + next-read cycle works end-to-end without
+operator hand-holding.
+
+### Protocol
+
+- New `PutRequestSchema` — `{ v: 1, op: "put", key, entry, token? }`.
+  Entry is string OR binary. `kind: "files"` is excluded — multi-file
+  rotation stays operator territory.
+- New `OkPutResponseSchema` — `{ ok: true, put: true, key }`.
+
+### Server
+
+- The vault passphrase is now retained in a private field after unlock
+  so the broker can re-encrypt for op:put. Trade-off documented in a
+  block comment: a pwned broker now exposes the passphrase too, but
+  the marginal expansion over the already-exposed decrypted secrets
+  is small (an attacker who can dump broker memory can already
+  exfiltrate every secret; retaining the passphrase additionally lets
+  them re-encrypt the on-disk vault). Zeroed on lock.
+- `op:put` handler — requires unlocked vault + path-as-identity (token
+  grants stay read-only); applies `checkAclByAgent`; refuses to
+  introduce new keys (UNKNOWN_KEY); refuses kind mismatch
+  (BAD_REQUEST). On success: in-memory update + `saveVault` atomic-
+  write. On persist fail: rolls back in-memory state. Audit rows
+  mirror op:get format (key name only, NEVER the value).
+
+### Client
+
+- New `putViaBroker(key, entry, opts)` returning a `PutResult`
+  discriminated union (`'ok' | 'unreachable' | 'denied' | 'not_found'`)
+  matching the existing `getViaBrokerStructured` shape.
+
+### CLI
+
+- `switchroom vault set` routes through the broker BEFORE prompting
+  for a passphrase when stdin is piped, no env passphrase, no `--file`,
+  no `--allow`/`--deny` scope flags. The skill's existing `_vault_set`
+  shell-out hits this path automatically. Operators with
+  `SWITCHROOM_VAULT_PASSPHRASE` set in their host shell still get the
+  legacy direct-write path.
+
+### Operator impact
+
+After `switchroom update` + recreate:
+- The calendar skill self-heals on every refresh window — no more
+  operator intervention.
+- Other OAuth-style skills (any skill that calls `switchroom vault
+  set` from agent context) get the same self-healing for free.
+- Existing operator workflows (host-side `switchroom vault set`)
+  unchanged.
+
+### Out of scope (follow-ups)
+
+- Token-based grant **writes** — grant tokens stay read-only by
+  design; introducing write-grants is a separate design discussion.
+- Multi-file entry rotation — `kind: "files"` is excluded from put.
+  Operators rotate those via host-side write.
+- New-key creation — broker put refuses UNKNOWN_KEY. Agents rotate,
+  operators introduce. Could relax with a per-agent prefix-allowlist
+  if a use case emerges.
+- Reviewer follow-ups: BAD_REQUEST hint should suggest the host-side
+  fix; consider gating passphrase retention behind "auto-unlock was
+  used"; add a `secrets:` example to `examples/switchroom.yaml`.
+
 ## v0.7.10 — `switchroom vault` CLI honors `SWITCHROOM_VAULT_BROKER_SOCK`
 
 Companion patch to v0.7.9. v0.7.9 fixed compose to emit

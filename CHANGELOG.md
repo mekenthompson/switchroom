@@ -1,5 +1,248 @@
 # Changelog
 
+## v0.7.8 — Phase 4 cron-fold-in, honest doctor, host-update CLI
+
+This release closes the v0.7 docker migration with the cron-fold-in
+cutover, lands the new operator-facing `switchroom update` and
+Telegram `/update` verbs, and stops `switchroom doctor` from crying
+wolf about per-agent UID-isolated state files. Net: a multi-agent
+fleet on a shared host is now self-healing, observable, and updatable
+without leaving Telegram.
+
+### Phase 4 — cron in the agent container, `switchroom-cron` retired
+
+The Phase 4 cutover landed across four PRs that gated the change
+behind a canary so a regression couldn't break operator fleets
+mid-flight:
+
+- **`dispatchAsInbound` primitive (#890)** — synthesizes a cron fire
+  as an `InboundMessage` and dispatches it through the same IPC
+  path Telegram uses, so cron-originated turns reach the agent
+  through one well-understood code path instead of `docker exec`.
+- **Phase 2 — in-agent scheduler sibling, gated/opt-in (#891).**
+  The new sidecar shipped first as opt-in; operators could enable
+  it per-agent and verify before any default change.
+- **Phase 3 — canary dual-run + mutual exclusion (#892).** The host-
+  side singleton and the in-container sidecar ran together with
+  mutual-exclusion gating so neither would double-fire — proves
+  the cutover safe under live traffic.
+- **Phase 4 — cron-fold-in cutover (#893).** The singleton
+  `switchroom-cron` container is gone. Cron now runs in-container
+  in every agent as a sibling of the gateway, delivering fires
+  through the same `InboundMessage` IPC path Telegram uses
+  (synthesized turns tagged `meta.source="cron"`). One less
+  container, one less daemon, one less mode of failure. See
+  `docs/scheduling.md` for the post-cutover model.
+
+**Robustness across the in-container scheduler.**
+
+- `cronMatchesDate` accepts node-cron's MON-FRI / JAN aliases (#896 /
+  #915) — the replay-on-boot path was silently dropping schedule
+  entries that used named days/months.
+- Boot-time freshness check defends against PID reuse across
+  container restarts wedging the supervisor (#895 / #914).
+- `restartAgent` uses `up -d --no-deps` instead of `restart` (#857 /
+  #916 / #932 / #944) — fixes the kernel-readiness race after a live
+  `agent add` and matches the contract the rest of the lifecycle
+  code expects.
+- `collectScheduleEntries` walks the cascade-resolved config (#917)
+  — was reading raw `config.agents[name].schedule` and dropping
+  defaults / profile schedule entries silently.
+- Empty schedule idles instead of restart-cap'ing (#921 / #928 /
+  #936) — agents with no `schedule:` block stay alive for cron
+  re-checks on container restart instead of the supervisor giving
+  up after 10 cycles.
+
+**Phase 4 follow-on cleanup (#897 / #899 / #913).** Stale
+`build.mjs` comment, CI matrix referencing the deleted
+`Dockerfile.scheduler`, and `docs/configuration.md` still describing
+the v0.6 systemd model — all cleaned up.
+
+### `switchroom update` — one verb for the host-update flow
+
+**`switchroom update` CLI verb (#918 / #923).** Wraps `git pull` +
+`bun install` + `npm run build` + `switchroom apply` + `docker
+compose up -d --remove-orphans` + `switchroom doctor` into a single
+command. `--check` for a dry-run; `--rebuild` for source-checkout
+users; `--skip-images` for offline mode; `--status` for a read-only
+snapshot.
+
+**`switchroom apply` self-elevates (#920 / #922).** Prior versions
+required the operator to type `sudo HOME=$HOME PATH=$PATH bun
+/path/to/switchroom apply` because vanilla `sudo switchroom apply`
+hit a remapped HOME and lost the bun-resolved CLI. apply now
+self-elevates via `sudo` cleanly.
+
+**Telegram `/update` (#919 / #924).** Operator-side host update
+without SSH. `/update` is dry-run; `/update apply` actually runs the
+update. The agent container has no docker binary or
+`/var/run/docker.sock` — `/update apply` probes both and surfaces a
+clean error pointing at the host CLI rather than letting the
+detached child fail with opaque exit-127 (#926 / #934).
+
+**Telegram `/upgradestatus` (#927 / #938).** Read-only fleet update
+status from any paired Telegram chat. Reports local CLI version,
+GHCR image digest + pull time, container creation time per service.
+Operator can answer "is the fleet up to date?" without SSH.
+
+### Boot card and `/status` — honest about Phase 4
+
+**Boot-card probes match the post-Phase-4 architecture (#925).**
+The Crons probe was lying — it returned `ok` with detail
+`"managed by switchroom-cron"`, but that container is gone. Replaced
+with `probeScheduler` (lockfile + holder PID liveness + last-fire
+freshness from `scheduler.jsonl`). Three other surfaces were
+silently missing from the probe set:
+
+- `probeBroker` / `probeKernel` — UDS connect-test against the
+  per-agent socket paths. Compose has bind-presence healthchecks
+  (#898) but the gateway itself never queried either daemon.
+- `probeSkills` — walks `<agentDir>/.claude/skills/` and reports
+  any entry whose target is unreadable (a renamed/deleted skill in
+  `~/.switchroom/skills/` was dangling silently).
+
+The boot card stays silent-when-healthy by design — only red surfaces.
+
+**`/status` grows a `Health` block.** Same probe set as the boot
+card, but renders **every** row including the green ones. Boot
+card = quiet ack; `/status` = on-demand dashboard.
+
+**Settle-window-aware soften (#935).** `/status` hit during the
+first ~30s of a container's life would show a 🔴 row before the
+supervisor had time to fork the scheduler. `probeScheduler` now
+reads `/proc/1/stat` to compute container PID-1 start time and
+softens the missing-lockfile fail to degraded with `(still settling)`
+inside the freshness window. Plus env-path overrides
+(`SWITCHROOM_AGENT_SCHEDULER_LOCK` / `_JSONL`) for symmetry with the
+scheduler's own override behavior.
+
+### Doctor — stops crying wolf
+
+**EACCES vs ENOENT (#945).** Per-agent state files are mode 0600
+owned by the agent UID (compose.ts allocates 10001-10999); doctor
+running as the host operator gets EACCES when reading `.env` and
+`.oauth-token.meta.json`. Pre-fix this manifested as 16 false-positive
+fails on every multi-agent host: 8 `TELEGRAM_BOT_TOKEN missing` +
+8 `not authenticated`. Now: warn rows with honest detail
+(`unreadable from host — agent reads it fine`), real failures stand
+out instead of being buried.
+
+**Leaked `$HOME/.switchroom` detector (#910 / #933 / #943).** Agents
+that pre-date the `$HOME/.switchroom` symlink fix have a real
+directory at `<agentDir>/home/.switchroom/` that shadows the symlink
+the new start.sh tries to create. start.sh defensively skips the
+symlink when the slot is occupied — silently. Tilde paths in cron
+prompts then resolve to a per-container empty dir instead of host
+state. Doctor now flags this with a copy-pasteable recovery recipe.
+
+**`start.sh` scheduler block check (#911).** If an operator
+upgraded across the Phase 4 cutover without re-running `switchroom
+apply`, their per-agent `start.sh` lacks the agent-scheduler sidecar
+block. Doctor surfaces it.
+
+**Post-apply doctor sweep (#929 / #937).** Bare `switchroom apply`
+now runs `switchroom doctor` automatically on completion.
+
+**Bind-mounts + tilde-paths (#907 / #910 / #911 / #912).** Agent
+containers were missing skills/credentials bind mounts; tilde paths
+broke under remapped HOME; doctor's stale-`start.sh` check was
+unaware of the new scheduler supervisor block. Bundle fix.
+
+**`agent list` scheduler-state column (#931 / #942).** New column
+distinguishes `active` (lockfile fresh, recent fire), `idle` (alive
+but no schedule entries), `wedged` (lockfile stale or holder PID
+dead). Single command for "is cron working across the fleet?".
+
+### Test discipline — phase tests must not clobber production
+
+**The 2026-05-10 incident.** PR #916 un-skipped three destructive
+docker phase tests on a host that also runs production switchroom.
+Each test's `beforeAll` ran `docker rm -f switchroom-vault-broker`
+and `switchroom-approval-kernel` to "clean up" — using the **production
+singleton names**. The compose generator hardcoded those fixed
+container_names too, so the tests' `docker compose up` collided
+with live production containers. After the test's project-scoped
+`compose down`, the production fleet had no broker or kernel — the
+operator's `klanker` agent failed all `/vault` calls.
+
+**Two-layer fix.**
+
+- `productionFleetIsLive()` / `assertNoProductionFleet()` helpers
+  (#939). Detection by `switchroom.fleet=switchroom` label, not by
+  container name. Wired as `describe.skipIf(... || PROD_FLEET_LIVE)`
+  into per-agent-isolation, broker-ipc-race, v0.7-install-e2e tests.
+- `containerNamePrefix` parametrization on `generateCompose` (#939
+  + #941). Defaults to `"switchroom"` — production unchanged. Tests
+  pass `containerNamePrefix: PROJECT` so emitted names become
+  `phase1c-iso-NNN-vault-broker` etc., which cannot collide with
+  production. The `switchroom.fleet` label is also parametrized so
+  parallel vitest forks don't false-positive each other (#941).
+
+### Refactor
+
+**Drop legacy v0.6 systemd dual-path code (#906).** Pre-Phase-4 the
+codebase carried both systemd-supervised-host and
+docker-compose-managed paths. Phase 4 makes docker mode the only
+shape; this PR deletes the systemd branches entirely. Smaller
+surface, cleaner naming.
+
+### Persistent agent home + base packages
+
+**Persistent agent `$HOME` (Layer 1) + Tier 1 base packages
+(#887).** Agents now have a stable per-agent `$HOME=/state/agent/home`
+that survives container recreation — `~/.bashrc`, `~/.config`,
+shell history, anything an interactive session writes. Plus the
+agent base image bundles the small set of Tier 1 OS packages
+(python3-pip, build-essential, etc.) the common skills depend on,
+so first-run `pip install` doesn't immediately fail with "command
+not found". Closes the v0.7-era footgun where agents lost their
+shell state on every restart.
+
+**Layer 1 follow-ups (#888).** `pip install` resolves the agent's
+`$HOME/.local/bin` correctly; agent UID resolves cleanly inside
+the container; the v0.7 install e2e test asserts the persistent
+HOME survives recreation.
+
+### v0.6 → v0.7 cutover loose ends (operator-impact bugs surfaced
+in real migrations)
+
+- **Three migration bugs (#882)** — surfaced when an operator with
+  a populated v0.6 install ran the docker cutover. Bundle fix.
+- **Two more cutover bugs (#885)** — `.mcp.json` regenerated on
+  apply (was inheriting v0.6 paths); gateway boot mutex now
+  works under the docker process tree.
+- **Docker-aware startup health probes (#886)** — no more
+  "systemctl: not found" inside agent containers. The v0.6 health
+  surface was systemd-shaped; the v0.7 probes detect docker mode
+  and use `/proc` walks instead.
+
+### Telegram surface fixes
+
+**Progress card no longer freezes at "⚠ Stalled" (#889).** When the
+streamer's keep-alive watchdog fired during a slow-but-not-stalled
+turn, the card edited to "⚠ Stalled" and never recovered even after
+the turn completed normally. Fixed.
+
+### Docs
+
+**Architecture docs refresh for post-Phase-4 (#900).** `docs/
+architecture.md` and `docs/scheduling.md` updated for the in-
+container scheduler model.
+
+**CLAUDE.md refresh for v0.7.8 sprint (#930 / #940).** Operator-
+agent runbook updated with new sidecar topology, env knobs
+(`SWITCHROOM_INLINE_SCHEDULER`, `SWITCHROOM_AGENT_SCHEDULER_*`),
+and self-restart command behavior under `/restart`, `/new`, `/reset`,
+`/update apply`.
+
+### Other
+
+- DAC_READ_SEARCH on approval-kernel so the healthcheck works (#901)
+- `switchroom apply` exits non-zero when scaffold fails (#903) +
+  `--compose-only` escape hatch
+- bake `switchroom` CLI into agent image (#904)
+- bind-mount skills + credentials (#907 / #912)
+
 ## v0.7.7 — Docker migration: completed for fresh installs
 
 This release completes the v0.6 → v0.7 docker migration. v0.7.0–7.3

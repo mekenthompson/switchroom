@@ -2,14 +2,19 @@
  * Tests for #309: boot card uses the agent slug (not display name) for
  * systemd unit probes.
  *
- * Root cause: probeAgentProcess and probeCronTimers were called with
- * opts.agentName (the persona display name, e.g. "Klanker") instead of
- * the lowercase slug ("klanker"). systemctl returns LoadState=not-found
- * for the capitalised name because unit files are always lowercase.
+ * Root cause: probeAgentProcess was called with opts.agentName (the
+ * persona display name, e.g. "Klanker") instead of the lowercase slug
+ * ("klanker"). systemctl returns LoadState=not-found for the
+ * capitalised name because unit files are always lowercase.
  *
  * Fix: RunProbesOpts.agentSlug carries the slug separately; runAllProbes
  * passes opts.agentSlug (falling back to opts.agentName for compat) to
- * both probeAgentProcess and probeCronTimers.
+ * probeAgentProcess.
+ *
+ * (Pre-Phase-4 this also covered probeCronTimers; that probe was
+ * replaced by probeScheduler when the singleton switchroom-cron
+ * container was retired and cron moved in-container — the slug now
+ * only matters for the systemd Agent probe.)
  */
 
 import { describe, it, expect } from 'vitest'
@@ -97,35 +102,6 @@ describe('#309: runAllProbes — slug vs display name for systemd calls', () => 
       const unitArg = agentProbeCall!.args.find(a => a.startsWith('switchroom-'))
       // Must use the slug, not the capitalised display name.
       expect(unitArg).toBe('switchroom-klanker.service')
-    } finally {
-      rmSync(tmpDir, { recursive: true })
-    }
-  })
-
-  it('probeCronTimers target is switchroom-<slug>-cron-*, not switchroom-<displayName>-cron-*', async () => {
-    const tmpDir = makeTmpAgentDir()
-    try {
-      const { fn: execFileMock, calls } = makeDispatchingExecFile('klanker')
-
-      await runAllProbes({
-        agentName: 'Klanker',
-        agentSlug: 'klanker',
-        version: 'v0.3.0',
-        agentDir: tmpDir,
-        gatewayInfo: { pid: 12345, startedAtMs: Date.now() },
-        fetchImpl: async () => new Response('', { status: 200 }),
-        settleWindowMs: 0,
-        agentLiveWindowMs: 0,
-        probeExecFileImpl: execFileMock,
-      })
-
-      // probeCronTimers calls: systemctl --user list-timers switchroom-<name>-cron-*
-      const cronProbeCall = calls.find(c =>
-        c.cmd === 'systemctl' && c.args.includes('list-timers'),
-      )
-      expect(cronProbeCall, 'probeCronTimers must call systemctl list-timers').toBeDefined()
-      const cronGlob = cronProbeCall!.args.find(a => a.includes('cron'))
-      expect(cronGlob).toBe('switchroom-klanker-cron-*')
     } finally {
       rmSync(tmpDir, { recursive: true })
     }

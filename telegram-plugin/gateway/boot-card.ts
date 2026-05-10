@@ -41,7 +41,10 @@ import {
   probeGateway,
   probeQuota,
   probeHindsight,
-  probeCronTimers,
+  probeScheduler,
+  probeBroker,
+  probeKernel,
+  probeSkills,
   watchAgentProcess,
   AGENT_LIVE_WINDOW_MS,
   AGENT_LIVE_POLL_INTERVAL_MS,
@@ -89,7 +92,16 @@ export function resolvePersonaName(
 
 export type RestartReason = 'planned' | 'graceful' | 'crash' | 'fresh'
 
-export type ProbeKey = 'account' | 'agent' | 'gateway' | 'quota' | 'hindsight' | 'crons'
+export type ProbeKey =
+  | 'account'
+  | 'agent'
+  | 'gateway'
+  | 'quota'
+  | 'hindsight'
+  | 'scheduler'
+  | 'broker'
+  | 'kernel'
+  | 'skills'
 
 export type ProbeMap = Partial<Record<ProbeKey, ProbeResult | null>>
 
@@ -204,11 +216,15 @@ const PROBE_LABELS: Record<ProbeKey, string> = {
   gateway:   'Gateway',
   quota:     'Quota',
   hindsight: 'Hindsight',
-  crons:     'Crons',
+  scheduler: 'Scheduler',
+  broker:    'Broker',
+  kernel:    'Kernel',
+  skills:    'Skills',
 }
 
 const PROBE_KEYS: ReadonlyArray<ProbeKey> = [
-  'account', 'agent', 'gateway', 'quota', 'hindsight', 'crons',
+  'account', 'agent', 'gateway', 'quota', 'hindsight',
+  'scheduler', 'broker', 'kernel', 'skills',
 ]
 
 const REASON_EMOJI: Record<RestartReason, string> = {
@@ -413,7 +429,10 @@ export async function runAllProbes(opts: RunProbesOpts): Promise<ProbeMap> {
     probeGateway(opts.gatewayInfo).then(r => { probes.gateway = r }),
     probeQuota(claudeDir, opts.agentDir, opts.fetchImpl).then(r => { probes.quota = r }),
     probeHindsight(opts.bankName, opts.fetchImpl).then(r => { probes.hindsight = r }),
-    probeCronTimers(slug, { execFileImpl: opts.probeExecFileImpl, dockerMode: opts.dockerMode }).then(r => { probes.crons = r }),
+    probeScheduler(slug, { dockerMode: opts.dockerMode }).then(r => { probes.scheduler = r }),
+    probeBroker(undefined, { dockerMode: opts.dockerMode }).then(r => { probes.broker = r }),
+    probeKernel(undefined, { dockerMode: opts.dockerMode }).then(r => { probes.kernel = r }),
+    probeSkills(opts.agentDir).then(r => { probes.skills = r }),
   ])
 
   return probes

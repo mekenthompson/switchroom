@@ -930,111 +930,296 @@ export async function probeHindsight(
   })())
 }
 
-// ─── Probe: Cron timers ──────────────────────────────────────────────────────
+// ─── Probe: Scheduler (in-container agent-scheduler since Phase 4) ───────────
 
-interface SystemctlTimerEntry {
-  next?: string
-  left?: string
-  last?: string
-  unit?: string
-  activates?: string
-  passed?: string
+/**
+ * Default lock and audit-jsonl paths inside the agent container.
+ * Mirrored from src/agent-scheduler/index.ts:194-197 — kept in sync there.
+ */
+const SCHEDULER_LOCK_PATH_DEFAULT = '/state/agent/scheduler.lock'
+const SCHEDULER_JSONL_PATH_DEFAULT = '/state/agent/scheduler.jsonl'
+
+/**
+ * Filesystem injection point for the scheduler probe. Same shape as
+ * ProcFsImpl but read-only against arbitrary paths. Tests inject a
+ * synthetic fs to drive lockfile contents and jsonl tails without
+ * touching disk.
+ */
+export interface SchedulerFsImpl {
+  readFile: (path: string) => string
+  /** stat-mtime, ms-since-epoch. Used to age the audit jsonl. */
+  mtimeMs: (path: string) => number
+  exists: (path: string) => boolean
 }
 
-function parseTimerLeft(left: string | undefined): number | null {
-  if (!left) return null
-  // format: "1h 32min left" or "2min 5s left" or similar
-  let ms = 0
-  const h = left.match(/(\d+)h/)
-  const m = left.match(/(\d+)min/)
-  const s = left.match(/(\d+)s/)
-  if (h) ms += Number(h[1]) * 3600_000
-  if (m) ms += Number(m[1]) * 60_000
-  if (s) ms += Number(s[1]) * 1000
-  return ms > 0 ? ms : null
+const realSchedulerFs: SchedulerFsImpl = {
+  readFile: (p) => readFileSync(p, 'utf-8'),
+  mtimeMs: (p) => {
+    // `existsSync` shaped path keeps the probe defensive — caller checks
+    // exists() first. statSync is imported via the readdirSync chain.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { statSync } = require('fs') as typeof import('fs')
+    return statSync(p).mtimeMs
+  },
+  exists: (p) => existsSync(p),
 }
 
-export async function probeCronTimers(
-  agentName: string,
+/**
+ * Probe the in-container agent-scheduler (cron-fold-in cutover, Phase 4
+ * — see CLAUDE.md "Cron-fold-in note"). Replaces the pre-Phase-4 probe
+ * that queried `systemctl --user list-timers switchroom-<agent>-cron-*`
+ * (those timers no longer exist) and the dockerMode short-circuit that
+ * lied with "managed by switchroom-cron" (that container was retired in
+ * PR #893).
+ *
+ * The scheduler is a sibling sidecar started by start.sh's
+ * _switchroom_supervise wrapper. It writes a pidfile-with-liveness lock
+ * at /state/agent/scheduler.lock (src/agent-scheduler/lock.ts) and an
+ * audit row per fire to /state/agent/scheduler.jsonl
+ * (src/agent-scheduler/index.ts:256, src/scheduler/audit.ts).
+ *
+ *   ok       — lockfile present, holder PID alive
+ *   degraded — lockfile present but PID dead (supervisor mid-restart, or
+ *              sched crashed and supervisor hasn't relaunched yet)
+ *   fail     — lockfile missing (sidecar never started or supervisor
+ *              gave up after restart-cap)
+ *
+ * Outside dockerMode the probe is silent (returns ok with "n/a"). Phase
+ * 4 deleted the host-side scheduler entirely; non-docker callers
+ * (legacy systemd installs, tests) have no scheduler to probe.
+ */
+export async function probeScheduler(
+  _agentName: string,
   opts: {
-    execFileImpl?: ExecFileFnType
-    /** When true, crons live in the `switchroom-cron` container and the
-     *  agent container has no docker.sock to query them. We surface that
-     *  the scheduler is managed externally rather than reporting fail
-     *  every boot for a non-issue. */
     dockerMode?: boolean
+    fs?: SchedulerFsImpl
+    lockPath?: string
+    jsonlPath?: string
+    /** Liveness check for the holder PID — defaults to process.kill(pid, 0). */
+    isAlive?: (pid: number) => boolean
+    now?: () => number
   } = {},
 ): Promise<ProbeResult> {
-  if (opts.dockerMode) {
-    return {
-      status: 'ok',
-      label: 'Crons',
-      detail: 'managed by switchroom-cron',
-    }
+  if (!opts.dockerMode) {
+    return { status: 'ok', label: 'Scheduler', detail: 'n/a (non-docker)' }
   }
-  const execFileFn: ExecFileFnType = opts.execFileImpl ?? execFile
-  return withTimeout('Crons', (async (): Promise<ProbeResult> => {
-    let stdout: string
-    try {
-      const result = await execFileFn('systemctl', [
-        '--user', 'list-timers',
-        `switchroom-${agentName}-cron-*`,
-        '--output=json',
-        '--all',
-      ])
-      stdout = result.stdout.trim()
-    } catch (err: unknown) {
-      // systemctl exits non-zero when no units match
-      const msg = (err as NodeJS.ErrnoException)?.message ?? String(err)
-      // child_process exec errors have `code` typed as string in
-      // NodeJS.ErrnoException, but at runtime it's numeric for shell
-      // exit codes. Stringify to avoid the type-system mismatch and
-      // the comparison "looks unintentional" warning.
-      if (msg.includes('No timers found') || String((err as NodeJS.ErrnoException)?.code) === '1') {
-        return { status: 'ok', label: 'Crons', detail: '0 timers' }
-      }
-      return { status: 'fail', label: 'Crons', detail: `systemctl failed: ${msg}` }
-    }
+  return withTimeout('Scheduler', (async (): Promise<ProbeResult> => {
+    const fs = opts.fs ?? realSchedulerFs
+    const lockPath = opts.lockPath ?? SCHEDULER_LOCK_PATH_DEFAULT
+    const jsonlPath = opts.jsonlPath ?? SCHEDULER_JSONL_PATH_DEFAULT
+    const now = opts.now ?? Date.now
+    const isAlive = opts.isAlive ?? ((pid: number) => {
+      try { process.kill(pid, 0); return true } catch { return false }
+    })
 
-    if (!stdout || stdout === '[]' || stdout.length === 0) {
-      return { status: 'ok', label: 'Crons', detail: '0 timers' }
+    if (!fs.exists(lockPath)) {
+      return { status: 'fail', label: 'Scheduler', detail: 'sidecar not running (no lockfile)' }
     }
-
-    let timers: SystemctlTimerEntry[] = []
+    let holderPid: number | null = null
     try {
-      timers = JSON.parse(stdout) as SystemctlTimerEntry[]
+      const raw = fs.readFile(lockPath).trim()
+      const parsed = Number.parseInt(raw, 10)
+      if (Number.isInteger(parsed) && parsed > 0) holderPid = parsed
     } catch {
-      // Fall back to line-count if JSON failed
-      const count = stdout.split('\n').filter(l => l.includes('cron')).length
-      return { status: 'ok', label: 'Crons', detail: `${count} timers` }
+      return { status: 'degraded', label: 'Scheduler', detail: 'lockfile unreadable' }
     }
-
-    if (!Array.isArray(timers) || timers.length === 0) {
-      return { status: 'ok', label: 'Crons', detail: '0 timers' }
+    if (holderPid == null) {
+      return { status: 'degraded', label: 'Scheduler', detail: 'lockfile contents invalid' }
     }
-
-    // Find the timer that fires soonest
-    let earliest: { name: string; leftMs: number } | null = null
-    for (const t of timers) {
-      const ms = parseTimerLeft(t.left)
-      const name = (t.unit ?? t.activates ?? '').replace(/^switchroom-[^-]+-cron-/, '').replace(/\.timer$/, '')
-      if (ms != null && (earliest == null || ms < earliest.leftMs)) {
-        earliest = { name, leftMs: ms }
+    if (!isAlive(holderPid)) {
+      return {
+        status: 'degraded',
+        label: 'Scheduler',
+        detail: `lock holder pid ${holderPid} not alive (supervisor restart in progress?)`,
       }
     }
 
-    const count = timers.length
-    if (!earliest) {
-      return { status: 'ok', label: 'Crons', detail: `${count} timers` }
+    // Sidecar is up. Add a freshness hint from scheduler.jsonl if present
+    // — gives the user signal that fires are actually happening, not just
+    // that the daemon is breathing. Absence is fine: a freshly booted
+    // agent or a 0-entry agent has no fires to report.
+    let detail = `running (pid ${holderPid})`
+    if (fs.exists(jsonlPath)) {
+      try {
+        const ageMs = now() - fs.mtimeMs(jsonlPath)
+        if (Number.isFinite(ageMs) && ageMs >= 0) {
+          detail += ` · last fire ${formatMs(ageMs)} ago`
+        }
+      } catch {
+        // mtime read failed — keep the basic detail; non-blocking.
+      }
     }
+    return { status: 'ok', label: 'Scheduler', detail }
+  })())
+}
 
-    const h = Math.floor(earliest.leftMs / 3600_000)
-    const m = Math.round((earliest.leftMs % 3600_000) / 60_000)
-    const timeStr = h > 0 ? `${h}h ${m}m` : `${m}m`
-    return {
-      status: 'ok',
-      label: 'Crons',
-      detail: `${count} timers · next: ${earliest.name} in ${timeStr}`,
+// ─── Probe: Vault broker / approval kernel reachability ──────────────────────
+
+/**
+ * Generic UDS-reachability probe used for both vault-broker and
+ * approval-kernel. Path-as-identity invariant (CLAUDE.md "Per-agent
+ * socket model") — bind paths are mounted into each agent container at
+ * /run/switchroom/{broker,kernel}/<agent>/sock. ENOENT means the
+ * compose volume isn't mounted (broker container down or no agent dir
+ * yet); ECONNREFUSED means the bind disappeared between us and the
+ * daemon (rare, broker shutdown removes the socket).
+ *
+ * Connect-test only — we do NOT send a wire request. The probe must not
+ * authenticate as the agent or do any vault/grant work; that's the
+ * agent's job. We just want to know "is something listening on this
+ * socket". Connection is closed immediately on success.
+ */
+async function probeUds(
+  label: string,
+  socketPath: string | undefined,
+  opts: { dockerMode?: boolean; connectImpl?: (path: string) => Promise<void> } = {},
+): Promise<ProbeResult> {
+  if (!opts.dockerMode) {
+    return { status: 'ok', label, detail: 'n/a (non-docker)' }
+  }
+  if (!socketPath) {
+    return { status: 'fail', label, detail: 'socket path not configured' }
+  }
+  return withTimeout(label, (async (): Promise<ProbeResult> => {
+    if (!opts.connectImpl) {
+      // Cheap pre-check: stat the file. Saves the connect round-trip on
+      // the common "broker container down → bind mount empty" case.
+      if (!existsSync(socketPath)) {
+        return { status: 'fail', label, detail: `socket missing: ${socketPath}` }
+      }
+    }
+    const connect = opts.connectImpl ?? defaultUdsConnect
+    try {
+      await connect(socketPath)
+      return { status: 'ok', label, detail: 'reachable' }
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException)?.code
+      const msg = (err as Error)?.message ?? String(err)
+      if (code === 'ENOENT') return { status: 'fail', label, detail: 'socket missing' }
+      if (code === 'ECONNREFUSED') return { status: 'fail', label, detail: 'connection refused' }
+      return { status: 'fail', label, detail: `connect failed: ${msg}` }
     }
   })())
+}
+
+/**
+ * Default UDS connect — opens a stream, then immediately closes it.
+ * Resolves on `connect` event, rejects on `error`. 1s connect timeout
+ * is plenty for a local socket (the per-probe timeout in withTimeout
+ * is the outer guard).
+ */
+function defaultUdsConnect(socketPath: string): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const net = require('net') as typeof import('net')
+  return new Promise<void>((resolve, reject) => {
+    const sock = net.createConnection({ path: socketPath })
+    const t = setTimeout(() => {
+      sock.destroy()
+      reject(new Error('connect timeout'))
+    }, 1000)
+    sock.once('connect', () => {
+      clearTimeout(t)
+      sock.end()
+      resolve()
+    })
+    sock.once('error', (err) => {
+      clearTimeout(t)
+      sock.destroy()
+      reject(err)
+    })
+  })
+}
+
+export async function probeBroker(
+  socketPath?: string,
+  opts: { dockerMode?: boolean; connectImpl?: (path: string) => Promise<void> } = {},
+): Promise<ProbeResult> {
+  return probeUds('Broker', socketPath ?? process.env.SWITCHROOM_BROKER_SOCKET, opts)
+}
+
+export async function probeKernel(
+  socketPath?: string,
+  opts: { dockerMode?: boolean; connectImpl?: (path: string) => Promise<void> } = {},
+): Promise<ProbeResult> {
+  return probeUds('Kernel', socketPath ?? process.env.SWITCHROOM_KERNEL_SOCKET, opts)
+}
+
+// ─── Probe: Skills (symlink validity) ────────────────────────────────────────
+
+/**
+ * Validate that every entry under <agentDir>/.claude/skills/ resolves
+ * to a readable file. Skills are normally symlinks into the global pool
+ * `~/.switchroom/skills/` (src/agents/scaffold.ts:639); a renamed or
+ * deleted skill in the pool dangles silently — claude won't surface the
+ * skill, the user wonders why /<skill> doesn't work.
+ *
+ *   ok       — every entry resolves OR the dir doesn't exist (no skills
+ *              configured is a normal state, not a failure)
+ *   degraded — at least one symlink dangles; rendered detail names them
+ *              up to a cap so the row doesn't wrap forever
+ */
+export async function probeSkills(
+  agentDir: string,
+  opts: { fs?: SkillsFsImpl; maxNamesShown?: number } = {},
+): Promise<ProbeResult> {
+  return withTimeout('Skills', (async (): Promise<ProbeResult> => {
+    const fs = opts.fs ?? realSkillsFs
+    const max = opts.maxNamesShown ?? 3
+    const skillsDir = join(agentDir, '.claude', 'skills')
+    if (!fs.exists(skillsDir)) {
+      return { status: 'ok', label: 'Skills', detail: 'no skills dir' }
+    }
+    let entries: string[]
+    try {
+      entries = fs.readdir(skillsDir)
+    } catch {
+      return { status: 'degraded', label: 'Skills', detail: 'skills dir unreadable' }
+    }
+    if (entries.length === 0) {
+      return { status: 'ok', label: 'Skills', detail: '0 skills' }
+    }
+    const dangling: string[] = []
+    for (const name of entries) {
+      // Skills are dirs containing a SKILL.md (claude convention). The
+      // dangle case we worry about is a symlink whose target was
+      // removed — readability of <name>/SKILL.md is the simplest proxy
+      // and matches what claude itself would discover.
+      const skillPath = join(skillsDir, name)
+      if (!fs.exists(skillPath)) {
+        dangling.push(name)
+        continue
+      }
+      // Single-file skills exist (rare but allowed); accept them too.
+      const skillMd = join(skillPath, 'SKILL.md')
+      if (!fs.exists(skillMd) && !fs.exists(skillPath + '.md')) {
+        // Only flag as dangling if the entry IS a symlink (a real dir
+        // without SKILL.md is weird but not necessarily broken — could
+        // be an in-progress local skill). We have no symlink-test in
+        // SkillsFsImpl by design; conservatively don't flag as dangling.
+        // The user's main risk is removed-pool-target, which existsSync
+        // catches above.
+        continue
+      }
+    }
+    if (dangling.length === 0) {
+      return { status: 'ok', label: 'Skills', detail: `${entries.length} resolved` }
+    }
+    const named = dangling.slice(0, max).join(', ')
+    const more = dangling.length > max ? ` +${dangling.length - max} more` : ''
+    return {
+      status: 'degraded',
+      label: 'Skills',
+      detail: `${dangling.length}/${entries.length} dangling: ${named}${more}`,
+    }
+  })())
+}
+
+export interface SkillsFsImpl {
+  readdir: (p: string) => string[]
+  exists: (p: string) => boolean
+}
+
+const realSkillsFs: SkillsFsImpl = {
+  readdir: (p) => readdirSync(p),
+  exists: (p) => existsSync(p),
 }

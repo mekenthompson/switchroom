@@ -74,13 +74,99 @@ const SOCKET_PATH_AGENT_RE =
 const SOCKET_PATH_AGENT_SUBDIR_RE =
   /^\/run\/switchroom\/broker\/([a-zA-Z0-9][a-zA-Z0-9_-]*)\/sock$/;
 
-export function socketPathToAgent(socketPath: string): string | null {
+/**
+ * Reserved names that look like an agent name in the path-derivation regex
+ * but are claimed by other identity kinds. Today: "operator" — used for
+ * the host-shell-reachable operator socket. An agent literally named
+ * "operator" would collide with that path; the agent allocator must
+ * refuse the name to avoid a forged-identity hazard.
+ */
+const RESERVED_AGENT_NAMES = new Set(["operator"]);
+
+/**
+ * Identity of the listener that accepted a connection.
+ *
+ *   - `{kind: "agent", name}`   — per-agent socket; the agent slug came
+ *                                 from the bound path, not from the wire.
+ *   - `{kind: "operator"}`      — host-shell operator socket. Trust comes
+ *                                 from the bind path (`/run/switchroom/
+ *                                 broker/operator/sock`) and the file
+ *                                 mode 0600 + chown to operator UID
+ *                                 enforced by the broker at bind time.
+ */
+export type SocketIdentity =
+  | { kind: "agent"; name: string }
+  | { kind: "operator" };
+
+/**
+ * Path to identity. Returns null when the path matches no canonical shape.
+ *
+ * Two canonical agent shapes (preserved from the original
+ * socketPathToAgent contract):
+ *   (a) /run/switchroom/broker/<agent>.sock          (flat sibling files)
+ *   (b) /run/switchroom/broker/<agent>/sock          (per-agent subdir)
+ *
+ * One operator shape:
+ *   (c) /run/switchroom/broker/operator/sock         (RESERVED — not an agent)
+ *
+ * "operator" cannot be an agent name (see RESERVED_AGENT_NAMES); a flat
+ * file at /run/switchroom/broker/operator.sock is also rejected to keep
+ * the reservation airtight regardless of bind shape.
+ */
+export function socketPathToIdentity(
+  socketPath: string,
+): SocketIdentity | null {
   if (typeof socketPath !== "string" || socketPath.length === 0) return null;
   const m =
     socketPath.match(SOCKET_PATH_AGENT_RE) ??
     socketPath.match(SOCKET_PATH_AGENT_SUBDIR_RE);
   if (!m) return null;
-  return m[1];
+  const name = m[1];
+  if (name === "operator") return { kind: "operator" };
+  if (RESERVED_AGENT_NAMES.has(name)) return null;
+  return { kind: "agent", name };
+}
+
+/**
+ * Legacy: returns the agent slug or null. Kept for callers that
+ * specifically want the "agent or nothing" answer (e.g. the per-agent
+ * socket enumerator must skip the operator path even though it parses).
+ *
+ * Reserved names (today: "operator") return null here so this function
+ * can be used as a "is this an agent socket?" test.
+ */
+export function socketPathToAgent(socketPath: string): string | null {
+  const identity = socketPathToIdentity(socketPath);
+  return identity?.kind === "agent" ? identity.name : null;
+}
+
+/**
+ * True iff `name` is reserved by another identity kind and may not be
+ * used as an agent name. Surfaced so the agent allocator (and config
+ * validator) can refuse such names at scaffold time rather than
+ * letting the broker silently mis-route.
+ */
+export function isReservedAgentName(name: string): boolean {
+  return RESERVED_AGENT_NAMES.has(name);
+}
+
+/**
+ * Derive the unlock-socket path that pairs with a data-socket path.
+ *
+ * Two canonical shapes the broker emits, both producing the same
+ * naming relationship:
+ *   - flat:   `/dir/<name>.sock`   → `/dir/<name>.unlock.sock`
+ *   - subdir: `/dir/<name>/sock`   → `/dir/<name>/unlock`
+ *
+ * Single source of truth so server.bindUnlockSocket and
+ * client.unlockViaBroker can never disagree (the failure mode would
+ * be operator unlock attempts hitting a closed socket).
+ */
+export function unlockSocketFor(dataSocketPath: string): string {
+  if (dataSocketPath.endsWith("/sock")) {
+    return dataSocketPath.slice(0, -"/sock".length) + "/unlock";
+  }
+  return dataSocketPath.replace(/\.sock$/, ".unlock.sock");
 }
 
 export interface PeerInfo {

@@ -9,7 +9,12 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { socketPathToAgent } from "./peercred.js";
+import {
+  socketPathToAgent,
+  socketPathToIdentity,
+  isReservedAgentName,
+  unlockSocketFor,
+} from "./peercred.js";
 
 describe("socketPathToAgent", () => {
   it("returns the agent name for a canonical /run/switchroom/broker/<agent>.sock path", () => {
@@ -91,5 +96,70 @@ describe("socketPathToAgent", () => {
     expect(socketPathToAgent(undefined)).toBeNull();
     // @ts-expect-error
     expect(socketPathToAgent(null)).toBeNull();
+  });
+});
+
+describe("socketPathToIdentity — host-shell operator socket", () => {
+  // /run/switchroom/broker/operator/sock is the host-shell-reachable
+  // operator socket the broker container binds in v0.7+. Trust comes
+  // from the bind path + 0600 chown to operator UID. The agent
+  // enumerator must not see "operator" as an agent name.
+
+  it("returns operator identity for the canonical path", () => {
+    expect(socketPathToIdentity("/run/switchroom/broker/operator/sock")).toEqual({
+      kind: "operator",
+    });
+  });
+
+  it("does NOT return agent identity for the operator path (reserved)", () => {
+    // Pre-fix this would have returned {kind:"agent", name:"operator"}.
+    // socketPathToAgent must return null so the per-agent enumerator
+    // skips this path; socketPathToIdentity returns the operator kind.
+    expect(socketPathToAgent("/run/switchroom/broker/operator/sock")).toBeNull();
+    expect(socketPathToAgent("/run/switchroom/broker/operator.sock")).toBeNull();
+  });
+
+  it("isReservedAgentName flags 'operator'", () => {
+    expect(isReservedAgentName("operator")).toBe(true);
+    expect(isReservedAgentName("alice")).toBe(false);
+    expect(isReservedAgentName("klanker")).toBe(false);
+  });
+
+  it("returns agent identity for non-operator subdir paths", () => {
+    expect(socketPathToIdentity("/run/switchroom/broker/alice/sock")).toEqual({
+      kind: "agent",
+      name: "alice",
+    });
+  });
+
+  it("returns null for unrelated paths", () => {
+    expect(socketPathToIdentity("/tmp/broker/operator/sock")).toBeNull();
+    expect(socketPathToIdentity("/run/switchroom/kernel/operator/sock")).toBeNull();
+    expect(socketPathToIdentity("")).toBeNull();
+  });
+});
+
+describe("unlockSocketFor — server/client must agree", () => {
+  // Single source of truth for the unlock-socket pairing. server.ts
+  // uses this to bind the unlock listener; client.ts uses the same
+  // function to compute the connect target. Disagreement here would
+  // manifest as silent unlock failures.
+
+  it("v0.6 flat-shape: foo.sock → foo.unlock.sock", () => {
+    expect(unlockSocketFor("/home/op/.switchroom/vault-broker.sock")).toBe(
+      "/home/op/.switchroom/vault-broker.unlock.sock",
+    );
+    expect(unlockSocketFor("/run/switchroom/broker/vault-broker.sock")).toBe(
+      "/run/switchroom/broker/vault-broker.unlock.sock",
+    );
+  });
+
+  it("v0.7 subdir-shape: <dir>/sock → <dir>/unlock", () => {
+    expect(unlockSocketFor("/run/switchroom/broker/operator/sock")).toBe(
+      "/run/switchroom/broker/operator/unlock",
+    );
+    expect(unlockSocketFor("/home/op/.switchroom/broker-operator/sock")).toBe(
+      "/home/op/.switchroom/broker-operator/unlock",
+    );
   });
 });

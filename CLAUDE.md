@@ -366,10 +366,12 @@ contract" above. The pointers below are for *implementation*.)
   `profiles/_base/start.sh.hbs` (docker-mode preamble forks three
   supervised sidecars — telegram-plugin gateway, autoaccept-poll,
   agent-scheduler — then re-execs into tmux). `docker/Dockerfile.agent`
-  copies the bundles to `/opt/switchroom/{telegram-plugin/dist/,
-  autoaccept-poll.js, agent-scheduler/index.js}` and sets CMD to
-  `/state/agent/start.sh` under tini. `src/agents/compose.ts` emits
-  the env / volumes / caps and the broker/kernel healthchecks.
+  copies the bundles to `/opt/switchroom/{switchroom.js,
+  telegram-plugin/dist/, autoaccept-poll.js, agent-scheduler/index.js}`
+  (the CLI is symlinked onto PATH at `/usr/local/bin/switchroom` for the
+  gateway's shell-out path) and sets CMD to `/state/agent/start.sh`
+  under tini. `src/agents/compose.ts` emits the env / volumes / caps
+  and the broker/kernel healthchecks.
 - **"How does autoaccept dispatch first-run prompts?"** →
   `src/agents/autoaccept.ts` (tmux capture-pane + send-keys, regex
   prompts in `PROMPTS`). Bundle entry at `src/cli/autoaccept-poll.ts`.

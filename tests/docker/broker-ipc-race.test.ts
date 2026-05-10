@@ -505,10 +505,11 @@ describe.skipIf(!imagesOk)(
               // count stability.
               process.stderr.write(`[race-test] newbie up failed: ${(e as Error).message}\n`);
             }
-            // Treat first SUCCESSFUL request after up-d as "newbie first reply"
-            // proxy, since newbie's own kernel socket isn't bound by the
-            // existing kernel container (kernel is restartless here).
-            // (Documented limitation.)
+            // Track first SUCCESSFUL alice lookup post-add as a topology-
+            // stability proxy (proves the live add didn't disturb existing
+            // sockets). Newbie's own readiness is asserted separately
+            // below after the kernel is recreated to pick up the new
+            // volume mount.
           }
           const r = kernelLookup("alice");
           results.push({ idx: i, ok: r.ok, durationMs: r.durationMs, err: r.err });
@@ -535,19 +536,21 @@ describe.skipIf(!imagesOk)(
 
         // Phase 3c F-#811 — split newbie-readiness from topology-stability.
         //
-        // Topology stability (existing assertions): broker/scheduler/kernel
+        // Topology stability (existing assertions): broker + kernel
         // RestartCount unchanged across the agent-add window. The original
-        // test conflated "first SUCCESSFUL alice lookup after newbie up" with
-        // "newbie is ready" — those are different things. Alice's IPC running
-        // through alice's pre-existing socket only proves the topology change
-        // didn't disrupt the existing fleet.
+        // test conflated "first SUCCESSFUL alice lookup after newbie up"
+        // with "newbie is ready" — those are different things. Alice's
+        // IPC running through alice's pre-existing socket only proves the
+        // topology change didn't disrupt the existing fleet.
         //
-        // Newbie readiness (new): newbie's OWN kernel socket is bound and
-        // newbie's first lookup against newbie's socket succeeds. The kernel
-        // server enumerates agents from the config + filesystem at boot, so
-        // it MUST be restarted after newbie's compose entry is added for its
-        // socket to exist. Broker + scheduler stay restartless — kernel
-        // RestartCount is allowed to bump by exactly 1.
+        // Newbie readiness (#857): newbie's OWN kernel socket is bound
+        // and newbie's first lookup against newbie's socket succeeds.
+        // The kernel-server enumerates agents from per-agent socket dirs
+        // mounted in at container-create time. So the kernel container
+        // must be RECREATED (not merely restarted) after newbie's compose
+        // entry is added — `up -d approval-kernel` does this; `restart`
+        // does NOT. Broker stays untouched. Singleton scheduler is gone
+        // since Phase 4 (#893).
         let newbieReadyAt: number | null = null;
         let newbieReadyLatencyMs: number | null = null;
         if (newbieUpAt !== null) {

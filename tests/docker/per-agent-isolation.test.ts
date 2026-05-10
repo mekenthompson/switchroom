@@ -55,7 +55,10 @@ import {
 const RUN_ID = newRunId();
 
 const TAG = "phase1b-test";
-const IMAGES = ["base", "agent", "broker", "kernel", "scheduler"].map(
+// Phase 4 (#893) retired the singleton scheduler image. Listing it
+// here would make `imagesOk` false in any environment that doesn't
+// build the (now-deleted) image, silently skipping the whole suite.
+const IMAGES = ["base", "agent", "broker", "kernel"].map(
   (n) => `switchroom/${n}:${TAG}`,
 );
 const PROJECT = `phase1c-iso-${process.pid}`;

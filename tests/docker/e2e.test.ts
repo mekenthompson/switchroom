@@ -56,7 +56,9 @@ const IMAGES = {
   agent: `switchroom/agent:${TAG}`,
   broker: `switchroom/broker:${TAG}`,
   kernel: `switchroom/kernel:${TAG}`,
-  scheduler: `switchroom/scheduler:${TAG}`,
+  // Phase 4 (#893) retired the singleton scheduler image. Keeping it
+  // here would make `imagesOk` false in any environment that doesn't
+  // build the (now-deleted) image, silently skipping this whole suite.
 };
 
 function hasDocker(): boolean {

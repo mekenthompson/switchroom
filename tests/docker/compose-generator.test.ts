@@ -263,9 +263,12 @@ describe("generateCompose", () => {
 
   it("uses ${HOME} for host-path bind mounts when no homeDir is given", () => {
     const out = generateCompose({ config: makeConfig({ a: {} }) });
-    // Vault file mounted directly (not as a parent dir) — see compose.ts
-    // for the rationale (#v0.7.1 vault file path fix).
-    expect(out).toContain("${HOME}/.switchroom/vault.enc:/state/vault.enc:ro");
+    // v0.7.12: vault parent dir bind-mounted RW (was single-file `:ro`
+    // pre-fix; that prevented atomic-rename → broker writes EBUSY-d).
+    // Plan v3 §3 — broker reads /state/vault/vault.enc.
+    expect(out).toContain("${HOME}/.switchroom/vault:/state/vault:rw");
+    // The legacy single-file mount is gone.
+    expect(out).not.toContain("vault.enc:/state/vault.enc");
     expect(out).toContain("${HOME}/.switchroom/approvals:/state/approvals");
     // The legacy `~/.switchroom:/state/config:ro` directory mount used
     // to be emitted on the singleton scheduler when no explicit
@@ -278,6 +281,24 @@ describe("generateCompose", () => {
     expect(out).toContain("${HOME}/.switchroom/agents/a:${HOME}/.switchroom/agents/a");
   });
 
+  it("v0.7.12 vault layout: parent-dir RW mount + canonical inner path", () => {
+    // Plan v3 §3: broker mounts the vault PARENT DIRECTORY RW (not
+    // the file directly). atomicWriteFileSync's write-temp-then-
+    // rename works because temp + dest are on the same fs. Inside
+    // the broker the vault is at /state/vault/vault.enc.
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+      homeDir: "/home/op",
+    });
+    // The mount line uses :rw and points at the parent dir.
+    expect(out).toContain("/home/op/.switchroom/vault:/state/vault:rw");
+    // The broker reads the canonical inner path.
+    expect(out).toContain("SWITCHROOM_VAULT_PATH: /state/vault/vault.enc");
+    // Pre-v0.7.12 single-file mount must NOT appear.
+    expect(out).not.toMatch(/vault\.enc:\/state\/vault\.enc/);
+    expect(out).not.toMatch(/SWITCHROOM_VAULT_PATH:\s*\/state\/vault\.enc[^/]/);
+  });
+
   it("bakes the absolute homeDir into bind sources when given (sudo-safe)", () => {
     // Why: under `sudo docker compose`, ${HOME} resolves to /root, not
     // the operator's home. apply.ts passes os.homedir() so the YAML
@@ -286,7 +307,8 @@ describe("generateCompose", () => {
       config: makeConfig({ a: {} }),
       homeDir: "/home/op",
     });
-    expect(out).toContain("/home/op/.switchroom/vault.enc:/state/vault.enc:ro");
+    expect(out).toContain("/home/op/.switchroom/vault:/state/vault:rw");
+    expect(out).not.toContain("/home/op/.switchroom/vault.enc:/state/vault.enc");
     expect(out).toContain("/home/op/.switchroom/approvals:/state/approvals");
     // The legacy scheduler-only `:/state/config:ro` directory mount
     // is gone since Phase 4.

@@ -363,7 +363,13 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // does NOT fall back to its `~/.switchroom/vault.enc` default — which
   // would resolve `~` against the container's HOME (/root) instead of
   // the operator's HOME on the host.
-  lines.push(`      SWITCHROOM_VAULT_PATH: /state/vault.enc`);
+  // Broker's vault path. Always reads `/state/vault/vault.enc` —
+  // the parent dir is bind-mounted from the host's resolved
+  // `vault.path` parent (default `~/.switchroom/vault/`). v0.7.11
+  // mounted the file directly which made atomic-rename impossible
+  // (cross-fs single-file bind mount, EBUSY); v0.7.12 mounts the
+  // parent dir so saveVault's write-temp-then-rename works.
+  lines.push(`      SWITCHROOM_VAULT_PATH: /state/vault/vault.enc`);
   lines.push(`      SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH: /state/vault-auto-unlock`);
   lines.push(`    volumes:`);
   for (const a of describeAgents(config)) {
@@ -372,13 +378,32 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   if (switchroomConfigPath) {
     lines.push(`      - ${switchroomConfigPath}:/state/config/switchroom.yaml:ro`);
   }
-  // Vault file mounted directly (not as a parent directory) — the host
-  // file is `~/.switchroom/vault.enc`, NOT `~/.switchroom/vault/*`.
-  // The earlier `${HOME}/.switchroom/vault:/state/vault` mount caused
-  // docker to auto-create an empty root-owned `~/.switchroom/vault`
-  // directory on the host (the v0.7.0 install bug) which the broker
-  // then "loaded" as a missing vault — restart-loop on every boot.
-  lines.push(`      - ${homePrefix}/.switchroom/vault.enc:/state/vault.enc:ro`);
+  // Vault parent directory mounted RW. v0.7.12 layout: vault file
+  // lives at `~/.switchroom/vault/vault.enc`, parent dir is
+  // bind-mounted at `/state/vault/`. atomicWriteFileSync's write-
+  // temp-then-rename pattern works because temp file lands in the
+  // same fs as the destination.
+  //
+  // v0.7.11 (and earlier) mounted the FILE directly (`~/.switchroom/
+  // vault.enc:/state/vault.enc:ro`). That had two problems:
+  //   1. Single-file bind mount + atomic-rename = EBUSY (cross-fs
+  //      rename to a bind-mount target fails). Surfaced as #954.
+  //   2. RO precluded broker-driven rotation (#952's op:put). Both
+  //      fixed by switching to a parent-dir RW mount.
+  //
+  // The v0.7.0 install bug — docker auto-creating an empty root-
+  // owned `~/.switchroom/vault/` on the host — is avoided by
+  // ensuring the directory exists with the operator's UID before
+  // compose runs. `switchroom apply`'s migrateVaultLayout step
+  // creates the directory with mode 0700 and moves the existing
+  // vault file into it, so docker never has to create an empty
+  // vault dir.
+  //
+  // Broker reads `/state/vault/vault.enc` (see SWITCHROOM_VAULT_PATH
+  // env above). The parent-dir guard at apply time refuses to mount
+  // if the dir contains anything other than the canonical vault
+  // file + saveVault's known artifacts (lockfile, sibling-tmp, etc).
+  lines.push(`      - ${homePrefix}/.switchroom/vault:/state/vault:rw`);
   // Auto-unlock blob (encrypted with /etc/machine-id-derived key).
   // Mounted read-only — the broker only ever reads the blob; rotation
   // is performed by the host CLI (`switchroom vault broker enable-auto-unlock`)

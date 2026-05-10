@@ -715,7 +715,11 @@ export function checkStartShStale(
       detail: `unreadable: ${(err as Error).message}`,
     };
   }
-  if (!content.includes("agent-scheduler")) {
+  // Match on the actual supervisor invocation, not the bare token —
+  // a comment like "# TODO: wire agent-scheduler" would otherwise
+  // falsely report "ok", and this check is the entire defense for
+  // the #911 silent-cron-loss class.
+  if (!/_switchroom_supervise\s+agent-scheduler\b/.test(content)) {
     return {
       name: label,
       status: "fail",

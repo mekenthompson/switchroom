@@ -530,6 +530,24 @@ describe("checkStartShStale", () => {
     expect(result.fix).toContain("docker compose");
   });
 
+  it("fails when start.sh only mentions agent-scheduler in a comment (false-positive guard)", () => {
+    // Catches the loose-grep regression: a stale start.sh that
+    // happens to mention the token in a TODO/comment must still
+    // be diagnosed as broken — the supervisor invocation is what
+    // actually keeps cron alive.
+    const startShPath = join(tempDir, "start.sh");
+    writeFileSync(
+      startShPath,
+      [
+        "#!/usr/bin/env bash",
+        "# TODO: wire agent-scheduler post-upgrade",
+        "_switchroom_supervise gateway /var/log/switchroom/gateway.log bun gateway.js &",
+      ].join("\n"),
+    );
+    const result = checkStartShStale("clerk", startShPath);
+    expect(result.status).toBe("fail");
+  });
+
   it("reports ok when the supervisor block is present", () => {
     const startShPath = join(tempDir, "start.sh");
     writeFileSync(

@@ -273,6 +273,30 @@ describe("generateCompose", () => {
     }
   });
 
+  it("emits each mount independently when only one host dir exists (#907)", async () => {
+    // Vault-only operators commonly have populated skills/ but no
+    // filesystem credentials/ (everything via vault). The two
+    // existsSync probes must be independent — emitting one mount
+    // mustn't depend on the other being present.
+    const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "compose-asym-"));
+    mkdirSync(join(tmp, ".switchroom", "skills"), { recursive: true });
+    try {
+      const out = generateCompose({
+        config: makeConfig({ a: {} }),
+        homeDir: tmp,
+      });
+      expect(out).toContain(
+        `${tmp}/.switchroom/skills:${tmp}/.switchroom/skills:ro`,
+      );
+      expect(out).not.toContain(`${tmp}/.switchroom/credentials`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("omits skills/credentials mounts when host dirs are absent (#907)", async () => {
     // docker compose `up` hard-fails if a `:ro` source path is missing.
     // Many operators keep all secrets in vault and never create

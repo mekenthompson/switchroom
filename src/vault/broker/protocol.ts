@@ -74,6 +74,21 @@ export const PutRequestSchema = z.object({
   ]),
   /** Optional capability token for grant-based access. */
   token: z.string().optional(),
+  /**
+   * Optional operator-passphrase attestation (issue #969 P1a). When
+   * present AND matching the broker's currently-loaded passphrase, the
+   * call is authorized as if the operator ran it from a host shell —
+   * bypasses path-as-identity, ACL, and the unknown-key gate. The
+   * gateway uses this path for one-tap user-approved saves: the user
+   * just typed (or has cached) the passphrase via Telegram, so the
+   * broker can trust the caller carries operator intent.
+   *
+   * The gateway already holds the passphrase in memory after any
+   * /vault command, so the marginal surface is small. Audit logs tag
+   * method="passphrase" so this path is distinguishable in the access
+   * log from grants and path-as-identity.
+   */
+  passphrase: z.string().optional(),
 });
 
 export const ListRequestSchema = z.object({

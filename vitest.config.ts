@@ -56,6 +56,8 @@ export default defineConfig({
       // Write-grant suites (issue #969 P1b) also use bun:sqlite — run via test:bun.
       "**/src/vault/write-grants.test.ts",
       "**/src/vault/broker/server-write-grants.test.ts",
+      // Passphrase-attestation suite (issue #969 P1a) — bun:sqlite.
+      "**/src/vault/broker/server-passphrase-attest.test.ts",
       "**/src/vault/broker/client-token.test.ts",
       "**/src/vault/broker/server-unlock.test.ts",
       "**/src/vault/broker/auto-unlock.test.ts",

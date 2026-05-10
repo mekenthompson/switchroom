@@ -1047,6 +1047,50 @@ export class VaultBroker {
         return;
       }
 
+      // ── Operator-passphrase attestation (issue #969 P1a) ───────────────────
+      //
+      // When the caller forwards an operator passphrase that matches the
+      // one the broker is currently unlocked with, treat the call as
+      // operator-attested: bypass path-as-identity, ACL, the
+      // unknown-key gate, and the kind-mismatch check (operators can
+      // change storage shape). Audit logs tag method="passphrase".
+      //
+      // This is the path the Telegram gateway uses for one-tap
+      // user-approved saves — the operator's passphrase reaches the
+      // gateway via /vault unlock, and the gateway forwards it here.
+      // Same threat model as the operator running `switchroom vault set`
+      // directly on the host.
+      let passphraseAttested = false;
+      if (req.passphrase !== undefined && req.passphrase !== "") {
+        if (req.passphrase === this.passphrase) {
+          passphraseAttested = true;
+        } else {
+          // Wrong passphrase explicitly supplied — fail closed. Don't
+          // fall through to other auth paths: the caller asserted an
+          // operator identity they don't actually have. Surface this
+          // clearly so the user can correct (typo, stale cache, etc).
+          this.auditLogger.write({
+            ts: new Date().toISOString(),
+            op: "put",
+            key: req.key,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:passphrase-mismatch",
+            method: "passphrase",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                "supplied passphrase does not match the broker's unlocked passphrase",
+              ),
+            ),
+          );
+          return;
+        }
+      }
+
       // ── Write-grant fast path (issue #969 P1b) ─────────────────────────────
       //
       // When the caller presents a valid token whose `write_allow` includes
@@ -1091,21 +1135,22 @@ export class VaultBroker {
       }
 
       // ── Path-as-identity rotate path (legacy) ──────────────────────────────
-      if (writeGrantId === null && agentName === null) {
+      if (writeGrantId === null && !passphraseAttested && agentName === null) {
         socket.write(
-          encodeResponse(errorResponse("DENIED", "put requires path-as-identity or a valid write-grant token")),
+          encodeResponse(errorResponse("DENIED", "put requires path-as-identity, a valid write-grant token, or operator-passphrase attestation")),
         );
         return;
       }
       // Same ACL as get — schedule.secrets[] gates write too. Skipped on
-      // the write-grant fast path: the grant IS the ACL.
+      // the write-grant fast path AND the passphrase-attestation fast
+      // path: in both cases the auth IS the ACL.
       if (this.config === null) {
         socket.write(
           encodeResponse(errorResponse("INTERNAL", "Broker config not loaded")),
         );
         return;
       }
-      if (writeGrantId === null) {
+      if (writeGrantId === null && !passphraseAttested) {
         const aclResult = checkAclByAgent(this.config, agentName!, req.key);
         if (!aclResult.allow) {
           this.auditLogger.write({
@@ -1122,10 +1167,10 @@ export class VaultBroker {
         }
       }
       // Refuse to introduce new keys ON THE PATH-AS-IDENTITY PATH ONLY.
-      // Write-grants explicitly permit new-key creation — that's the whole
-      // point of the capability.
+      // Write-grants and passphrase-attestation explicitly permit new-key
+      // creation — that's the whole point of those capabilities.
       const existing = this.secrets[req.key];
-      if (existing === undefined && writeGrantId === null) {
+      if (existing === undefined && writeGrantId === null && !passphraseAttested) {
         this.auditLogger.write({
           ts: new Date().toISOString(),
           op: "put",
@@ -1148,8 +1193,14 @@ export class VaultBroker {
       // Refuse to change the kind (string ↔ binary). The protocol union
       // already excludes 'files' from put. Agents rotating values must keep
       // the same shape. (Only applies when an entry already exists — for
-      // new-key creation via write-grant, any kind in the request is fine.)
-      if (existing !== undefined && existing.kind !== req.entry.kind) {
+      // new-key creation via write-grant or passphrase attestation, any
+      // kind in the request is fine. Passphrase-attested requests CAN
+      // change the kind of existing entries; that's an operator action.)
+      if (
+        existing !== undefined
+        && existing.kind !== req.entry.kind
+        && !passphraseAttested
+      ) {
         this.auditLogger.write({
           ts: new Date().toISOString(),
           op: "put",
@@ -1194,7 +1245,11 @@ export class VaultBroker {
           pid: auditPid,
           cgroup: auditCgroup,
           result: `error:${(err as Error)?.message ?? "save failed"}`,
-          ...(writeGrantId !== null ? { method: "grant", grant_id: writeGrantId } : {}),
+          ...(passphraseAttested
+            ? { method: "passphrase" }
+            : writeGrantId !== null
+              ? { method: "grant", grant_id: writeGrantId }
+              : {}),
         });
         socket.write(
           encodeResponse(
@@ -1204,8 +1259,9 @@ export class VaultBroker {
         return;
       }
       // Successful put — log only the key, NEVER the value. Surface the
-      // grant id when a write-grant was used so audit downstream can trace
-      // capability-driven writes back to the operator action that minted them.
+      // auth method so audit downstream can trace which path authorized
+      // the write: passphrase (operator-attested via gateway), grant
+      // (capability token), or peercred (path-as-identity / cron unit).
       this.auditLogger.write({
         ts: new Date().toISOString(),
         op: "put",
@@ -1214,7 +1270,11 @@ export class VaultBroker {
         pid: auditPid,
         cgroup: auditCgroup,
         result: "allowed",
-        ...(writeGrantId !== null ? { method: "grant", grant_id: writeGrantId } : {}),
+        ...(passphraseAttested
+          ? { method: "passphrase" }
+          : writeGrantId !== null
+            ? { method: "grant", grant_id: writeGrantId }
+            : {}),
       });
       socket.write(encodeResponse({ ok: true, put: true, key: req.key }));
       return;

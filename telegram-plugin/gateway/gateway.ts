@@ -6646,6 +6646,28 @@ bot.command('update', async ctx => {
   )
 })
 
+// /upgrade-status — read-only snapshot of where this host stands (#927).
+// Wraps `switchroom update --status` synchronously and posts the
+// formatted output. NOT admin-gated: read-only fleet metadata is safe
+// for any allowFrom user to see, and the answer "is something behind?"
+// is the missing companion to /update's "trigger an update".
+bot.command('upgradestatus', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  await runSwitchroomCommand(ctx, ['update', '--status'], 'update --status')
+})
+// Alias with hyphen — Grammy doesn't allow hyphens in command names
+// (Telegram's slash-command grammar excludes them) but operators are
+// likely to type /upgrade-status; surface a polite redirect.
+bot.command('upgrade', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  await switchroomReply(
+    ctx,
+    'Did you mean <code>/upgradestatus</code> (no hyphen — Telegram slash-command grammar)? ' +
+    'Or <code>/update</code> to plan, <code>/update apply</code> to execute.',
+    { html: true },
+  )
+})
+
 // ─── /approve, /deny, /pending ────────────────────────────────────────────
 // Slash-command alternatives to the inline-button approval flow (useful for
 // desktop-only sessions and power-users). Share pendingPermissions state
@@ -8840,17 +8862,11 @@ bot.command('permissions', async ctx => {
   await runSwitchroomCommand(ctx, ['agent', 'permissions', agentName], `permissions ${agentName}`)
 })
 
-bot.command('update', async ctx => {
-  if (!isAuthorizedSender(ctx)) return
-  await switchroomReply(ctx, '🔄 Running <b>switchroom update</b>… back in ~30 seconds.', { html: true })
-  await sweepBeforeSelfRestart()
-  const chatId = String(ctx.chat!.id)
-  const threadId = resolveThreadId(chatId, ctx.message?.message_thread_id)
-  spawnSwitchroomDetached(
-    ['update'],
-    notifyDetachedFailure(chatId, threadId ?? null, 'update'),
-  )
-})
+// Drive-by cleanup (#927): the dead /update handler that lived here
+// was a pre-#919 stub. Grammy registers in order so the comprehensive
+// /update handler at line ~6516 (added in #919, hardened in #924,
+// docker-guarded in #934) fired first and this one never ran.
+// Removed to avoid future confusion.
 
 bot.command('version', async ctx => {
   if (!isAuthorizedSender(ctx)) return

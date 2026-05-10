@@ -353,6 +353,7 @@ export function switchroomHelpText(agentName: string): string {
     `<code>/memory &lt;query&gt;</code> — search agent memory`,
     ``,
     `<b>Fleet management</b>`,
+    `<code>/upgradestatus</code> — read-only: CLI version, image age, container age per service`,
     `<code>/update</code> — dry-run plan; <code>/update apply</code> — actually pull images, reconcile, restart`,
     `<code>/restart [name|all]</code> — bounce agent (drains in-flight turn by default)`,
     `<code>/version</code> — show versions + running agent health summary`,

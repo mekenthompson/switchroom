@@ -31,7 +31,8 @@ import { dirname, resolve, join, basename } from "node:path";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SwitchroomConfig } from "../../config/schema.js";
-import { openVault, saveVault, type VaultEntry } from "../vault.js";
+import { openVault, saveVault, VaultError, type VaultEntry } from "../vault.js";
+import { inspectVaultLayout } from "../migrate-layout.js";
 import { resolvePath } from "../../config/loader.js";
 import {
   AutoUnlockDecryptError,
@@ -107,6 +108,13 @@ export interface BrokerTestOpts {
    * DO NOT set outside tests.
    */
   _testGrantsDb?: Database;
+  /**
+   * If provided, override the resolved vault file path. Used by the
+   * drift-detection test which needs to point the broker at a tmp
+   * vault file without going through `start()`'s arg-handling.
+   * DO NOT set outside tests.
+   */
+  _testVaultPath?: string;
 }
 
 export class VaultBroker {
@@ -160,12 +168,16 @@ export class VaultBroker {
       testOpts._testConfig !== undefined ||
       testOpts._testIdentify !== undefined ||
       testOpts._testAuditLogger !== undefined ||
-      testOpts._testGrantsDb !== undefined;
+      testOpts._testGrantsDb !== undefined ||
+      testOpts._testVaultPath !== undefined;
     if (usingTestOpt && process.env.NODE_ENV !== "test") {
       throw new Error(
-        "VaultBroker: BrokerTestOpts (_testSecrets/_testConfig/_testIdentify/_testAuditLogger/_testGrantsDb) " +
+        "VaultBroker: BrokerTestOpts (_testSecrets/_testConfig/_testIdentify/_testAuditLogger/_testGrantsDb/_testVaultPath) " +
           "must not be set outside tests. Set NODE_ENV=test if you really mean it.",
       );
+    }
+    if (testOpts._testVaultPath !== undefined) {
+      this.vaultPath = testOpts._testVaultPath;
     }
 
     // Use the injected logger for tests; create the real one for production.
@@ -300,8 +312,19 @@ export class VaultBroker {
   /**
    * Unlock the vault using the given passphrase.
    * Throws VaultError on bad passphrase or unreadable vault.
+   *
+   * Defends against state-E layout divergence (plan v3 §5 companion):
+   * if the broker's resolved vault path is a symlink target inside a
+   * dir that ALSO contains a sibling regular `vault.enc` with
+   * different content, the broker refuses to unlock with a fatal
+   * error pointing at `switchroom apply`. Catches the case where an
+   * older switchroom CLI wrote to the legacy path AFTER migration ran
+   * (rename-replaces-symlink), leaving broker and CLI writing to
+   * different files. Without this check the broker would happily
+   * serve stale data until the next `apply`.
    */
   unlockFromPassphrase(passphrase: string): void {
+    detectVaultLayoutDrift(this.vaultPath);
     const secrets = openVault(passphrase, this.vaultPath);
     this.secrets = secrets;
     // Retain the passphrase to enable op:put (agent-driven rotation).
@@ -1810,6 +1833,56 @@ export class VaultBroker {
       });
     } catch { /* non-fatal */ }
   }
+}
+
+// ─── Vault layout drift detection (plan v3 §5 companion) ────────────────────
+
+/**
+ * Defend against state-E layout divergence: an older switchroom CLI
+ * wrote to the legacy `~/.switchroom/vault.enc` path AFTER migration
+ * ran, replacing the symlink with a fresh regular file. Broker and
+ * CLI now write to different files; without this check the broker
+ * would serve stale data unbounded.
+ *
+ * Reuses the canonical state machine in `migrate-layout.ts` rather
+ * than re-implementing the hash-comparison logic. The check only
+ * triggers when:
+ *   - The resolved vault path is the canonical
+ *     `<home>/.switchroom/vault/vault.enc` shape.
+ *   - The state machine reports `divergent` (state E).
+ *
+ * Throws `VaultError` on detected drift — caller's existing VaultError
+ * handling surfaces the message to logs / stderr (broker process
+ * exits non-zero from the unlock failure, surfacing to the
+ * compose `restart: unless-stopped` loop + healthcheck).
+ */
+function detectVaultLayoutDrift(vaultPath: string): void {
+  // Only meaningful when the layout is the canonical
+  // `<home>/.switchroom/vault/vault.enc` shape. Custom paths and
+  // pre-migration single-file paths skip the check.
+  const dir = dirname(vaultPath);
+  if (basename(dir) !== "vault") return;
+  if (basename(vaultPath) !== "vault.enc") return;
+  // Re-derive the home from the path: vault/vault.enc lives at
+  // <home>/.switchroom/vault/vault.enc.
+  const switchroomDir = dirname(dir);
+  if (basename(switchroomDir) !== ".switchroom") return;
+  const home = dirname(switchroomDir);
+
+  const result = inspectVaultLayout(home);
+  if (result.kind === "divergent") {
+    throw new VaultError(
+      `Vault layout divergence detected at boot: ` +
+      `${result.details.oldPath} and ${result.details.newPath} ` +
+      `are both regular files with different content. An older switchroom ` +
+      `CLI may have written to the legacy path after migration ran. ` +
+      `Run \`switchroom apply\` from the host to surface the recovery recipe ` +
+      `(state E refusal with literal \`mv\` commands). ` +
+      `See docs/operators/state-e-recovery.md.`,
+    );
+  }
+  // States A / B / C / D / migrated / custom-path-skipped — all fine
+  // for the broker's read path.
 }
 
 // ─── Top-level graceful shutdown ─────────────────────────────────────────────

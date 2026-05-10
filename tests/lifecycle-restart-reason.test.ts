@@ -117,17 +117,19 @@ describe("lifecycle: restart-reason marker", () => {
   });
 });
 
-describe("lifecycle: restartAgent shellout shape (v0.7 PR-C1)", () => {
+describe("lifecycle: restartAgent shellout shape (v0.7 PR-C1, updated #932)", () => {
   // Under the docker runtime there's a single container per agent
   // (`switchroom-<name>`), not the systemd-era pair of agent + gateway
-  // services. The pre-#177 ordering concern is moot — a single
-  // `docker compose restart agent-<name>` cycles the whole container,
-  // which holds both the gateway and the claude REPL inside.
+  // services. Since #932 the call is `compose up -d --no-deps
+  // agent-<name>` (was `compose restart` pre-#932) so on-disk compose
+  // diffs are picked up via container recreation; --no-deps prevents
+  // disturbing sibling services (broker/kernel).
   //
   // This test pins that the source still routes restart through
   // docker compose with the expected project + service names, so a
-  // future re-edit can't silently revert to systemctl.
-  it("restartAgent's source uses `docker compose ... restart agent-<name>`", async () => {
+  // future re-edit can't silently revert to systemctl OR to plain
+  // `restart` (which would silently miss volume-mount changes).
+  it("restartAgent's source uses `docker compose ... up -d --no-deps agent-<name>` (#932)", async () => {
     const { readFileSync } = await import("node:fs");
     const { resolve, join: joinPath } = await import("node:path");
     const { fileURLToPath } = await import("node:url");
@@ -140,7 +142,17 @@ describe("lifecycle: restartAgent shellout shape (v0.7 PR-C1)", () => {
     expect(funcStart).toBeGreaterThan(0);
     const body = src.slice(funcStart, funcEnd);
 
-    expect(body).toMatch(/composeArgs\(\["restart", serviceKey\(name\)\]\)/);
+    expect(body).toMatch(
+      /composeArgs\(\["up", "-d", "--force-recreate", "--no-deps", serviceKey\(name\)\]\)/,
+    );
+    // Regression guards — must NOT silently revert to:
+    //   - plain `restart` (would miss volume-mount diffs from `apply`
+    //     — see #932 / #857 / #916)
+    //   - `up -d --no-deps` without --force-recreate (would no-op on
+    //     byte-identical compose, breaking auth.ts and grant flows
+    //     that depend on always-bounce — see #944 reviewer)
+    expect(body).not.toMatch(/composeArgs\(\["restart"/);
+    expect(body).toMatch(/--force-recreate/);
     // No leftover systemctl calls in the restart path.
     expect(body).not.toMatch(/systemctl/);
   });

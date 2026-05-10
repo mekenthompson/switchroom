@@ -21,6 +21,7 @@ on:
     branches: [main]
     paths:
       - "src/vault/**"
+      - "src/cli/apply.ts"
       - "src/agents/compose.ts"
       - "src/agent-scheduler/**"
       - "docker/Dockerfile.base"

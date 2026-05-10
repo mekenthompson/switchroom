@@ -93,6 +93,30 @@ describe("resolveVaultBindMountDir (#961)", () => {
       customVaultPath: undefined,
     })).toBe("/home/op/.switchroom/vault");
   });
+
+  it("completed-partial migration → canonical parent dir", () => {
+    // State C (partial) from the 5-state migration machine — file
+    // was moved but the legacy symlink hasn't been written yet.
+    // The mount target is still the canonical dir; subsequent apply
+    // runs resume.
+    expect(resolveVaultBindMountDir(fakeHome, {
+      migrationKind: "completed-partial",
+      customVaultPath: "/home/op/.switchroom/vault.enc",
+    })).toBe("/home/op/.switchroom/vault");
+  });
+
+  it("divergent state → canonical parent dir", () => {
+    // State E (divergent) — both the legacy file AND the new
+    // canonical file exist with different content. Migration helper
+    // returns this kind to signal "operator intervention required";
+    // apply.ts surfaces the error and exits before reaching the
+    // guard. If it did reach here (defensive), the mount target is
+    // still the canonical parent — never `dirname(legacy)`.
+    expect(resolveVaultBindMountDir(fakeHome, {
+      migrationKind: "divergent",
+      customVaultPath: "/home/op/.switchroom/vault.enc",
+    })).toBe("/home/op/.switchroom/vault");
+  });
 });
 
 describe("inspectVaultBindMountDir (#961)", () => {

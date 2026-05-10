@@ -233,6 +233,12 @@ function getRestartCount(container: string): number {
   } catch { return -1; }
 }
 
+function getContainerId(container: string): string {
+  try {
+    return execSync(`docker inspect -f '{{.Id}}' ${container}`).toString().trim();
+  } catch { return ""; }
+}
+
 /**
  * Run an `approval_lookup` against kernel by execing a tiny inline
  * client inside the kernel container itself (which has bun + the
@@ -386,20 +392,18 @@ afterAll(() => {
   releaseFleetLock();
 }, 60_000);
 
-// Gated behind SWITCHROOM_PHASE1C_RACE=1 in addition to image presence.
-// The "newbie ready after live add" sub-assertion is currently flaky on
-// some kernels — `kernelLookup("newbie")` does not return ok within the
-// 30s socket-bind deadline even when the socket exists. Triaged in
-// PR-D3 as a product/timing question separate from the compose-fixture
-// rot that previously masked it (filed as follow-up). Compose YAML
-// generation IS now exercised by the per-agent-isolation suite which
-// shares the same fixture path; if that goes red, this needs to too.
-const raceOptIn = process.env.SWITCHROOM_PHASE1C_RACE === "1";
-describe.skipIf(!imagesOk || !raceOptIn)(
+// Ungated post-#857: the newbie-readiness assertion was flaky because
+// the test used `docker compose restart approval-kernel`, which does
+// NOT pick up the new kernel-newbie-sock volume mount. Switching to
+// `up -d approval-kernel` (which detects the compose diff and recreates
+// the container with the new volume) makes newbie's socket actually
+// bindable. The compose-fixture rot that previously masked this was
+// already addressed in PR-D3.
+describe.skipIf(!imagesOk)(
   "phase1c broker-IPC race — newbie agent online during sustained kernel IPC",
   () => {
     it(
-      "45 requests succeed, 0 broker/kernel/scheduler restarts, newbie reaches first reply within 60s",
+      "45 requests succeed, broker stays untouched across live add, newbie reaches first reply within 60s",
       async () => {
         if (!ctx) throw new Error("ctx not initialized");
         // Sanity: alice's container can see its own kernel sock at the
@@ -420,6 +424,13 @@ describe.skipIf(!imagesOk || !raceOptIn)(
           broker: getRestartCount("switchroom-vault-broker"),
           kernel: getRestartCount("switchroom-approval-kernel"),
         };
+        // Also capture the kernel container ID — the live-add procedure
+        // recreates the kernel container (`docker compose up -d` picks
+        // up the new kernel-newbie-sock volume mount), which resets
+        // RestartCount to 0 on the new container. We assert recreation
+        // by container-ID change instead of restart-count bump (#857).
+        const startKernelId = getContainerId("switchroom-approval-kernel");
+        const startBrokerId = getContainerId("switchroom-vault-broker");
 
         const results: Array<{ idx: number; ok: boolean; durationMs: number; err?: string }> = [];
         let newbieFirstReplyAt: number | null = null;
@@ -514,8 +525,9 @@ describe.skipIf(!imagesOk || !raceOptIn)(
         const drops = TOTAL_REQUESTS - ok;
 
         // Topology-stability snapshot — captured BEFORE the kernel
-        // restart-after-add step below, since that step is a deliberate
-        // bump (broker/scheduler must still be restartless).
+        // recreation step below, since that step is a deliberate
+        // disturbance (broker must still be untouched; the singleton
+        // scheduler was retired in Phase 4 #893).
         const stabilityCounts = {
           broker: getRestartCount("switchroom-vault-broker"),
           kernel: getRestartCount("switchroom-approval-kernel"),
@@ -541,8 +553,20 @@ describe.skipIf(!imagesOk || !raceOptIn)(
         if (newbieUpAt !== null) {
           const readinessStart = Date.now();
           try {
+            // #857 fix: `docker compose restart` does NOT recreate the
+            // container — it just stops + starts the existing one with
+            // its existing volume mounts. The kernel's enumeration of
+            // per-agent socket dirs (`readdirSync(/run/switchroom/kernel)`
+            // in kernel-server.ts:bootstrap) is gated by what's actually
+            // mounted into the container at create time. compose2 added
+            // a `kernel-newbie-sock` named volume to approval-kernel's
+            // volumes list; only `up -d` (which detects the config diff
+            // and recreates) picks that up. With `restart`, newbie's
+            // subdir never appears in the kernel's view, the kernel
+            // never binds newbie's socket, and the polling loop times
+            // out after 30s — exactly the symptom the issue described.
             execSync(
-              `docker compose -p ${PROJECT} -f ${ctx.composePath} restart approval-kernel`,
+              `docker compose -p ${PROJECT} -f ${ctx.composePath} up -d approval-kernel`,
               { stdio: "pipe", cwd: ctx.workdir },
             );
             // Give kernel up to 30s to bind newbie's per-agent socket.
@@ -599,27 +623,32 @@ describe.skipIf(!imagesOk || !raceOptIn)(
         // ── Topology stability ────────────────────────────────────────
         // Assertion 1: zero IPC drops on alice's pre-existing socket.
         expect(drops).toBe(0);
-        // Assertion 2: broker / kernel / scheduler RestartCount unchanged
-        // across the agent-add window itself (kernel restart-after-add
-        // is a separate, deliberate step measured below).
+        // Assertion 2: broker + kernel RestartCount unchanged across
+        // the agent-add window itself (kernel recreation is a separate,
+        // deliberate step measured below). Singleton scheduler is gone
+        // since Phase 4 (#893).
         expect(stabilityCounts.broker).toBe(startCounts.broker);
         expect(stabilityCounts.kernel).toBe(startCounts.kernel);
-        expect(stabilityCounts.scheduler).toBe(startCounts.scheduler);
 
         // ── Newbie readiness ──────────────────────────────────────────
         // Assertion 3a: newbie reached "own socket bound + first lookup
-        // answered" within the budget. This requires the kernel
-        // restart-after-add — broker + scheduler MUST stay restartless.
+        // answered" within the budget. This requires kernel recreation
+        // with the new volume mount — broker MUST stay untouched.
         expect(newbieUpAt).not.toBeNull();
         expect(newbieReadyAt).not.toBeNull();
         expect(newbieReadyLatencyMs).not.toBeNull();
         expect(newbieReadyLatencyMs!).toBeLessThan(NEWBIE_FIRST_REPLY_BUDGET_MS);
-        // Assertion 3b: broker + scheduler RestartCount STILL unchanged
-        // even after the kernel restart. Kernel is allowed to bump by
-        // exactly 1 (the deliberate restart-after-add).
+        // Assertion 3b: kernel was recreated (container ID changed) so
+        // it picked up the new kernel-newbie-sock volume; broker was
+        // NOT touched (container ID unchanged + RestartCount stable).
+        // Pre-#857 the test used `docker compose restart` and asserted
+        // RestartCount+1; that didn't actually recreate the container,
+        // so newbie's volume mount never appeared inside the kernel.
+        const endKernelId = getContainerId("switchroom-approval-kernel");
+        const endBrokerId = getContainerId("switchroom-vault-broker");
+        expect(endBrokerId).toBe(startBrokerId);
         expect(endCounts.broker).toBe(startCounts.broker);
-        expect(endCounts.scheduler).toBe(startCounts.scheduler);
-        expect(endCounts.kernel).toBe(startCounts.kernel + 1);
+        expect(endKernelId).not.toBe(startKernelId);
       },
       LONG_MODE ? 240_000 : 120_000,
     );

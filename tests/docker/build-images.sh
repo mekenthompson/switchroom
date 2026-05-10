@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Phase 1b helper — build all 5 images locally with the :phase1b-test tag
-# so tests/docker/e2e.test.ts can find them. CI does the same via the
-# multi-arch workflow at .github/workflows/docker-images.yml.
+# Phase 1b helper — build the docker images locally with the :phase1b-test
+# tag so tests/docker/e2e.test.ts and friends can find them. CI does the
+# same via the multi-arch workflow at .github/workflows/docker-images.yml.
+# Phase 4 (#893) retired the singleton scheduler image; this script
+# tracks that.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -13,7 +15,7 @@ echo "[build-images] running npm build (emits dist/ bundles required by COPY dir
 echo "[build-images] base"
 docker buildx build -t "switchroom/base:${TAG}" -f "$ROOT/docker/Dockerfile.base" --load "$ROOT"
 
-for img in agent broker kernel scheduler; do
+for img in agent broker kernel; do
   echo "[build-images] ${img}"
   docker buildx build \
     --build-arg "BASE_IMAGE=switchroom/base:${TAG}" \

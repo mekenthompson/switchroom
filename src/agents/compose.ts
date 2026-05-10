@@ -380,9 +380,19 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`      - "ALL"`);
   // Kernel mirrors broker: it owns per-agent socket dirs and must chown
   // sockets to the agent UID after bind().
+  //
+  // DAC_READ_SEARCH is needed by the healthcheck probe (PR #898) — it
+  // runs `ls /run/switchroom/kernel/*/sock` as root, but per-agent
+  // socket dirs are mode 0700 owned by the agent UID after bind. With
+  // `cap_drop: ALL` and only CHOWN + FOWNER, root cannot read into
+  // those dirs, so the probe always fails. Broker already has this
+  // cap (for vault file reads); adding it here gives both singletons
+  // the same probe-reachability. Read-only DAC bypass — strictly less
+  // powerful than DAC_OVERRIDE which also bypasses write checks.
   lines.push(`    cap_add:`);
   lines.push(`      - "CHOWN"`);
   lines.push(`      - "FOWNER"`);
+  lines.push(`      - "DAC_READ_SEARCH"`);
   if (switchroomConfigPath) {
     lines.push(`    environment:`);
     lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);

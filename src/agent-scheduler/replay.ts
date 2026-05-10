@@ -47,6 +47,42 @@ const FIELD_RANGES: Record<FieldKind, [number, number]> = {
 };
 
 /**
+ * Name aliases node-cron 3.x accepts in month + day-of-week fields
+ * (#896). Case-insensitive. Substituted to numeric form before
+ * `matchField` runs, so the parser stays integer-only.
+ */
+const MONTH_ALIASES: Record<string, string> = {
+  JAN: "1", FEB: "2", MAR: "3", APR: "4", MAY: "5", JUN: "6",
+  JUL: "7", AUG: "8", SEP: "9", OCT: "10", NOV: "11", DEC: "12",
+};
+const DOW_ALIASES: Record<string, string> = {
+  SUN: "0", MON: "1", TUE: "2", WED: "3", THU: "4", FRI: "5", SAT: "6",
+};
+
+/**
+ * Substitute month/dow name aliases (`JAN`, `MON`, etc.) with their
+ * numeric equivalents. Operates on a single cron field; idempotent
+ * for already-numeric input. Letter-run regex so contiguous alpha
+ * tokens substitute as a unit and field separators (`-`, `,`, `/`)
+ * partition the runs cleanly — `MON-FRI` becomes `1-5`, not `1-FRI`.
+ *
+ * Known minor divergence from node-cron 3.x: `MON-FRI/2` expands to
+ * `1-5/2` here (matchPart steps from lo=1 yielding {1,3,5}), whereas
+ * node-cron's convert-expression emits {2,4}. Stepped weekday ranges
+ * with aliases are rare; operators who need them should write the
+ * numeric form. Filed as a known-quirk rather than a bug because
+ * Vixie cron's own behaviour is the {1,3,5} expansion.
+ */
+export function normalizeAliases(field: string, kind: FieldKind): string {
+  const map = kind === "month" ? MONTH_ALIASES : kind === "dow" ? DOW_ALIASES : null;
+  if (map == null) return field;
+  return field.replace(/[A-Za-z]+/g, (token) => {
+    const sub = map[token.toUpperCase()];
+    return sub ?? token;
+  });
+}
+
+/**
  * Returns true if `value` matches the cron field expression `field`.
  * Each field expression is a comma-separated list of parts; a value
  * matches the field iff it matches any part. Each part is one of:
@@ -112,13 +148,17 @@ function matchPart(part: string, value: number, min: number, max: number): boole
 export function cronMatchesDate(expr: string, date: Date): boolean {
   const fields = expr.trim().split(/\s+/);
   if (fields.length !== 5) return false;
-  const [mField, hField, domField, moField, dowFieldRaw] = fields as [
+  const [mField, hField, domField, moFieldRaw, dowFieldRaw] = fields as [
     string, string, string, string, string,
   ];
-  // Normalize 7 → 0 in dow before matching. Operators sometimes write
-  // `0` (Sun-Sat) and sometimes `7` (Sun-Sat-Sun); cron(5) accepts
-  // both.
-  const dowField = dowFieldRaw.replace(/\b7\b/g, "0");
+  // Substitute name aliases (JAN-DEC, SUN-SAT) before any other
+  // normalization. node-cron 3.x accepts these for live fires; the
+  // replay parser must too or boot replay is silently dropped (#896).
+  const moField = normalizeAliases(moFieldRaw, "month");
+  // Normalize 7 → 0 in dow AFTER alias substitution. Operators
+  // sometimes write `0` (Sun-Sat) and sometimes `7` (Sun-Sat-Sun);
+  // cron(5) accepts both.
+  const dowField = normalizeAliases(dowFieldRaw, "dow").replace(/\b7\b/g, "0");
 
   const minuteOk = matchField(mField, date.getMinutes(), "minute");
   const hourOk = matchField(hField, date.getHours(), "hour");

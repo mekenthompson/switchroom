@@ -7,7 +7,6 @@ import {
   buildPollingStatus,
   buildMessageStatus,
   formatStatusText,
-  parseSystemdTimestamp,
   readinessGaps,
   waitForAgentReady,
   type AgentStatusReport,
@@ -315,34 +314,6 @@ describe("buildAgentStatusReport — end-to-end composition", () => {
     // A fresh agent shouldn't fail status just because no one has talked
     // to it yet — that's a normal state.
     expect(report.overallState).toBe("ok");
-  });
-});
-
-describe("parseSystemdTimestamp", () => {
-  it("parses the systemd format with weekday and AEST zone", () => {
-    const ms = parseSystemdTimestamp("Tue 2026-04-21 16:38:48 AEST");
-    expect(ms).not.toBeNull();
-    expect(typeof ms).toBe("number");
-  });
-
-  it("parses the systemd format with UTC zone", () => {
-    const ms = parseSystemdTimestamp("Tue 2026-04-21 06:38:48 UTC");
-    expect(ms).toBe(Date.UTC(2026, 3, 21, 6, 38, 48));
-  });
-
-  it("falls back when zone abbreviation is unknown", () => {
-    // Made-up zone — strip weekday, Date.parse may still handle it; if
-    // not, the local-time fallback kicks in and we get a non-null answer.
-    const ms = parseSystemdTimestamp("Tue 2026-04-21 16:38:48 XYZT");
-    expect(ms).not.toBeNull();
-  });
-
-  it("returns null on empty input", () => {
-    expect(parseSystemdTimestamp("")).toBeNull();
-  });
-
-  it("returns null on garbage", () => {
-    expect(parseSystemdTimestamp("not a timestamp")).toBeNull();
   });
 });
 

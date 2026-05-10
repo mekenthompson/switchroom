@@ -156,5 +156,4 @@ web UI (Settings → Developer settings → Personal access tokens →
 ## Related
 
 - `runtime-mode.md` — Docker is the only supported runtime in v0.7+.
-- `migration-v0.7.md` — upgrading from the v0.6 systemd runtime.
 - `docs/proposed/docker-images.yml` — the GHCR build/push workflow.

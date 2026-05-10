@@ -250,6 +250,74 @@ describe("generateCompose", () => {
     expect(out).not.toContain("${HOME}");
   });
 
+  it("emits skills + credentials :ro mounts when host dirs exist (#907)", async () => {
+    const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "compose-mounts-"));
+    mkdirSync(join(tmp, ".switchroom", "skills"), { recursive: true });
+    mkdirSync(join(tmp, ".switchroom", "credentials"), { recursive: true });
+    try {
+      const out = generateCompose({
+        config: makeConfig({ a: {} }),
+        homeDir: tmp,
+      });
+      expect(out).toContain(
+        `${tmp}/.switchroom/skills:${tmp}/.switchroom/skills:ro`,
+      );
+      expect(out).toContain(
+        `${tmp}/.switchroom/credentials:${tmp}/.switchroom/credentials:ro`,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("emits each mount independently when only one host dir exists (#907)", async () => {
+    // Vault-only operators commonly have populated skills/ but no
+    // filesystem credentials/ (everything via vault). The two
+    // existsSync probes must be independent — emitting one mount
+    // mustn't depend on the other being present.
+    const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "compose-asym-"));
+    mkdirSync(join(tmp, ".switchroom", "skills"), { recursive: true });
+    try {
+      const out = generateCompose({
+        config: makeConfig({ a: {} }),
+        homeDir: tmp,
+      });
+      expect(out).toContain(
+        `${tmp}/.switchroom/skills:${tmp}/.switchroom/skills:ro`,
+      );
+      expect(out).not.toContain(`${tmp}/.switchroom/credentials`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("omits skills/credentials mounts when host dirs are absent (#907)", async () => {
+    // docker compose `up` hard-fails if a `:ro` source path is missing.
+    // Many operators keep all secrets in vault and never create
+    // `.switchroom/credentials/`; we must skip emission rather than
+    // refuse to generate compose at all.
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "compose-no-mounts-"));
+    try {
+      const out = generateCompose({
+        config: makeConfig({ a: {} }),
+        homeDir: tmp,
+      });
+      expect(out).not.toContain(`${tmp}/.switchroom/skills`);
+      expect(out).not.toContain(`${tmp}/.switchroom/credentials`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("emits top-level project name 'switchroom' for collision protection", () => {
     // Belt-and-braces vs Coolify-managed (or other) compose stacks on
     // the same host. Pinning name: at file scope means

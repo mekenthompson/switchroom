@@ -110,6 +110,22 @@ if [ "$SWITCHROOM_RUNTIME" = "docker" ] && [ -z "$SWITCHROOM_DOCKER_TMUX_INNER" 
     bash -l "$0"
 fi
 
+{{#if hostHomeQ}}
+# Host ~/.switchroom symlink (#910). Container HOME=/state/agent/home,
+# but operator yaml prompts (cron, hooks, ad-hoc tool calls) widely use
+# ~/.switchroom/skills/..., ~/.switchroom/credentials/..., and
+# ~/.switchroom/agents/<self>/... — those expand against $HOME inside the
+# container. Bind mounts land at the host's absolute path
+# (/home/<user>/.switchroom/...), not under HOME. Symlinking
+# $HOME/.switchroom → <host-home>/.switchroom makes tilde paths resolve
+# to the bind-mounted location. Idempotent: ln -sfn refreshes the link
+# without following an existing symlink. Guard refuses to clobber a
+# real directory at $HOME/.switchroom.
+if [ ! -e "$HOME/.switchroom" ] || [ -L "$HOME/.switchroom" ]; then
+  ln -sfn {{{hostHomeQ}}}/.switchroom "$HOME/.switchroom" 2>/dev/null || true
+fi
+{{/if}}
+
 export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
 export PATH="$HOME/.bun/bin:$PATH"

@@ -1434,6 +1434,10 @@ function buildWorkspaceContext(args: BuildWorkspaceContextArgs): Record<string, 
     switchroomConfigPathQ: switchroomConfigPath
       ? shellSingleQuote(resolve(switchroomConfigPath))
       : undefined,
+    // Host home — baked into start.sh.hbs's $HOME/.switchroom symlink
+    // (#910). When unset (e.g. tests with no HOME) the template's
+    // {{#if hostHomeQ}} guard renders the symlink block as a no-op.
+    hostHomeQ: process.env.HOME ? shellSingleQuote(process.env.HOME) : undefined,
     modelQ: shellSingleQuote(agentConfig.model ?? SWITCHROOM_DEFAULT_MAIN_MODEL),
     thinkingEffort: agentConfig.thinking_effort ?? SWITCHROOM_DEFAULT_THINKING_EFFORT,
     permissionMode: agentConfig.permission_mode,
@@ -2894,6 +2898,9 @@ export function reconcileAgent(
       hindsightRecallMaxMemories,
       hindsightRecallCacheTtlSecs,
       hindsightRecallMinOverlap,
+      // Mirror buildWorkspaceContext (#910): host home for the
+      // $HOME/.switchroom symlink in start.sh's docker preamble.
+      hostHomeQ: process.env.HOME ? shellSingleQuote(process.env.HOME) : undefined,
       modelQ: shellSingleQuote(agentConfig.model ?? SWITCHROOM_DEFAULT_MAIN_MODEL),
       thinkingEffort: agentConfig.thinking_effort ?? SWITCHROOM_DEFAULT_THINKING_EFFORT,
       permissionMode: agentConfig.permission_mode,

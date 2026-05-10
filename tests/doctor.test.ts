@@ -12,6 +12,7 @@ import {
   checkDepsCacheWritable,
   checkSkillsPrerequisites,
   checkConfig,
+  checkStartShStale,
 } from "../src/cli/doctor.js";
 import { findConfigFile } from "../src/config/loader.js";
 import type { SwitchroomConfig } from "../src/config/schema.js";
@@ -487,5 +488,77 @@ describe("checkConfig — default subagents check", () => {
     expect(check!.status).toBe("warn");
     expect(check!.detail).toContain("no default subagents");
     expect(check!.fix).toContain("docs/sub-agents.md");
+  });
+});
+
+describe("checkStartShStale", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = resolve(tmpdir(), `switchroom-doctor-startsh-${Date.now()}`);
+    mkdirSync(tempDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("warns when start.sh is missing entirely", () => {
+    const result = checkStartShStale("clerk", join(tempDir, "missing.sh"));
+    expect(result.status).toBe("warn");
+    expect(result.detail).toContain("not found");
+    expect(result.fix).toContain("switchroom apply");
+  });
+
+  it("fails when start.sh lacks the agent-scheduler supervisor block (#909)", () => {
+    // Hand-craft a pre-Phase-4 start.sh: gateway + autoaccept supervisors
+    // only, no agent-scheduler reference.
+    const startShPath = join(tempDir, "start.sh");
+    writeFileSync(
+      startShPath,
+      [
+        "#!/usr/bin/env bash",
+        "_switchroom_supervise gateway /var/log/switchroom/gateway.log bun gateway.js &",
+        "_switchroom_supervise autoaccept /var/log/switchroom/autoaccept.log bun autoaccept-poll.js &",
+        "exec tmux new-session -A -s clerk bash -l \"$0\"",
+      ].join("\n"),
+    );
+    const result = checkStartShStale("clerk", startShPath);
+    expect(result.status).toBe("fail");
+    expect(result.detail).toContain("agent-scheduler");
+    expect(result.fix).toContain("switchroom apply");
+    expect(result.fix).toContain("docker compose");
+  });
+
+  it("fails when start.sh only mentions agent-scheduler in a comment (false-positive guard)", () => {
+    // Catches the loose-grep regression: a stale start.sh that
+    // happens to mention the token in a TODO/comment must still
+    // be diagnosed as broken — the supervisor invocation is what
+    // actually keeps cron alive.
+    const startShPath = join(tempDir, "start.sh");
+    writeFileSync(
+      startShPath,
+      [
+        "#!/usr/bin/env bash",
+        "# TODO: wire agent-scheduler post-upgrade",
+        "_switchroom_supervise gateway /var/log/switchroom/gateway.log bun gateway.js &",
+      ].join("\n"),
+    );
+    const result = checkStartShStale("clerk", startShPath);
+    expect(result.status).toBe("fail");
+  });
+
+  it("reports ok when the supervisor block is present", () => {
+    const startShPath = join(tempDir, "start.sh");
+    writeFileSync(
+      startShPath,
+      [
+        "#!/usr/bin/env bash",
+        "_switchroom_supervise agent-scheduler /var/log/switchroom/agent-scheduler.log \\",
+        "  bun /opt/switchroom/agent-scheduler/index.js &",
+      ].join("\n"),
+    );
+    const result = checkStartShStale("clerk", startShPath);
+    expect(result.status).toBe("ok");
   });
 });

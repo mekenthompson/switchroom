@@ -562,3 +562,52 @@ describe("checkStartShStale", () => {
     expect(result.status).toBe("ok");
   });
 });
+
+describe("checkLeakedHomeSwitchroom (#933)", () => {
+  let tempDir: string;
+
+  beforeEach(() => {
+    tempDir = resolve(tmpdir(), `switchroom-doctor-leaked-${Date.now()}-${Math.random()}`);
+    mkdirSync(tempDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it("ok when $HOME/.switchroom doesn't exist (fresh agent or post-#910 first boot)", async () => {
+    const { checkLeakedHomeSwitchroom } = await import("../src/cli/doctor.js");
+    const r = checkLeakedHomeSwitchroom("clerk", tempDir);
+    expect(r.status).toBe("ok");
+    expect(r.detail).toContain("no leaked state");
+  });
+
+  it("ok when $HOME/.switchroom is a symlink (post-#910 boot succeeded)", async () => {
+    const { symlinkSync } = await import("node:fs");
+    mkdirSync(join(tempDir, "home"), { recursive: true });
+    symlinkSync("/home/operator/.switchroom", join(tempDir, "home", ".switchroom"));
+    const { checkLeakedHomeSwitchroom } = await import("../src/cli/doctor.js");
+    const r = checkLeakedHomeSwitchroom("clerk", tempDir);
+    expect(r.status).toBe("ok");
+    expect(r.detail).toContain("symlink in place");
+  });
+
+  it("fails when $HOME/.switchroom is a real directory (leaked state from pre-#910)", async () => {
+    // Replicate the production observation: agent10821-owned dir with
+    // analytics-id, logs/, quota-cache.json files.
+    const leakedDir = join(tempDir, "home", ".switchroom");
+    mkdirSync(leakedDir, { recursive: true });
+    writeFileSync(join(leakedDir, "analytics-id"), "abc123\n");
+    mkdirSync(join(leakedDir, "logs"), { recursive: true });
+    writeFileSync(join(leakedDir, "quota-cache.json"), "{}\n");
+
+    const { checkLeakedHomeSwitchroom } = await import("../src/cli/doctor.js");
+    const r = checkLeakedHomeSwitchroom("clerk", tempDir);
+    expect(r.status).toBe("fail");
+    expect(r.detail).toContain("real directory");
+    expect(r.detail).toContain("tilde paths");
+    expect(r.fix).toContain("docker exec switchroom-clerk");
+    expect(r.fix).toContain("rm -rf $HOME/.switchroom");
+    expect(r.fix).toContain("switchroom agent restart clerk");
+  });
+});

@@ -19,6 +19,7 @@ import {
   cronMatchesDate,
   findMissedFires,
   matchField,
+  normalizeAliases,
   readRecentFires,
 } from "./replay.js";
 import type { DispatchResult } from "../scheduler/dispatch.js";
@@ -102,6 +103,81 @@ describe("cronMatchesDate", () => {
     expect(cronMatchesDate("0 8 * *", new Date())).toBe(false); // 4 fields
     expect(cronMatchesDate("0 8 * * 1-5 2024", new Date())).toBe(false); // 6 fields
     expect(cronMatchesDate("not-a-cron", new Date())).toBe(false);
+  });
+
+  // Name aliases (#896) — node-cron 3.x accepts these in month + dow
+  // fields. Replay must too or boot replay silently drops fires for
+  // any operator who wrote MON-FRI / JAN-DEC.
+  describe("name aliases (#896)", () => {
+    it("matches MON in dow against a Monday", () => {
+      const monday = new Date("2026-05-11T08:00:00"); // Monday
+      expect(cronMatchesDate("0 8 * * MON", monday)).toBe(true);
+      const tuesday = new Date("2026-05-12T08:00:00");
+      expect(cronMatchesDate("0 8 * * MON", tuesday)).toBe(false);
+    });
+
+    it("matches MON-FRI weekday range", () => {
+      const wed = new Date("2026-05-13T08:00:00");
+      const sat = new Date("2026-05-09T08:00:00");
+      expect(cronMatchesDate("0 8 * * MON-FRI", wed)).toBe(true);
+      expect(cronMatchesDate("0 8 * * MON-FRI", sat)).toBe(false);
+    });
+
+    it("matches JAN in month field", () => {
+      const jan = new Date("2026-01-15T08:00:00");
+      const feb = new Date("2026-02-15T08:00:00");
+      expect(cronMatchesDate("0 8 * JAN *", jan)).toBe(true);
+      expect(cronMatchesDate("0 8 * JAN *", feb)).toBe(false);
+    });
+
+    it("is case-insensitive", () => {
+      const monday = new Date("2026-05-11T08:00:00");
+      expect(cronMatchesDate("0 8 * * mon", monday)).toBe(true);
+      expect(cronMatchesDate("0 8 * * Mon", monday)).toBe(true);
+    });
+
+    it("accepts comma-lists of aliases", () => {
+      const monday = new Date("2026-05-11T08:00:00");
+      const sat = new Date("2026-05-09T08:00:00");
+      expect(cronMatchesDate("0 8 * * MON,WED,FRI", monday)).toBe(true);
+      expect(cronMatchesDate("0 8 * * MON,WED,FRI", sat)).toBe(false);
+    });
+
+    it("normalizeAliases is a no-op for already-numeric input", () => {
+      expect(normalizeAliases("1-5", "dow")).toBe("1-5");
+      expect(normalizeAliases("*", "month")).toBe("*");
+      expect(normalizeAliases("1,3,5", "dow")).toBe("1,3,5");
+    });
+
+    it("normalizeAliases leaves non-month/dow fields untouched", () => {
+      // Defensive: a stray alias in a minute/hour/dom field (operator
+      // typo) shouldn't get substituted — keep aliasing scoped to
+      // fields where node-cron actually accepts it.
+      expect(normalizeAliases("MON", "minute")).toBe("MON");
+      expect(normalizeAliases("MON", "hour")).toBe("MON");
+      expect(normalizeAliases("MON", "dom")).toBe("MON");
+    });
+
+    it("handles mixed alias + numeric forms in the same field", () => {
+      // The most likely user-written form to regress: half the field
+      // is named, half is numeric. Each letter-run substitutes
+      // independently, numerics pass through.
+      expect(normalizeAliases("MON,3,FRI", "dow")).toBe("1,3,5");
+      expect(normalizeAliases("1,WED,5", "dow")).toBe("1,3,5");
+      const monday = new Date("2026-05-11T08:00:00");
+      const wed = new Date("2026-05-13T08:00:00");
+      expect(cronMatchesDate("0 8 * * MON,3,FRI", monday)).toBe(true);
+      expect(cronMatchesDate("0 8 * * MON,3,FRI", wed)).toBe(true);
+    });
+
+    it("normalizes dow=7 (Sunday) chained after alias substitution", () => {
+      // Operator might write the literal '7' alongside aliases. The
+      // substitute-then-normalize-7 order (in cronMatchesDate) must
+      // not double-process: SUN already became 0; 7 also becomes 0.
+      expect(normalizeAliases("MON,7", "dow")).toBe("1,7");
+      const sun = new Date("2026-05-10T08:00:00");
+      expect(cronMatchesDate("0 8 * * MON,7", sun)).toBe(true);
+    });
   });
 });
 

@@ -113,23 +113,29 @@ export function planUpdate(opts: UpdateOptions): UpdateStep[] {
     },
   });
 
-  // Source-checkout step. Auto-skip when not in a git repo, so
-  // npm-installed users don't see a confusing "skipping git pull"
-  // line on every update.
+  // Source-checkout step. Only added when --rebuild is explicit. If
+  // the user passed --rebuild but the CLI isn't running from a git
+  // checkout, the runUpdate dispatcher will fail loudly — the explicit
+  // flag is treated as a hard intent, not a hint we can quietly drop
+  // (#923 reviewer feedback).
   const scriptPath = process.argv[1] ?? "";
-  const inCheckout = isGitCheckout(scriptPath);
   if (opts.rebuild) {
     steps.push({
       name: "rebuild-source",
       description: "git pull upstream main + bun install + npm run build",
-      skipReason: !inCheckout
-        ? "not in a git checkout (CLI is an installed binary)"
-        : undefined,
       run: () => {
-        // CWD doesn't matter — git/bun/npm run from process.cwd().
-        // For `--rebuild` to mean anything, the operator should be
-        // invoking `update` from inside the checkout. We don't try to
-        // be clever about chdir.
+        if (!isGitCheckout(scriptPath)) {
+          throw new Error(
+            `--rebuild requires a git checkout, but the CLI is running ` +
+            `from ${scriptPath} which has no .git ancestor (looks like ` +
+            `an installed binary). Drop --rebuild or invoke from a ` +
+            `source checkout.`,
+          );
+        }
+        // CWD matters: git/bun/npm run from process.cwd(). Operator
+        // is expected to invoke `update --rebuild` from inside the
+        // checkout. We don't chdir on their behalf because they may
+        // have multiple worktrees and we shouldn't guess which.
         const pull = runner("git", ["pull", "--ff-only", "upstream", "main"]);
         if (pull.status !== 0) throw new Error("git pull failed");
         const install = runner("bun", ["install"]);
@@ -159,9 +165,12 @@ export function planUpdate(opts: UpdateOptions): UpdateStep[] {
     name: "recreate-containers",
     description:
       "docker compose up -d --remove-orphans (recreates services with new images / compose)",
-    skipReason: opts.skipImages && !opts.rebuild
-      ? "no image or scaffold changes expected; nothing to recreate"
-      : undefined,
+    // No skipReason: apply-config (the prior step) regenerates compose
+    // and per-agent scaffolds even with --skip-images. If the operator
+    // added/removed/renamed an agent and we skipped recreate, the
+    // running fleet would be out of sync with on-disk compose. Up-d
+    // is cheap and idempotent — if nothing changed it's a no-op
+    // (#923 reviewer feedback).
     run: () => {
       const r = runner("docker", [
         "compose", "-p", "switchroom", "-f", composePath, "up", "-d",

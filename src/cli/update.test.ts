@@ -81,26 +81,32 @@ describe("planUpdate", () => {
     expect(pull?.skipReason).toContain("apply --compose-only");
   });
 
-  it("skips recreate-containers when --skip-images and not --rebuild (nothing to recreate)", () => {
+  it("never skips recreate-containers — even with --skip-images, apply may have changed compose (#923 reviewer)", () => {
     const steps = planUpdate({ skipImages: true });
     const recreate = steps.find((s) => s.name === "recreate-containers");
-    expect(recreate?.skipReason).toContain("nothing to recreate");
+    expect(recreate?.skipReason).toBeUndefined();
   });
+});
 
-  it("does NOT skip recreate-containers when --rebuild is set, even with --skip-images", () => {
-    // Rebuild changes scaffolds/CLI, so containers may need to bounce
-    // even if image digests didn't change.
-    const tmp = mkdtempSync(join(tmpdir(), "update-rebuild-skipimg-"));
+describe("--rebuild against a non-checkout install fails loudly (#923 reviewer)", () => {
+  it("rebuild-source step throws when scriptPath has no .git ancestor", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "rebuild-no-git-"));
     try {
       const composePath = join(tmp, "docker-compose.yml");
       writeFileSync(composePath, "services: {}\n");
-      const steps = planUpdate({
-        composePath,
-        skipImages: true,
-        rebuild: true,
-      });
-      const recreate = steps.find((s) => s.name === "recreate-containers");
-      expect(recreate?.skipReason).toBeUndefined();
+      // Spoof argv[1] to a path with no .git ancestor for the duration
+      // of the plan() + run() calls.
+      const origArgv1 = process.argv[1];
+      process.argv[1] = join(tmp, "fake-installed-cli.js");
+      try {
+        const steps = planUpdate({ composePath, rebuild: true });
+        const rebuild = steps.find((s) => s.name === "rebuild-source");
+        expect(rebuild).toBeDefined();
+        expect(rebuild?.skipReason).toBeUndefined(); // not silently skipped
+        expect(() => rebuild!.run()).toThrow(/--rebuild requires a git checkout/);
+      } finally {
+        process.argv[1] = origArgv1;
+      }
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

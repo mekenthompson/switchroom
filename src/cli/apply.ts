@@ -99,6 +99,15 @@ export interface ApplyOptions {
    * compose-up <name>, validate, repeat for next agent.
    */
   only?: string;
+  /**
+   * Skip the per-agent scaffold loop entirely; only (re)generate the
+   * compose file. Useful for CI / scripts that need a fresh compose
+   * yaml but cannot chown into per-agent state dirs (mode 0700,
+   * owned by per-agent UIDs in v0.7+ docker mode). Without this flag,
+   * `apply --non-interactive` from a non-root operator silently fails
+   * to write start.sh / .mcp.json / settings.json (issue #902).
+   */
+  composeOnly?: boolean;
 }
 
 export interface ApplyDeps {
@@ -113,6 +122,19 @@ export interface ApplyResult {
   agentsTotal: number;
   composePath: string;
   composeBytes: number;
+  /**
+   * Per-agent scaffold failures collected during the loop. Empty when
+   * everything succeeded or when `composeOnly` skipped the loop. The
+   * CLI handler exits non-zero when this is non-empty (issue #902 —
+   * before the fix, scaffold failures were printed but apply silently
+   * exited 0, leaving CI / non-interactive callers with stale state).
+   */
+  failures: ScaffoldFailure[];
+}
+
+export interface ScaffoldFailure {
+  agent: string;
+  message: string;
 }
 
 /**
@@ -282,11 +304,16 @@ export async function runApply(
 
   // ── 1. Scaffold each agent ────────────────────────────────────────
   let scaffolded = 0;
+  const failures: ScaffoldFailure[] = [];
   // Sentinel-typed error class so the outer per-agent try/catch can
   // re-raise UID alignment failures without swallowing them as a soft
   // `x ${name}` log line.
   class UidAlignmentAbort extends Error {}
-  for (const name of agentNames) {
+  // composeOnly skips the entire scaffold pass — for CI / scripts that
+  // can't chown into per-agent state dirs and only need a fresh
+  // compose yaml. Issue #902 / `--compose-only` flag.
+  const skipScaffold = options.composeOnly === true;
+  for (const name of skipScaffold ? [] : agentNames) {
     const agentConfig = config.agents[name];
     try {
       // apply ALWAYS generates a docker compose file (that's its whole
@@ -347,8 +374,17 @@ export async function runApply(
       scaffolded++;
     } catch (err) {
       if (err instanceof UidAlignmentAbort) throw err;
-      writeOut(chalk.red(`  x ${name}: ${(err as Error).message}\n`));
+      const message = (err as Error).message;
+      writeOut(chalk.red(`  x ${name}: ${message}\n`));
+      failures.push({ agent: name, message });
     }
+  }
+  if (skipScaffold) {
+    writeOut(
+      chalk.gray(
+        `  (--compose-only: skipped per-agent scaffold for ${agentNames.length} agent(s))\n`,
+      ),
+    );
   }
 
   // ── 2. Pre-create host mount sources ──────────────────────────────
@@ -415,7 +451,57 @@ export async function runApply(
     agentsTotal: allAgentNames.length,
     composePath,
     composeBytes,
+    failures,
   };
+}
+
+/**
+ * Resolution block printed when one or more agents fail to scaffold.
+ * Tells the operator their two real options (sudo or `--compose-only`)
+ * so the next step is obvious. Returns the formatted string so the
+ * CLI handler can write it directly and tests can pin the shape.
+ *
+ * NOTE on what's intentionally NOT in this block: dropping
+ * `--non-interactive` (i.e. running interactive `switchroom apply`)
+ * does NOT fix the post-alignment EACCES. The per-agent loop calls
+ * scaffoldAgent BEFORE alignAgentUid, so on a fleet whose state dirs
+ * are already mode 0700 owned by the per-agent UID (the v0.7+ steady
+ * state), scaffoldAgent fails with EACCES before alignAgentUid's
+ * sudo prompt can ever fire. The interactive sudo-prompt path only
+ * works on a fresh, pre-alignment fleet — exactly the case the bug
+ * doesn't manifest in. Documented here so the next reader doesn't
+ * "helpfully" add a misleading "run interactively" resolution back.
+ */
+export function formatScaffoldFailureResolution(
+  failures: ScaffoldFailure[],
+  scaffolded: number,
+  agentsTotal: number,
+): string {
+  const fail = failures.length;
+  const lines: string[] = [];
+  lines.push("");
+  lines.push(
+    `ERROR: Scaffolded ${scaffolded}/${agentsTotal} agents. ${fail} failed.`,
+  );
+  lines.push("");
+  lines.push(
+    "Per-agent state dirs are mode 0700 owned by per-agent UIDs (the v0.7+",
+  );
+  lines.push(
+    "docker model). The operator cannot write into them without privilege",
+  );
+  lines.push("escalation.");
+  lines.push("");
+  lines.push("Resolutions:");
+  lines.push("  1. Run with sudo (refreshes start.sh / .mcp.json / settings.json):");
+  lines.push("       sudo -E switchroom apply --non-interactive");
+  lines.push("");
+  lines.push("  2. Regenerate compose only, skip per-agent scaffold:");
+  lines.push("       switchroom apply --non-interactive --compose-only");
+  lines.push("     Use this if you only changed compose-level fields and don't");
+  lines.push("     need to refresh per-agent files.");
+  lines.push("");
+  return lines.join("\n");
 }
 
 /**
@@ -495,6 +581,10 @@ export function registerApplyCommand(program: Command): void {
       "--only <agent>",
       "Restrict scaffold + UID-alignment to a single agent (compose still covers the full fleet). Use during a v0.6 → v0.7 cutover to migrate agents one at a time without breaking the systemd-managed siblings.",
     )
+    .option(
+      "--compose-only",
+      "Skip the per-agent scaffold loop entirely; only (re)generate the compose file. Use in CI / scripts that can't chown into per-agent state dirs (mode 0700, owned by per-agent UIDs in v0.7+ docker mode). The full apply still runs preflight + emits compose; only the start.sh / .mcp.json / settings.json refresh is skipped.",
+    )
     .action(
       async (opts: {
         buildLocal?: boolean | string;
@@ -503,6 +593,7 @@ export function registerApplyCommand(program: Command): void {
         nonInteractive?: boolean;
         allowUnaligned?: boolean;
         only?: string;
+        composeOnly?: boolean;
       }) => {
         try {
           if (opts.example) {
@@ -530,6 +621,7 @@ export function registerApplyCommand(program: Command): void {
               nonInteractive: opts.nonInteractive ?? false,
               allowUnaligned: opts.allowUnaligned ?? false,
               only: opts.only,
+              composeOnly: opts.composeOnly ?? false,
             },
             {},
             switchroomConfigPath,
@@ -538,9 +630,27 @@ export function registerApplyCommand(program: Command): void {
           await captureEvent("apply_completed", {
             agents_total: result.agentsTotal,
             agents_scaffolded: result.scaffolded,
+            agents_failed: result.failures.length,
             build_local: buildLocal,
+            compose_only: opts.composeOnly ?? false,
             example: opts.example ?? null,
           });
+
+          // Issue #902: surface partial scaffold failures with a
+          // resolution block + non-zero exit. Pre-fix behaviour was
+          // silent exit 0 even when 0/N agents scaffolded.
+          if (result.failures.length > 0) {
+            process.stderr.write(
+              chalk.red(
+                formatScaffoldFailureResolution(
+                  result.failures,
+                  result.scaffolded,
+                  result.agentsTotal,
+                ),
+              ),
+            );
+            process.exit(1);
+          }
         } catch (err) {
           await captureException(err, { action: "apply" });
           if (err instanceof ConfigError) {

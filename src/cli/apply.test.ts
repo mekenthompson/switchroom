@@ -255,4 +255,141 @@ describe("runApply", () => {
       ).rejects.toThrow(/--only=frank.*no such agent/);
     });
   });
+
+  describe("scaffold-failure surfacing (issue #902)", () => {
+    /**
+     * Pre-fix behaviour: scaffold failures in the per-agent loop were
+     * caught silently — printed as `x ${name}` but `runApply` returned
+     * normally and the CLI handler exited 0. CI / non-interactive
+     * callers ended up with stale start.sh / .mcp.json / settings.json
+     * with no signal that anything was wrong.
+     */
+    function multiAgentConfig(agentsDir: string): SwitchroomConfig {
+      return {
+        agents: {
+          alice: { profile: "engineer", claudeAccount: "default" },
+          bob: { profile: "engineer", claudeAccount: "default" },
+        },
+        profiles: {},
+        defaults: {},
+        switchroom: { agents_dir: agentsDir },
+        telegram: { forum_chat_id: "0" },
+      } as unknown as SwitchroomConfig;
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let scaffoldSpy: any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let alignSpy: any;
+
+    afterEach(() => {
+      if (scaffoldSpy) scaffoldSpy.mockRestore();
+      if (alignSpy) alignSpy.mockRestore();
+    });
+
+    it("collects per-agent scaffold failures into result.failures with agent name + message", async () => {
+      // Half the fleet succeeds, half throws — runApply must return
+      // both `scaffolded === 1` and `failures.length === 1`, with the
+      // failed agent name on the failure record.
+      scaffoldSpy = vi
+        .spyOn(scaffoldModule, "scaffoldAgent")
+        .mockImplementation((name: string) => {
+          if (name === "bob") throw new Error("EACCES: permission denied");
+          return { created: ["fake.txt"] } as never;
+        });
+      alignSpy = vi
+        .spyOn(scaffoldModule, "alignAgentUid")
+        .mockImplementation(() => ({ chowned: true, paths: [] }));
+
+      const dir = await mkdtemp(join(tmpdir(), "switchroom-apply-fail-"));
+      const sink: string[] = [];
+      const res = await runApply(
+        multiAgentConfig(join(dir, "agents")),
+        {
+          outPath: join(dir, "docker-compose.yml"),
+          nonInteractive: true,
+        },
+        { writeOut: (s) => sink.push(s), writeErr: (s) => sink.push(s) },
+      );
+
+      expect(res.scaffolded).toBe(1);
+      expect(res.failures).toHaveLength(1);
+      expect(res.failures[0]!.agent).toBe("bob");
+      expect(res.failures[0]!.message).toMatch(/EACCES/);
+      // Compose still emitted — partial scaffold doesn't gate compose.
+      expect(res.composeBytes).toBeGreaterThan(0);
+      // Regression check: the human-readable per-agent error line is
+      // still printed alongside the new structured collection. A
+      // future refactor that drops failures.push without also dropping
+      // the writeOut would silently re-introduce the old "exit 0 on
+      // partial failure" bug under a different code path.
+      const all = sink.join("");
+      expect(all).toMatch(/x bob.*EACCES/);
+    });
+
+    it("--compose-only skips the per-agent scaffold loop entirely; compose still emits", async () => {
+      // Verify scaffoldAgent is NEVER called when composeOnly is set.
+      // This is the CI-friendly path: regenerate compose without
+      // touching per-agent dirs we can't write to.
+      scaffoldSpy = vi
+        .spyOn(scaffoldModule, "scaffoldAgent")
+        .mockImplementation(() => {
+          throw new Error("should not be called when composeOnly is set");
+        });
+      alignSpy = vi
+        .spyOn(scaffoldModule, "alignAgentUid")
+        .mockImplementation(() => {
+          throw new Error("should not be called when composeOnly is set");
+        });
+
+      const dir = await mkdtemp(join(tmpdir(), "switchroom-apply-co-"));
+      const outPath = join(dir, "docker-compose.yml");
+      const sink: string[] = [];
+
+      const res = await runApply(
+        multiAgentConfig(join(dir, "agents")),
+        {
+          outPath,
+          nonInteractive: true,
+          composeOnly: true,
+        },
+        { writeOut: (s) => sink.push(s), writeErr: (s) => sink.push(s) },
+      );
+
+      expect(scaffoldSpy).not.toHaveBeenCalled();
+      expect(alignSpy).not.toHaveBeenCalled();
+      expect(res.scaffolded).toBe(0);
+      expect(res.failures).toHaveLength(0);
+      expect(res.agentsTotal).toBe(2);
+      // Compose still on disk + sized.
+      expect(res.composeBytes).toBeGreaterThan(0);
+      const composeYml = await readFile(outPath, "utf-8");
+      expect(composeYml).toMatch(/agent-alice:/);
+      expect(composeYml).toMatch(/agent-bob:/);
+      // Operator gets a hint about what was skipped.
+      expect(sink.join("")).toMatch(/--compose-only.*skipped/);
+    });
+
+    it("formatScaffoldFailureResolution emits an actionable resolution block", async () => {
+      const { formatScaffoldFailureResolution } = await import("./apply.js");
+      const out = formatScaffoldFailureResolution(
+        [
+          { agent: "alice", message: "EACCES: x" },
+          { agent: "bob", message: "EACCES: y" },
+        ],
+        0,
+        2,
+      );
+      // The block names the right number and points at the two real
+      // escape hatches: sudo and --compose-only.
+      expect(out).toMatch(/Scaffolded 0\/2.*2 failed/s);
+      expect(out).toMatch(/sudo -E switchroom apply/);
+      expect(out).toMatch(/--compose-only/);
+      // Regression: deliberately does NOT advertise "run interactively"
+      // as a fix for this case. scaffoldAgent runs before alignAgentUid
+      // so the sudo prompt never fires on an already-aligned fleet.
+      // See the doc-comment on formatScaffoldFailureResolution.
+      expect(out).not.toMatch(/interactive shell/i);
+    });
+  });
 });

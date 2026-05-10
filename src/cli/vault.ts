@@ -24,6 +24,7 @@ import {
   statusViaBroker,
   unlockViaBroker,
   resolveBrokerSocketPath,
+  readVaultTokenFile,
 } from "../vault/broker/client.js";
 import { registerVaultBrokerCommand } from "./vault-broker.js";
 import { registerVaultDoctorCommand } from "./vault-doctor.js";
@@ -336,10 +337,17 @@ export function registerVaultCommand(program: Command): void {
           } catch {
             brokerSocket = resolveBrokerSocketPath();
           }
+          // Forward the agent's capability token to the broker. The broker
+          // checks it via validateGrantForWrite (#969 P1b) — if the grant
+          // authorizes write for this key, the broker also allows new-key
+          // creation. Without a write-grant we fall back to the legacy
+          // path-as-identity rotate-only behaviour.
+          const agentSlug = process.env.SWITCHROOM_AGENT_NAME;
+          const token = agentSlug ? readVaultTokenFile(agentSlug) ?? undefined : undefined;
           const result = await putViaBroker(
             key,
             { kind: "string", value },
-            { socket: brokerSocket },
+            { socket: brokerSocket, token },
           );
           if (result.kind === "ok") {
             return;

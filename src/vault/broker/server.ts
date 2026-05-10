@@ -52,7 +52,7 @@ import {
 } from "./protocol.js";
 import { createAuditLogger, callerFromPeer, type AuditLogger } from "./audit-log.js";
 import { Database } from "bun:sqlite";
-import { mintGrant, validateGrant, revokeGrant, listGrants, migrateGrantsSchema } from "../grants.js";
+import { mintGrant, validateGrant, validateGrantForWrite, revokeGrant, listGrants, migrateGrantsSchema } from "../grants.js";
 import { openGrantsDb } from "../grants-db.js";
 import {
   requestApproval as kernelRequestApproval,
@@ -1046,42 +1046,86 @@ export class VaultBroker {
         socket.write(encodeResponse(errorResponse("LOCKED", "Vault is locked")));
         return;
       }
-      // Identity required — agentName from path-as-identity is the canonical
-      // signal for per-agent ACL. Token-based grants don't yet support put
-      // (deliberate — grant tokens are read-only by design; introducing
-      // write-grants is a separate design discussion).
-      if (agentName === null) {
+
+      // ── Write-grant fast path (issue #969 P1b) ─────────────────────────────
+      //
+      // When the caller presents a valid token whose `write_allow` includes
+      // this key, accept the PUT WITHOUT requiring path-as-identity and
+      // WITHOUT enforcing the schedule.secrets[] ACL. Write-grants are also
+      // permitted to introduce new keys (this is the path that unblocks
+      // agent-initiated "save this user-provided secret" — issue #968).
+      //
+      // The token presence + key check happens here so write-grants take
+      // precedence over the legacy path-as-identity-only rules; agents that
+      // also have path-as-identity ACL still get the legacy rotate path
+      // below when no token is presented.
+      let writeGrantId: string | null = null;
+      if (req.token !== undefined && req.token !== "") {
+        const v = await validateGrantForWrite(this.grantsDb, req.token, req.key);
+        if (v.ok) {
+          writeGrantId = v.grant.id;
+        } else if (
+          v.reason === "grant-expired" ||
+          v.reason === "grant-revoked"
+        ) {
+          // Token recognized but explicitly disabled — surface a hard
+          // denial. Don't fall through to peercred/path-as-identity:
+          // the operator revoked this token deliberately and silently
+          // accepting a different auth path would mask the signal.
+          this.auditLogger.write({
+            ts: new Date().toISOString(),
+            op: "put",
+            key: req.key,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: `denied:${v.reason}`,
+            method: "grant",
+          });
+          socket.write(encodeResponse(errorResponse("DENIED", v.reason)));
+          return;
+        }
+        // grant-invalid (bad token / typo) or grant-write-not-allowed —
+        // fall through to path-as-identity in case the agent ALSO has
+        // schedule.secrets[] coverage for this key (rotate-only).
+      }
+
+      // ── Path-as-identity rotate path (legacy) ──────────────────────────────
+      if (writeGrantId === null && agentName === null) {
         socket.write(
-          encodeResponse(errorResponse("DENIED", "put requires path-as-identity (token-based grants are read-only)")),
+          encodeResponse(errorResponse("DENIED", "put requires path-as-identity or a valid write-grant token")),
         );
         return;
       }
-      // Same ACL as get — schedule.secrets[] gates write too.
+      // Same ACL as get — schedule.secrets[] gates write too. Skipped on
+      // the write-grant fast path: the grant IS the ACL.
       if (this.config === null) {
         socket.write(
           encodeResponse(errorResponse("INTERNAL", "Broker config not loaded")),
         );
         return;
       }
-      const aclResult = checkAclByAgent(this.config, agentName, req.key);
-      if (!aclResult.allow) {
-        this.auditLogger.write({
-          ts: new Date().toISOString(),
-          op: "put",
-          key: req.key,
-          caller: auditCaller,
-          pid: auditPid,
-          cgroup: auditCgroup,
-          result: `denied:${aclResult.reason}`,
-        });
-        socket.write(encodeResponse(errorResponse("DENIED", aclResult.reason)));
-        return;
+      if (writeGrantId === null) {
+        const aclResult = checkAclByAgent(this.config, agentName!, req.key);
+        if (!aclResult.allow) {
+          this.auditLogger.write({
+            ts: new Date().toISOString(),
+            op: "put",
+            key: req.key,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: `denied:${aclResult.reason}`,
+          });
+          socket.write(encodeResponse(errorResponse("DENIED", aclResult.reason)));
+          return;
+        }
       }
-      // Refuse to introduce new keys — operator-only territory. Agents can
-      // only update entries that already exist, preserving the "operator
-      // decides what goes in vault" boundary.
+      // Refuse to introduce new keys ON THE PATH-AS-IDENTITY PATH ONLY.
+      // Write-grants explicitly permit new-key creation — that's the whole
+      // point of the capability.
       const existing = this.secrets[req.key];
-      if (existing === undefined) {
+      if (existing === undefined && writeGrantId === null) {
         this.auditLogger.write({
           ts: new Date().toISOString(),
           op: "put",
@@ -1095,7 +1139,7 @@ export class VaultBroker {
           encodeResponse(
             errorResponse(
               "UNKNOWN_KEY",
-              `Key not found: ${req.key} (broker put cannot introduce new keys; ask operator to set it once via 'switchroom vault set' from the host)`,
+              `Key not found: ${req.key} (broker put cannot introduce new keys without a write-grant; ask operator to 'switchroom vault grant <agent> --write ${req.key}' or set it once via 'switchroom vault set' from the host)`,
             ),
           ),
         );
@@ -1103,8 +1147,9 @@ export class VaultBroker {
       }
       // Refuse to change the kind (string ↔ binary). The protocol union
       // already excludes 'files' from put. Agents rotating values must keep
-      // the same shape.
-      if (existing.kind !== req.entry.kind) {
+      // the same shape. (Only applies when an entry already exists — for
+      // new-key creation via write-grant, any kind in the request is fine.)
+      if (existing !== undefined && existing.kind !== req.entry.kind) {
         this.auditLogger.write({
           ts: new Date().toISOString(),
           op: "put",
@@ -1134,8 +1179,13 @@ export class VaultBroker {
       try {
         saveVault(this.passphrase, this.vaultPath, this.secrets);
       } catch (err: unknown) {
-        // Roll back in-memory state.
-        this.secrets[req.key] = previousEntry;
+        // Roll back in-memory state — restore previous entry, or delete
+        // if this was a write-grant new-key creation.
+        if (previousEntry === undefined) {
+          delete this.secrets[req.key];
+        } else {
+          this.secrets[req.key] = previousEntry;
+        }
         this.auditLogger.write({
           ts: new Date().toISOString(),
           op: "put",
@@ -1144,6 +1194,7 @@ export class VaultBroker {
           pid: auditPid,
           cgroup: auditCgroup,
           result: `error:${(err as Error)?.message ?? "save failed"}`,
+          ...(writeGrantId !== null ? { method: "grant", grant_id: writeGrantId } : {}),
         });
         socket.write(
           encodeResponse(
@@ -1152,7 +1203,9 @@ export class VaultBroker {
         );
         return;
       }
-      // Successful put — log only the key, NEVER the value.
+      // Successful put — log only the key, NEVER the value. Surface the
+      // grant id when a write-grant was used so audit downstream can trace
+      // capability-driven writes back to the operator action that minted them.
       this.auditLogger.write({
         ts: new Date().toISOString(),
         op: "put",
@@ -1161,6 +1214,7 @@ export class VaultBroker {
         pid: auditPid,
         cgroup: auditCgroup,
         result: "allowed",
+        ...(writeGrantId !== null ? { method: "grant", grant_id: writeGrantId } : {}),
       });
       socket.write(encodeResponse({ ok: true, put: true, key: req.key }));
       return;
@@ -1273,10 +1327,41 @@ export class VaultBroker {
 
     if (req.op === "mint_grant") {
       // Parse ttl_seconds into a duration for mintGrant
-      const { agent, keys, ttl_seconds, description } = req;
+      const { agent, keys, ttl_seconds, description, write_keys } = req;
+
+      // At least one capability must be granted. The schema permits an
+      // empty `keys` array (so write-only grants don't need a placeholder)
+      // but a request with both empty is meaningless — reject early.
+      if (keys.length === 0 && (write_keys?.length ?? 0) === 0) {
+        this.auditLogger.write({
+          ts: new Date().toISOString(),
+          op: "mint_grant",
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: "denied:no-capabilities",
+        });
+        socket.write(
+          encodeResponse(
+            errorResponse(
+              "BAD_REQUEST",
+              "mint_grant requires at least one of `keys` or `write_keys` to be non-empty",
+            ),
+          ),
+        );
+        return;
+      }
+
       let mintResult: Awaited<ReturnType<typeof mintGrant>>;
       try {
-        mintResult = await mintGrant(this.grantsDb, agent, keys, ttl_seconds, description);
+        mintResult = await mintGrant(
+          this.grantsDb,
+          agent,
+          keys,
+          ttl_seconds,
+          description,
+          write_keys ?? [],
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.auditLogger.write({
@@ -1346,10 +1431,11 @@ export class VaultBroker {
         result: `allowed:${grants.length}`,
       });
       // Strip revoked_at before sending (not part of the GrantMeta wire schema)
-      const grantMetas = grants.map(({ id, agent_slug, key_allow, expires_at, created_at, description }) => ({
+      const grantMetas = grants.map(({ id, agent_slug, key_allow, write_allow, expires_at, created_at, description }) => ({
         id,
         agent_slug,
         key_allow,
+        write_allow,
         expires_at,
         created_at,
         description,

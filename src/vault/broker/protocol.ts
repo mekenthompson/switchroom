@@ -83,13 +83,24 @@ export const ListRequestSchema = z.object({
   token: z.string().optional(),
 });
 
+// Note: the constraint "keys OR write_keys must be non-empty" is enforced
+// in the handler (server.ts) rather than via z.refine() — refine() returns
+// a ZodEffects which breaks z.discriminatedUnion's narrowing requirements.
 export const MintGrantRequestSchema = z.object({
   v: z.literal(1),
   op: z.literal("mint_grant"),
   agent: z.string().min(1),
-  keys: z.array(z.string().min(1)).min(1),
+  /** Keys this grant authorizes for READ. May be empty when `write_keys`
+   * is non-empty (write-only grant). */
+  keys: z.array(z.string().min(1)),
   ttl_seconds: z.number().int().positive().nullable(),
   description: z.string().optional(),
+  /**
+   * Optional list of keys (or prefix-globs like `OPENAI_*`) this grant
+   * authorizes for WRITE via broker PUT. Defaults to `[]` (read-only).
+   * Issue #969 P1b.
+   */
+  write_keys: z.array(z.string().min(1)).optional(),
 });
 
 export const ListGrantsRequestSchema = z.object({
@@ -279,6 +290,8 @@ export const GrantMetaSchema = z.object({
   id: z.string(),
   agent_slug: z.string(),
   key_allow: z.array(z.string()),
+  /** Keys/globs this grant authorizes for WRITE. `[]` = read-only. */
+  write_allow: z.array(z.string()).default([]),
   expires_at: z.number().nullable(),
   created_at: z.number(),
   description: z.string().nullable(),

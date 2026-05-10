@@ -262,7 +262,25 @@ function getContainerId(container: string): string {
  * client socket path exposed). This avoids needing to mount sockets
  * to the host or shipping a separate test client image.
  */
-function kernelLookup(agent: string, container: string = `switchroom-${agent}`):
+/**
+ * NOTE: the `container` argument is REQUIRED — there is deliberately
+ * no default. Pre-fix, this defaulted to `switchroom-${agent}` which
+ * is the PRODUCTION container name pattern emitted by the compose
+ * generator when `containerNamePrefix === "switchroom"` (the default).
+ *
+ * That default had two failure modes:
+ *   - On a clean-room runner (GHA) `switchroom-alice` doesn't exist
+ *     and every exec exits 1 — manifests as "0/45 succeed, exit=1".
+ *   - On the operator's host where `switchroom-alice` DOES exist as
+ *     part of the production fleet, the test silently hits the live
+ *     production kernel socket instead of the phase-test fleet. The
+ *     test would pass for the wrong reason and could cause real
+ *     side-effects against the operator's production state.
+ *
+ * Removing the default forces every callsite to pass the test
+ * fleet's project-prefixed container name.
+ */
+function kernelLookup(agent: string, container: string):
   { ok: boolean; raw: string; durationMs: number; err?: string } {
   // Exec from INSIDE the agent's own container (running as the agent's
   // UID) so the file-perm boundary lets the connect through. Doing the
@@ -535,7 +553,11 @@ describe.skipIf(!imagesOk || PROD_FLEET_LIVE)(
             // below after the kernel is recreated to pick up the new
             // volume mount.
           }
-          const r = kernelLookup("alice");
+          // Container name MUST be the test fleet's prefixed alice, never
+          // the default-shape `switchroom-alice` (which is the production
+          // container on the operator's host — see kernelLookup's doc
+          // comment for the prior failure mode).
+          const r = kernelLookup("alice", `${PROJECT}-alice`);
           results.push({ idx: i, ok: r.ok, durationMs: r.durationMs, err: r.err });
           if (newbieUpAt !== null && newbieFirstReplyAt === null && r.ok) {
             newbieFirstReplyAt = Date.now();

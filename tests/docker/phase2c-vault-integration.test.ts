@@ -683,6 +683,198 @@ describe.skipIf(!imagesOk)(
     );
 
     it(
+      "op:put round-trip — agent rotates its own scoped key, broker re-encrypts vault, next op:get observes the new value (closes #962, regression for #958)",
+      () => {
+        if (!fx) throw new Error("fixture not initialized");
+
+        // What this catches: the v0.7.12 deploy regression chain.
+        //   - #958-A: broker container missing CAP_DAC_OVERRIDE → write
+        //     to operator-owned vault dir fails with EACCES.
+        //   - #958-B: apply.ts vault-dir guard scans the wrong dir for
+        //     legacy-path operators, so compose never gets written and
+        //     the broker boots against a stale mount.
+        //   - #955: pre-dir-layout, the bind-mount of a single file
+        //     blocks atomic-rename across filesystems (EBUSY).
+        //
+        // The whole rotation flow round-trips here against a real
+        // broker container with real mount geometry — if any of those
+        // bugs reappears, op:put fails or the next op:get returns the
+        // stale value.
+        const newValue = `rotated-${RUN_ID.slice(0, 8)}`;
+
+        // 1. Capture the pre-rotation on-disk vault size + sha so we can
+        //    assert it actually changed post-write. (Identical bytes
+        //    would mean the broker silently accepted the put but never
+        //    re-encrypted, which has happened in the past when the
+        //    fsync path was skipped on a write error.)
+        const preSize = execSync(
+          `docker exec ${fx.brokerName} stat -c '%s' /state/vault/vault.enc`,
+          { encoding: "utf8" },
+        ).trim();
+        const preSha = execSync(
+          `docker exec ${fx.brokerName} sha256sum /state/vault/vault.enc`,
+          { encoding: "utf8" },
+        ).trim().split(/\s+/)[0];
+
+        // 2. alice rotates her own key. ACL allows (schedule.secrets[]
+        //    declares alice_key for alice in the fixture config).
+        const aliceCn = fx.agentNames.get("alice")!;
+        const putResp = agentNdjson(
+          aliceCn,
+          `/run/switchroom/broker/alice.sock`,
+          {
+            v: 1,
+            op: "put",
+            key: "alice_key",
+            entry: { kind: "string", value: newValue },
+          },
+        ) as NdjsonResult;
+        expect(putResp.ok, `put round-trip failed: raw=${putResp.raw}`).toBe(true);
+        const putJson = putResp.parsed as { ok: boolean; put?: boolean; key?: string; code?: string; msg?: string };
+        if (!putJson.ok) {
+          // Surface broker logs for forensics when this fires in CI.
+          let logs = "";
+          try {
+            logs = execSync(`docker logs --tail=80 ${fx.brokerName} 2>&1`, { encoding: "utf8" });
+          } catch { /* */ }
+          throw new Error(
+            `op:put returned ok:false — code=${putJson.code} msg=${putJson.msg}\n` +
+            `raw=${putResp.raw}\nbroker logs:\n${logs}`,
+          );
+        }
+        // Server emits `{ ok: true, put: true, key: <key> }` per server.ts.
+        expect(putJson.put).toBe(true);
+        expect(putJson.key).toBe("alice_key");
+
+        // 3. Next op:get from alice returns the new value. This is the
+        //    "broker re-encrypted + reloaded in-memory secrets" check.
+        const getResp = agentNdjson(
+          aliceCn,
+          `/run/switchroom/broker/alice.sock`,
+          { v: 1, op: "get", key: "alice_key" },
+        ) as NdjsonResult;
+        expect(getResp.ok).toBe(true);
+        const getJson = getResp.parsed as { ok: boolean; entry?: { value: string } };
+        expect(getJson.ok).toBe(true);
+        expect(getJson.entry?.value).toBe(newValue);
+
+        // 4. On-disk bytes changed. The encrypted ciphertext + GCM tag
+        //    + IV are all rerolled on each saveVault, so even rotating
+        //    a single key produces a fundamentally different blob.
+        const postSha = execSync(
+          `docker exec ${fx.brokerName} sha256sum /state/vault/vault.enc`,
+          { encoding: "utf8" },
+        ).trim().split(/\s+/)[0];
+        expect(postSha, "vault.enc bytes unchanged after op:put — broker never re-encrypted").not.toBe(preSha);
+
+        // 5. Sentinel-dir flock leak check — `vault.enc.lock` is a
+        //    directory created by proper-lockfile during saveVault and
+        //    cleaned up on release. If it's still on disk post-write,
+        //    saveVault's finally{} didn't run (process crash or unhandled
+        //    rejection) and the next writer will retry-loop forever.
+        const lockProbe = spawnSync(
+          "docker",
+          [
+            "exec",
+            fx.brokerName,
+            "sh",
+            "-c",
+            "test -e /state/vault/vault.enc.lock && echo LEAK || echo CLEAN",
+          ],
+          { encoding: "utf8" },
+        );
+        expect(lockProbe.stdout.trim()).toBe("CLEAN");
+
+        // 6. Other agents still see their own (unchanged) keys — the
+        //    rotation didn't smear writes across the vault.
+        const bobCn = fx.agentNames.get("bob")!;
+        const bobGet = agentNdjson(
+          bobCn,
+          `/run/switchroom/broker/bob.sock`,
+          { v: 1, op: "get", key: "bob_key" },
+        ) as NdjsonResult;
+        expect(bobGet.ok).toBe(true);
+        const bobJson = bobGet.parsed as { ok: boolean; entry?: { value: string } };
+        expect(bobJson.ok).toBe(true);
+        expect(bobJson.entry?.value).toBe("secret-for-bob");
+
+        // Defensive — log preSize for forensics if a future regression
+        // flips this from "different blob" to "same size, same sha".
+        expect(typeof preSize).toBe("string");
+      },
+      90_000,
+    );
+
+    it(
+      "op:put denials — cross-agent ACL holds, unknown-key refused, kind-mismatch refused (closes #962)",
+      () => {
+        if (!fx) throw new Error("fixture not initialized");
+
+        // Cross-agent ACL: alice's process on alice's socket asking to
+        // write bob's key → DENIED via path-as-identity ACL. The wire
+        // payload's "key" is matched against schedule.secrets[] for
+        // alice, which doesn't include bob_key.
+        const aliceCn = fx.agentNames.get("alice")!;
+        const crossResp = agentNdjson(
+          aliceCn,
+          `/run/switchroom/broker/alice.sock`,
+          {
+            v: 1,
+            op: "put",
+            key: "bob_key",
+            entry: { kind: "string", value: "alice-trying-to-overwrite-bob" },
+          },
+        ) as NdjsonResult;
+        expect(crossResp.ok).toBe(true);
+        const crossJson = crossResp.parsed as { ok: boolean; code?: string };
+        expect(crossJson.ok).toBe(false);
+        expect(crossJson.code).toBe("DENIED");
+
+        // Unknown key: even alice's own request to a key the operator
+        // never set is refused with UNKNOWN_KEY. op:put is rotation-only,
+        // not key-creation — the boundary keeps "operator decides what's
+        // in vault" intact.
+        const unknownResp = agentNdjson(
+          aliceCn,
+          `/run/switchroom/broker/alice.sock`,
+          {
+            v: 1,
+            op: "put",
+            key: "nonexistent_key",
+            entry: { kind: "string", value: "first-time-key" },
+          },
+        ) as NdjsonResult;
+        expect(unknownResp.ok).toBe(true);
+        const unknownJson = unknownResp.parsed as { ok: boolean; code?: string };
+        expect(unknownJson.ok).toBe(false);
+        // Could be DENIED (ACL filters before existence check) or
+        // UNKNOWN_KEY — either is correct refusal. The fixture's
+        // schedule.secrets[] for alice only includes alice_key, so
+        // DENIED fires first.
+        expect(["DENIED", "UNKNOWN_KEY"]).toContain(unknownJson.code);
+
+        // Kind mismatch: alice tries to overwrite her string-kind key
+        // with a binary-kind entry. Server-side guard refuses.
+        const kindResp = agentNdjson(
+          aliceCn,
+          `/run/switchroom/broker/alice.sock`,
+          {
+            v: 1,
+            op: "put",
+            key: "alice_key",
+            entry: { kind: "binary", value: "aGVsbG8=" },
+          },
+        ) as NdjsonResult;
+        expect(kindResp.ok).toBe(true);
+        const kindJson = kindResp.parsed as { ok: boolean; code?: string; msg?: string };
+        expect(kindJson.ok).toBe(false);
+        expect(kindJson.code).toBe("BAD_REQUEST");
+        expect(kindJson.msg ?? "").toMatch(/kind mismatch/i);
+      },
+      60_000,
+    );
+
+    it(
       "schema-stability invariant — broker.db AND kernel.db PRAGMA schema_version unchanged",
       () => {
         if (!fx) throw new Error("fixture not initialized");

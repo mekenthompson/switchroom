@@ -86,6 +86,21 @@ broker falls back to interactive unlock (`switchroom vault broker
 unlock` from any agent's Telegram chat with `/vault unlock`, or via
 `docker exec -it switchroom-vault-broker ...`).
 
+**Vault on-disk layout (v0.7.12+).** The vault is a *directory*
+(`~/.switchroom/vault/`) containing `vault.enc`, not a single file.
+Pre-v0.7.12 it was just `~/.switchroom/vault.enc` and atomic-rename
+hit cross-fs EBUSY on docker single-file bind mounts. The migration
+helper (`src/vault/migrate-layout.ts`, PR #955) moves the file in
+place and symlinks the legacy path so existing `vault.path` configs
+keep working. The 5-state migration machine (A virgin / B
+pre-migration / C partial / D post-migration / E divergent) is
+the contract — read the file's header doc before touching it. The
+*directory* is what compose bind-mounts into the broker; the
+`apply.ts` guard refuses to mount if the dir contains files outside
+the artifact whitelist in `KNOWN_VAULT_ARTIFACT_NAMES` /
+`_PATTERNS`. See `docs/vault.md` § "Layout" and
+`docs/operators/rollback-v0.7.12.md` for downgrade.
+
 **Networking:** agent containers use `network_mode: host` so scaffolded
 `start.sh` can reach hindsight at `127.0.0.1:18888` and operator LAN
 devices. Tradeoff: agents share the host network namespace (no

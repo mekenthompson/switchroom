@@ -150,6 +150,75 @@ export interface ScaffoldFailure {
 }
 
 /**
+ * Resolve the directory the broker will bind-mount as the vault parent.
+ *
+ * Path derivation: the dir we're about to BIND-MOUNT is always the
+ * POST-MIGRATION canonical parent (`<home>/.switchroom/vault/`) for
+ * default-config operators, regardless of whether their `vault.path`
+ * is the legacy or new shape. Custom-path operators (where the
+ * migration helper returned `custom-path-skipped`) use
+ * `dirname(customVaultPath)`.
+ *
+ * Pre-#958 this used `dirname(customVaultPath)` unconditionally, which
+ * for the legacy configured path `~/.switchroom/vault.enc` resolved
+ * to `~/.switchroom/` (parent of the legacy file, NOT the new mount
+ * target). The operator's actual `~/.switchroom/` contains many
+ * sibling dirs (approvals/, logs/, etc.) and the guard correctly
+ * refused to mount because none are in the artifact whitelist —
+ * surfaced when self-deploying v0.7.12 against the operator's fleet.
+ *
+ * @internal exported for testing (#961).
+ */
+export function resolveVaultBindMountDir(
+  homeDir: string,
+  ctx: {
+    migrationKind: import("../vault/migrate-layout.js").MigrationResult["kind"];
+    customVaultPath: string | undefined;
+  },
+): string {
+  const isCustomPath = ctx.migrationKind === "custom-path-skipped";
+  if (isCustomPath && ctx.customVaultPath) {
+    return dirname(ctx.customVaultPath);
+  }
+  return join(homeDir, ".switchroom", "vault");
+}
+
+/**
+ * Read the vault bind-mount dir and report any files outside saveVault's
+ * known-artifacts list. The whitelist is sourced from
+ * `KNOWN_VAULT_ARTIFACT_NAMES` + `KNOWN_VAULT_ARTIFACT_PATTERNS` in
+ * `src/vault/vault.ts` so future write artifacts are picked up
+ * without editing two places.
+ *
+ * Returns one of:
+ *   - { kind: "missing" } — dir doesn't exist (treated as success;
+ *     compose will create it on first up)
+ *   - { kind: "ok" } — every entry is a known artifact
+ *   - { kind: "unexpected-files", unknown } — caller refuses to mount
+ *     and prints the recovery recipe
+ *
+ * @internal exported for testing (#961).
+ */
+export function inspectVaultBindMountDir(
+  vaultDir: string,
+):
+  | { kind: "missing" }
+  | { kind: "ok" }
+  | { kind: "unexpected-files"; unknown: string[] }
+{
+  if (!existsSync(vaultDir)) return { kind: "missing" };
+  const entries = readdirSync(vaultDir);
+  const unknown: string[] = [];
+  for (const name of entries) {
+    if (KNOWN_VAULT_ARTIFACT_NAMES.has(name)) continue;
+    if (KNOWN_VAULT_ARTIFACT_PATTERNS.some((re) => re.test(name))) continue;
+    unknown.push(name);
+  }
+  if (unknown.length > 0) return { kind: "unexpected-files", unknown };
+  return { kind: "ok" };
+}
+
+/**
  * Walk a value recursively and return true if any string property is a
  * `vault:<key>` reference. Used by the preflight check below so we can
  * fail fast when the config wants vault-resolved secrets but the
@@ -489,41 +558,24 @@ export async function runApply(
   // src/vault/vault.ts so future write artifacts are picked up
   // without editing two places.
   //
-  // Path derivation: the dir we're about to BIND-MOUNT is always the
-  // POST-MIGRATION canonical parent (`~/.switchroom/vault/`) for
-  // default-config operators. Custom-path operators (where migration
-  // was skipped) use `dirname(customVaultPath)`. Pre-fix this used
-  // `dirname(customVaultPath)` unconditionally, which for the legacy
-  // configured path `~/.switchroom/vault.enc` resolved to
-  // `~/.switchroom/` (parent of the legacy file, not the new mount
-  // target). Caught when self-deploying v0.7.12 against the operator's
-  // own ~/.switchroom which has many sibling dirs (approvals/, logs/,
-  // etc.) that legitimately don't belong in the vault dir.
-  const isCustomPath = migrationResult.kind === "custom-path-skipped";
-  const vaultDir = isCustomPath && customVaultPath
-    ? dirname(customVaultPath)
-    : join(homedir(), ".switchroom", "vault");
-  if (existsSync(vaultDir)) {
-    const entries = readdirSync(vaultDir);
-    const unknown: string[] = [];
-    for (const name of entries) {
-      if (KNOWN_VAULT_ARTIFACT_NAMES.has(name)) continue;
-      if (KNOWN_VAULT_ARTIFACT_PATTERNS.some((re) => re.test(name))) continue;
-      unknown.push(name);
-    }
-    if (unknown.length > 0) {
-      writeErr(chalk.red(
-        `Vault directory ${vaultDir} contains unexpected files:\n` +
-        unknown.map((n) => `  - ${n}\n`).join("") +
-        `Refusing to bind-mount: a docker bind-mount source is the\n` +
-        `entire directory, so unexpected files would be visible inside\n` +
-        `the broker container. Move them out, then re-run apply.\n` +
-        `Known artifacts: vault.enc, vault.enc.bak, vault.enc.tmp,\n` +
-        `vault.enc.lock (sentinel-dir from saveVault flock), and\n` +
-        `.vault.enc.<pid>.<ms>.tmp (atomicWriteFileSync sibling-tmp).\n`,
-      ));
-      process.exit(6);
-    }
+  const vaultDir = resolveVaultBindMountDir(homedir(), {
+    migrationKind: migrationResult.kind,
+    customVaultPath,
+  });
+  const vaultGuardResult = inspectVaultBindMountDir(vaultDir);
+  if (vaultGuardResult.kind === "unexpected-files") {
+    const unknown = vaultGuardResult.unknown;
+    writeErr(chalk.red(
+      `Vault directory ${vaultDir} contains unexpected files:\n` +
+      unknown.map((n) => `  - ${n}\n`).join("") +
+      `Refusing to bind-mount: a docker bind-mount source is the\n` +
+      `entire directory, so unexpected files would be visible inside\n` +
+      `the broker container. Move them out, then re-run apply.\n` +
+      `Known artifacts: vault.enc, vault.enc.bak, vault.enc.tmp,\n` +
+      `vault.enc.lock (sentinel-dir from saveVault flock), and\n` +
+      `.vault.enc.<pid>.<ms>.tmp (atomicWriteFileSync sibling-tmp).\n`,
+    ));
+    process.exit(6);
   }
 
   // ── 3. Generate compose file ──────────────────────────────────────

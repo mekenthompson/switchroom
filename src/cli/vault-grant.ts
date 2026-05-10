@@ -27,6 +27,7 @@ import {
   mintGrantViaBroker,
   listGrantsViaBroker,
   revokeGrantViaBroker,
+  resolveBrokerSocketPath,
   type BrokerClientOpts,
 } from "../vault/broker/client.js";
 import type { GrantMeta } from "../vault/broker/protocol.js";
@@ -63,14 +64,20 @@ function parseDuration(raw: string): number | null {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function getBrokerOpts(configPath?: string): BrokerClientOpts {
+  // Use the canonical resolver — honors SWITCHROOM_VAULT_BROKER_SOCK
+  // env (set by compose). Same fix as the other vault CLI files. Pre-
+  // fix this read only config + legacy fallback, missing the env var
+  // every other broker client honors.
   try {
     const config = loadConfig(configPath);
-    const socket = resolvePath(
-      config.vault?.broker?.socket ?? "~/.switchroom/vault-broker.sock",
-    );
+    const socket = resolveBrokerSocketPath({
+      vaultBrokerSocket: config.vault?.broker?.socket
+        ? resolvePath(config.vault.broker.socket)
+        : undefined,
+    });
     return { socket };
   } catch {
-    return { socket: resolvePath("~/.switchroom/vault-broker.sock") };
+    return { socket: resolveBrokerSocketPath() };
   }
 }
 

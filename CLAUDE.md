@@ -93,6 +93,57 @@ inter-agent isolation). The trust model already assumed shared-host
 operation. Future work: an opt-in strict-isolation mode with
 `extra_hosts: host.docker.internal`.
 
+**Self-restart commands (`/restart`, `/new`, `/reset`, `/update apply`).**
+The gateway shells `switchroom <verb>` via `spawnSwitchroomDetached`
+(`telegram-plugin/gateway/gateway.ts`). Two load-bearing primitives in
+that helper that are easy to "simplify away" and break the self-
+restart case:
+
+  1. **`systemd-run --scope` cgroup escape** (when available). Without
+     it, `docker compose up -d --remove-orphans` (the recreate step
+     of `switchroom update`) cgroup-kills the gateway, which kills
+     the spawned child mid-flight. Inside the agent container
+     `systemd-run` is absent, so the spawn falls through to plain
+     detached. This works for the `/restart` / `/new` / `/reset`
+     verbs which run host-side via `switchroom agent restart`. It
+     does NOT work for `/update apply` — see the docker-availability
+     guard below.
+
+  2. **Restart marker + sweep** (`writeRestartMarker`,
+     `stampUserRestartReason`, `sweepBeforeSelfRestart`). Captures
+     the originating chat so the post-restart greeting card edits
+     into the same message; clears active reactions so they don't
+     get stranded across the restart. All four self-restart commands
+     share the marker, so a `/restart` fired mid-`/update` is
+     debounced by the same 15s window (and vice versa).
+
+**`/update apply` docker-availability guard (#926).** The agent
+container has no docker binary or `/var/run/docker.sock` mount.
+`isDockerReachable()` in the gateway probes both before invoking
+`switchroom update`; on failure it surfaces a clean error pointing
+at the host CLI rather than letting the detached child fail with
+opaque exit-127. The proper fix (a host-side update daemon the
+gateway can call into) is tracked.
+
+**Agent-scheduler env knobs.**
+- `SWITCHROOM_INLINE_SCHEDULER` — set to `0` in the compose env to
+  disable the in-agent scheduler entirely. Default: enabled. Useful
+  for narrowing a wedge to a single agent.
+- `SWITCHROOM_AGENT_SCHEDULER_REPLAY_MIN` — minutes the boot replay
+  walks back looking for missed cron fires. Default: 30. Set to 0
+  to disable replay.
+- `SWITCHROOM_AGENT_SCHEDULER_LOCK` / `SWITCHROOM_AGENT_SCHEDULER_JSONL`
+  — override the lockfile / audit log paths. Default: under
+  `/state/agent/`. Used by tests; operators rarely need to set.
+- `SWITCHROOM_GATEWAY_SOCKET` — override the IPC socket the
+  scheduler dispatches `inject_inbound` through. Default: under
+  the agent's telegram state dir.
+
+The empty-schedule idle path (#921) means agents with no `schedule:`
+entries stay alive (instead of restart-cap'ing). Look for the line
+`agent-scheduler: <name> has no schedule entries — idling` in
+`/var/log/switchroom/agent-scheduler.log` to confirm.
+
 ## Docker test discipline (HARD RULES)
 
 These rules are permanent guidance for every phase of the docker migration, not phase-1c-scoped commentary. Tests run on a host that ALSO runs Coolify, hindsight, nginx-tunnel-gateway, and every Coolify-managed app. Treat the host as production.
@@ -271,7 +322,7 @@ Agent working on this repo: when you open a PR, **target
 is a staging area for your own iteration; the canonical repo is where
 review + merge + release happens.
 
-### Three workflows — know which one you're in
+### Two workflows — know which one you're in
 
 **1. Code-change dev loop (most common).** Editing source, iterating.
 ```
@@ -283,7 +334,42 @@ switchroom agent restart all   # reconciles + restarts running agents
 update `CHANGELOG.md`, commit `chore: release vX.Y.Z`, tag, push, then
 `npm publish`. Publishes come from the canonical repo only.
 
-**3. Local deploy.** Same as the dev loop — pull, build, restart.
+### Operator update — `switchroom update`
+
+For a host that's already running switchroom and just needs to catch
+up with upstream, use the `update` verb (since #918 / v0.7.8). It
+collapses what used to be three separate operator steps:
+
+```
+switchroom update              # pull images + apply + recreate + doctor
+switchroom update --check      # dry-run: print the plan, exit 0
+switchroom update --status     # read-only: CLI version + image/container ages
+switchroom update --rebuild    # source-checkout users: also git pull + npm build
+```
+
+`apply` self-elevates via sudo internally (since #920) when the per-
+agent scaffold dirs need root — no need for the operator to memorize
+the old `sudo HOME=… PATH=… bun /path/to/dist/cli/switchroom.js
+apply --non-interactive` incantation.
+
+`apply` also runs a focused `doctor` sweep against the Agents section
+on success (since #929) so the post-apply state is visible without
+a separate verb. Suppress with `--no-doctor`; `update` passes this
+internally to avoid double-printing (it has its own doctor step).
+
+### Telegram operator surfaces
+
+The same flow is reachable from any agent's DM (since #919, #927):
+
+- `/upgradestatus` — read-only fleet snapshot (CLI version, image
+  digests + ages, container ages). Not admin-gated.
+- `/update` — dry-run plan (calls `switchroom update --check`).
+- `/update apply [--skip-images|--rebuild]` — execute. Admin-gated.
+  Internally guards with a docker-availability probe (#926): on the
+  canonical docker install the agent container has no docker
+  binary/socket, so the apply path returns a clean error pointing
+  the operator at the host CLI. Host-side update daemon (the proper
+  fix for in-Telegram apply on docker hosts) is a tracked follow-up.
 
 ### Code ≠ runtime
 

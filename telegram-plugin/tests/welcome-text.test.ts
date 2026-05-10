@@ -243,6 +243,63 @@ describe("statusPairedText", () => {
       expect(out).toContain("<b>Version</b>");
     });
   });
+
+  // Live probe block — `/status` shows EVERY probe (green and otherwise).
+  // This is the deliberate opposite of the boot card's silent-when-healthy
+  // contract: boot card = quiet ack, /status = dashboard.
+  describe("live health block", () => {
+    it("does NOT render a Health section when meta.live is undefined", () => {
+      const out = statusPairedText({ user: "@ken", meta });
+      expect(out).not.toContain("<b>Health</b>");
+    });
+
+    it("does NOT render a Health section when meta.live is empty array", () => {
+      const out = statusPairedText({ user: "@ken", meta: { ...meta, live: [] } });
+      expect(out).not.toContain("<b>Health</b>");
+    });
+
+    it("renders all probe rows including green ones", () => {
+      const live: AgentMetadata["live"] = [
+        { status: "ok",       label: "Account",   detail: "ken@x.com · Max · token 60d" },
+        { status: "ok",       label: "Broker",    detail: "reachable" },
+        { status: "degraded", label: "Skills",    detail: "1/5 dangling: foo" },
+        { status: "fail",     label: "Scheduler", detail: "sidecar not running" },
+      ];
+      const out = statusPairedText({ user: "@ken", meta: { ...meta, live } });
+      expect(out).toContain("<b>Health</b>");
+      expect(out).toContain("🟢 <b>Account</b>  ken@x.com · Max · token 60d");
+      expect(out).toContain("🟢 <b>Broker</b>  reachable");
+      expect(out).toContain("🟡 <b>Skills</b>  1/5 dangling: foo");
+      expect(out).toContain("🔴 <b>Scheduler</b>  sidecar not running");
+    });
+
+    it("renders Health section before the audit block", () => {
+      const live: AgentMetadata["live"] = [
+        { status: "ok", label: "Account", detail: "ok" },
+      ];
+      const audit = {
+        version: "v0.3.0", tools: "all", toolsDeny: null, skills: null,
+        limits: "idle 30m", channel: "switchroom", memoryBank: "x",
+      };
+      const out = statusPairedText({
+        user: "@ken",
+        meta: { ...meta, live, audit },
+      });
+      const healthIdx = out.indexOf("<b>Health</b>");
+      const versionIdx = out.indexOf("<b>Version</b>");
+      expect(healthIdx).toBeGreaterThan(-1);
+      expect(versionIdx).toBeGreaterThan(healthIdx);
+    });
+
+    it("escapes HTML in probe detail strings", () => {
+      const live: AgentMetadata["live"] = [
+        { status: "fail", label: "Skills", detail: "<script>alert(1)</script>" },
+      ];
+      const out = statusPairedText({ user: "@ken", meta: { ...meta, live } });
+      expect(out).not.toContain("<script>alert");
+      expect(out).toContain("&lt;script&gt;");
+    });
+  });
 });
 
 // Local alias for the audit shape — duplicates the AgentMetadata.audit

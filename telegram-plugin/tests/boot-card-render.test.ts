@@ -94,27 +94,28 @@ describe('renderBootCard — degraded conditions', () => {
     expect(out).not.toContain('Agent</b>')
     expect(out).not.toContain('Gateway</b>')
     expect(out).not.toContain('Hindsight</b>')
-    expect(out).not.toContain('Crons</b>')
+    expect(out).not.toContain('Scheduler</b>')
   })
 
   it('orders probe rows in PROBE_KEYS canonical order regardless of object iteration', () => {
     // Insert in a non-canonical order; renderer must still output Account first,
-    // then Hindsight, then Crons (matching PROBE_KEYS).
+    // then Hindsight, then Scheduler (matching PROBE_KEYS — Phase 4 renamed
+    // crons → scheduler when the in-container agent-scheduler took over).
     const out = renderBootCard({
       agentName: 'a',
       version: 'v',
       probes: {
-        crons:     { status: 'fail',     label: 'Crons',     detail: 'bad' },
+        scheduler: { status: 'fail',     label: 'Scheduler', detail: 'sidecar not running' },
         hindsight: { status: 'fail',     label: 'Hindsight', detail: 'unreachable' },
         account:   { status: 'degraded', label: 'Account',   detail: 'expiring' },
       },
     })
     const accountIdx = out.indexOf('Account</b>')
     const hindsightIdx = out.indexOf('Hindsight</b>')
-    const cronsIdx = out.indexOf('Crons</b>')
+    const schedulerIdx = out.indexOf('Scheduler</b>')
     expect(accountIdx).toBeGreaterThan(-1)
     expect(hindsightIdx).toBeGreaterThan(accountIdx)
-    expect(cronsIdx).toBeGreaterThan(hindsightIdx)
+    expect(schedulerIdx).toBeGreaterThan(hindsightIdx)
   })
 
   it('crash + degraded probe = both rows render', () => {

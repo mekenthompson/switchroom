@@ -48,6 +48,21 @@ export type AgentAudit = {
   memoryBank?: string;
 };
 
+/**
+ * One live probe row for the `/status` health block. Mirrors the
+ * `ProbeResult` shape used by the boot card without dragging the
+ * boot-probes module into welcome-text — keeps welcome-text dependency-
+ * free for unit tests.
+ */
+export type StatusProbeRow = {
+  /** ProbeStatus shape from boot-probes: ok / degraded / fail. */
+  status: 'ok' | 'degraded' | 'fail';
+  /** Display label, e.g. "Broker", "Scheduler". */
+  label: string;
+  /** Free-text detail, e.g. "running (pid 23) · last fire 4m ago". */
+  detail: string;
+};
+
 export type AgentMetadata = {
   agentName: string;
   model: string | null;
@@ -59,6 +74,13 @@ export type AgentMetadata = {
   auth: AuthSummary | null;
   /** Live audit details — present only when switchroom.yaml loaded cleanly. */
   audit?: AgentAudit;
+  /**
+   * Live probe results gathered at request time. Same probe set as the
+   * boot card. Unlike the boot card (silent-when-healthy), `/status`
+   * shows EVERY row including the green ones — the user explicitly
+   * asked for current state, so terseness loses to completeness here.
+   */
+  live?: StatusProbeRow[];
 };
 
 // Tiny escaper — duplicates the one in gateway.ts / server.ts so this
@@ -151,6 +173,12 @@ export function helpText(agentName: string): string {
  * Version. This is the on-demand reincarnation of the SessionStart
  * greeting card deleted in #142 PR 1.
  */
+const STATUS_DOT: Record<StatusProbeRow['status'], string> = {
+  ok: '🟢',
+  degraded: '🟡',
+  fail: '🔴',
+};
+
 export function statusPairedText(params: {
   user: string;
   meta: AgentMetadata;
@@ -163,6 +191,19 @@ export function statusPairedText(params: {
     `Auth: ${formatAuthLine(meta.auth)}`,
   ];
   if (meta.status) lines.push(`Status: <code>${escapeHtml(meta.status)}</code>${meta.uptime ? ` · up ${escapeHtml(meta.uptime)}` : ""}`);
+
+  // Live health block — every probe (green and otherwise) so the user
+  // can see at a glance what's working AND what isn't. This is the
+  // `/status`-specific opposite of the boot card's silent-when-healthy
+  // contract: the boot card is a quiet ack, /status is the dashboard.
+  if (meta.live && meta.live.length > 0) {
+    lines.push("");
+    lines.push("<b>Health</b>");
+    for (const row of meta.live) {
+      const dot = STATUS_DOT[row.status] ?? STATUS_DOT.fail;
+      lines.push(`${dot} <b>${escapeHtml(row.label)}</b>  ${escapeHtml(row.detail)}`);
+    }
+  }
 
   const audit = meta.audit;
   if (audit) {

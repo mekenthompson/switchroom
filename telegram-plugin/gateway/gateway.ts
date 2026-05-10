@@ -153,7 +153,7 @@ import {
   resetSessionAckText as buildResetSessionAckText,
   TELEGRAM_BASE_COMMANDS,
   TELEGRAM_SWITCHROOM_COMMANDS,
-  type AgentMetadata, type AuthSummary,
+  type AgentMetadata, type AuthSummary, type StatusProbeRow,
 } from '../welcome-text.js'
 import {
   isContextExhaustionText,
@@ -6135,7 +6135,7 @@ function buildAgentAudit(agentName: string): AgentAudit | undefined {
 // to `switchroom agent list --json` and `switchroom auth status --json`.
 // Best-effort — any missing piece renders as a placeholder in the text
 // templates rather than blocking the reply.
-function buildAgentMetadata(agentName: string): AgentMetadata {
+async function buildAgentMetadata(agentName: string): Promise<AgentMetadata> {
   type AgentListResp = {
     agents: Array<{
       name: string; status: string; uptime: string;
@@ -6172,6 +6172,52 @@ function buildAgentMetadata(agentName: string): AgentMetadata {
     status: a?.status ?? null,
     auth: authSummary,
     audit: buildAgentAudit(agentName),
+    live: await buildLiveProbeRows(agentName),
+  }
+}
+
+/**
+ * Run the boot-card probe set on demand for `/status`. Same probes,
+ * different rendering contract: `/status` shows every row (silent-when-
+ * healthy is for the boot card; the user explicitly asked for current
+ * state here). Failures are swallowed per-probe via runAllProbes's
+ * Promise.allSettled, and we filter out anything we couldn't render so
+ * the reply doesn't break on a broken probe.
+ */
+async function buildLiveProbeRows(agentName: string): Promise<StatusProbeRow[]> {
+  try {
+    const { runAllProbes } = await import('./boot-card.js')
+    const agentDir = resolveAgentDirFromEnv()
+      ?? (process.env.TELEGRAM_STATE_DIR
+        ? require('path').dirname(process.env.TELEGRAM_STATE_DIR)
+        : '/tmp')
+    const probes = await runAllProbes({
+      agentName,
+      agentSlug: agentName,
+      version: formatBootVersion(),
+      agentDir,
+      gatewayInfo: { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS },
+      tmuxSupervisor: process.env.SWITCHROOM_TMUX_SUPERVISOR === '1',
+      dockerMode: process.env.SWITCHROOM_RUNTIME === 'docker',
+    })
+    const rows: StatusProbeRow[] = []
+    // Render order matches the boot card's PROBE_KEYS so the two
+    // surfaces tell the same story in the same order.
+    const order = ['account', 'agent', 'gateway', 'quota', 'hindsight',
+      'scheduler', 'broker', 'kernel', 'skills'] as const
+    for (const k of order) {
+      const r = probes[k]
+      if (!r) continue
+      rows.push({ status: r.status, label: r.label, detail: r.detail })
+    }
+    return rows
+  } catch (err: unknown) {
+    process.stderr.write(
+      `telegram gateway: /status: probe gathering failed: ${
+        (err as Error)?.message ?? String(err)
+      }\n`,
+    )
+    return []
   }
 }
 
@@ -6210,7 +6256,7 @@ bot.command('status', async ctx => {
   const from = ctx.from!
   if (access.allowFrom.includes(senderId)) {
     const userTag = from.username ? `@${from.username}` : senderId
-    const meta = buildAgentMetadata(getMyAgentName())
+    const meta = await buildAgentMetadata(getMyAgentName())
     await ctx.reply(buildStatusPairedText({ user: userTag, meta }), { parse_mode: 'HTML' })
     return
   }

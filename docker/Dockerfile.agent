@@ -85,6 +85,34 @@ RUN npm init -y >/dev/null \
  && npm install --omit=dev --build-from-source=false node-cron@^3.0.3
 WORKDIR /
 
+# Playwright — pre-baked for skills that use browser automation
+# (calendar / scrape / UI-test). Pre-this-bake, agents called
+# \`npx playwright\` which triggered an on-demand download of the
+# browser binaries into \`~/.cache/ms-playwright/\` per agent on
+# first call (~30s latency, plus N copies of ~150MB browsers across
+# the fleet). Baking it in:
+#
+#   - First call latency ~0s
+#   - One shared browser cache in image layer, not N per-agent caches
+#   - Version pin via image build, no per-agent npm @latest drift
+#
+# Major-version pin: the npm install resolves to the latest 1.x at
+# image build time; CI re-builds the image when a new patch lands.
+# Bumping the major requires CI to re-run \`playwright install
+# --with-deps\` in case browser-binary versions changed.
+#
+# \`--with-deps chromium\` installs the apt packages chromium needs
+# at runtime (libnss3, libatk1.0-0, libcups2 etc.). Firefox / Webkit
+# can be added per-agent via \`npx playwright install <browser>\`
+# without re-baking; chromium is the default because most skills
+# use it.
+#
+# Browser binaries land at \$PLAYWRIGHT_BROWSERS_PATH (image layer,
+# OS-independent) instead of \$HOME/.cache/.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright/browsers
+RUN npm install -g playwright@^1.49.0 \
+ && npx playwright install --with-deps chromium
+
 # tini handles zombies + signal forwarding. The actual command is
 # /state/agent/start.sh, which the scaffold renders into the bind-mount.
 ENTRYPOINT ["/usr/bin/tini", "--"]

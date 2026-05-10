@@ -28,7 +28,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 /** Operations the broker can perform. */
-export type AuditOp = "get" | "set" | "delete" | "list" | "unlock" | "lock" | "mint_grant" | "list_grants" | "revoke_grant";
+export type AuditOp = "get" | "put" | "set" | "delete" | "list" | "unlock" | "lock" | "mint_grant" | "list_grants" | "revoke_grant";
 
 /**
  * One audit log entry.

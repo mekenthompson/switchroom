@@ -30,6 +30,11 @@ describe("encodeRequest / decodeRequest roundtrip", () => {
     { v: 1, op: "list" },
     { v: 1, op: "status" },
     { v: 1, op: "lock" },
+    // op:put — agent-driven key rotation. String + binary kinds only;
+    // the schema deliberately excludes "files" since rotation of multi-
+    // file entries is operator territory, not agent-self-service.
+    { v: 1, op: "put", key: "microsoft/ken-tokens", entry: { kind: "string", value: "{\"access_token\":\"new\"}" } },
+    { v: 1, op: "put", key: "ssh/id_rsa", entry: { kind: "binary", value: "aGVsbG8=" } },
   ];
 
   for (const req of cases) {
@@ -60,6 +65,7 @@ describe("encodeResponse / decodeResponse roundtrip", () => {
     { ok: true, keys: ["foo", "bar"] },
     { ok: true, status: { unlocked: true, keyCount: 3, uptimeSec: 42 } },
     { ok: true, locked: true },
+    { ok: true, put: true, key: "microsoft/ken-tokens" },
     { ok: false, code: "LOCKED", msg: "Vault is locked" },
     { ok: false, code: "DENIED", msg: "Not in ACL" },
     { ok: false, code: "UNKNOWN_KEY", msg: "Key not found: x" },

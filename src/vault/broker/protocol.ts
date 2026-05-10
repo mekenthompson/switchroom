@@ -35,6 +35,47 @@ export const GetRequestSchema = z.object({
   token: z.string().optional(),
 });
 
+/**
+ * Put a vault entry. Same ACL as Get — an agent that can read a key
+ * via `schedule.secrets[]` can also rotate (write) it.
+ *
+ * Motivation (#950): the calendar skill (and any OAuth-style skill that
+ * stores rotating refresh tokens in vault) reads its token via broker,
+ * exchanges it with the IDP for a fresh access_token + possibly-new
+ * refresh_token, then needs to persist the rotation. Pre-fix the only
+ * write path was `switchroom vault set` which decrypts the vault file
+ * directly with the operator's passphrase — agents don't have it. The
+ * skill's ms_graph_token.py would refresh against MS successfully and
+ * then drop the new tokens on the floor. Calendar never worked.
+ *
+ * Trust model: the broker is already auto-unlocked (machine-id-derived
+ * blob inside the broker container) and holds all decrypted secrets in
+ * memory. A pwned broker can already exfiltrate every secret. Allowing
+ * authorized agents to rotate keys they're already allowed to READ
+ * doesn't expand the broker's surface; it just lets agents repair their
+ * own state without operator hand-holding.
+ *
+ * Out of scope: introducing a NEW key (one not already in vault) is
+ * still operator-only — Put refuses keys that aren't already present
+ * in the broker's loaded secrets. That keeps the "operator decides
+ * what goes in vault" boundary intact; agents can only update existing
+ * entries they have ACL for.
+ */
+export const PutRequestSchema = z.object({
+  v: z.literal(1),
+  op: z.literal("put"),
+  key: z.string().min(1),
+  /** New entry value. Kind must match the existing entry — agents can
+   *  rotate values, not change the storage shape (string ↔ binary ↔
+   *  files). */
+  entry: z.union([
+    z.object({ kind: z.literal("string"), value: z.string() }),
+    z.object({ kind: z.literal("binary"), value: z.string() }),
+  ]),
+  /** Optional capability token for grant-based access. */
+  token: z.string().optional(),
+});
+
 export const ListRequestSchema = z.object({
   v: z.literal(1),
   op: z.literal("list"),
@@ -136,6 +177,7 @@ export const ApprovalRecordRequestSchema = z.object({
 
 export const RequestSchema = z.discriminatedUnion("op", [
   GetRequestSchema,
+  PutRequestSchema,
   ListRequestSchema,
   StatusRequestSchema,
   LockRequestSchema,
@@ -151,6 +193,7 @@ export const RequestSchema = z.discriminatedUnion("op", [
 ]);
 
 export type GetRequest = z.infer<typeof GetRequestSchema>;
+export type PutRequest = z.infer<typeof PutRequestSchema>;
 export type ListRequest = z.infer<typeof ListRequestSchema>;
 export type StatusRequest = z.infer<typeof StatusRequestSchema>;
 export type LockRequest = z.infer<typeof LockRequestSchema>;
@@ -216,6 +259,13 @@ export const OkStatusResponseSchema = z.object({
 export const OkLockResponseSchema = z.object({
   ok: z.literal(true),
   locked: z.literal(true),
+});
+
+export const OkPutResponseSchema = z.object({
+  ok: z.literal(true),
+  put: z.literal(true),
+  /** Echo the key so wire-debug tooling can correlate the response. */
+  key: z.string(),
 });
 
 export const OkMintGrantResponseSchema = z.object({
@@ -342,6 +392,7 @@ export const ResponseSchema = z.union([
   OkKeysResponseSchema,
   OkStatusResponseSchema,
   OkLockResponseSchema,
+  OkPutResponseSchema,
   OkMintGrantResponseSchema,
   OkListGrantsResponseSchema,
   OkRevokeGrantResponseSchema,
@@ -358,6 +409,7 @@ export type OkEntryResponse = z.infer<typeof OkEntryResponseSchema>;
 export type OkKeysResponse = z.infer<typeof OkKeysResponseSchema>;
 export type OkStatusResponse = z.infer<typeof OkStatusResponseSchema>;
 export type OkLockResponse = z.infer<typeof OkLockResponseSchema>;
+export type OkPutResponse = z.infer<typeof OkPutResponseSchema>;
 export type OkMintGrantResponse = z.infer<typeof OkMintGrantResponseSchema>;
 export type OkListGrantsResponse = z.infer<typeof OkListGrantsResponseSchema>;
 export type OkRevokeGrantResponse = z.infer<typeof OkRevokeGrantResponseSchema>;

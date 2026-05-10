@@ -166,7 +166,7 @@ function checkSwitchroomBranch(): string | null {
 }
 
 export function preflightCheck(
-  _name: string,
+  name: string,
   agentDir: string,
   _usesDevChannels: boolean,
 ): string[] {
@@ -175,6 +175,31 @@ export function preflightCheck(
   const startSh = resolve(agentDir, "start.sh");
   if (!existsSync(startSh)) {
     errors.push(`start.sh not found at ${startSh}`);
+  }
+
+  // Bot token file exists and has real content. Compose bind-mounts
+  // <agentDir>/telegram into the container; a missing/stub token sends
+  // the gateway sidecar into a restart loop with no host-side surface.
+  const envPath = resolve(agentDir, "telegram", ".env");
+  if (existsSync(envPath)) {
+    const envContent = readFileSync(envPath, "utf-8");
+    if (!envContent.includes("TELEGRAM_BOT_TOKEN=") || envContent.includes("# Set your bot token")) {
+      errors.push(
+        `telegram/.env is missing TELEGRAM_BOT_TOKEN. ` +
+        `Set it or run: switchroom setup`,
+      );
+    }
+  } else {
+    errors.push(`telegram/.env not found at ${envPath}`);
+  }
+
+  // .claude/settings.json exists. Compose bind-mounts the agent dir; a
+  // missing settings.json means claude boots without hooks or MCP wiring
+  // inside the container.
+  if (!existsSync(resolve(agentDir, ".claude", "settings.json"))) {
+    errors.push(
+      `.claude/settings.json not found. Run: switchroom agent reconcile ${name}`,
+    );
   }
 
   return errors;

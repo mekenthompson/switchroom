@@ -164,7 +164,6 @@ src/                    TypeScript source for the `switchroom` CLI
                         autoaccept-poll.ts — bun-runnable bundle baked into agent image
   config/               YAML loader + three-layer cascade (defaults → profiles → agents)
   memory/               Hindsight memory integration
-  runtime-mode.ts       isDockerRuntime() — v0.7.3 unified host-shell + in-container detection
   scheduler/            Cron synthesis primitives — collectScheduleEntries,
                         dispatchAsInbound, JsonlAuditSink. Shared by the in-agent
                         scheduler (no host-side scheduler runtime since Phase 4).
@@ -209,12 +208,8 @@ tests/                  Vitest suite for src/
 
 Agent scaffolds are written **outside** this repo (default
 `~/.switchroom/agents/<name>/`) — never commit per-user agent state here.
-
-The generated compose file at `~/.switchroom/compose/docker-compose.yml`
-doubles as a runtime-mode signal: `isDockerRuntime()` (`src/runtime-mode.ts`)
-returns true if either the file exists OR `SWITCHROOM_RUNTIME=docker` is
-set (the env-var path is for in-container code; the file path is for
-host-shell CLI invocations).
+The generated compose file lives at
+`~/.switchroom/compose/docker-compose.yml`.
 
 ## Commands
 
@@ -389,7 +384,3 @@ contract" above. The pointers below are for *implementation*.)
   `/run/switchroom/<svc>/*/sock` (PR #898). Empty fleets correctly
   read as unhealthy — a singleton with no agents to serve isn't
   doing useful work.
-- **"Why does a host-shell `switchroom agent list` differ from
-  inside a container?"** → `src/runtime-mode.ts:isDockerRuntime()`.
-  Both signals (env var + compose-file presence) flip the answer.
-  Doctor / status / lifecycle all branch on this single helper.

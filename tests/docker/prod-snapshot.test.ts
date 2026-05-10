@@ -67,6 +67,23 @@ describe("productionFleetIsLive", () => {
     expect(productionFleetIsLive()).toBe(false);
   });
 
+  it("filter value is exactly 'switchroom' — does not match parametrized test fleets", () => {
+    // Regression test for PR #939's reviewer note: phase tests in
+    // parallel vitest forks emit containers labeled
+    // switchroom.fleet=<PROJECT> (e.g. phase1c-iso-12345). The
+    // production filter must be the LITERAL string 'switchroom' so it
+    // matches ONLY production containers, not sibling-fork test
+    // fleets. Docker label filters are equality, not prefix — so as
+    // long as we filter on exactly 'switchroom', a label of
+    // 'phase1c-iso-12345' is correctly excluded by the daemon.
+    mockExec.mockReturnValueOnce(Buffer.from(""));
+    productionFleetIsLive();
+    const cmd = String(mockExec.mock.calls[0][0]);
+    // Anchor the filter value on both sides to catch any future
+    // refactor that adds a wildcard or prefix-match shape.
+    expect(cmd).toMatch(/--filter label=switchroom\.fleet=switchroom(?=\s|$|'|")/);
+  });
+
   it("returns false when docker is unreachable (fail-closed)", () => {
     mockExec.mockImplementationOnce(() => {
       throw new Error("docker daemon not running");

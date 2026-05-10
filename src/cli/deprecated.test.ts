@@ -104,23 +104,20 @@ describe("`up` and `init` delegate to runApply with a yellow deprecation warning
   });
 });
 
-describe("`update` removed-shim exit codes", () => {
-  // process.exit's signature `(code?) => never` doesn't unify with the
-  // generic `ReturnType<typeof vi.spyOn>` MockInstance shape — vitest's
-  // generic for spyOn refuses the never return type. Let TS infer the
-  // narrow types directly off the assignments instead of pinning them
-  // to the generic placeholder.
+describe("`update` legacy-flag handling (post-#918)", () => {
+  // PR #918 replaced the `update` removed-shim with the real bundled
+  // update verb. Legacy v0.6 flags (--phase, --force, --no-restart,
+  // --resume) are still accepted as no-ops so any in-flight v0.6 →
+  // v0.7 self-reexec doesn't crash on argv it no longer recognises.
+  // The old "update is removed in v0.7" tests have been retired.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let warnSpy: any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let errSpy: any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let exitSpy: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
     warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     exitSpy = vi.spyOn(process, "exit").mockImplementation(((_code?: number) => {
       throw new Error(`__exit_${_code ?? 0}`);
     }) as never);
@@ -128,28 +125,10 @@ describe("`update` removed-shim exit codes", () => {
 
   afterEach(() => {
     warnSpy.mockRestore();
-    errSpy.mockRestore();
     exitSpy.mockRestore();
   });
 
-  it("`update` (no flags) exits 1 with the docker recipe in stderr", async () => {
-    const program = new Command();
-    program.exitOverride();
-    registerUpdateCommand(program);
-
-    await expect(program.parseAsync(["node", "switchroom", "update"])).rejects.toThrow(
-      /__exit_1/,
-    );
-
-    const errBanner = errSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("\n");
-    expect(errBanner).toMatch(/switchroom update is removed in v0\.7/);
-    expect(errBanner).toMatch(/docker compose .* pull/);
-    expect(errBanner).toMatch(/switchroom apply/);
-    expect(errBanner).toMatch(/docker compose .* up -d/);
-    expect(exitSpy).toHaveBeenCalledWith(1);
-  });
-
-  it("`update --phase=post-build` exits 0 with the `no longer supported, restart manually` notice", async () => {
+  it("`update --phase=post-build` exits 0 with the v0.6→v0.7 self-reexec compat notice", async () => {
     const program = new Command();
     program.exitOverride();
     registerUpdateCommand(program);
@@ -160,10 +139,7 @@ describe("`update` removed-shim exit codes", () => {
 
     const warnBanner = warnSpy.mock.calls.map((c: unknown[]) => String(c[0])).join("\n");
     expect(warnBanner).toMatch(/post-build/);
-    expect(warnBanner).toMatch(/no longer supported/);
-    expect(warnBanner).toMatch(/Restart manually/);
+    expect(warnBanner).toMatch(/legacy v0\.6 self-reexec path/);
     expect(exitSpy).toHaveBeenCalledWith(0);
-    // Crucially, the red error banner must NOT have fired in this branch.
-    expect(errSpy).not.toHaveBeenCalled();
   });
 });

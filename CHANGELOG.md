@@ -1,5 +1,134 @@
 # Changelog
 
+## v0.7.15 — vault UX epic + PID-file flock
+
+Bundles four PRs landed since v0.7.14: the second half of the #969
+vault UX epic (P0b / P1a / P1b — agent-initiated save, write-grants,
+gateway error rendering) plus the v0.7.14 sprint's final tier-3
+follow-up (#964 PID-file flock).
+
+### Save secrets from Telegram, end-to-end (#969 P1a — #975)
+
+The completion of the #969 epic's product loop. From any Telegram
+chat the user can now:
+
+  - paste a secret, OR ask an agent to save one
+  - tap a single button to confirm (with optional rename)
+  - verify the key landed in the vault
+
+…without ever touching a host shell. Two moving parts:
+
+  1. **`vault_request_save` MCP tool.** Agents call it with `{chat_id,
+     key, value, why?}` when the user supplies a secret and asks to
+     save it. The gateway stages the value server-side (in memory only;
+     never echoed back to the agent or logged), renders an `apv:`-style
+     approval card with [✅ Save once] [🚫 Discard] [✏️ Rename]
+     buttons in the user's chat.
+  2. **Broker passphrase attestation.** New optional `passphrase` field
+     on broker PUT requests. When supplied and matching the broker's
+     loaded passphrase, the call is authorized as if the operator had
+     run `switchroom vault set` from the host shell — bypasses path-
+     as-identity, ACL, the unknown-key gate, and the kind-mismatch
+     check. Wrong-passphrase fails closed with `method:"passphrase"
+     DENIED` (does NOT fall through, so a typo can't mask the wrong-
+     attestation signal). Audit logs tag method:"passphrase" so this
+     auth path is distinct from grants and peercred.
+
+The `vrs:` callback router (Save/Discard/Rename) carries the cached
+operator passphrase forward through `defaultVaultWrite` → CLI →
+broker PUT.
+
+### Write-grants — agents can create keys with operator consent (#969 P1b — #973)
+
+Pre-v0.7.15, grants were read-only. Agents could rotate existing
+keys via the broker but couldn't *create* new ones, which blocked
+the deferred-secret save flow the previous bullet enables.
+
+  - New `write_allow` column on `vault_grants` (JSON array of literal
+    keys and/or prefix-globs ending in `*`). Idempotent schema
+    migration: `PRAGMA table_info` check + `ALTER TABLE ADD COLUMN`
+    with `DEFAULT '[]'` so existing rows stay read-only.
+  - `validateGrantForWrite` mirrors the read-side validator, consults
+    `write_allow` with prefix-glob support, returns typed
+    `WriteDenyReason` so audit logs name the missing capability
+    (`grant-write-not-allowed`) distinct from read denials
+    (`grant-key-not-allowed`).
+  - Broker PUT path consults write-grants BEFORE the legacy
+    path-as-identity rule. A valid write-grant is the identity (the
+    token IS the caller) — no `<agent>` arg needed.
+  - `switchroom vault grant --write <key-or-prefix>` on the CLI; can
+    combine with `--read` for full-access grants.
+
+### Telegram-honest error rendering for vault CLI failures (#969 P0b — #972)
+
+P0a (#971, in v0.7.14) made `switchroom vault` emit stable stderr
+markers + exit codes when running inside an agent sandbox. P0b
+consumes them in the gateway so the user-facing failure UX explains
+what to do instead of dumping a raw `Vault file not found …` /
+`VAULT-NEEDS-APPROVAL …` blob.
+
+New `telegram-plugin/secret-detect/vault-error.ts`:
+
+```
+parseVaultCliError(stderr) → { kind, original, key? }
+renderVaultCliError(parsed, { verb, key }) → { html, suppressRaw }
+```
+
+Maps each marker to a copy-pasteable host command:
+
+  - `VAULT-SANDBOX-CONTEXT` → "⚠️ This action must run on the host."
+    plus `<pre>switchroom vault <verb> <key></pre>`
+  - `VAULT-NEEDS-APPROVAL` → "⚠️ New vault key — operator approval
+    required." plus forward-pointer to the one-tap save card from
+    #975 above.
+  - `VAULT-BROKER-UNREACHABLE` → recovery hint pointing at
+    `switchroom vault broker status`.
+
+### PID-file flock with holder PID in busy errors (#964 — #974)
+
+Replaces `proper-lockfile`'s sentinel-directory flock with a
+PID-file written to `<vaultPath>.lock`. Closes plan v3 §11's ask
+for diagnosable busy errors.
+
+  - Acquisition: `openSync(O_CREAT|O_EXCL)` + write
+    `<pid>\n<ts_ms>\n<argv0>\n` and fsync. Kernel-atomic
+    create-if-not-exists; file content is human-readable so any
+    operator (or peer process) can `cat` it.
+  - Contention error gains the holder PID and acquired-ago seconds:
+    `vault busy: held by pid 12345 (acquired 2s ago) at <path>
+    (retried for 5000ms). …`
+  - New `VaultBusyError` carries `holderPid` / `heldForMs` /
+    `lockPath` / `budgetMs` as structured fields; threaded through
+    `VaultError.cause` so the gateway error renderer from #972 can
+    consume them programmatically without re-parsing the message.
+  - Stale-lock recovery: dead holder PID → unlink + retry (no
+    waiting). Liveness via `/proc/<pid>` on Linux, `kill(pid, 0)`
+    portably.
+
+**v0.7.14 → v0.7.15 migration.** v0.7.12-v0.7.14 left
+`<vaultPath>.lock` as a directory (proper-lockfile sentinel).
+v0.7.15's acquirer detects `EEXIST + statSync.isDirectory()` and
+treats it as a stale legacy sentinel: rmdir the contents, retry
+the openSync. Safe under the standard `switchroom update` flow
+because the recreate step SIGTERMs any v0.7.14 writer. Operators
+running the v0.7.15 host CLI against a still-running v0.7.14
+broker should bounce the broker first — see #979.
+
+Four follow-ups filed for soft-edge cases identified during
+review: PID-reuse defense via `acquiredAtMs` (#976),
+unparseable-lockfile + mtime-stale heuristic (#977), real
+concurrent-acquirer test via `worker_threads` (#978), and the
+v0.7.14 → v0.7.15 upgrade-window operator note (#979).
+
+### Migration
+
+None required beyond restarting the broker. `proper-lockfile`
+removed from package.json; no consumer code-change.
+
+Patch release. Update via `switchroom update` from any operator
+host; in-Telegram via `/update apply` (docker hosts: host-side
+CLI, per the v0.7.13 docker-availability guard).
+
 ## v0.7.14 — tier-1 follow-ups + docker e2e CI gate
 
 Five issues from the v0.7.12 / v0.7.13 sprint, closed in PR #966.

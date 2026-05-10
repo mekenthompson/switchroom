@@ -447,6 +447,19 @@ describe("generateCompose", () => {
     expect(block).toContain("DAC_READ_SEARCH");
   });
 
+  it("broker adds DAC_OVERRIDE so op:put can write to the host-owned vault dir (v0.7.13)", () => {
+    // Without this cap, broker can READ the vault dir (DAC_READ_SEARCH)
+    // but rejects mkdir + write into it. Surfaced post-v0.7.12 deploy
+    // as `EACCES: permission denied, mkdir '/state/vault/vault.enc.lock'`
+    // when ms_graph_token.py's broker put attempted the saveVault flock
+    // sentinel-dir. The host vault dir is mode 0700 owned by the
+    // operator UID; broker runs as container-root which doesn't bypass
+    // perms under cap_drop ALL without DAC_OVERRIDE.
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const block = /vault-broker:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toContain("DAC_OVERRIDE");
+  });
+
   it("broker mounts /etc/machine-id so auto-unlock key derivation matches host (v0.7.4)", () => {
     // The auto-unlock blob is sealed with an AES key derived from the
     // host's /etc/machine-id. Without passing it through, the broker

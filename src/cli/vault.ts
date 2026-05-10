@@ -30,6 +30,53 @@ import { registerVaultDoctorCommand } from "./vault-doctor.js";
 import { registerVaultAuditCommand } from "./vault-audit.js";
 import { registerVaultGrantCommands } from "./vault-grant.js";
 
+/**
+ * Sandbox-context detection.
+ *
+ * Set by `src/agents/compose.ts` on every agent container's env. Inside
+ * the sandbox there is NO `vault.enc` mount — only the broker socket —
+ * so any code path that calls `openVault` / `saveVault` / `createVault`
+ * directly will surface the misleading "Vault file not found" error
+ * reported in issue #968.
+ *
+ * Sandbox-aware callers should fail closed with a structured prefix
+ * (consumed by the Telegram gateway) rather than fall through to direct
+ * file IO that cannot work.
+ */
+function isSandboxContext(): boolean {
+  return process.env.SWITCHROOM_RUNTIME === "docker";
+}
+
+/**
+ * Stable error markers consumed by the Telegram gateway and any other
+ * subprocess caller. The gateway greps stderr for these prefixes to
+ * route the failure into the right UX (approval card, host-CLI hint,
+ * passphrase prompt) instead of dumping a raw stack trace at the user.
+ *
+ * Exit codes:
+ *   2  — VAULT-BROKER-DENIED      (ACL rejection from broker)
+ *   5  — VAULT-NEEDS-APPROVAL     (new key, no grant — must be approved)
+ *   6  — VAULT-BROKER-UNREACHABLE (broker socket missing/dead)
+ *   7  — VAULT-SANDBOX-CONTEXT    (operation impossible from sandbox)
+ *
+ * Codes 2/6/7 mean "fix the environment, then retry"; code 5 is the
+ * only one that means "ask the user to approve."
+ */
+const VAULT_EXIT_DENIED = 2;
+const VAULT_EXIT_NEEDS_APPROVAL = 5;
+const VAULT_EXIT_BROKER_UNREACHABLE = 6;
+const VAULT_EXIT_SANDBOX_CONTEXT = 7;
+
+function refuseSandboxDirectAccess(verbHint: string): never {
+  process.stderr.write(
+    `VAULT-SANDBOX-CONTEXT: direct vault access is unavailable inside an ` +
+    `agent sandbox. The vault file is not mounted into agent containers; ` +
+    `only the broker socket is. Run '${verbHint}' on the host shell, or ` +
+    `use a broker-supported operation.\n`
+  );
+  process.exit(VAULT_EXIT_SANDBOX_CONTEXT);
+}
+
 function getVaultPath(configPath?: string): string {
   try {
     const config = loadConfig(configPath);
@@ -154,6 +201,9 @@ export function registerVaultCommand(program: Command): void {
     .description("Create a new encrypted vault file")
     .action(async () => {
       try {
+        if (isSandboxContext()) {
+          refuseSandboxDirectAccess("switchroom vault init");
+        }
         const parentOpts = program.opts();
         const vaultPath = getVaultPath(parentOpts.config);
         const passphrase = await getPassphrase(true);
@@ -207,25 +257,57 @@ export function registerVaultCommand(program: Command): void {
           formatHint = opts.format as VaultFormatHint;
         }
 
+        // ── Sandbox guards (issue #968) ─────────────────────────────────────
+        //
+        // Inside an agent container the vault file is not mounted; only
+        // the broker socket is. Direct-IO options that need host vault
+        // access (--file, --allow, --deny) cannot work — fail closed with
+        // a marker the Telegram gateway can route to a clearer UX.
+        const inSandbox = isSandboxContext();
+        if (inSandbox && opts.file) {
+          process.stderr.write(
+            `VAULT-SANDBOX-CONTEXT: --file is not supported inside an agent ` +
+            `sandbox (the source file is not visible to the host vault). ` +
+            `Pipe the value via stdin, or run 'switchroom vault set ${key} ` +
+            `--file ${opts.file}' on the host.\n`
+          );
+          process.exit(VAULT_EXIT_SANDBOX_CONTEXT);
+        }
+        if (inSandbox && (opts.allow !== undefined || opts.deny !== undefined)) {
+          process.stderr.write(
+            `VAULT-SANDBOX-CONTEXT: --allow / --deny scope changes require ` +
+            `host-side vault re-encryption and cannot run from inside an ` +
+            `agent sandbox. Re-run on the host shell.\n`
+          );
+          process.exit(VAULT_EXIT_SANDBOX_CONTEXT);
+        }
+
         // ── Broker-mediated put (agent-driven rotation) ─────────────────────
         //
-        // When stdin is piped, no passphrase is set, and the operator hasn't
-        // requested scope changes (--allow / --deny), try the broker's
-        // `op:put` first. This is the path the calendar skill (and any
-        // OAuth-style skill that rotates refresh tokens) needs: agents
-        // can't acquire the operator passphrase, so direct vault writes are
-        // off-limits. The broker's put-ACL is the same as the read-ACL
-        // (schedule.secrets[]) — agents that can read a key can rotate it.
+        // When stdin is piped (and the caller hasn't requested scope changes
+        // or file input), route writes through the broker. This is the
+        // path the calendar skill (and any OAuth-style skill that rotates
+        // refresh tokens) needs: agents can't acquire the operator
+        // passphrase, so direct vault writes are off-limits. The broker's
+        // put-ACL is the same as the read-ACL (schedule.secrets[]) — agents
+        // that can read a key can rotate it.
         //
         // Pre-fix this branch errored with "requires SWITCHROOM_VAULT_PASSPHRASE
         // to be set", which the calendar skill's ms_graph_token.py hit on
         // every refresh, dropping freshly-rotated tokens on the floor.
+        //
+        // Issue #968 fix: when running inside the agent sandbox, ALWAYS use
+        // the broker — even if SWITCHROOM_VAULT_PASSPHRASE is set (the
+        // Telegram gateway sets it for /vault commands). Direct vault.enc
+        // access is impossible from the sandbox; falling through would
+        // surface the misleading "Vault file not found:
+        // /state/agent/home/.switchroom/vault.enc" error.
         if (
-          !process.stdin.isTTY
-          && !process.env.SWITCHROOM_VAULT_PASSPHRASE
+          (!process.stdin.isTTY || inSandbox)
           && !opts.file
           && opts.allow === undefined
           && opts.deny === undefined
+          && (inSandbox || !process.env.SWITCHROOM_VAULT_PASSPHRASE)
         ) {
           // Read the new value from stdin first — broker put needs the
           // value as a string/binary kind. Multi-line preserved.
@@ -263,9 +345,19 @@ export function registerVaultCommand(program: Command): void {
             return;
           }
           if (result.kind === "unreachable") {
-            // Broker isn't there — surface the same passphrase-required
-            // error as the legacy path so operators get a familiar message
-            // and the legacy fallback path isn't accidentally triggered.
+            // Broker isn't there. From the sandbox there is no fallback —
+            // surface a marker the gateway can route to a "broker down"
+            // help card (#969 P0a). From the host, surface the legacy
+            // passphrase-required hint.
+            if (inSandbox) {
+              process.stderr.write(
+                `VAULT-BROKER-UNREACHABLE: cannot reach vault broker (${result.msg}). ` +
+                `From inside the agent sandbox, direct vault access is not ` +
+                `possible. Check broker health on the host: ` +
+                `'switchroom vault broker status'.\n`
+              );
+              process.exit(VAULT_EXIT_BROKER_UNREACHABLE);
+            }
             console.error(
               chalk.red(
                 "Error: piping a value to `vault set` requires SWITCHROOM_VAULT_PASSPHRASE " +
@@ -275,24 +367,34 @@ export function registerVaultCommand(program: Command): void {
             );
             process.exit(1);
           }
-          // denied or not_found — broker reached and refused. Print
-          // the structured reason so the caller can act on it.
-          console.error(
-            chalk.red(
-              `VAULT-BROKER-DENIED [${result.code}]: ${result.msg}`,
-            ),
-          );
+          // not_found: the broker reached us but the key doesn't exist.
+          // Agents cannot create new keys via the broker — that requires
+          // operator approval. Mark this with VAULT-NEEDS-APPROVAL (issue
+          // #969 P0a) so the gateway can offer an approval card instead
+          // of dumping a denied error at the user.
           if (result.kind === "not_found") {
-            console.error(
-              chalk.yellow(
-                `Hint: broker put cannot introduce new keys. Run ` +
-                `'switchroom vault set ${key}' once from the host (with the ` +
-                `vault passphrase) to create the entry; agents can rotate it ` +
-                `from then on.`,
-              ),
+            process.stderr.write(
+              `VAULT-NEEDS-APPROVAL [unknown_key]: secret '${key}' does not ` +
+              `exist in the vault yet. Agents can rotate existing keys via ` +
+              `the broker but cannot create new ones; this requires operator ` +
+              `approval. Tap the approval card in your Telegram chat, or run ` +
+              `'switchroom vault set ${key}' on the host to create the entry.\n`
             );
+            process.exit(VAULT_EXIT_NEEDS_APPROVAL);
           }
-          process.exit(2);
+          // denied — broker reached and ACL refused. Print the structured
+          // reason so the caller can act on it.
+          process.stderr.write(
+            `VAULT-BROKER-DENIED [${result.code}]: ${result.msg}\n`
+          );
+          process.exit(VAULT_EXIT_DENIED);
+        }
+
+        // Past this point we need direct vault.enc access — refuse early
+        // from the sandbox with a clear marker instead of falling through
+        // to setStringSecret → openVault → "Vault file not found".
+        if (inSandbox) {
+          refuseSandboxDirectAccess(`switchroom vault set ${key}`);
         }
 
         const passphrase = await getPassphrase();
@@ -632,6 +734,15 @@ export function registerVaultCommand(program: Command): void {
       }
 
       // ── Direct vault access (--no-broker or broker unreachable + TTY) ──
+      //
+      // Sandbox guard: vault.enc isn't mounted into agent containers, so a
+      // direct read here would surface "Vault file not found". Refuse with
+      // a clear marker instead. The broker path above is the only valid
+      // surface from inside an agent.
+      if (isSandboxContext()) {
+        refuseSandboxDirectAccess(`switchroom vault get ${key}`);
+      }
+
       try {
         const vaultPath = getVaultPath(parentOpts.config);
         const passphrase = await getPassphrase();
@@ -668,6 +779,39 @@ export function registerVaultCommand(program: Command): void {
     .action(async () => {
       try {
         const parentOpts = program.opts();
+
+        // Sandbox: route via broker — vault.enc isn't mounted into agent
+        // containers. Falling through to listSecrets would surface
+        // "Vault file not found".
+        if (isSandboxContext()) {
+          let brokerSocket: string | undefined;
+          try {
+            const config = loadConfig(parentOpts.config);
+            brokerSocket = resolveBrokerSocketPath({
+              vaultBrokerSocket: config.vault?.broker?.socket
+                ? resolvePath(config.vault.broker.socket)
+                : undefined,
+            });
+          } catch {
+            brokerSocket = resolveBrokerSocketPath();
+          }
+          const { listViaBroker } = await import("../vault/broker/client.js");
+          const keys = await listViaBroker({ socket: brokerSocket });
+          if (keys === null) {
+            process.stderr.write(
+              `VAULT-BROKER-UNREACHABLE: cannot reach vault broker; ` +
+              `'switchroom vault list' from a sandbox requires a live broker.\n`
+            );
+            process.exit(VAULT_EXIT_BROKER_UNREACHABLE);
+          }
+          if (keys.length === 0) {
+            console.log(chalk.dim("No secrets in vault"));
+          } else {
+            for (const key of keys) console.log(key);
+          }
+          return;
+        }
+
         const vaultPath = getVaultPath(parentOpts.config);
         const passphrase = await getPassphrase();
 
@@ -693,6 +837,11 @@ export function registerVaultCommand(program: Command): void {
     .description("Remove a secret from the vault")
     .action(async (key: string) => {
       try {
+        if (isSandboxContext()) {
+          // The broker has no `remove` op — removal needs host-side
+          // vault re-encryption. Fail closed with a clear marker.
+          refuseSandboxDirectAccess(`switchroom vault remove ${key}`);
+        }
         const parentOpts = program.opts();
         const vaultPath = getVaultPath(parentOpts.config);
         const passphrase = await getPassphrase();

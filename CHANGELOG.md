@@ -11,12 +11,28 @@ without leaving Telegram.
 
 ### Phase 4 — cron in the agent container, `switchroom-cron` retired
 
-**Cron-fold-in cutover (#893).** The singleton `switchroom-cron`
-container is gone. Cron now runs in-container in every agent as a
-sibling of the gateway, delivering fires through the same
-`InboundMessage` IPC path Telegram uses (synthesized turns tagged
-`meta.source="cron"`). One less container, one less daemon, one less
-mode of failure. See `docs/scheduling.md` for the post-cutover model.
+The Phase 4 cutover landed across four PRs that gated the change
+behind a canary so a regression couldn't break operator fleets
+mid-flight:
+
+- **`dispatchAsInbound` primitive (#890)** — synthesizes a cron fire
+  as an `InboundMessage` and dispatches it through the same IPC
+  path Telegram uses, so cron-originated turns reach the agent
+  through one well-understood code path instead of `docker exec`.
+- **Phase 2 — in-agent scheduler sibling, gated/opt-in (#891).**
+  The new sidecar shipped first as opt-in; operators could enable
+  it per-agent and verify before any default change.
+- **Phase 3 — canary dual-run + mutual exclusion (#892).** The host-
+  side singleton and the in-container sidecar ran together with
+  mutual-exclusion gating so neither would double-fire — proves
+  the cutover safe under live traffic.
+- **Phase 4 — cron-fold-in cutover (#893).** The singleton
+  `switchroom-cron` container is gone. Cron now runs in-container
+  in every agent as a sibling of the gateway, delivering fires
+  through the same `InboundMessage` IPC path Telegram uses
+  (synthesized turns tagged `meta.source="cron"`). One less
+  container, one less daemon, one less mode of failure. See
+  `docs/scheduling.md` for the post-cutover model.
 
 **Robustness across the in-container scheduler.**
 
@@ -169,6 +185,55 @@ codebase carried both systemd-supervised-host and
 docker-compose-managed paths. Phase 4 makes docker mode the only
 shape; this PR deletes the systemd branches entirely. Smaller
 surface, cleaner naming.
+
+### Persistent agent home + base packages
+
+**Persistent agent `$HOME` (Layer 1) + Tier 1 base packages
+(#887).** Agents now have a stable per-agent `$HOME=/state/agent/home`
+that survives container recreation — `~/.bashrc`, `~/.config`,
+shell history, anything an interactive session writes. Plus the
+agent base image bundles the small set of Tier 1 OS packages
+(python3-pip, build-essential, etc.) the common skills depend on,
+so first-run `pip install` doesn't immediately fail with "command
+not found". Closes the v0.7-era footgun where agents lost their
+shell state on every restart.
+
+**Layer 1 follow-ups (#888).** `pip install` resolves the agent's
+`$HOME/.local/bin` correctly; agent UID resolves cleanly inside
+the container; the v0.7 install e2e test asserts the persistent
+HOME survives recreation.
+
+### v0.6 → v0.7 cutover loose ends (operator-impact bugs surfaced
+in real migrations)
+
+- **Three migration bugs (#882)** — surfaced when an operator with
+  a populated v0.6 install ran the docker cutover. Bundle fix.
+- **Two more cutover bugs (#885)** — `.mcp.json` regenerated on
+  apply (was inheriting v0.6 paths); gateway boot mutex now
+  works under the docker process tree.
+- **Docker-aware startup health probes (#886)** — no more
+  "systemctl: not found" inside agent containers. The v0.6 health
+  surface was systemd-shaped; the v0.7 probes detect docker mode
+  and use `/proc` walks instead.
+
+### Telegram surface fixes
+
+**Progress card no longer freezes at "⚠ Stalled" (#889).** When the
+streamer's keep-alive watchdog fired during a slow-but-not-stalled
+turn, the card edited to "⚠ Stalled" and never recovered even after
+the turn completed normally. Fixed.
+
+### Docs
+
+**Architecture docs refresh for post-Phase-4 (#900).** `docs/
+architecture.md` and `docs/scheduling.md` updated for the in-
+container scheduler model.
+
+**CLAUDE.md refresh for v0.7.8 sprint (#930 / #940).** Operator-
+agent runbook updated with new sidecar topology, env knobs
+(`SWITCHROOM_INLINE_SCHEDULER`, `SWITCHROOM_AGENT_SCHEDULER_*`),
+and self-restart command behavior under `/restart`, `/new`, `/reset`,
+`/update apply`.
 
 ### Other
 

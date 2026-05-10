@@ -572,7 +572,7 @@ export async function runApply(
       `entire directory, so unexpected files would be visible inside\n` +
       `the broker container. Move them out, then re-run apply.\n` +
       `Known artifacts: vault.enc, vault.enc.bak, vault.enc.tmp,\n` +
-      `vault.enc.lock (sentinel-dir from saveVault flock), and\n` +
+      `vault.enc.lock (PID-file flock from saveVault), and\n` +
       `.vault.enc.<pid>.<ms>.tmp (atomicWriteFileSync sibling-tmp).\n`,
     ));
     process.exit(6);

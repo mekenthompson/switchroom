@@ -112,13 +112,29 @@ describe("generateCompose", () => {
     expect(out).toContain("container_name: phase1c-iso-12345-alice");
     expect(out).toContain("container_name: phase1c-iso-12345-bob");
     // Prefix MUST NOT leak into compose project name, service keys,
-    // socket paths, or labels — those stay fixed on the production
-    // shape so operator tooling and runtime contracts don't drift.
+    // or socket paths — those stay fixed on the production shape so
+    // operator tooling and runtime contracts don't drift.
     expect(out).toContain("name: switchroom\n");
     expect(out).toContain("  vault-broker:");
     expect(out).toContain("  approval-kernel:");
     expect(out).toContain("/run/switchroom/broker/alice/sock");
-    expect(out).toContain('switchroom.fleet: "switchroom"');
+    // The fleet label IS parametrized (PR #939 follow-up): test
+    // fleets carry switchroom.fleet=<prefix>, so a parallel vitest
+    // fork's productionFleetIsLive() filter on switchroom.fleet=
+    // switchroom doesn't false-positive on a sibling test fleet.
+    expect(out).toContain('switchroom.fleet: "phase1c-iso-12345"');
+    expect(out).not.toContain('switchroom.fleet: "switchroom"');
+  });
+
+  it("default containerNamePrefix preserves the production fleet label", () => {
+    // Critical for productionFleetIsLive() to keep working: the
+    // default-emit path MUST still stamp `switchroom.fleet=switchroom`
+    // on every service so `docker ps --filter
+    // label=switchroom.fleet=switchroom` finds them.
+    const out = generateCompose({ config: makeConfig({ coach: {} }) });
+    // One label line per service: broker + kernel + 1 agent = 3.
+    const matches = out.match(/switchroom\.fleet: "switchroom"/g) ?? [];
+    expect(matches.length).toBe(3);
   });
 
   it("emits agents in sorted order", () => {

@@ -6421,6 +6421,120 @@ async function handleNewOrResetCommand(ctx: Context, kind: 'new' | 'reset'): Pro
 bot.command('new', async ctx => handleNewOrResetCommand(ctx, 'new'))
 bot.command('reset', async ctx => handleNewOrResetCommand(ctx, 'reset'))
 
+// /update — host update from Telegram (#919). Default = dry-run plan
+// (`switchroom update --check`); explicit `apply` triggers the real
+// thing via spawnSwitchroomDetached so the gateway can be killed
+// mid-flight by the recreate-containers step without orphaning the
+// update. Admin-gated via ADMIN_COMMAND_NAMES.
+bot.command('update', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const arg = ctx.match?.trim() || ''
+  if (arg === '' || arg === 'check' || arg === '--check') {
+    await runSwitchroomCommand(ctx, ['update', '--check'], 'update --check')
+    await switchroomReply(
+      ctx,
+      'Reply with <code>/update apply</code> to execute, or <code>/update apply --skip-images</code> to skip the image pull.',
+      { html: true },
+    )
+    return
+  }
+  // Parse `apply` (with optional --skip-images / --rebuild passthrough).
+  // `/update apply` and `/update apply --skip-images` are the supported
+  // forms; everything else surfaces a usage hint.
+  const tokens = arg.split(/\s+/)
+  if (tokens[0] !== 'apply' && tokens[0] !== '--apply') {
+    await switchroomReply(
+      ctx,
+      'Usage: <code>/update</code> (dry-run) or <code>/update apply [--skip-images] [--rebuild]</code>',
+      { html: true },
+    )
+    return
+  }
+  // Whitelist passthrough flags. Anything outside the allowlist is
+  // refused — operators should not be able to inject arbitrary CLI
+  // args via Telegram (defense in depth even though admin-gated).
+  const ALLOWED_FLAGS = new Set(['--skip-images', '--rebuild'])
+  const passthrough = tokens.slice(1)
+  for (const tok of passthrough) {
+    if (!ALLOWED_FLAGS.has(tok)) {
+      await switchroomReply(
+        ctx,
+        `Refusing to pass unknown flag: <code>${escapeHtmlForTg(tok)}</code>. ` +
+        `Allowed: <code>--skip-images</code>, <code>--rebuild</code>.`,
+        { html: true },
+      )
+      return
+    }
+  }
+  // Debounce vs concurrent self-restart commands (/restart, /new, /reset
+  // and other /update). Reading + writing the SAME restart marker means
+  // a double-tap of /update apply is rejected, AND a /restart fired
+  // mid-update is rejected (and vice versa). 15s window matches the
+  // /restart handler.
+  const existing = readRestartMarker()
+  if (existing && Date.now() - existing.ts < 15_000) {
+    await switchroomReply(
+      ctx,
+      `⏳ Self-restart already in progress (started ${Math.round(
+        (Date.now() - existing.ts) / 1000,
+      )}s ago) — ignoring duplicate.`,
+      { html: true },
+    )
+    return
+  }
+  const chatId = String(ctx.chat!.id)
+  const threadId = resolveThreadId(chatId, ctx.message?.message_thread_id)
+  // Send the ack and capture its message_id so the post-restart
+  // greeting card can edit/reply into the same message. Mirrors the
+  // /restart handler (gateway.ts ~6273) so the boot-card lookup
+  // (gateway.ts ~10393) finds chat_id + ack_message_id in the marker.
+  const ackText =
+    `🚀 <b>update started</b> — running ${[
+      '<code>switchroom update</code>',
+      ...passthrough.map((t) => `<code>${escapeHtmlForTg(t)}</code>`),
+    ].join(' ')}\n` +
+    `\nThe gateway will restart as part of the recreate step; watch ` +
+    `for the post-restart greeting card to confirm completion.`
+  let ackId: number | null = null
+  try {
+    const sent = await lockedBot.api.sendMessage(chatId, ackText, {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      ...(threadId != null ? { message_thread_id: threadId } : {}),
+    })
+    ackId = sent.message_id
+    if (HISTORY_ENABLED) {
+      try {
+        recordOutbound({
+          chat_id: chatId,
+          thread_id: threadId ?? null,
+          message_ids: [sent.message_id],
+          texts: [`🚀 update started`],
+          attachment_kinds: [],
+        })
+      } catch {}
+    }
+  } catch {}
+  writeRestartMarker({
+    chat_id: chatId,
+    thread_id: threadId ?? null,
+    ack_message_id: ackId,
+    ts: Date.now(),
+  })
+  // Reason banner for the post-restart greeting card. Without this the
+  // banner falls back to whatever the CLI's clean-shutdown marker
+  // stamped — usually 'unknown' or a docker-compose-restart string.
+  stampUserRestartReason('user: /update from chat')
+  // Unpin progress cards + clear active reactions before we die. The
+  // pinned-progress-card surface is the headline feature per CLAUDE.md;
+  // leaving one pinned across the recreate would surprise the operator.
+  await sweepBeforeSelfRestart()
+  spawnSwitchroomDetached(
+    ['update', ...passthrough],
+    notifyDetachedFailure(chatId, threadId ?? null, 'update'),
+  )
+})
+
 // ─── /approve, /deny, /pending ────────────────────────────────────────────
 // Slash-command alternatives to the inline-button approval flow (useful for
 // desktop-only sessions and power-users). Share pendingPermissions state

@@ -312,7 +312,7 @@ export function switchroomHelpText(agentName: string): string {
     `<code>/memory &lt;query&gt;</code> — search agent memory`,
     ``,
     `<b>Fleet management</b>`,
-    `<code>/update</code> — pull latest code, reconcile, restart everything`,
+    `<code>/update</code> — dry-run plan; <code>/update apply</code> — actually pull images, reconcile, restart`,
     `<code>/restart [name|all]</code> — bounce agent (drains in-flight turn by default)`,
     `<code>/version</code> — show versions + running agent health summary`,
     ``,
@@ -336,7 +336,7 @@ export function switchroomHelpText(agentName: string): string {
     `<code>/inject &lt;slash&gt;</code> — inject a Claude Code REPL slash command (e.g. <code>/inject /cost</code>; allowlisted)`,
     `<code>/commands</code> — this help`,
     ``,
-    `<i>Tip: <code>/update</code> picks up new code; <code>/restart</code> bounces a stuck agent; <code>/version</code> checks what's running.</i>`,
+    `<i>Tip: <code>/update</code> shows the plan; <code>/update apply</code> executes it; <code>/restart</code> bounces a stuck agent; <code>/version</code> checks what's running.</i>`,
   ].join("\n");
 }
 

@@ -336,6 +336,48 @@ describe("generateCompose", () => {
     expect(block).toContain("DAC_READ_SEARCH");
   });
 
+  // Operator socket — host-shell-reachable broker surface.
+  // Pre-fix v0.7 docker mode bound the broker's data + unlock sockets
+  // only inside the container; the host CLI defaulted to a v0.6 socket
+  // path that didn't exist, so every host-shell broker verb returned
+  // "broker unreachable". Now compose emits a host-bound dir mount
+  // (`~/.switchroom/broker-operator → /run/switchroom/broker/operator`)
+  // and SWITCHROOM_BROKER_OPERATOR_UID, so the broker chowns the
+  // operator socket to the host UID and the CLI can connect through
+  // the bind. Both halves of the contract are pinned here.
+  it("emits operator bind + UID env when operatorUid is set", () => {
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+      operatorUid: 1000,
+    });
+    const block = /vault-broker:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toMatch(/SWITCHROOM_BROKER_OPERATOR_UID:\s*"1000"/);
+    expect(block).toMatch(
+      /-\s+\$\{HOME\}\/\.switchroom\/broker-operator:\/run\/switchroom\/broker\/operator/,
+    );
+  });
+
+  it("omits operator bind + UID env when operatorUid is not set (back-compat)", () => {
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const block = /vault-broker:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).not.toContain("SWITCHROOM_BROKER_OPERATOR_UID");
+    expect(block).not.toContain("broker-operator:/run/switchroom/broker/operator");
+  });
+
+  it("bakes the absolute operator-bind host path under homeDir override", () => {
+    // Sudo-runs lose ${HOME} interpolation; apply.ts already passes
+    // homedir() so all bind sources come out absolute. The operator
+    // bind has to follow the same shape or it'd silently mis-resolve
+    // to /root under sudo docker compose.
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+      operatorUid: 1000,
+      homeDir: "/home/op",
+    });
+    const block = /vault-broker:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toContain("/home/op/.switchroom/broker-operator:/run/switchroom/broker/operator");
+  });
+
 });
 
 describe("agent service env (Phase 2c F2 — IPC wiring)", () => {

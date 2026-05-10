@@ -153,6 +153,12 @@ async function ensureHostMountSources(config: SwitchroomConfig): Promise<void> {
     join(home, ".switchroom", "scheduler"),
     join(home, ".switchroom", "logs"),
     join(home, ".switchroom", "compose"),
+    // Host bind for the broker's operator socket. Pre-create so docker
+    // doesn't auto-create as root-owned (which would prevent the broker
+    // from chowning the dir to the operator UID at bind time, leaving
+    // the host-shell unable to connect — the exact failure mode this
+    // mount is here to fix).
+    join(home, ".switchroom", "broker-operator"),
   ];
   for (const name of Object.keys(config.agents)) {
     dirs.push(join(home, ".switchroom", "agents", name));
@@ -368,6 +374,25 @@ export async function runApply(
 
   // ── 3. Generate compose file ──────────────────────────────────────
   const composePath = options.outPath ?? DEFAULT_COMPOSE_PATH;
+  // Capture the host operator UID so the broker can chown its operator
+  // socket at bind time. Under sudo, `process.getuid()` returns 0 (root)
+  // — what we actually want is the underlying user's UID, which sudo
+  // exposes via SUDO_UID. Fall back to getuid() when SUDO_UID is unset
+  // or unparseable. On Windows / non-POSIX, getuid is unavailable; the
+  // operator listener simply isn't bound (broker skips when env var
+  // is unset).
+  const operatorUid: number | undefined = (() => {
+    const sudoUid = process.env.SUDO_UID;
+    if (sudoUid !== undefined) {
+      const parsed = parseInt(sudoUid, 10);
+      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    }
+    if (typeof process.getuid === "function") {
+      const uid = process.getuid();
+      if (uid > 0) return uid;
+    }
+    return undefined;
+  })();
   const composeContent = generateCompose({
     config,
     buildMode: options.buildLocal ? "local" : "pull",
@@ -380,6 +405,8 @@ export async function runApply(
     // on `ConfigError: No switchroom.yaml found` when the operator's
     // config lives outside ~/.switchroom (v0.7 P0 install-path bug).
     switchroomConfigPath,
+    // Captured above — turns on the host-shell operator socket.
+    operatorUid,
   });
   await mkdir(dirname(composePath), { recursive: true });
   await writeFile(composePath, composeContent, {

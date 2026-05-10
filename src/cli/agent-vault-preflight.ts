@@ -18,6 +18,7 @@ import type { SwitchroomConfig } from "../config/schema.js";
 import { isVaultReference } from "../vault/resolver.js";
 import { statusViaBroker } from "../vault/broker/client.js";
 import type { BrokerStatus } from "../vault/broker/protocol.js";
+import { isDockerRuntime } from "../runtime-mode.js";
 
 export type VaultPreflightVerdict =
   | { kind: "ok" }
@@ -119,6 +120,34 @@ export async function checkVaultPreflightBulk(
  * Format a refusal message for a single locked-vault verdict. Exported
  * so the CLI command and tests share one source of truth for wording.
  */
+/**
+ * Build the unlock-instruction lines, runtime-aware.
+ *
+ * Pre-fix this always said "Run: switchroom vault broker unlock". That
+ * verb dispatches via the broker socket — which under v0.7 docker mode
+ * was unreachable from the host shell, so following the instruction
+ * just looped back to the same "broker unreachable" error. Now: if the
+ * broker is reachable (locked path), the verb works the same in both
+ * runtimes. If the broker is unreachable (the failure mode that
+ * historically pointed at this message), we surface the docker-mode
+ * paths the architecture actually supports — Telegram /vault unlock
+ * or `docker exec` into the broker container.
+ */
+function unlockInstructionLines(reachable: boolean): string[] {
+  if (reachable) {
+    return ["  Run: switchroom vault broker unlock"];
+  }
+  if (isDockerRuntime()) {
+    return [
+      "  Broker container appears down. Bring the project up first:",
+      "    docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d",
+      "  Then unlock from any agent's Telegram chat (`/vault unlock`) or via:",
+      "    docker exec -it switchroom-vault-broker switchroom vault broker unlock",
+    ];
+  }
+  return ["  Run: switchroom vault broker unlock"];
+}
+
 export function formatLockedRefusal(
   agentName: string,
   verdict: Extract<VaultPreflightVerdict, { kind: "locked" }>,
@@ -129,7 +158,7 @@ export function formatLockedRefusal(
   return [
     head,
     "",
-    "  Run: switchroom vault broker unlock",
+    ...unlockInstructionLines(verdict.reachable),
     `  Then retry: switchroom agent restart ${agentName}`,
     "",
     `  To restart anyway (will hard-fail with cleaner error): switchroom agent restart ${agentName} --force-locked`,
@@ -147,7 +176,7 @@ export function formatLockedRefusalBulk(
     head,
     ...blocked.map((b) => `    ${b.agent}`),
     "",
-    "  Run: switchroom vault broker unlock",
+    ...unlockInstructionLines(reachable),
     "  Then retry the restart.",
     "",
     "  To restart anyway (will hard-fail with cleaner error): re-run with --force-locked",

@@ -37,9 +37,55 @@ import {
   type OkMintGrantResponse,
 } from "./protocol.js";
 import type { VaultEntry } from "../vault.js";
+import { unlockSocketFor } from "./peercred.js";
+import { isDockerRuntime } from "../../runtime-mode.js";
 
 const DEFAULT_TIMEOUT_MS = 2000;
-const DEFAULT_SOCKET_PATH = join(homedir(), ".switchroom", "vault-broker.sock");
+/**
+ * v0.6 legacy host-side socket path. Pre-v0.7 the broker daemon ran
+ * directly on the host as a systemd-user unit and bound its data socket
+ * here. v0.7 moved the broker into a Docker container; the host shell
+ * reaches it through the operator socket at OPERATOR_SOCKET_PATH below.
+ *
+ * Kept as a fallback for v0.6 installs and for any operator who has
+ * symlinked the operator socket here intentionally.
+ */
+const LEGACY_SOCKET_PATH = join(homedir(), ".switchroom", "vault-broker.sock");
+/**
+ * v0.7 operator socket — bound by the broker container at
+ * `/run/switchroom/broker/operator/sock` and exposed on the host via
+ * compose's `${HOME}/.switchroom/broker-operator:/run/switchroom/broker/
+ * operator` bind mount. The CLI prefers this path under Docker mode.
+ */
+const OPERATOR_SOCKET_PATH = join(homedir(), ".switchroom", "broker-operator", "sock");
+
+/**
+ * Pick the right default broker socket for the current runtime.
+ *
+ * Under Docker mode (v0.7+), the operator socket inside
+ * `~/.switchroom/broker-operator/` is what the host shell can reach.
+ * Under systemd mode (v0.6), the legacy `~/.switchroom/vault-broker.sock`
+ * is bound directly by the host-side broker daemon.
+ *
+ * If we're in Docker mode but the operator socket isn't there yet
+ * (broker container not yet recreated post-`switchroom apply`), fall
+ * back to the legacy path so the resulting "unreachable" error message
+ * points operators at a path they actually expect rather than at the
+ * dummy operator path.
+ */
+function defaultBrokerSocketPath(): string {
+  if (isDockerRuntime()) {
+    if (fs.existsSync(OPERATOR_SOCKET_PATH)) return OPERATOR_SOCKET_PATH;
+    // Docker mode but no operator socket yet — try operator path anyway
+    // (so the connect error names the path operators should see). Falls
+    // through to legacy below only if the operator path also isn't
+    // configured at all (extremely unusual).
+    return OPERATOR_SOCKET_PATH;
+  }
+  return LEGACY_SOCKET_PATH;
+}
+
+const DEFAULT_SOCKET_PATH = LEGACY_SOCKET_PATH; // preserved for tests / back-compat
 
 export interface BrokerClientOpts {
   /** Override socket path */
@@ -293,7 +339,9 @@ export function resolveBrokerSocketPath(opts?: BrokerClientOpts): string {
   const env = process.env.SWITCHROOM_VAULT_BROKER_SOCK;
   if (env) return env;
   if (opts?.vaultBrokerSocket) return opts.vaultBrokerSocket;
-  return DEFAULT_SOCKET_PATH;
+  // Runtime-aware default — operator socket under Docker, legacy host
+  // socket under systemd. See `defaultBrokerSocketPath` for the rules.
+  return defaultBrokerSocketPath();
 }
 
 /**
@@ -498,8 +546,11 @@ export async function unlockViaBroker(
   opts?: BrokerClientOpts,
 ): Promise<UnlockResult> {
   const dataSocketPath = resolveBrokerSocketPath(opts);
-  // Unlock socket is named <data-socket>.replace(/.sock$/, ".unlock.sock")
-  const unlockSocketPath = dataSocketPath.replace(/\.sock$/, ".unlock.sock");
+  // Server + client share `unlockSocketFor` so the v0.7 subdir-shape
+  // operator socket (/.../operator/sock → /.../operator/unlock) and
+  // the v0.6 flat-shape legacy socket (foo.sock → foo.unlock.sock)
+  // both pair correctly.
+  const unlockSocketPath = unlockSocketFor(dataSocketPath);
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
   return new Promise<UnlockResult>((resolve) => {

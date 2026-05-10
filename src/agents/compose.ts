@@ -30,6 +30,7 @@
 import { createHash } from "node:crypto";
 import type { SwitchroomConfig, AgentConfig } from "../config/schema.js";
 import { resolveAgentConfig } from "../config/merge.js";
+import { isReservedAgentName } from "../vault/broker/peercred.js";
 
 /** UID range reserved for agent containers. 999 slots — practical fleet limit. */
 export const AGENT_UID_MIN = 10001;
@@ -85,6 +86,17 @@ export function resolveResourceDefaults(
  * never shift (which would require a chown sweep over their state).
  */
 export function allocateAgentUid(name: string): number {
+  // Names reserved by other identity kinds (today: "operator", used for
+  // the host-shell broker socket) cannot be used as agent names.
+  // Refusing here at allocation rather than letting a same-named agent
+  // silently collide with the operator socket — which would forge an
+  // identity from the broker's POV.
+  if (isReservedAgentName(name)) {
+    throw new Error(
+      `agent name '${name}' is reserved by switchroom for another identity kind ` +
+      `(see vault/broker/peercred.ts:RESERVED_AGENT_NAMES). Pick a different name.`,
+    );
+  }
   const hash = createHash("sha256").update(name).digest();
   const u32 = hash.readUInt32BE(0);
   const range = AGENT_UID_MAX - AGENT_UID_MIN + 1;
@@ -141,6 +153,22 @@ export interface ComposeGeneratorOptions {
    * mount (back-compat with pre-fix generated compose).
    */
   switchroomConfigPath?: string;
+  /**
+   * Host operator UID — baked into the broker service so it knows which
+   * UID to chown the operator socket+dir to at bind time. The operator
+   * socket lives at `/run/switchroom/broker/operator/sock` inside the
+   * broker container, host-bind-mounted at `${homeDir}/.switchroom/
+   * broker-operator`. Without the chown, host-shell connects fail
+   * because the socket is owned by root (the broker container's UID 0)
+   * and the host operator runs as their own UID.
+   *
+   * Capture at apply time via `process.getuid()` (or `SUDO_UID` when
+   * apply runs under sudo). Optional for back-compat: when omitted,
+   * the broker skips the operator listener entirely and host-shell CLI
+   * verbs continue to fail with "broker unreachable" — the same as
+   * pre-fix behavior. Setting it is what turns the host-shell path on.
+   */
+  operatorUid?: number;
 }
 
 /** Resolve the image ref for one of the four service images. */
@@ -321,9 +349,31 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // the operator's HOME on the host.
   lines.push(`      SWITCHROOM_VAULT_PATH: /state/vault.enc`);
   lines.push(`      SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH: /state/vault-auto-unlock`);
+  // Operator UID — when set, the broker binds an additional listener at
+  // /run/switchroom/broker/operator/sock and chowns it to this UID so
+  // the host operator's shell can talk to the broker through the bind
+  // mount below. See server.bindOperatorListener for the runtime side.
+  if (opts.operatorUid !== undefined) {
+    lines.push(`      SWITCHROOM_BROKER_OPERATOR_UID: "${opts.operatorUid}"`);
+  }
   lines.push(`    volumes:`);
   for (const a of describeAgents(config)) {
     lines.push(`      - broker-${a.name}-sock:/run/switchroom/broker/${a.name}`);
+  }
+  // Operator listener bind — only emitted when operatorUid is set so a
+  // legacy install (no operatorUid → no operator listener) doesn't get
+  // an unused bind that just confuses operators staring at the compose
+  // file. Both ends of the path-as-identity contract live here:
+  //   host: ${homePrefix}/.switchroom/broker-operator
+  //   container: /run/switchroom/broker/operator
+  // peercred.socketPathToIdentity recognises the container path and
+  // returns {kind: "operator"}; the broker chowns the socket to
+  // operatorUid at bind time. The dir is auto-created by docker on
+  // bind-mount setup; no host-side mkdir required.
+  if (opts.operatorUid !== undefined) {
+    lines.push(
+      `      - ${homePrefix}/.switchroom/broker-operator:/run/switchroom/broker/operator`,
+    );
   }
   if (switchroomConfigPath) {
     lines.push(`      - ${switchroomConfigPath}:/state/config/switchroom.yaml:ro`);

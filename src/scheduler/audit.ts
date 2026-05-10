@@ -1,33 +1,18 @@
 /**
- * Scheduler audit log — scheduler.db.
+ * Scheduler audit log — append-only JSONL written by the in-agent
+ * scheduler at /state/agent/scheduler.jsonl. Each row is a
+ * `DispatchResult` (see ./dispatch.ts). Operators can `tail -f` the
+ * file; the at-least-once replay logic on agent-scheduler boot scans
+ * recent rows to determine which scheduled fires already ran.
  *
- * Schema (frozen for Phase 1a, enforced by tests):
- *   columns: when_ms, agent, schedule_index, prompt_key, exit_code, output_summary
- *   indices: (agent, when_ms)
- *
- * Implementation note: the production scheduler container runs Node and
- * will be wired against better-sqlite3 in Phase 1b's image build; for
- * Phase 1a we ship the storage as an injectable interface so that
- * (a) vitest tests don't drag a native dep into the test toolchain, and
- * (b) the SQL DDL is defined exactly once, here, ready for Phase 1b to
- * lift verbatim into a Database.exec() call.
+ * Pre-Phase-4 the singleton scheduler also wrote a SQLite audit
+ * (audit-sqlite.ts + SCHEDULER_DB_DDL) — both have been removed
+ * now that cron runs in-container.
  */
 
 import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { DispatchResult } from "./dispatch.js";
-
-export const SCHEDULER_DB_DDL = `
-CREATE TABLE IF NOT EXISTS fires (
-  when_ms        INTEGER NOT NULL,
-  agent          TEXT NOT NULL,
-  schedule_index INTEGER NOT NULL,
-  prompt_key     TEXT NOT NULL,
-  exit_code      INTEGER NOT NULL,
-  output_summary TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS fires_by_agent ON fires(agent, when_ms);
-`.trim();
 
 export interface AuditSink {
   recordFire(result: DispatchResult): void;

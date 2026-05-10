@@ -184,16 +184,6 @@ interface AgentServiceData {
   resources: ResourceDefaults;
   /** Capability extras the operator requested AND we stripped. */
   strippedCaps: string[];
-  /**
-   * Phase 3 canary flag. True when the cascade-resolved
-   * `experimental.inline_scheduler` is true — compose emits
-   * SWITCHROOM_INLINE_SCHEDULER=1 in the agent container's env so
-   * start.sh starts the in-container scheduler sibling, AND the
-   * singleton scheduler's collectScheduleEntries skips this agent
-   * (mutual exclusion: we never dual-fire). False (default) keeps
-   * the agent on the singleton dispatcher.
-   */
-  inlineScheduler: boolean;
 }
 
 /** Per-agent metadata exposed to doctor checks (and tests). */
@@ -206,8 +196,8 @@ export function describeAgents(config: SwitchroomConfig): AgentServiceData[] {
     const uid = allocateAgentUid(name);
     const resources = resolveResourceDefaults(name, profile);
     const strippedCaps = readStrippedCaps(agent);
-    const inlineScheduler = resolved.experimental?.inline_scheduler === true;
-    out.push({ name, uid, profile, resources, strippedCaps, inlineScheduler });
+    out.push({ name, uid, profile, resources, strippedCaps });
+    void resolved;
   }
   return out;
 }
@@ -374,42 +364,12 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`      - ${homePrefix}/.switchroom/approvals:/state/approvals`);
   lines.push(``);
 
-  // ── switchroom-cron (singleton scheduler) ──────────────────────────
-  lines.push(`  switchroom-cron:`);
-  emitImageOrBuild(lines, "scheduler", imageTag, buildMode, buildContext);
-  lines.push(`    container_name: switchroom-cron`);
-  lines.push(`    labels:`);
-  lines.push(`      switchroom.role: "scheduler"`);
-  lines.push(`      switchroom.fleet: "switchroom"`);
-  lines.push(`    restart: unless-stopped`);
-  lines.push(`    user: "0:0"`);
-  lines.push(`    stop_grace_period: 15s`);
-  lines.push(`    security_opt:`);
-  lines.push(`      - "no-new-privileges:true"`);
-  lines.push(`    cap_drop:`);
-  lines.push(`      - "ALL"`);
-  lines.push(`    volumes:`);
-  // docker.sock mounted read-write: scheduler needs `docker exec`
-  // which is a write op against the daemon API. Read-only would
-  // silently break dispatch with cryptic permission errors.
-  lines.push(`      - /var/run/docker.sock:/var/run/docker.sock`);
-  if (switchroomConfigPath) {
-    // Bind-mount the resolved config file directly so the scheduler
-    // boots regardless of where the operator keeps switchroom.yaml.
-    // Without this, scheduler only finds the file when it lives under
-    // ~/.switchroom/ — same install-path bug that bit the broker.
-    lines.push(`      - ${switchroomConfigPath}:/state/config/switchroom.yaml:ro`);
-  } else {
-    lines.push(`      - ${homePrefix}/.switchroom:/state/config:ro`);
-  }
-  lines.push(`      - ${homePrefix}/.switchroom/scheduler:/state/scheduler`);
-  lines.push(`    environment:`);
-  lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);
-  // SQLite audit sink for scheduler fires (Phase 1b — wires
-  // SqliteAuditSink that better-sqlite3 was already installed for).
-  // Without this env var the scheduler falls back to JsonlAuditSink.
-  lines.push(`      SWITCHROOM_SCHEDULER_DB_PATH: /state/scheduler/scheduler.db`);
-  lines.push(``);
+  // The singleton switchroom-cron service was removed in Phase 4 of
+  // the cron-fold-in. Cron now runs in-container as a sibling of the
+  // gateway in every agent (see profiles/_base/start.sh.hbs's third
+  // supervised sidecar and src/agent-scheduler/). Fires arrive in the
+  // agent transcript through the same InboundMessage path Telegram
+  // uses, tagged meta.source="cron".
 
   // ── per-agent services ─────────────────────────────────────────────
   for (const a of describeAgents(config)) {
@@ -547,17 +507,6 @@ function emitAgentService(
   // Same env+mount pattern broker/kernel/scheduler already use.
   if (switchroomConfigPath) {
     env.SWITCHROOM_CONFIG = "/state/config/switchroom.yaml";
-  }
-  // Phase 3 cron-fold-in canary. When experimental.inline_scheduler is
-  // true on this agent, set the env var so start.sh's third supervised
-  // sidecar (the agent-scheduler bundle, gated by the same env var)
-  // starts on boot. Mutual-exclusion with the singleton is enforced on
-  // the OTHER side: src/scheduler/index.ts:main() calls
-  // `filterForSingleton(collectScheduleEntries(config), config)` to
-  // drop entries for inline-scheduled agents before registering its
-  // cron loop, so we never dual-fire.
-  if (a.inlineScheduler) {
-    env.SWITCHROOM_INLINE_SCHEDULER = "1";
   }
   for (const k of Object.keys(env).sort()) {
     lines.push(`      ${k}: ${JSON.stringify(env[k])}`);

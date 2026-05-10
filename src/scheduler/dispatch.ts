@@ -1,26 +1,24 @@
 /**
  * Scheduler dispatch logic — pure-function core, mockable for tests.
  *
- * Phase 1a slice. Reads the cascade-resolved config, walks every agent's
- * `schedule[]`, registers each entry with node-cron against the same
- * cron expressions cronToOnCalendar parses today, and on fire dispatches
- * via `docker exec switchroom-<name> claude -p "<prompt>"`.
+ * Post-cutover (Phase 4): cron runs in-container in every agent as a
+ * sibling of the gateway. This module exports two primitives:
  *
- * The container name MUST match `container_name:` set by compose.ts —
- * `switchroom-<agent>` — not the compose service name `agent-<agent>`.
- * `docker exec` resolves against container names, not service names.
+ *   - `collectScheduleEntries(config)` — walk the cascade-resolved
+ *     config and return a flat (agent, schedule_index) list. The
+ *     in-agent scheduler then filters to its own agent name.
+ *   - `dispatchAsInbound(entry, opts, dispatcher)` — synthesize the
+ *     `InboundMessage` envelope the gateway forwards to the bridge,
+ *     tagged `meta.source="cron"`.
  *
- * Identity boundary: the scheduler container is privileged (it mounts
- * /var/run/docker.sock to invoke `docker exec`) but does NOT see secret
- * values. The agent resolves its own vault refs through the broker
- * socket inside its container. The scheduler only fires the dispatch
- * and audits the (when, agent, schedule_index, prompt_key, exit_code,
- * output_summary) row to scheduler.db.
+ * The host-side `docker exec` dispatcher (`dispatchEntry`) and the
+ * dual-run canary helpers (`inlineScheduledAgents` / `filterForSingleton`)
+ * were removed in Phase 4 along with the singleton switchroom-cron
+ * container. See `git log --oneline src/scheduler/` for the deletion
+ * commit.
  */
 
-import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { resolveAgentConfig } from "../config/merge.js";
 import type { ScheduleEntry, SwitchroomConfig } from "../config/schema.js";
 
 export interface SchedulerEntry {
@@ -30,53 +28,6 @@ export interface SchedulerEntry {
   prompt: string;
   /** SHA-256 prefix of prompt — stable, non-reversible audit key. */
   promptKey: string;
-}
-
-/**
- * Phase 3 cron-fold-in helper. Returns the set of agent names whose
- * cascade-resolved `experimental.inline_scheduler` is true — these
- * agents run an in-container scheduler sibling and the singleton
- * MUST NOT also fire for them (mutual exclusion: never dual-fire).
- *
- * Pure function: no IO. The cascade is resolved here (defaults →
- * profile → per-agent) so callers don't need to pre-merge.
- */
-export function inlineScheduledAgents(
-  config: SwitchroomConfig,
-): Set<string> {
-  const out = new Set<string>();
-  const agentNames = Object.keys(config.agents);
-  for (const name of agentNames) {
-    const agent = config.agents[name];
-    if (!agent) continue;
-    const resolved = resolveAgentConfig(config.defaults, config.profiles, agent);
-    if (resolved.experimental?.inline_scheduler === true) {
-      out.add(name);
-    }
-  }
-  return out;
-}
-
-/**
- * Filter to only the entries the singleton scheduler should fire.
- * Drops entries for any agent whose cascade-resolved
- * `experimental.inline_scheduler` is true — those fire from the
- * in-container scheduler sibling instead. Phase 3 canary +
- * dual-run safety net: prevents double-fires while one agent at
- * a time gets flipped to inline-mode.
- *
- * Pure function: deterministic, no IO. The in-agent scheduler does
- * NOT need to call this — start.sh only spawns it for agents whose
- * compose env carries SWITCHROOM_INLINE_SCHEDULER=1, which is the
- * same gate.
- */
-export function filterForSingleton(
-  entries: SchedulerEntry[],
-  config: SwitchroomConfig,
-): SchedulerEntry[] {
-  const inline = inlineScheduledAgents(config);
-  if (inline.size === 0) return entries;
-  return entries.filter((e) => !inline.has(e.agent));
 }
 
 /**
@@ -107,76 +58,31 @@ export function collectScheduleEntries(
   return out;
 }
 
+/**
+ * Audit row written to scheduler.jsonl on every fire. Same shape since
+ * Phase 1; `exitCode` and `outputSummary` semantics shifted in Phase 4
+ * when the singleton (`docker exec claude -p`) was retired:
+ *   - `exitCode`: 0 when the inbound was accepted by the local gateway
+ *     socket; -1 when the gateway wasn't connected, the wire write
+ *     failed, or the dispatcher threw.
+ *   - `outputSummary`: short status string (e.g. "delivered to bridge
+ *     via gateway", "no agent client connected"). Capped at 200 chars.
+ */
 export interface DispatchResult {
   agent: string;
   scheduleIndex: number;
   promptKey: string;
   exitCode: number;
-  /** Trimmed stdout/stderr — first 200 chars only, for the audit row. */
   outputSummary: string;
   startedAt: number;
   finishedAt: number;
 }
 
-export type ExecRunner = (
-  args: string[],
-  stdin: string,
-) => Promise<{ exitCode: number; output: string }>;
-
-/**
- * Default exec runner — shells `docker exec -i switchroom-<name> claude -p`,
- * piping the prompt on stdin (avoids embedding the prompt in argv where
- * it'd show up in `ps` and shell history). Tests inject a mock.
- */
-export const defaultExecRunner: ExecRunner = (args, stdin) =>
-  new Promise((resolveP) => {
-    const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
-    let buf = "";
-    child.stdout.on("data", (c) => { buf += c.toString("utf8"); });
-    child.stderr.on("data", (c) => { buf += c.toString("utf8"); });
-    child.on("close", (code) => {
-      resolveP({ exitCode: code ?? -1, output: buf });
-    });
-    child.stdin.write(stdin);
-    child.stdin.end();
-  });
-
-/**
- * Dispatch a single schedule entry. Pure-ish: takes an injectable runner
- * so tests can drive the full path without a live docker daemon.
- */
-export async function dispatchEntry(
-  entry: SchedulerEntry,
-  runner: ExecRunner = defaultExecRunner,
-): Promise<DispatchResult> {
-  const startedAt = Date.now();
-  // Must match compose.ts `container_name: switchroom-<agent>`. The
-  // compose service name (`agent-<name>`) is not what `docker exec`
-  // resolves against — it resolves against container names.
-  const containerName = `switchroom-${entry.agent}`;
-  // -i: keep stdin open so we can pipe the prompt in.
-  // claude -p: print mode, single prompt, exits when done.
-  const args = ["exec", "-i", containerName, "claude", "-p"];
-  const { exitCode, output } = await runner(args, entry.prompt);
-  const finishedAt = Date.now();
-  return {
-    agent: entry.agent,
-    scheduleIndex: entry.scheduleIndex,
-    promptKey: entry.promptKey,
-    exitCode,
-    outputSummary: output.trim().slice(0, 200),
-    startedAt,
-    finishedAt,
-  };
-}
-
 // ───────────────────────────────────────────────────────────────────────
-//  Phase 1: in-band cron synthesis primitive (no behaviour change yet)
+//  In-band cron synthesis primitive
 // ───────────────────────────────────────────────────────────────────────
 //
-// The end-state for cron scheduling (see issue tracking the scheduler
-// fold-in work) is to retire the `switchroom-cron` singleton container
-// and run cron as a sibling of the gateway inside each agent container.
+// Cron runs in-container in every agent as a sibling of the gateway.
 // Fires are delivered to the agent as synthesized `InboundMessage`s
 // flowing the same path as Telegram messages and button-callback
 // injections (gateway.ts:5217, :8796, :9226), discriminated by
@@ -184,9 +90,6 @@ export async function dispatchEntry(
 // agent transcript and Hindsight see cron fires as ordinary turns
 // tagged with `<channel source="cron">`, rather than as out-of-band
 // one-shot `claude -p` runs that vanish from session history.
-//
-// `dispatchAsInbound` is the synthesis primitive. Phase 1 only adds it
-// — nothing calls it yet. Phase 2 wires the in-agent scheduler.
 
 /**
  * InboundMessage envelope, mirrored structurally from

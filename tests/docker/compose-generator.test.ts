@@ -78,7 +78,10 @@ describe("generateCompose", () => {
     const out = generateCompose({ config: makeConfig({}) });
     expect(out).toContain("vault-broker:");
     expect(out).toContain("approval-kernel:");
-    expect(out).toContain("switchroom-cron:");
+    // The switchroom-cron singleton was removed in Phase 4 (cron-fold-in
+    // cutover) — every agent runs cron in-container now. The compose
+    // file should NOT emit a singleton scheduler service.
+    expect(out).not.toContain("switchroom-cron");
     expect(out).not.toContain("agent-");
   });
 
@@ -170,13 +173,13 @@ describe("generateCompose", () => {
     expect(matches.length).toBe(2);
   });
 
-  it("emits scheduler service with docker.sock mount (read-write)", () => {
-    const out = generateCompose({ config: makeConfig({}) });
-    expect(out).toContain("switchroom-cron:");
-    // RW, NOT :ro — `docker exec` is a write op against the daemon
-    // API. A :ro bind silently breaks dispatch.
-    expect(out).toContain("/var/run/docker.sock:/var/run/docker.sock\n");
-    expect(out).not.toContain("/var/run/docker.sock:/var/run/docker.sock:ro");
+  it("does NOT emit a singleton scheduler service or docker.sock mount (Phase 4 cutover)", () => {
+    const out = generateCompose({ config: makeConfig({ alice: {} }) });
+    expect(out).not.toContain("switchroom-cron");
+    // No service mounts the docker daemon socket — the singleton was
+    // the only thing that needed it (`docker exec claude -p`). Every
+    // agent now runs cron in-container against the gateway's IPC.
+    expect(out).not.toContain("/var/run/docker.sock");
   });
 
   it("emits per-agent named volumes for broker AND kernel", () => {
@@ -213,7 +216,10 @@ describe("generateCompose", () => {
     // for the rationale (#v0.7.1 vault file path fix).
     expect(out).toContain("${HOME}/.switchroom/vault.enc:/state/vault.enc:ro");
     expect(out).toContain("${HOME}/.switchroom/approvals:/state/approvals");
-    expect(out).toContain("${HOME}/.switchroom:/state/config:ro");
+    // The legacy `~/.switchroom:/state/config:ro` directory mount used
+    // to be emitted on the singleton scheduler when no explicit
+    // switchroomConfigPath was given. Phase 4 removed that singleton.
+    expect(out).not.toContain("${HOME}/.switchroom:/state/config:ro");
     expect(out).toContain("${HOME}/.switchroom/agents/a:/state/agent");
     // Same-path dual mount for agents — see compose.ts for the rationale
     // (start.sh bakes host paths at scaffold time, so the same paths
@@ -231,7 +237,9 @@ describe("generateCompose", () => {
     });
     expect(out).toContain("/home/op/.switchroom/vault.enc:/state/vault.enc:ro");
     expect(out).toContain("/home/op/.switchroom/approvals:/state/approvals");
-    expect(out).toContain("/home/op/.switchroom:/state/config:ro");
+    // The legacy scheduler-only `:/state/config:ro` directory mount
+    // is gone since Phase 4.
+    expect(out).not.toContain("/home/op/.switchroom:/state/config:ro");
     // Dual mount: canonical /state/agent path AND same-path host path.
     expect(out).toContain("/home/op/.switchroom/agents/a:/state/agent");
     expect(out).toContain("/home/op/.switchroom/agents/a:/home/op/.switchroom/agents/a");
@@ -265,7 +273,7 @@ describe("generateCompose", () => {
     }
   });
 
-  it("emits no-new-privileges + cap_drop ALL on broker, kernel, scheduler", () => {
+  it("emits no-new-privileges + cap_drop ALL on broker and kernel", () => {
     const out = generateCompose({ config: makeConfig({}) });
     // Split into top-level service blocks.
     const blocks: Record<string, string> = {};
@@ -274,7 +282,7 @@ describe("generateCompose", () => {
     while ((m = re.exec(out)) !== null) {
       blocks[m[1]!] = m[0]!;
     }
-    for (const svc of ["vault-broker", "approval-kernel", "switchroom-cron"]) {
+    for (const svc of ["vault-broker", "approval-kernel"]) {
       const block = blocks[svc] ?? "";
       expect(block, `${svc} block found`).toContain(`${svc}:`);
       expect(block, `${svc} security_opt`).toContain("no-new-privileges:true");
@@ -315,11 +323,6 @@ describe("generateCompose", () => {
     expect(block).toContain("FOWNER");
   });
 
-  it("scheduler does NOT re-add any caps", () => {
-    const out = generateCompose({ config: makeConfig({}) });
-    const block = /switchroom-cron:[\s\S]*?(?=\nvolumes:|\n  [a-z])/.exec(out)?.[0] ?? "";
-    expect(block).not.toContain("cap_add");
-  });
 });
 
 describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
@@ -452,13 +455,12 @@ describe("agent service network (v0.7.4 — host networking)", () => {
     }
   });
 
-  it("does NOT emit network_mode: host on broker / kernel / scheduler", () => {
-    // Only agents need host networking — the singletons talk via UDS
-    // (broker, kernel) or to the docker daemon socket (scheduler).
+  it("does NOT emit network_mode: host on broker / kernel", () => {
+    // Only agents need host networking — the singletons talk via UDS.
     const out = generateCompose({
       config: makeConfig({ a: {} }),
     });
-    for (const svc of ["vault-broker", "approval-kernel", "switchroom-cron"]) {
+    for (const svc of ["vault-broker", "approval-kernel"]) {
       const re = new RegExp(`  ${svc}:[\\s\\S]*?(?=\\n  [a-z]|\\nvolumes:)`);
       const block = re.exec(out)?.[0] ?? "";
       expect(block, `${svc} block`).not.toMatch(/network_mode:\s*host/);
@@ -497,13 +499,13 @@ describe("agent service tty (v0.7.4 — claude interactive mode)", () => {
     }
   });
 
-  it("does NOT emit tty / stdin_open on broker / kernel / scheduler", () => {
+  it("does NOT emit tty / stdin_open on broker / kernel", () => {
     // Singletons run a long-lived server loop with no stdin reads;
     // forcing a TTY would just waste a fd.
     const out = generateCompose({
       config: makeConfig({ a: {} }),
     });
-    for (const svc of ["vault-broker", "approval-kernel", "switchroom-cron"]) {
+    for (const svc of ["vault-broker", "approval-kernel"]) {
       const re = new RegExp(`  ${svc}:[\\s\\S]*?(?=\\n  [a-z]|\\nvolumes:)`);
       const block = re.exec(out)?.[0] ?? "";
       expect(block, `${svc} block`).not.toMatch(/^\s+tty:\s*true/m);
@@ -545,18 +547,11 @@ describe("generateCompose — switchroomConfigPath bind-mount (v0.7 P0 fix)", ()
     expect(block).toMatch(/SWITCHROOM_CONFIG:\s*\/state\/config\/switchroom\.yaml/);
   });
 
-  it("bind-mounts switchroom.yaml as a file on the scheduler (not the dir)", () => {
-    const out = generateCompose({
-      config: makeConfig({ a: {} }),
-      switchroomConfigPath: CONFIG,
-    });
-    const block = blockFor(out, "switchroom-cron");
-    expect(block).toContain(`${CONFIG}:/state/config/switchroom.yaml:ro`);
-    // The legacy directory mount must be replaced when the explicit
-    // file path is provided, otherwise both compete for /state/config.
-    expect(block).not.toMatch(/\.switchroom:\/state\/config:ro/);
-    expect(block).toMatch(/SWITCHROOM_CONFIG:\s*\/state\/config\/switchroom\.yaml/);
-  });
+  // Phase 4 cron-fold-in cutover removed the singleton scheduler
+  // service from compose, so the per-scheduler bind-mount + env-var
+  // assertions that lived here have been retired with it. Per-agent
+  // services bind-mount switchroom.yaml read-only at the same path —
+  // see the agent-service env tests below.
 
   it("back-compat: omitting switchroomConfigPath leaves broker/kernel without the mount", () => {
     const out = generateCompose({ config: makeConfig({ a: {} }) });
@@ -564,9 +559,6 @@ describe("generateCompose — switchroomConfigPath bind-mount (v0.7 P0 fix)", ()
     expect(broker).not.toContain(":/state/config/switchroom.yaml");
     const kernel = blockFor(out, "approval-kernel");
     expect(kernel).not.toContain(":/state/config/switchroom.yaml");
-    // Scheduler keeps its legacy directory mount in back-compat mode.
-    const sched = blockFor(out, "switchroom-cron");
-    expect(sched).toMatch(/\.switchroom:\/state\/config:ro/);
   });
 
   it("bind-mounts switchroom.yaml + sets SWITCHROOM_CONFIG on each agent (v0.7.6)", () => {
@@ -606,8 +598,10 @@ describe("generateCompose — buildMode (pull vs local)", () => {
     const out = generateCompose({ config: makeConfig({ alice: {} }) });
     expect(out).toContain("image: ghcr.io/switchroom/switchroom-broker:latest");
     expect(out).toContain("image: ghcr.io/switchroom/switchroom-kernel:latest");
-    expect(out).toContain("image: ghcr.io/switchroom/switchroom-scheduler:latest");
     expect(out).toContain("image: ghcr.io/switchroom/switchroom-agent:latest");
+    // Phase 4 cron-fold-in cutover: the singleton scheduler image was
+    // retired with the singleton service.
+    expect(out).not.toContain("switchroom-scheduler:");
     expect(out).not.toContain("build:");
     expect(out).not.toMatch(/dockerfile: docker\/Dockerfile/);
   });
@@ -620,9 +614,11 @@ describe("generateCompose — buildMode (pull vs local)", () => {
       buildContext: ctx,
     });
     expect(out).not.toMatch(/image: ghcr\.io\//);
-    for (const df of ["agent", "broker", "kernel", "scheduler"]) {
+    // Three Dockerfiles after Phase 4 — agent, broker, kernel.
+    for (const df of ["agent", "broker", "kernel"]) {
       expect(out).toContain(`dockerfile: docker/Dockerfile.${df}`);
     }
+    expect(out).not.toContain("Dockerfile.scheduler");
     expect(out).toContain(`context: ${ctx}`);
     expect(out.match(/dockerfile: docker\/Dockerfile\.agent/g)?.length).toBe(1);
   });
@@ -657,47 +653,26 @@ describe("describeAgents", () => {
   });
 });
 
-describe("Phase 3: inline_scheduler env emission", () => {
-  /**
-   * Build a config with a per-agent experimental.inline_scheduler flag.
-   * The makeConfig helper above doesn't model experimental, so we
-   * splice in the field after construction.
-   */
-  function configWithInline(agents: Record<string, boolean>): SwitchroomConfig {
-    const base = makeConfig(
-      Object.fromEntries(Object.keys(agents).map((n) => [n, {}])),
-    );
-    for (const [name, inline] of Object.entries(agents)) {
-      const a = base.agents[name] as unknown as Record<string, unknown>;
-      if (inline) a.experimental = { inline_scheduler: true };
-    }
-    return base;
-  }
+describe("Phase 4 cutover: agent-scheduler is default-on", () => {
+  // Phase 3 used `experimental.inline_scheduler: true` + a per-agent
+  // SWITCHROOM_INLINE_SCHEDULER=1 env emission to canary the in-agent
+  // scheduler one agent at a time. Phase 4 removed both — the start.sh
+  // sidecar starts unconditionally (gated only by the bundle existing
+  // at /opt/switchroom/agent-scheduler/index.js + bun on PATH), and
+  // operators can disable per-container by setting the env var to "0".
 
-  it("emits SWITCHROOM_INLINE_SCHEDULER=1 ONLY for agents with the flag", () => {
+  it("does not emit SWITCHROOM_INLINE_SCHEDULER (no longer per-agent config)", () => {
     const out = generateCompose({
-      config: configWithInline({ alice: true, bob: false }),
-    });
-    // Both agent service blocks exist — split so we can inspect each in
-    // isolation. The order is alphabetical (allocateAgentUid + sort).
-    const aliceBlock = out.split("agent-bob:")[0]!;
-    const bobBlock = out.split("agent-bob:")[1]!;
-    expect(aliceBlock).toContain('SWITCHROOM_INLINE_SCHEDULER: "1"');
-    expect(bobBlock).not.toContain("SWITCHROOM_INLINE_SCHEDULER");
-  });
-
-  it("does not emit the env var when no agent has the flag (back-compat)", () => {
-    const out = generateCompose({
-      config: configWithInline({ alice: false, bob: false }),
+      config: makeConfig({ alice: {}, bob: {} }),
     });
     expect(out).not.toContain("SWITCHROOM_INLINE_SCHEDULER");
   });
 
-  it("describeAgents surfaces inlineScheduler on each agent record", () => {
-    const agents = describeAgents(configWithInline({ alice: true, bob: false }));
-    const alice = agents.find((a) => a.name === "alice")!;
-    const bob = agents.find((a) => a.name === "bob")!;
-    expect(alice.inlineScheduler).toBe(true);
-    expect(bob.inlineScheduler).toBe(false);
+  it("emits no scheduler container at all", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    expect(out).not.toContain("switchroom-cron");
+    expect(out).not.toContain("switchroom-scheduler");
   });
 });

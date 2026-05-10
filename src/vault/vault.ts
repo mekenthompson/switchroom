@@ -72,9 +72,24 @@ function atomicWriteFileSync(path: string, data: string, mode: number): void {
 }
 
 export class VaultError extends Error {
-  constructor(message: string) {
+  /**
+   * The underlying error, when this VaultError wraps a more specific
+   * vault-layer exception (currently only `VaultBusyError` from the
+   * flock acquisition path). Consumers that want structured access
+   * to lock-contention details (holder PID, acquired-ago, lock path)
+   * can `instanceof VaultBusyError` against this field instead of
+   * re-parsing the error message.
+   *
+   * Note: TC39 `Error.prototype.cause` is supported in Node ≥16.9 but
+   * we keep an explicit field for IDE clarity and to document the
+   * contract — only the flock path sets it.
+   */
+  readonly cause?: unknown;
+
+  constructor(message: string, options?: { cause?: unknown }) {
     super(message);
     this.name = "VaultError";
+    if (options?.cause !== undefined) this.cause = options.cause;
   }
 }
 
@@ -384,7 +399,11 @@ export function saveVault(
     releaseLock = acquireLock(vaultPath, { budgetMs: SAVE_VAULT_LOCK_RETRY_MS }).release;
   } catch (err: unknown) {
     if (err instanceof VaultBusyError) {
-      throw new VaultError(err.message);
+      // Wrap with cause so callers retain access to the structured
+      // fields (holderPid, heldForMs, lockPath, budgetMs) without
+      // re-parsing the message string. Gateway error renderer in
+      // #972 reads `.cause` to format the Telegram reply.
+      throw new VaultError(err.message, { cause: err });
     }
     throw err;
   }
@@ -439,7 +458,11 @@ export function acquireVaultLock(vaultPath: string): () => void {
     return acquireLock(vaultPath, { budgetMs: SAVE_VAULT_LOCK_RETRY_MS }).release;
   } catch (err: unknown) {
     if (err instanceof VaultBusyError) {
-      throw new VaultError(err.message);
+      // Wrap with cause so callers retain access to the structured
+      // fields (holderPid, heldForMs, lockPath, budgetMs) without
+      // re-parsing the message string. Gateway error renderer in
+      // #972 reads `.cause` to format the Telegram reply.
+      throw new VaultError(err.message, { cause: err });
     }
     throw err;
   }

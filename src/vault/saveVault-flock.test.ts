@@ -23,6 +23,7 @@ import { mkdirSync, rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createVault, openVault, saveVault, acquireVaultLock, VaultError } from "./vault.js";
+import { VaultBusyError } from "./flock.js";
 
 describe("saveVault flock", () => {
   let tmpDir: string;
@@ -91,6 +92,33 @@ describe("saveVault flock", () => {
         expect(msg).toContain(vaultPath);
         // Post-#964: holder PID is named.
         expect(msg).toMatch(/held by pid \d+/);
+      }
+    } finally {
+      release();
+    }
+  }, 15000);
+
+  it("VaultError carries VaultBusyError as cause when saveVault loses contention (#964 reviewer ask)", () => {
+    // Reviewer on PR #974 flagged that VaultBusyError's structured
+    // fields (holderPid, heldForMs, lockPath, budgetMs) were being
+    // stripped at the saveVault boundary — the gateway error renderer
+    // in #972 would have to re-parse the message. Fixed by plumbing
+    // the cause through. This test pins the contract.
+    const release = acquireVaultLock(vaultPath);
+    try {
+      const secrets = { foo: { kind: "string" as const, value: "bar" } };
+      try {
+        saveVault(passphrase, vaultPath, secrets);
+        throw new Error("expected throw");
+      } catch (err) {
+        expect(err).toBeInstanceOf(VaultError);
+        const cause = (err as VaultError).cause;
+        expect(cause).toBeInstanceOf(VaultBusyError);
+        const busy = cause as VaultBusyError;
+        expect(busy.holderPid).toBe(process.pid);
+        expect(busy.lockPath).toBe(`${vaultPath}.lock`);
+        expect(busy.vaultPath).toBe(vaultPath);
+        expect(busy.budgetMs).toBeGreaterThan(0);
       }
     } finally {
       release();

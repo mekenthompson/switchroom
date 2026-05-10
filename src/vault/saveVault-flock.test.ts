@@ -3,12 +3,19 @@
  *
  * Plan v3 §4: post-#952 (op:put), the broker AND the host CLI both
  * write the same vault file. Without flock the two writers can race
- * (last rename wins, lost update). saveVault now acquires an
- * exclusive lock via proper-lockfile before reading/writing.
+ * (last rename wins, lost update). saveVault acquires an exclusive
+ * lock before reading/writing.
  *
- * The lock has a 5s retry budget for contended writes; busy-wait
- * busy-wait holds the calling thread but proper-lockfile's
- * stale-lock detection auto-recovers from a crashed holder.
+ * Lock impl (v0.7.15+ per #964): PID-file at `<vaultPath>.lock`,
+ * acquired via `openSync(O_CREAT|O_EXCL)` with the holder PID written
+ * to the file content. Replaces the v0.7.12-v0.7.14 proper-lockfile
+ * sentinel directory. See src/vault/flock.ts for the rationale and
+ * src/vault/flock.test.ts for tests of the lock primitive itself.
+ *
+ * The lock has a 5s retry budget for contended writes; the new
+ * `VaultBusyError` (surfaced as a `VaultError` to keep saveVault's
+ * thrown-type contract stable) carries the holder PID in its
+ * message per plan v3 §11.
  */
 
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
@@ -16,6 +23,7 @@ import { mkdirSync, rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createVault, openVault, saveVault, acquireVaultLock, VaultError } from "./vault.js";
+import { VaultBusyError } from "./flock.js";
 
 describe("saveVault flock", () => {
   let tmpDir: string;
@@ -65,10 +73,10 @@ describe("saveVault flock", () => {
   }, 15000);
 
   it("saveVault error message includes 'vault busy' and the path for diagnosability (closes #954)", () => {
-    // #954 ask: holder PID + path in the error. Our error message is
-    // path-bearing; "another writer holds the lock at <path>" gives
-    // operators an actionable starting point. (PID would be a follow-up
-    // — proper-lockfile doesn't expose the holder PID directly.)
+    // #954 + plan v3 §11: holder PID + path in the error. Post-#964
+    // the PID-file flock surfaces the holder PID — "held by pid <N>"
+    // — plus the lock-file path (`<vaultPath>.lock`). Operators get
+    // an actionable starting point without grepping /proc.
     const release = acquireVaultLock(vaultPath);
     try {
       const secrets = { foo: { kind: "string" as const, value: "bar" } };
@@ -79,7 +87,38 @@ describe("saveVault flock", () => {
         expect(err).toBeInstanceOf(VaultError);
         const msg = (err as Error).message;
         expect(msg).toContain("vault busy");
+        // The lock-file path is `<vaultPath>.lock`; checking for the
+        // vault path is enough to confirm we identified the right file.
         expect(msg).toContain(vaultPath);
+        // Post-#964: holder PID is named.
+        expect(msg).toMatch(/held by pid \d+/);
+      }
+    } finally {
+      release();
+    }
+  }, 15000);
+
+  it("VaultError carries VaultBusyError as cause when saveVault loses contention (#964 reviewer ask)", () => {
+    // Reviewer on PR #974 flagged that VaultBusyError's structured
+    // fields (holderPid, heldForMs, lockPath, budgetMs) were being
+    // stripped at the saveVault boundary — the gateway error renderer
+    // in #972 would have to re-parse the message. Fixed by plumbing
+    // the cause through. This test pins the contract.
+    const release = acquireVaultLock(vaultPath);
+    try {
+      const secrets = { foo: { kind: "string" as const, value: "bar" } };
+      try {
+        saveVault(passphrase, vaultPath, secrets);
+        throw new Error("expected throw");
+      } catch (err) {
+        expect(err).toBeInstanceOf(VaultError);
+        const cause = (err as VaultError).cause;
+        expect(cause).toBeInstanceOf(VaultBusyError);
+        const busy = cause as VaultBusyError;
+        expect(busy.holderPid).toBe(process.pid);
+        expect(busy.lockPath).toBe(`${vaultPath}.lock`);
+        expect(busy.vaultPath).toBe(vaultPath);
+        expect(busy.budgetMs).toBeGreaterThan(0);
       }
     } finally {
       release();

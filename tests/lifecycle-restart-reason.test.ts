@@ -143,11 +143,16 @@ describe("lifecycle: restartAgent shellout shape (v0.7 PR-C1, updated #932)", ()
     const body = src.slice(funcStart, funcEnd);
 
     expect(body).toMatch(
-      /composeArgs\(\["up", "-d", "--no-deps", serviceKey\(name\)\]\)/,
+      /composeArgs\(\["up", "-d", "--force-recreate", "--no-deps", serviceKey\(name\)\]\)/,
     );
-    // Regression: must NOT silently revert to plain `restart` (would
-    // miss volume-mount diffs from `apply` — see #932 / #857 / #916).
+    // Regression guards — must NOT silently revert to:
+    //   - plain `restart` (would miss volume-mount diffs from `apply`
+    //     — see #932 / #857 / #916)
+    //   - `up -d --no-deps` without --force-recreate (would no-op on
+    //     byte-identical compose, breaking auth.ts and grant flows
+    //     that depend on always-bounce — see #944 reviewer)
     expect(body).not.toMatch(/composeArgs\(\["restart"/);
+    expect(body).toMatch(/--force-recreate/);
     // No leftover systemctl calls in the restart path.
     expect(body).not.toMatch(/systemctl/);
   });

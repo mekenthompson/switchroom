@@ -115,11 +115,17 @@ describe("lifecycle (docker mode): start/stop/restart shellouts", () => {
     ]);
   });
 
-  it("restartAgent calls `compose up -d --no-deps agent-<name>` (#932)", () => {
-    // Was `compose restart` pre-#932 — swapped to `up -d --no-deps`
-    // so the recreate semantics pick up new volume mounts / compose-
-    // entry diffs (the same lesson learned in #857 / #916 for the
-    // test path). --no-deps prevents recreating sibling services.
+  it("restartAgent calls `compose up -d --force-recreate --no-deps agent-<name>` (#932)", () => {
+    // All three flags are load-bearing — see the doc-comment on
+    // restartAgent for why each one matters:
+    //   up -d            picks up volume-mount diffs (#857 / #916)
+    //   --force-recreate always bounces the process so scaffold-
+    //                    content edits (settings.json / start.sh /
+    //                    SOUL.md / .mcp.json) take effect — pre-PR
+    //                    `restart` always bounced; pre-#944-reviewer
+    //                    `up -d --no-deps` no-op'd on byte-identical
+    //                    compose, breaking auth.ts and grant flows.
+    //   --no-deps        leaves siblings (broker/kernel) untouched.
     const calls = recordingStub({ "compose up": () => "" });
     restartAgent("foo");
     expect(calls[0].args).toEqual([
@@ -130,6 +136,7 @@ describe("lifecycle (docker mode): start/stop/restart shellouts", () => {
       "/tmp/sw-test-compose.yml",
       "up",
       "-d",
+      "--force-recreate",
       "--no-deps",
       "agent-foo",
     ]);

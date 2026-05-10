@@ -151,11 +151,16 @@ export function planUpdate(opts: UpdateOptions): UpdateStep[] {
     description: "switchroom apply — refresh per-agent scaffolds + compose",
     run: () => {
       // Re-exec ourselves to invoke the apply subcommand. apply will
-      // self-elevate via #920 if needed.
+      // self-elevate via #920 if needed. --no-doctor: apply-side
+      // post-scaffold doctor sweep (#929) is suppressed because
+      // update has its own doctor step at position 5; running it
+      // twice would produce identical output ~3s apart and read as
+      // a broken pipeline.
       const r = runner(process.execPath, [
         scriptPath,
         "apply",
         "--non-interactive",
+        "--no-doctor",
       ]);
       if (r.status !== 0) throw new Error("switchroom apply failed");
     },

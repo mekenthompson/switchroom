@@ -5,6 +5,7 @@ import {
   accessSync,
   constants as fsConstants,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -732,6 +733,75 @@ export function checkStartShStale(
   return { name: label, status: "ok", detail: "supervisor block present" };
 }
 
+/**
+ * Detect leaked $HOME/.switchroom state inside an agent's bind-mounted
+ * state dir (#933). Agents that ran before #910's symlink fix landed
+ * may have written analytics-id / quota-cache / logs into the wrong
+ * path — those writes manifest on the host as a real directory at
+ * `<agentDir>/home/.switchroom/`. The start.sh symlink block refuses
+ * to clobber a real dir (correctly, to protect operator data), so
+ * #910's fix never takes effect for that agent until the operator
+ * manually clears the leaked state. Symptom is silent: tilde paths
+ * in cron prompts continue to resolve to the wrong location, so cron
+ * skills that reference `~/.switchroom/skills/<x>/...` fail.
+ *
+ * @internal exported for testing
+ */
+export function checkLeakedHomeSwitchroom(
+  agentName: string,
+  agentDir: string,
+): CheckResult {
+  const label = `${agentName}: $HOME/.switchroom symlink (#910)`;
+  const path = join(agentDir, "home", ".switchroom");
+  // lstatSync, not existsSync — existsSync follows symlinks and would
+  // return false for a symlink with a non-existent target (e.g. when
+  // the operator's host home is mounted differently than expected),
+  // misclassifying a fresh post-#910 symlink as "no leaked state".
+  let stats;
+  try {
+    stats = lstatSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      // Either the agent's never run (no $HOME/.switchroom yet, will
+      // be created as a symlink on first start.sh exec) OR the
+      // post-#910 start.sh hasn't run yet. Either way: no leaked
+      // state to clean up.
+      return {
+        name: label,
+        status: "ok",
+        detail: "no leaked state (will symlink on next start.sh exec)",
+      };
+    }
+    return {
+      name: label,
+      status: "warn",
+      detail: `unreadable: ${(err as Error).message}`,
+    };
+  }
+  if (stats.isSymbolicLink()) {
+    return {
+      name: label,
+      status: "ok",
+      detail: "symlink in place — tilde paths resolve correctly",
+    };
+  }
+  // Real dir or file → leaked state. Surface the cleanup recipe.
+  return {
+    name: label,
+    status: "fail",
+    detail:
+      "real directory at $HOME/.switchroom — #910 symlink can't take " +
+      "effect; tilde paths in cron prompts will resolve to the wrong location",
+    fix:
+      `Inside the container, move the leaked state out of the way and ` +
+      `restart so start.sh re-creates the symlink:\n` +
+      `        docker exec switchroom-${agentName} sh -c 'rm -rf $HOME/.switchroom'\n` +
+      `        switchroom agent restart ${agentName}\n` +
+      `      The symlink target ($HOME/.switchroom → host's ~/.switchroom) ` +
+      `regenerates on next start.sh exec.`,
+  };
+}
+
 export function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[] {
   const results: CheckResult[] = [];
   const agentsDir = resolveAgentsDir(config);
@@ -754,6 +824,15 @@ export function checkAgents(config: SwitchroomConfig, configPath: string): Check
 
     // 1b. start.sh has the post-Phase-4 scheduler supervisor block
     results.push(checkStartShStale(name, join(agentDir, "start.sh")));
+
+    // 1c. Leaked $HOME/.switchroom state from pre-#910 runs (#933).
+    // Inside the container HOME=/state/agent/home; if the agent ever
+    // wrote to $HOME/.switchroom/ before the symlink fix landed, that
+    // state lives at <agentDir>/home/.switchroom/ as a real dir. The
+    // start.sh symlink-creation guard refuses to clobber a real dir,
+    // so the #910 fix never takes effect for that agent — silent:
+    // tilde paths in cron prompts continue to look in the wrong place.
+    results.push(checkLeakedHomeSwitchroom(name, agentDir));
 
     // 2. Service status
     const status = statuses[name];

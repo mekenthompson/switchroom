@@ -25,7 +25,11 @@ memory:
     model: nomic-embed-text
 
 vault:
-  path: ~/.switchroom/vault.enc
+  # v0.7.12+ canonical path is the parent-dir layout. v0.7.x installs
+  # auto-migrate from the legacy ~/.switchroom/vault.enc on `switchroom
+  # apply`; the legacy path becomes a symlink that's removed in v0.7.14.
+  # See docs/vault.md for the migration story.
+  path: ~/.switchroom/vault/vault.enc
 
 # --- Global defaults (implicit bottom-of-cascade profile) ---
 # Every agent inherits this. Per-agent fields win on conflict.

@@ -13,12 +13,17 @@ import { join } from 'path'
 
 import {
   probeAgentProcess,
-  probeCronTimers,
+  probeScheduler,
+  probeBroker,
+  probeKernel,
+  probeSkills,
   probeQuota,
   watchAgentProcess,
   findAgentProcessInContainer,
   uptimeMsForStarttime,
   type ProcFsImpl,
+  type SchedulerFsImpl,
+  type SkillsFsImpl,
 } from '../gateway/boot-probes.js'
 import { readQuotaCache, RATE_LIMIT_TTL_MS } from '../gateway/quota-cache.js'
 
@@ -455,7 +460,7 @@ describe('watchAgentProcess — #296: re-poll after window expiry', () => {
 
 // ── docker mode: skip systemctl, use /proc walk ───────────────────────────
 
-describe('probeAgentProcess / probeCronTimers — docker mode skips systemctl', () => {
+describe('probeAgentProcess — docker mode skips systemctl', () => {
   it('probeAgentProcess(dockerMode) returns the injected /proc result without execing', async () => {
     let execFileCalls = 0
     const execFileImpl: ExecFileFn = async () => {
@@ -522,20 +527,240 @@ describe('probeAgentProcess / probeCronTimers — docker mode skips systemctl', 
     expect(execFileCalls).toBe(0)
   })
 
-  it('probeCronTimers(dockerMode) returns ok-with-managed-externally without execing', async () => {
-    let execFileCalls = 0
-    const execFileImpl: ExecFileFn = async () => {
-      execFileCalls++
-      throw new Error('systemctl should never be called under dockerMode')
-    }
-    const result = await probeCronTimers('clerk', {
+})
+
+// ── probeScheduler — in-container agent-scheduler (Phase 4 cron-fold-in) ──
+
+function makeSchedulerFs(files: Record<string, { content?: string; mtimeMs?: number }>): SchedulerFsImpl {
+  return {
+    readFile: (p) => {
+      const f = files[p]
+      if (!f || f.content === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      return f.content
+    },
+    mtimeMs: (p) => {
+      const f = files[p]
+      if (!f || f.mtimeMs === undefined) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      return f.mtimeMs
+    },
+    exists: (p) => p in files,
+  }
+}
+
+describe('probeScheduler', () => {
+  it('returns ok n/a when not in dockerMode (Phase 4 deleted host-side scheduler)', async () => {
+    const result = await probeScheduler('clerk', { dockerMode: false })
+    expect(result.status).toBe('ok')
+    expect(result.label).toBe('Scheduler')
+    expect(result.detail).toContain('non-docker')
+  })
+
+  it('fails when lockfile is missing (sidecar never started or supervisor gave up)', async () => {
+    const fs = makeSchedulerFs({})
+    const result = await probeScheduler('clerk', {
       dockerMode: true,
-      execFileImpl: execFileImpl as never,
+      fs,
+      isAlive: () => true,
+    })
+    expect(result.status).toBe('fail')
+    expect(result.detail).toContain('no lockfile')
+  })
+
+  it('returns ok with last-fire age when lock is held by a live PID', async () => {
+    const lockPath = '/state/agent/scheduler.lock'
+    const jsonlPath = '/state/agent/scheduler.jsonl'
+    const now = 1_700_000_000_000
+    const fs = makeSchedulerFs({
+      [lockPath]: { content: '4242\n' },
+      [jsonlPath]: { content: '{}\n', mtimeMs: now - 5 * 60_000 },
+    })
+    const result = await probeScheduler('clerk', {
+      dockerMode: true,
+      fs,
+      isAlive: (pid) => pid === 4242,
+      now: () => now,
     })
     expect(result.status).toBe('ok')
-    expect(result.label).toBe('Crons')
-    expect(result.detail).toBe('managed by switchroom-cron')
-    expect(execFileCalls).toBe(0)
+    expect(result.detail).toContain('pid 4242')
+    expect(result.detail).toContain('last fire')
+  })
+
+  it('degraded when lockfile holder PID is not alive (mid-restart)', async () => {
+    const lockPath = '/state/agent/scheduler.lock'
+    const fs = makeSchedulerFs({
+      [lockPath]: { content: '99\n' },
+    })
+    const result = await probeScheduler('clerk', {
+      dockerMode: true,
+      fs,
+      isAlive: () => false,
+    })
+    expect(result.status).toBe('degraded')
+    expect(result.detail).toContain('pid 99 not alive')
+  })
+
+  it('degraded when lockfile contents are not a valid PID', async () => {
+    const lockPath = '/state/agent/scheduler.lock'
+    const fs = makeSchedulerFs({
+      [lockPath]: { content: 'garbage' },
+    })
+    const result = await probeScheduler('clerk', {
+      dockerMode: true,
+      fs,
+      isAlive: () => true,
+    })
+    expect(result.status).toBe('degraded')
+    expect(result.detail).toContain('invalid')
+  })
+
+  it('returns ok without freshness hint when scheduler.jsonl has never been written', async () => {
+    const lockPath = '/state/agent/scheduler.lock'
+    const fs = makeSchedulerFs({
+      [lockPath]: { content: '5555' },
+    })
+    const result = await probeScheduler('clerk', {
+      dockerMode: true,
+      fs,
+      isAlive: () => true,
+    })
+    expect(result.status).toBe('ok')
+    expect(result.detail).toContain('pid 5555')
+    expect(result.detail).not.toContain('last fire')
+  })
+})
+
+// ── probeBroker / probeKernel — UDS reachability ─────────────────────────
+
+describe('probeBroker / probeKernel', () => {
+  it('probeBroker returns ok n/a when not in dockerMode', async () => {
+    const result = await probeBroker('/some/path', { dockerMode: false })
+    expect(result.status).toBe('ok')
+    expect(result.detail).toContain('non-docker')
+  })
+
+  it('probeBroker fails when no socket path is configured', async () => {
+    const oldEnv = process.env.SWITCHROOM_BROKER_SOCKET
+    delete process.env.SWITCHROOM_BROKER_SOCKET
+    try {
+      const result = await probeBroker(undefined, { dockerMode: true })
+      expect(result.status).toBe('fail')
+      expect(result.detail).toContain('not configured')
+    } finally {
+      if (oldEnv !== undefined) process.env.SWITCHROOM_BROKER_SOCKET = oldEnv
+    }
+  })
+
+  it('probeBroker reports ok when connect resolves', async () => {
+    const result = await probeBroker('/run/switchroom/broker/clerk/sock', {
+      dockerMode: true,
+      connectImpl: async () => { /* connect ok */ },
+    })
+    expect(result.status).toBe('ok')
+    expect(result.label).toBe('Broker')
+    expect(result.detail).toBe('reachable')
+  })
+
+  it('probeBroker reports fail with ENOENT detail when socket missing', async () => {
+    const result = await probeBroker('/run/switchroom/broker/clerk/sock', {
+      dockerMode: true,
+      connectImpl: async () => {
+        const err = new Error('ENOENT') as NodeJS.ErrnoException
+        err.code = 'ENOENT'
+        throw err
+      },
+    })
+    expect(result.status).toBe('fail')
+    expect(result.detail).toContain('socket missing')
+  })
+
+  it('probeBroker reports fail with ECONNREFUSED detail when daemon down', async () => {
+    const result = await probeBroker('/run/switchroom/broker/clerk/sock', {
+      dockerMode: true,
+      connectImpl: async () => {
+        const err = new Error('ECONNREFUSED') as NodeJS.ErrnoException
+        err.code = 'ECONNREFUSED'
+        throw err
+      },
+    })
+    expect(result.status).toBe('fail')
+    expect(result.detail).toContain('connection refused')
+  })
+
+  it('probeKernel mirrors probeBroker shape with Kernel label', async () => {
+    const result = await probeKernel('/run/switchroom/kernel/clerk/sock', {
+      dockerMode: true,
+      connectImpl: async () => { /* connect ok */ },
+    })
+    expect(result.status).toBe('ok')
+    expect(result.label).toBe('Kernel')
+    expect(result.detail).toBe('reachable')
+  })
+})
+
+// ── probeSkills — symlink validity ───────────────────────────────────────
+
+function makeSkillsFs(entries: Record<string, string[]>, files: Set<string>): SkillsFsImpl {
+  return {
+    readdir: (p) => {
+      if (!(p in entries)) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' })
+      return entries[p]
+    },
+    exists: (p) => files.has(p) || p in entries,
+  }
+}
+
+describe('probeSkills', () => {
+  const agentDir = '/state/agent'
+  const skillsDir = '/state/agent/.claude/skills'
+
+  it('returns ok when no skills dir exists (no skills configured is normal)', async () => {
+    const fs = makeSkillsFs({}, new Set())
+    const result = await probeSkills(agentDir, { fs })
+    expect(result.status).toBe('ok')
+    expect(result.detail).toContain('no skills dir')
+  })
+
+  it('returns ok with count when every skill resolves', async () => {
+    const fs = makeSkillsFs(
+      { [skillsDir]: ['simplify', 'review'] },
+      new Set([
+        `${skillsDir}/simplify`, `${skillsDir}/simplify/SKILL.md`,
+        `${skillsDir}/review`, `${skillsDir}/review/SKILL.md`,
+      ]),
+    )
+    const result = await probeSkills(agentDir, { fs })
+    expect(result.status).toBe('ok')
+    expect(result.detail).toContain('2 resolved')
+  })
+
+  it('degraded when at least one symlink dangles, names them up to cap', async () => {
+    const fs = makeSkillsFs(
+      { [skillsDir]: ['simplify', 'gone-skill', 'also-gone', 'and-this', 'review'] },
+      new Set([
+        `${skillsDir}/simplify`, `${skillsDir}/simplify/SKILL.md`,
+        `${skillsDir}/review`, `${skillsDir}/review/SKILL.md`,
+        // gone-skill, also-gone, and-this NOT in files set → dangling
+      ]),
+    )
+    const result = await probeSkills(agentDir, { fs, maxNamesShown: 2 })
+    expect(result.status).toBe('degraded')
+    expect(result.detail).toContain('3/5 dangling')
+    expect(result.detail).toContain('gone-skill')
+    expect(result.detail).toContain('also-gone')
+    expect(result.detail).toContain('+1 more')
+    expect(result.detail).not.toContain('and-this')
+  })
+
+  it('returns ok when entries dir is empty', async () => {
+    const fs = makeSkillsFs({ [skillsDir]: [] }, new Set([skillsDir]))
+    // Make exists() report true for the dir itself
+    const wrappedFs: SkillsFsImpl = {
+      readdir: fs.readdir,
+      exists: (p) => p === skillsDir || fs.exists(p),
+    }
+    const result = await probeSkills(agentDir, { fs: wrappedFs })
+    expect(result.status).toBe('ok')
+    expect(result.detail).toBe('0 skills')
   })
 })
 

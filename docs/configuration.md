@@ -36,7 +36,7 @@ Each field type has specific merge behavior when values exist at multiple layers
 | `skills` | union | Named skills from the global skills pool (`switchroom.skills_dir`) |
 | `bundled_skills` | per-key | Opt-out map for switchroom's bundled-default skills. Set a key to `false` to suppress (e.g. `pdf: false`). See [docs/skills.md](./skills.md). |
 | `subagents` | per-key | Sub-agent definitions rendered to `.claude/agents/<name>.md` |
-| `schedule` | concatenate | Cron-based scheduled tasks (systemd timers) |
+| `schedule` | concatenate | Cron-based scheduled tasks (in-agent scheduler sidecar — see [scheduling.md](./scheduling.md)) |
 | `session.max_idle` | override | Fresh session after idle period (`2h`, `30m`) |
 | `session.max_turns` | override | Fresh session after N user turns |
 | `channels.telegram.plugin` | override | `switchroom` (default, enhanced) or `official` |
@@ -239,7 +239,7 @@ Manage entries with `switchroom vault set <key>`, `switchroom vault get <key>`, 
 
 ### Vault broker (Linux only)
 
-For scheduled tasks that need vault access, switchroom can run a long-lived **vault broker** daemon that holds the decrypted vault in memory after a one-time passphrase entry. Cron scripts then ask the broker for keys instead of prompting for the passphrase on every run. The broker is **Linux-only by design** — its access control relies on cgroup-based systemd unit identification, which doesn't exist on macOS / WSL. On non-Linux platforms `switchroom vault get` always reads the vault file directly with the user's passphrase.
+For scheduled tasks that need vault access, switchroom runs a long-lived **vault broker** container that holds the decrypted vault in memory after a one-time passphrase entry (or via auto-unlock; see [vault-broker.md](./vault-broker.md)). Cron-fired prompts then ask the broker for keys instead of re-prompting on every run. The broker is **Linux-only by design** — its access control relies on socket-path-as-identity (each agent gets its own UDS bound by the broker at `/run/switchroom/broker/<agent>/sock`), which only composes on Linux. On non-Linux platforms `switchroom vault get` always reads the vault file directly with the user's passphrase.
 
 ```yaml
 agents:
@@ -252,9 +252,9 @@ agents:
 
 The `secrets:` array is **misconfiguration protection, not a security boundary**: it prevents a typo in cron-A from accidentally reading cron-B's keys, and it makes the per-cron secret surface area explicit at config-review time. It does not prevent attack — anyone who can edit cron scripts on the host can also edit `switchroom.yaml` to declare any keys, and anyone who has the vault passphrase can read the vault file directly. Frame it as: "the cron-A script that asks for `weather_api_key` was clearly meant to ask for it" — not "the cron-A script can't reach `bank_token` even if compromised."
 
-The broker is started/stopped via `switchroom vault broker {start,stop,status,unlock,lock}`. When `installAllUnits()` runs (called by `switchroom agent create` and similar), a `switchroom-vault-broker.service` user unit is installed with `Restart=on-failure`, so the broker auto-restarts if it crashes and auto-starts at user login.
+The broker runs as a `docker compose` singleton service alongside the agent containers (see `~/.switchroom/compose/docker-compose.yml`). `switchroom apply` regenerates the compose file and `docker compose up -d` brings the broker up with `restart: unless-stopped`, so it auto-restarts on crash and at host boot. CLI verbs `switchroom vault broker {status,unlock,lock,enable-auto-unlock}` talk to the running container.
 
-For interactive use — `switchroom vault get key`, `switchroom vault set key`, etc. — the CLI does **not** go through the broker. It reads the vault file directly with your passphrase. The broker's ACL would deny an interactive caller anyway (no cron systemd unit), and the user already has the passphrase.
+For interactive use — `switchroom vault get key`, `switchroom vault set key`, etc. — the CLI does **not** go through the broker. It reads the vault file directly with your passphrase. The broker's ACL would deny an interactive caller anyway (the bind-time path-as-identity ACL only grants the per-agent UID), and the user already has the passphrase.
 
 ### Per-skill dependency caches
 
@@ -336,7 +336,8 @@ switchroom auth refresh-tick --threshold-ms 7200000  # custom threshold (2h here
 
 The tick is idempotent and safe to run as often as you like — when nothing
 needs refreshing it makes no network calls and writes no files. Wire it to
-an existing systemd timer or cron line:
+a cron line on the host (or to an agent's `schedule:` block, which fires
+through the in-agent scheduler sidecar — see [scheduling.md](./scheduling.md)):
 
 ```
 # crontab — every 15 minutes

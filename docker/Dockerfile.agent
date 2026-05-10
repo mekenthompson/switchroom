@@ -35,6 +35,20 @@ RUN mkdir -p /tmp/tmux-shared
 COPY dist/cli/autoaccept-poll.js /opt/switchroom/autoaccept-poll.js
 RUN chmod 0755 /opt/switchroom/autoaccept-poll.js
 
+# switchroom CLI bundle: the in-container telegram-plugin gateway sidecar
+# shells out to `switchroom <verb>` for /auth, /vault, /agent, /topics
+# and friends (see telegram-plugin/gateway/gateway.ts:switchroomExec). On
+# v0.6 systemd the host's installed CLI was on PATH; under v0.7+ docker
+# the agent container is its own filesystem and the host CLI isn't
+# reachable. Without this bake, every gateway shell-out hits ENOENT and
+# Telegram-driven `/auth add`, `/auth code`, `/auth list`, `/vault …`,
+# `/agent restart` (the post-fallback restart) all fail silently. The
+# bundle is self-contained (bun build --target node + bun shebang) and
+# bun is already in the base image, so a symlink onto PATH is enough.
+COPY dist/cli/switchroom.js /opt/switchroom/switchroom.js
+RUN chmod 0755 /opt/switchroom/switchroom.js \
+ && ln -s /opt/switchroom/switchroom.js /usr/local/bin/switchroom
+
 # telegram-plugin: the MCP channel server claude spawns when invoked
 # with `--dangerously-load-development-channels server:switchroom-telegram`.
 # Resolved by bun via `bun run --cwd /opt/switchroom/telegram-plugin

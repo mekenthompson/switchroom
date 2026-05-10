@@ -732,7 +732,7 @@ export function checkStartShStale(
   return { name: label, status: "ok", detail: "supervisor block present" };
 }
 
-function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[] {
+export function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[] {
   const results: CheckResult[] = [];
   const agentsDir = resolveAgentsDir(config);
   const statuses = getAllAgentStatuses(config);
@@ -906,7 +906,7 @@ function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[
   return results;
 }
 
-function printSection(title: string, results: CheckResult[]): {
+export function printSection(title: string, results: CheckResult[]): {
   oks: number;
   warns: number;
   fails: number;

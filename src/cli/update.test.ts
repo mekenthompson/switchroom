@@ -159,10 +159,13 @@ describe("runUpdate", () => {
       // [0] docker compose ... pull
       expect(runner.calls[0]?.cmd).toBe("docker");
       expect(runner.calls[0]?.args).toContain("pull");
-      // [1] <execPath> <scriptPath> apply --non-interactive
+      // [1] <execPath> <scriptPath> apply --non-interactive --no-doctor
+      // (--no-doctor: update has its own doctor step at position 5;
+      // suppressing the apply-side sweep #929 avoids double-printing)
       expect(runner.calls[1]?.cmd).toBe(process.execPath);
       expect(runner.calls[1]?.args).toContain("apply");
       expect(runner.calls[1]?.args).toContain("--non-interactive");
+      expect(runner.calls[1]?.args).toContain("--no-doctor");
       // [2] docker compose ... up -d --remove-orphans
       expect(runner.calls[2]?.cmd).toBe("docker");
       expect(runner.calls[2]?.args).toContain("up");

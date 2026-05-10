@@ -1,7 +1,9 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { getSchedulerState, formatSchedulerState } from "../agents/scheduler-state.js";
 import YAML from "yaml";
 import { resolveAgentsDir, loadConfig } from "../config/loader.js";
 import type { SwitchroomConfig } from "../config/schema.js";
@@ -603,10 +605,21 @@ export function registerAgentCommand(program: Command): void {
           return;
         }
 
+        // Per-agent scheduler state — distinguishes "5 tasks" from
+        // "idle (no schedule entries)" from "wedged" (#931). Cheap
+        // log-tail-parse against ~/.switchroom/logs/<agent>/agent-
+        // scheduler.log so the operator doesn't have to docker-logs
+        // each agent to confirm cron health.
+        const logsDir = join(homedir(), ".switchroom", "logs");
+        const schedulerStates = Object.fromEntries(
+          agentNames.map((n) => [n, getSchedulerState(n, logsDir)] as const),
+        );
+
         if (opts.json) {
           const data = agentNames.map((name) => {
             const agentConfig = config.agents[name];
             const status = statuses[name];
+            const sched = schedulerStates[name];
             return {
               name,
               status: status?.active ?? "unknown",
@@ -614,18 +627,20 @@ export function registerAgentCommand(program: Command): void {
               extends: agentConfig.extends ?? "default",
               topic_name: agentConfig.topic_name,
               topic_emoji: agentConfig.topic_emoji,
+              scheduler: sched, // {kind:'active',tasks:N} | {kind:'idle'} | etc.
             };
           });
           console.log(JSON.stringify({ agents: data }, null, 2));
           return;
         }
 
-        const headers = ["Name", "Status", "Uptime", "Template", "Topic"];
-        const widths = [16, 10, 12, 15, 20];
+        const headers = ["Name", "Status", "Uptime", "Template", "Scheduler", "Topic"];
+        const widths = [16, 10, 12, 15, 12, 20];
 
         const rows = agentNames.map((name) => {
           const agentConfig = config.agents[name];
           const status = statuses[name];
+          const sched = schedulerStates[name];
           const topicDisplay = [
             agentConfig.topic_name,
             agentConfig.topic_emoji,
@@ -638,6 +653,7 @@ export function registerAgentCommand(program: Command): void {
             statusColor(status?.active ?? "unknown"),
             formatUptime(status?.uptime ?? null),
             agentConfig.extends ?? "default",
+            sched ? formatSchedulerState(sched) : "?",
             topicDisplay,
           ];
         });

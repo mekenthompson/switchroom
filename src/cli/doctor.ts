@@ -684,6 +684,50 @@ export async function checkTelegram(config: SwitchroomConfig): Promise<CheckResu
   return results;
 }
 
+/**
+ * Detect agents whose start.sh predates the Phase 4 cron-fold-in cutover
+ * (#893) — they lack the agent-scheduler supervisor block, so cron does
+ * not fire (#909, #911). Reads the host file directly; the bind mount
+ * makes it the same content the container sees.
+ *
+ * @internal exported for testing
+ */
+export function checkStartShStale(
+  agentName: string,
+  startShPath: string,
+): CheckResult {
+  const label = `${agentName}: start.sh scheduler block`;
+  if (!existsSync(startShPath)) {
+    return {
+      name: label,
+      status: "warn",
+      detail: `${startShPath} not found`,
+      fix: `Run \`switchroom apply\` to scaffold start.sh.`,
+    };
+  }
+  let content: string;
+  try {
+    content = readFileSync(startShPath, "utf-8");
+  } catch (err) {
+    return {
+      name: label,
+      status: "warn",
+      detail: `unreadable: ${(err as Error).message}`,
+    };
+  }
+  if (!content.includes("agent-scheduler")) {
+    return {
+      name: label,
+      status: "fail",
+      detail:
+        "missing agent-scheduler supervisor block — no crons will fire",
+      fix:
+        "Run `switchroom apply` to regenerate start.sh against the latest template, then `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d` to restart.",
+    };
+  }
+  return { name: label, status: "ok", detail: "supervisor block present" };
+}
+
 function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[] {
   const results: CheckResult[] = [];
   const agentsDir = resolveAgentsDir(config);
@@ -703,6 +747,9 @@ function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[
       });
       continue;
     }
+
+    // 1b. start.sh has the post-Phase-4 scheduler supervisor block
+    results.push(checkStartShStale(name, join(agentDir, "start.sh")));
 
     // 2. Service status
     const status = statuses[name];

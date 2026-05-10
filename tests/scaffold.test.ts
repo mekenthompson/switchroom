@@ -160,6 +160,42 @@ describe("scaffoldAgent", () => {
     expect(startSh).not.toContain("export SWITCHROOM_CONFIG=");
   });
 
+  it("start.sh symlinks $HOME/.switchroom to host home (#910 tilde-path fix)", () => {
+    // Container HOME=/state/agent/home (compose.ts) but operator yaml
+    // prompts widely use ~/.switchroom/skills/..., ~/.switchroom/
+    // credentials/..., etc. Without the symlink the tilde resolves to
+    // a path that doesn't exist inside the container.
+    const prevHome = process.env.HOME;
+    process.env.HOME = "/home/op";
+    try {
+      const config = makeAgentConfig();
+      const result = scaffoldAgent("tilde-agent", config, tmpDir, telegramConfig);
+      const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+      // Symlink target is the host home, link path is $HOME/.switchroom.
+      expect(startSh).toMatch(/ln -sfn '\/home\/op'\/\.switchroom "\$HOME\/\.switchroom"/);
+      // Idempotent guard refuses to clobber a real directory.
+      expect(startSh).toContain('[ ! -e "$HOME/.switchroom" ] || [ -L "$HOME/.switchroom" ]');
+    } finally {
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
+    }
+  });
+
+  it("start.sh skips the symlink block when HOME is unset (test/non-host context)", () => {
+    const prevHome = process.env.HOME;
+    delete process.env.HOME;
+    try {
+      const config = makeAgentConfig();
+      const result = scaffoldAgent("no-home-agent", config, tmpDir, telegramConfig);
+      const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+      // Without hostHomeQ, the {{#if hostHomeQ}} guard renders nothing.
+      expect(startSh).not.toContain('"$HOME/.switchroom"');
+      expect(startSh).not.toContain("ln -sfn");
+    } finally {
+      if (prevHome !== undefined) process.env.HOME = prevHome;
+    }
+  });
+
   it("start.sh includes --effort flag when thinking_effort is set", () => {
     const config = makeAgentConfig({ thinking_effort: "xhigh" });
     const result = scaffoldAgent("effort-agent", config, tmpDir, telegramConfig);

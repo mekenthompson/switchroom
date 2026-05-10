@@ -1,33 +1,30 @@
 /**
  * Docker Compose generator — Phase 1a.
  *
- * Turns the cascade-resolved switchroom.yaml into a byte-deterministic
- * docker-compose.yml. Mirrors what `installAllUnits()` does for systemd,
- * but for the Docker substrate (RFC §"Compose skeleton").
+ * Turns the cascade-resolved switchroom.yaml into a deterministic
+ * docker-compose.yml.
  *
- * Determinism is load-bearing: agents are emitted in sorted name order,
- * volumes alphabetised, env keys sorted. Two byte-identical inputs
- * MUST produce a byte-identical output (asserted by the snapshot tests
- * in tests/docker/compose-generator.test.ts).
+ * Determinism: agents are emitted in sorted name order, volumes
+ * alphabetised, env keys sorted. Two apply runs against the same
+ * inputs AND the same host filesystem state MUST produce a
+ * byte-identical output (asserted by the snapshot tests in
+ * tests/docker/compose-generator.test.ts). The host-filesystem
+ * caveat covers the optional skills/credentials bind mounts (#907)
+ * that we only emit when the source dirs actually exist — docker
+ * compose `up` hard-fails when a `:ro` bind source is missing.
  *
- * Identity model summary (RFC §"Container identity model"):
- *   - Each agent gets a deterministic UID in 10001..10999 derived from
- *     a stable hash of its name (allocateAgentUid()).
+ * Identity model:
+ *   - Each agent gets a deterministic UID in 10001..10999 derived
+ *     from a stable hash of its name (allocateAgentUid()).
  *   - Each agent's broker socket dir lives in its OWN named volume,
  *     mounted ONLY into that agent's container. Same for kernel.
  *   - The broker mounts every agent's socket dir under
  *     /run/switchroom/broker/<agent>; per-agent agents mount only
  *     their own dir under /run/switchroom/broker.
- *
- * What this module does NOT do:
- *   - Touch existing systemd code paths. The existing host-native
- *     install path (src/agents/systemd.ts) is unchanged.
- *   - Evaluate live runtime — that's the runtime detection in
- *     src/cli/agent.ts which calls this only when SWITCHROOM_RUNTIME
- *     is set to "docker".
  */
 
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import type { SwitchroomConfig, AgentConfig } from "../config/schema.js";
 import { resolveAgentConfig } from "../config/merge.js";
 
@@ -228,6 +225,11 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // preserves the older `${HOME}` shape for callers that haven't been
   // updated.
   const homePrefix = opts.homeDir ?? "${HOME}";
+  // For existsSync() decisions on optional bind-mount sources (#907):
+  // emission uses `homePrefix` (which may be the literal "${HOME}" so
+  // sudo-bake works), but the existsSync probe must use the real host
+  // home. Falls back to process.env.HOME when no homeDir is passed.
+  const hostHomeForChecks = opts.homeDir ?? process.env.HOME ?? "";
   const switchroomConfigPath = opts.switchroomConfigPath;
   if (buildMode === "local" && !buildContext) {
     throw new Error(
@@ -419,7 +421,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
     if (a.strippedCaps.length > 0) {
       warn(`compose: stripping cap_add ${JSON.stringify(a.strippedCaps)} from agent "${a.name}" (Docker mode forbids capability extras; see RFC §security)`);
     }
-    emitAgentService(lines, a, imageTag, buildMode, buildContext, homePrefix, switchroomConfigPath);
+    emitAgentService(lines, a, imageTag, buildMode, buildContext, homePrefix, hostHomeForChecks, switchroomConfigPath);
   }
 
   // ── volumes ────────────────────────────────────────────────────────
@@ -440,6 +442,7 @@ function emitAgentService(
   buildMode: "pull" | "local",
   buildContext: string | undefined,
   homePrefix: string,
+  hostHomeForChecks: string,
   switchroomConfigPath: string | undefined,
 ): void {
   lines.push(`  agent-${a.name}:`);
@@ -578,6 +581,21 @@ function emitAgentService(
   lines.push(`      - ${homePrefix}/.switchroom/logs/${a.name}:/var/log/switchroom`);
   lines.push(`      - ${homePrefix}/.switchroom/agents/${a.name}:${homePrefix}/.switchroom/agents/${a.name}`);
   lines.push(`      - ${homePrefix}/.claude/projects/${a.name}:${homePrefix}/.claude/projects/${a.name}`);
+  // Shared read-only bind mounts for skills + credentials (#907). Cron
+  // yaml prompts widely reference `~/.switchroom/skills/...` (calendar,
+  // mail, garmin, home-assistant) and `~/.switchroom/credentials/...`.
+  // Mounted at the operator's host path so absolute paths in scaffolded
+  // start.sh and yaml prompts Just Work; tilde resolution is fixed by
+  // start.sh.hbs's $HOME/.switchroom symlink (see #910). Conditional on
+  // existsSync because docker compose `up` hard-fails when a `:ro`
+  // source is missing — many operators keep all secrets in vault and
+  // never create a `credentials/` dir at all.
+  if (existsSync(`${hostHomeForChecks}/.switchroom/skills`)) {
+    lines.push(`      - ${homePrefix}/.switchroom/skills:${homePrefix}/.switchroom/skills:ro`);
+  }
+  if (existsSync(`${hostHomeForChecks}/.switchroom/credentials`)) {
+    lines.push(`      - ${homePrefix}/.switchroom/credentials:${homePrefix}/.switchroom/credentials:ro`);
+  }
   // switchroom.yaml file mount (read-only) — the in-container gateway
   // daemon needs `--config $SWITCHROOM_CONFIG` to talk to the
   // switchroom CLI for handoff / topic / vault grants. SWITCHROOM_CONFIG

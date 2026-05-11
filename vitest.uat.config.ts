@@ -1,12 +1,22 @@
 import { defineConfig } from "vitest/config";
+import { fileURLToPath } from "node:url";
 
 /**
  * UAT-only vitest config (epic #863). Runs scenarios in
  * `telegram-plugin/uat/scenarios/`. Hits real Telegram, real Claude
  * — never on the default CI critical path. Invoke via
  * `bun run test:uat` from `telegram-plugin/`.
+ *
+ * `root` is pinned to the directory containing this config file
+ * (repo root), not vitest's cwd. Without this, running the script
+ * from `telegram-plugin/` (as `bun run test:uat` does) resolves
+ * the `include` glob against `telegram-plugin/`, so the pattern
+ * `telegram-plugin/uat/scenarios/**` ends up looking for
+ * `telegram-plugin/telegram-plugin/uat/scenarios/**` and matches
+ * nothing — "No test files found, exiting with code 1".
  */
 export default defineConfig({
+  root: fileURLToPath(new URL(".", import.meta.url)),
   test: {
     globals: true,
     environment: "node",

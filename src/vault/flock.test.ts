@@ -20,6 +20,7 @@ import {
   readFileSync,
   existsSync,
   statSync,
+  utimesSync,
 } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -131,27 +132,124 @@ describe("flock — contention (plan v3 §11 — VaultBusyError shape)", () => {
     expect(err.message).toMatch(/retried for 200ms/);
   });
 
-  it("contention with unreadable lock file surfaces 'holder PID unreadable'", () => {
-    // Write an unparseable lock file so readLockHolder returns null
-    // BUT the file still exists, so openSync(O_EXCL) fails with
-    // EEXIST. Without a valid PID we can't liveness-check, so the
-    // acquirer waits the full budget and gives up.
+  it("contention with FRESH unreadable lock file surfaces 'holder PID unreadable'", () => {
+    // An unreadable lock file whose mtime is YOUNGER than the retry
+    // budget is treated as "fresh" — could be a writer in the middle
+    // of populating the metadata. Acquirer waits the full budget
+    // and gives up with a "PID unreadable" message.
     //
-    // NOTE: this is also why the test uses a tight budget — the
-    // acquirer can't tell if the holder is alive or dead, so it
-    // defaults to waiting (the safe option).
+    // (The mtime-stale path #977 kicks in when the file is *older*
+    // than the budget — see the next test for that case.)
     const lockPath = lockPathFor(vaultPath);
     writeFileSync(lockPath, "garbage-content-no-pid");
 
     let caught: VaultBusyError | null = null;
     try {
-      acquireLock(vaultPath, { budgetMs: 150 });
+      // Long budget relative to mtime age so the mtime-stale path
+      // doesn't fire while we wait. The file was JUST written; even
+      // with the deadline+wait cadence it'll never exceed budgetMs.
+      acquireLock(vaultPath, { budgetMs: 300 });
     } catch (e) {
       if (e instanceof VaultBusyError) caught = e;
     }
     expect(caught).not.toBeNull();
     expect(caught?.holderPid).toBeNull();
     expect(caught?.message).toMatch(/holder PID unreadable/);
+  });
+
+  it("unparseable lock file older than budget → acquirer reclaims it (closes #977)", () => {
+    // A lock file that's unparseable AND older than the retry budget
+    // almost certainly came from a writer that crashed mid-write of
+    // the metadata block. Pre-#977 the acquirer waited the full
+    // budget anyway; post-#977 it unlinks the stale file and retries.
+    const lockPath = lockPathFor(vaultPath);
+    writeFileSync(lockPath, "");
+    // Backdate the mtime well past the stale-mtime floor
+    // (STALE_MTIME_FLOOR_MS = 10s) and past 2× any reasonable
+    // budget — 60s back is comfortably stale.
+    const sixtySecondsAgo = Date.now() / 1000 - 60;
+    utimesSync(lockPath, sixtySecondsAgo, sixtySecondsAgo);
+
+    // Tight budget — proves we reclaimed without waiting it out.
+    const lock = acquireLock(vaultPath, { budgetMs: 500 });
+    try {
+      const holder = readLockHolder(lockPath);
+      expect(holder?.pid).toBe(process.pid);
+    } finally {
+      lock.release();
+    }
+  });
+});
+
+describe("flock — PID-reuse defense (#976)", () => {
+  let tmp: string;
+  let vaultPath: string;
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), "vault-flock-test-"));
+    vaultPath = join(tmp, "vault.enc");
+    writeFileSync(vaultPath, "stub");
+  });
+
+  afterEach(() => {
+    try { rmSync(tmp, { recursive: true, force: true }); } catch { /* */ }
+  });
+
+  it("planted lock with our PID + acquired-time BEFORE this process started → reclaimed as stale (#976)", () => {
+    // PID reuse scenario: the lockfile claims `process.pid` as the
+    // holder (so kill(0)/proc check shows "alive"), but the
+    // acquired-at timestamp predates this process's own start time.
+    // No way the original holder is us → must be PID reuse → stale.
+    //
+    // Skip on non-Linux — pidStartTimeMs returns null on other
+    // platforms (conservative: treats as live). The defense is a
+    // Linux-only refinement; the underlying pidIsLive check still
+    // covers the most common (dead-PID) case everywhere.
+    if (process.platform !== "linux") {
+      return;
+    }
+
+    const lockPath = lockPathFor(vaultPath);
+    // Acquired-at = 1 hour before any reasonable test process start.
+    // We can't easily read THIS process's exact start time from
+    // userland, but it's certainly less than 1 hour old in CI.
+    const acquiredAt = Date.now() - 60 * 60 * 1000;
+    writeFileSync(lockPath, `${process.pid}\n${acquiredAt}\nlong-ago\n`);
+
+    // Tight budget so a regression would manifest as a timeout
+    // rather than a slow pass.
+    const lock = acquireLock(vaultPath, { budgetMs: 500 });
+    try {
+      const holder = readLockHolder(lockPath);
+      // Reclaimed: the lockfile now records the current acquire's
+      // timestamp, not the planted one.
+      expect(holder?.pid).toBe(process.pid);
+      expect(holder?.acquiredAtMs).toBeGreaterThan(acquiredAt + 60_000);
+    } finally {
+      lock.release();
+    }
+  });
+
+  it("planted lock with our PID + acquired-time WITHIN tolerance → treated as live (don't reclaim)", () => {
+    // If the planted acquired-at is recent enough that we can't rule
+    // out same-process acquisition, the conservative defense is to
+    // treat it as live. Acquirer waits the full budget.
+    if (process.platform !== "linux") return;
+
+    const lockPath = lockPathFor(vaultPath);
+    // Acquired-at = now. pidStartTimeMs returns a time before "now"
+    // (process must have started before it could write the lock),
+    // so pidIsOriginalHolder returns true → treat as live.
+    writeFileSync(lockPath, `${process.pid}\n${Date.now()}\ncurrent-process\n`);
+
+    let caught: VaultBusyError | null = null;
+    try {
+      acquireLock(vaultPath, { budgetMs: 300 });
+    } catch (e) {
+      if (e instanceof VaultBusyError) caught = e;
+    }
+    expect(caught).not.toBeNull();
+    expect(caught?.holderPid).toBe(process.pid);
   });
 });
 
@@ -236,15 +334,22 @@ describe("flock — v0.7.14 sentinel-dir migration", () => {
     try { rmSync(tmp, { recursive: true, force: true }); } catch { /* */ }
   });
 
-  it("legacy v0.7.14 sentinel-dir at lock path → acquirer migrates to file", () => {
+  it("legacy v0.7.14 sentinel-dir (with old leftover) → acquirer migrates to file", () => {
     // v0.7.14's proper-lockfile leaves `vault.enc.lock/` as a dir.
-    // The v0.7.15 acquirer's open(O_EXCL) fails with EISDIR; the
-    // migration branch rmdir's the legacy dir and retries.
+    // The v0.7.15 acquirer's EEXIST handler detects the dir-shape,
+    // clears it, and retries the openSync.
+    //
+    // Post-#979: clearStaleSentinelDir refuses to migrate if any
+    // file inside has been written within the last 60s (defensive
+    // against an in-flight v0.7.14 writer). Backdate the leftover
+    // so the migration proceeds.
     const lockPath = lockPathFor(vaultPath);
     mkdirSync(lockPath, { recursive: true });
-    // proper-lockfile may leave a file inside the sentinel dir; the
-    // migration must remove it too. Plant one to make sure.
-    writeFileSync(join(lockPath, "leftover"), "stale-content");
+    const leftoverPath = join(lockPath, "leftover");
+    writeFileSync(leftoverPath, "stale-content");
+    // Backdate to 2 minutes ago — beyond the 60s recent-write window.
+    const twoMinAgo = Date.now() / 1000 - 120;
+    utimesSync(leftoverPath, twoMinAgo, twoMinAgo);
 
     const lock = acquireLock(vaultPath, { budgetMs: 1000 });
     try {
@@ -256,6 +361,30 @@ describe("flock — v0.7.14 sentinel-dir migration", () => {
     } finally {
       lock.release();
     }
+  });
+
+  it("legacy v0.7.14 sentinel-dir with RECENT write → refuses migration, waits (closes #979)", () => {
+    // Defense for the v0.7.14 → v0.7.15 upgrade window. If a
+    // v0.7.14 writer is still active (e.g. broker not yet bounced
+    // post-upgrade), the sentinel dir's contents have fresh mtimes.
+    // clearStaleSentinelDir refuses to migrate; the acquirer falls
+    // through to the contention path and waits the budget.
+    const lockPath = lockPathFor(vaultPath);
+    mkdirSync(lockPath, { recursive: true });
+    // Fresh write — within the 60s recent-write window.
+    writeFileSync(join(lockPath, "leftover"), "in-flight-writer-data");
+
+    let caught: VaultBusyError | null = null;
+    try {
+      acquireLock(vaultPath, { budgetMs: 200 });
+    } catch (e) {
+      if (e instanceof VaultBusyError) caught = e;
+    }
+    // We expect a VaultBusyError (didn't migrate, waited budget).
+    expect(caught).not.toBeNull();
+    // Sentinel-dir is still on disk — defensive refusal worked.
+    expect(existsSync(lockPath)).toBe(true);
+    expect(statSync(lockPath).isDirectory()).toBe(true);
   });
 
   it("empty sentinel-dir → acquirer migrates cleanly", () => {

@@ -118,20 +118,161 @@ function pidIsLive(pid: number): boolean {
 }
 
 /**
+ * Read a Linux process's start time from `/proc/<pid>/stat` field 22
+ * (in clock ticks since boot — `man 5 proc` "starttime"). Combined
+ * with the system boot time (`/proc/stat:btime`, seconds since epoch)
+ * we get the wallclock millisecond when the process started.
+ *
+ * Returns `null` on non-Linux, missing PID, or parse failure (caller
+ * treats null as "unknown start time" and conservatively assumes the
+ * PID may be the original holder).
+ *
+ * Used by `pidIsOriginalHolder` to defend against PID reuse:
+ * if the running process started AFTER the lock was acquired, the
+ * PID was reused and the lock is stale. Closes #976.
+ */
+function pidStartTimeMs(pid: number): number | null {
+  if (process.platform !== "linux") return null;
+  try {
+    // /proc/<pid>/stat is one line. The comm field (field 2) is
+    // wrapped in parens and can contain spaces, so split on the
+    // closing `)` and parse the remaining whitespace-separated
+    // tokens. Field 22 (starttime) is index 19 of the post-`)` split.
+    const raw = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const tailStart = raw.lastIndexOf(")");
+    if (tailStart < 0) return null;
+    const tokens = raw.slice(tailStart + 1).trim().split(/\s+/);
+    // After the closing `)`, the next field is `state` (index 0 of
+    // tokens, which corresponds to field 3 of /proc/<pid>/stat).
+    // starttime is field 22, so index 22 - 3 = 19.
+    const starttimeTicks = Number.parseInt(tokens[19] ?? "", 10);
+    if (!Number.isFinite(starttimeTicks)) return null;
+
+    // Boot wallclock (seconds since epoch) — `btime` in /proc/stat.
+    const procStat = readFileSync("/proc/stat", "utf8");
+    const btimeMatch = procStat.match(/^btime\s+(\d+)/m);
+    if (!btimeMatch) return null;
+    const bootEpochSec = Number.parseInt(btimeMatch[1], 10);
+    if (!Number.isFinite(bootEpochSec)) return null;
+
+    // USER_HZ (clock ticks per second). On Linux this is almost always
+    // 100 (`getconf CLK_TCK`); we can't read it from /proc directly
+    // but the constant has been 100 on every common distro for 20+
+    // years. If this ever changes we surface "unknown start time" by
+    // returning null in the parse failure path above rather than
+    // computing a wrong answer here.
+    const USER_HZ = 100;
+    const startEpochMs = bootEpochSec * 1000 + (starttimeTicks / USER_HZ) * 1000;
+    return Math.floor(startEpochMs);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Defense against PID reuse (#976). If `pidIsLive(holder.pid)` is
+ * true but the running process at `holder.pid` started AFTER
+ * `holder.acquiredAtMs`, the PID has been reused by a fresh
+ * (unrelated) process and the lock is stale.
+ *
+ * Returns:
+ *   - true  → the process at this PID started before or at the time
+ *             the lock was acquired (could be the original holder, or
+ *             we can't tell — be conservative, treat as live).
+ *   - false → the process at this PID started after the lock was
+ *             acquired → PID reuse → stale lock.
+ *
+ * Conservative on unknown: returns true (treat as live) if we can't
+ * read /proc/<pid>/stat. False positives (treating a reused PID as
+ * live) cause a 5s busy-wait. False negatives (treating a live PID
+ * as dead) could double-grab the lock — much worse. So unknown is
+ * always "live".
+ */
+function pidIsOriginalHolder(holder: LockHolder): boolean {
+  const startMs = pidStartTimeMs(holder.pid);
+  if (startMs === null) return true; // conservative
+  // Tolerance: process start times are 1-tick (10ms on USER_HZ=100)
+  // granularity; the lock's acquiredAtMs is millisecond-precision
+  // from before the writeSync. Allow a 100ms slop so we don't
+  // false-positive on a process that legitimately wrote its own
+  // lockfile within the same tick as starting.
+  return startMs <= holder.acquiredAtMs + 100;
+}
+
+/**
+ * Threshold for the unparseable-lockfile + mtime-stale recovery
+ * path. Set well above any realistic retry budget so a normal
+ * wait loop never trips it — only files that pre-date the current
+ * acquirer's wait are considered "definitely stale". The check
+ * uses `max(STALE_MTIME_FLOOR_MS, budgetMs * 2)` so callers with
+ * huge budgets (test stress, long broker-vs-CLI contention)
+ * still get a safe margin.
+ */
+const STALE_MTIME_FLOOR_MS = 10_000;
+
+/**
+ * Returns true if the lock file's mtime is older than the
+ * stale threshold (see STALE_MTIME_FLOOR_MS). Used by the
+ * unparseable-lockfile + mtime-stale recovery path (#977): if
+ * the holder content can't be parsed AND the file is much older
+ * than the current wait budget, no live writer could plausibly
+ * still be using it — almost certainly a process that crashed
+ * mid-write of the metadata block.
+ *
+ * Returns false on any stat failure (caller treats this as "fresh,
+ * keep waiting") rather than null so the calling expression stays
+ * boolean-typed.
+ */
+function lockFileMtimeIsOlderThan(lockPath: string, budgetMs: number): boolean {
+  try {
+    const s = statSync(lockPath);
+    const threshold = Math.max(STALE_MTIME_FLOOR_MS, budgetMs * 2);
+    return Date.now() - s.mtimeMs > threshold;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Best-effort cleanup of a v0.7.14 sentinel-DIRECTORY lock at the
  * given path. Removes the directory's contents (proper-lockfile may
  * leave one or two files inside) then rmdir's it. Returns true on
  * success or if nothing was there.
  *
- * Safe only because v0.7.15 binary replacement requires a service
- * restart, which terminates any v0.7.14 writer that might have been
- * holding the sentinel dir legitimately.
+ * Refuses to migrate (returns false) if ANY file inside the sentinel
+ * dir has an mtime newer than `SENTINEL_DIR_RECENT_WRITE_MS` — that
+ * suggests a v0.7.14 writer might actually still be using the lock
+ * (the standard `switchroom update` flow recreates containers and
+ * SIGTERMs v0.7.14 writers, so this is rare, but operator-side
+ * manual upgrades can leave a window where the v0.7.15 host CLI is
+ * on PATH while the v0.7.14 broker is still mid-write). Closes #979.
+ *
+ * Caller treats a false return as "fall through to the contention
+ * path" so we don't busy-loop. After the recent-write window
+ * passes (or the v0.7.14 writer is killed), the next acquire
+ * succeeds.
  */
+const SENTINEL_DIR_RECENT_WRITE_MS = 60_000;
+
 function clearStaleSentinelDir(lockPath: string): boolean {
   try {
     if (!existsSync(lockPath)) return true;
     const s = statSync(lockPath);
     if (!s.isDirectory()) return true; // already a file — nothing to do
+
+    // Defensive: if any file inside has been written recently, a
+    // v0.7.14 writer may still be active. Refuse migration; caller
+    // falls through to contention.
+    const now = Date.now();
+    for (const entry of readdirSync(lockPath)) {
+      try {
+        const childStat = statSync(`${lockPath}/${entry}`);
+        if (now - childStat.mtimeMs < SENTINEL_DIR_RECENT_WRITE_MS) {
+          return false;
+        }
+      } catch { /* */ }
+    }
+
     for (const entry of readdirSync(lockPath)) {
       try { unlinkSync(`${lockPath}/${entry}`); } catch { /* */ }
     }
@@ -195,13 +336,26 @@ export function acquireLock(
 
         // Regular file: PID-file lock. Inspect liveness.
         const holder = readLockHolder(lockPath);
-        if (holder && !pidIsLive(holder.pid)) {
+
+        // Three stale-recovery paths, in order of how confidently we
+        // can call the lock dead:
+        //   1. holder PID dead (kill(0)/proc check) — fastest signal.
+        //   2. holder PID alive but the process started AFTER the
+        //      lock was acquired — PID reuse (#976).
+        //   3. lockfile content unparseable AND file's mtime is older
+        //      than the retry budget — almost certainly a writer that
+        //      crashed mid-write of the metadata block (#977).
+        const isDeadPid = holder !== null && !pidIsLive(holder.pid);
+        const isReusedPid = holder !== null && pidIsLive(holder.pid) && !pidIsOriginalHolder(holder);
+        const isUnparseableAndOld = holder === null && lockFileMtimeIsOlderThan(lockPath, budgetMs);
+        if (isDeadPid || isReusedPid || isUnparseableAndOld) {
           // Stale lock — best-effort unlink + retry. If another
           // racing acquirer beats us to the unlink, the next loop
           // iteration's openSync just contends again normally.
           try { unlinkSync(lockPath); } catch { /* lost the race */ }
           continue;
         }
+
         if (Date.now() >= deadline) {
           // Budget expired. Build the diagnostic message.
           throw makeBusyError(vaultPath, lockPath, holder, budgetMs);

@@ -202,8 +202,10 @@ function handleConnection(
   socket.on("data", (chunk: Buffer) => {
     buffer += chunk.toString("utf8");
     if (Buffer.byteLength(buffer, "utf8") > MAX_FRAME_BYTES) {
-      socket.write(encodeResponse(errorResponse("BAD_REQUEST", "Frame exceeds 64 KiB limit")));
-      socket.destroy();
+      // end(resp) not write(resp); destroy() — same race shape as
+      // #988's unlock-handler fix: destroy can drop the buffered
+      // response before the kernel flushes it to the peer.
+      socket.end(encodeResponse(errorResponse("BAD_REQUEST", "Frame exceeds 64 KiB limit")));
       return;
     }
     let nl: number;

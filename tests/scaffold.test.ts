@@ -2044,7 +2044,7 @@ describe("scaffoldAgent with global defaults cascade", () => {
   });
 
   it("writes model override into settings.json when set", () => {
-    const agentConfig = makeAgentConfig({ model: "claude-opus-4-6" });
+    const agentConfig = makeAgentConfig({ model: "claude-opus-4-7" });
     const switchroomConfig: SwitchroomConfig = {
       switchroom: { version: 1, agents_dir: tmpDir },
       telegram: telegramConfig,
@@ -2062,10 +2062,10 @@ describe("scaffoldAgent with global defaults cascade", () => {
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
     );
 
-    expect(settings.model).toBe("claude-opus-4-6");
+    expect(settings.model).toBe("claude-opus-4-7");
     // And --model is appended to exec claude in start.sh
     const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
-    expect(startSh).toContain("--model 'claude-opus-4-6'");
+    expect(startSh).toContain("--model 'claude-opus-4-7'");
   });
 
   it("exports user env vars in start.sh in declaration order", () => {
@@ -2799,7 +2799,7 @@ describe("scheduled task cron script generation", () => {
   it("uses the configured model when specified", () => {
     const agentConfig = makeAgentConfig({
       schedule: [
-        { cron: "0 9 * * *", prompt: "Important analysis", model: "claude-opus-4-6" },
+        { cron: "0 9 * * *", prompt: "Important analysis", model: "claude-opus-4-7" },
       ],
     });
     const result = scaffoldAgent(
@@ -2813,7 +2813,7 @@ describe("scheduled task cron script generation", () => {
       join(result.agentDir, "telegram", "cron-0.sh"),
       "utf-8",
     );
-    expect(content).toContain("claude-opus-4-6");
+    expect(content).toContain("claude-opus-4-7");
     expect(content).not.toContain("claude-sonnet-4-6");
   });
 
@@ -3508,7 +3508,7 @@ describe("scaffoldAgent with inline profiles (extends cascade)", () => {
   it("per-agent fields still win over inline profile fields", () => {
     const agentConfig = makeAgentConfig({
       extends: "coder",
-      model: "claude-opus-4-6",
+      model: "claude-opus-4-7",
     });
     const switchroomConfig: SwitchroomConfig = {
       switchroom: { version: 1, agents_dir: tmpDir },
@@ -3529,7 +3529,7 @@ describe("scaffoldAgent with inline profiles (extends cascade)", () => {
     const settings = JSON.parse(
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
     );
-    expect(settings.model).toBe("claude-opus-4-6");
+    expect(settings.model).toBe("claude-opus-4-7");
   });
 });
 

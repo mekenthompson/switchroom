@@ -152,6 +152,45 @@ function readStdinToEnd(): Promise<string> {
   });
 }
 
+/**
+ * Issue #969 P3: emit a one-shot deprecation warning when
+ * `SWITCHROOM_VAULT_PASSPHRASE` is set inside an agent sandbox. The env
+ * var is still honoured for backwards compatibility AND for the
+ * canonical gateway-passphrase-attestation flow (P1a) — both legitimate.
+ * The warning targets the anti-pattern where a SKILL script bakes the
+ * master passphrase into the agent's environment.
+ *
+ * Heuristic for distinguishing the two: the gateway invokes the CLI
+ * with the env var set on a per-spawn basis AND the wider sandbox
+ * shell does not have it exported. The legitimate gateway flow never
+ * enters this codepath under normal sandbox boot because the env is
+ * only on the spawned subprocess, not the agent's interactive shell
+ * environment. A skill script that runs `switchroom vault get` after
+ * `export SWITCHROOM_VAULT_PASSPHRASE=...` WILL hit it — which is
+ * exactly what we want.
+ *
+ * Emitting the warning is therefore safe to put at vault CLI entry:
+ * even if it fires on a legitimate gateway-spawned subprocess, it's
+ * one-shot, goes to stderr (not stdout), and gateway error handling
+ * already separates these streams.
+ */
+let _passphraseEnvDeprecationWarned = false;
+function maybeWarnPassphraseEnvDeprecation(): void {
+  if (_passphraseEnvDeprecationWarned) return;
+  if (process.env.SWITCHROOM_VAULT_PASSPHRASE === undefined) return;
+  if (!isSandboxContext()) return;
+  if (process.env.SWITCHROOM_NO_VAULT_DEPRECATION_WARNING === "1") return;
+  _passphraseEnvDeprecationWarned = true;
+  process.stderr.write(
+    `VAULT-DEPRECATION-WARNING: SWITCHROOM_VAULT_PASSPHRASE is set inside ` +
+    `an agent sandbox. Skills should authenticate via a capability grant ` +
+    `(\`switchroom vault grant <agent> --keys ... [--write ...]\`) instead — ` +
+    `the master passphrase in process env defeats the ACL model and ` +
+    `bypasses the broker audit log. See docs/vault-security.md. ` +
+    `(Set SWITCHROOM_NO_VAULT_DEPRECATION_WARNING=1 to silence.)\n`
+  );
+}
+
 async function getPassphrase(confirm = false): Promise<string> {
   // Check env var first
   const envPassphrase = process.env.SWITCHROOM_VAULT_PASSPHRASE;
@@ -195,7 +234,13 @@ function conversionHint(stored: VaultFormatHint, expected: VaultFormatHint): str
 export function registerVaultCommand(program: Command): void {
   const vault = program
     .command("vault")
-    .description("Manage encrypted secrets vault");
+    .description("Manage encrypted secrets vault")
+    .hook("preAction", () => {
+      // Fire the env-var deprecation check once per CLI invocation, BEFORE
+      // any subcommand runs. Catches the legacy skill pattern of exporting
+      // SWITCHROOM_VAULT_PASSPHRASE in the agent environment. (#969 P3)
+      maybeWarnPassphraseEnvDeprecation();
+    });
 
   vault
     .command("init")

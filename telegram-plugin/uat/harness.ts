@@ -45,7 +45,19 @@ export interface SpinUpOptions {
    * a user_id. Defaults to `process.env.TELEGRAM_TEST_BOT_USERNAME`.
    */
   botUsername?: string;
+  /**
+   * Settle delay (ms) after the driver connects, before the scenario's
+   * first send. Gives the previous scenario's turn time to finish its
+   * cleanup on the agent side — without this, observePins() starts
+   * subscribing while the gateway is still pinning/editing the prior
+   * turn's card and the next sendDM gets reused by an in-flight turn
+   * instead of starting a fresh one. Default 3000ms; set to 0 in
+   * single-scenario runs where settling is not needed.
+   */
+  settleMs?: number;
 }
+
+const DEFAULT_SETTLE_MS = 6_000;
 
 export interface Scenario {
   /** mtcute driver, already connected. */
@@ -141,6 +153,22 @@ export async function spinUp(opts: SpinUpOptions): Promise<Scenario> {
     driver.resolveBotUserId(cfg.botUsername),
     driver.getMyUserId(),
   ]);
+
+  // Settle gap: let any prior scenario's turn finish its card-lifecycle
+  // cleanup before we subscribe to pin events and send the next DM. See
+  // `settleMs` in SpinUpOptions for the why. Skip entirely when
+  // settleMs === 0 (explicit single-scenario runs).
+  const settleMs = opts.settleMs ?? DEFAULT_SETTLE_MS;
+  if (settleMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, settleMs));
+  }
+
+  // Unpin any leftover pinned message in the bot DM. Without this, the
+  // gateway re-uses the existing pin via edit on the next turn — no
+  // `updatePinnedMessages` event fires, and `expectPinnedCard` times
+  // out even though a card IS rendering. Forcing a clean slate makes
+  // the new turn's pin emit a fresh event the harness can observe.
+  await driver.unpinAllMessages(botUserId);
 
   const scenario: Scenario = {
     driver,

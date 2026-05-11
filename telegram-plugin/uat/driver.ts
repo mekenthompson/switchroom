@@ -176,6 +176,19 @@ export class Driver {
   }
 
   /**
+   * Unpin every pinned message in `chatId`. Used by the harness's
+   * settle phase: a stale pin from the previous scenario's turn would
+   * otherwise be reused by the gateway via edit (no new pin event),
+   * making `expectPinnedCard` time out. Best-effort — silently ignores
+   * Telegram errors (e.g. nothing currently pinned, or driver lacks
+   * unpin permission on a bot DM that hasn't pinned anything yet).
+   */
+  async unpinAllMessages(chatId: number): Promise<void> {
+    const c = this.requireClient();
+    await c.unpinAllMessages(chatId).catch(() => undefined);
+  }
+
+  /**
    * Resolve a bot username (with or without `@`) to its user_id. The
    * resulting id doubles as the chat_id for DMing the bot from the
    * driver — Telegram DMs use the peer's user_id as the chat_id.

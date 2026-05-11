@@ -30,26 +30,34 @@ import { spinUp } from "../harness.js";
 const INBOUND = `uat-card ${new Date().toISOString()}`;
 
 describe("uat: progress card lifecycle on driver DM", () => {
-  it("driver sees a pinned card progress to 'done' within 60s", async () => {
-    const sc = await spinUp({ agent: "test-harness" });
-    try {
-      await sc.sendDM(INBOUND);
+  it(
+    "driver sees a pinned card progress to 'done' within 60s",
+    async () => {
+      const sc = await spinUp({ agent: "test-harness" });
+      try {
+        await sc.sendDM(INBOUND);
 
-      // Card should be pinned within 5 s of the inbound (delay_ms
-      // override has it firing immediately at start-of-turn).
-      const card = await sc.expectPinnedCard({ timeout: 10_000 });
-      expect(card.messageId).toBeGreaterThan(0);
+        // Card should be pinned within 5 s of the inbound (delay_ms
+        // override has it firing immediately at start-of-turn).
+        const card = await sc.expectPinnedCard({ timeout: 10_000 });
+        expect(card.messageId).toBeGreaterThan(0);
 
-      // Walk to terminal phase. Fast turns may render straight to
-      // "done" — waitForCardPhase's fast-path returns immediately
-      // when the input snapshot's text already matches.
-      const finalCard = await sc.waitForCardPhase(card, "done", {
-        timeout: 60_000,
-      });
-      expect(finalCard.phase).toBe("done");
-      expect(finalCard.text).toMatch(/✅|Done/i);
-    } finally {
-      await sc.tearDown();
-    }
-  });
+        // Walk to terminal phase. Fast turns may render straight to
+        // "done" — waitForCardPhase's fast-path returns immediately
+        // when the input snapshot's text already matches.
+        const finalCard = await sc.waitForCardPhase(card, "done", {
+          timeout: 60_000,
+        });
+        expect(finalCard.phase).toBe("done");
+        expect(finalCard.text).toMatch(/✅|Done/i);
+      } finally {
+        await sc.tearDown();
+      }
+    },
+    // Per-test wall-clock budget. Must exceed the sum of inner poll
+    // deadlines (10s + 60s) plus mtcute connect + DM round-trip
+    // overhead. bun:test's default of 5s cuts the test off before
+    // the 60s inner wait can fire.
+    75_000,
+  );
 });

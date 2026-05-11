@@ -227,6 +227,16 @@ export interface PendingAgentSpawn {
   readonly subagentType?: string
   readonly promptText: string
   readonly startedAt: number
+  /**
+   * True when the parent emitted `Agent(run_in_background: true)`.
+   * Background sub-agents arrive AFTER the parent's `turn_end`, so
+   * background pending entries MUST survive the `turn_end` reducer's
+   * pending-spawn cleanup — otherwise the next `sub_agent_started`
+   * lands as an orphan with `pendingSpawns=0` (the live bug surfaced
+   * by `bg-sub-agent-dispatch-dm.test.ts`, see RFC Phase 2 §Bug 1
+   * in reference/sub-agent-visibility-rfc.md).
+   */
+  readonly runInBackground: boolean
 }
 
 export interface NarrativeStep {
@@ -559,7 +569,11 @@ export function reduce(
           process.stderr.write(`telegram gateway: progress-card: tool_use → agent correlation toolUseId=${event.toolUseId} agentId=${bestAgentId} (reverse-race adopt orphan)\n`)
         }
         if (!adopted) {
-          process.stderr.write(`telegram gateway: progress-card: tool_use → agent correlation toolUseId=${event.toolUseId} agentId=pending (awaiting sub_agent_started)\n`)
+          // Capture run_in_background flag — load-bearing for the
+          // turn_end pending-spawn preservation below. See
+          // PendingAgentSpawn.runInBackground JSDoc + RFC Phase 2 §Bug 1.
+          const runInBackground = event.input?.run_in_background === true
+          process.stderr.write(`telegram gateway: progress-card: tool_use → agent correlation toolUseId=${event.toolUseId} agentId=pending (awaiting sub_agent_started) bg=${runInBackground}\n`)
           const nextPending = new Map(pendingAgentSpawns)
           nextPending.set(event.toolUseId, {
             parentToolUseId: event.toolUseId,
@@ -567,6 +581,7 @@ export function reduce(
             subagentType,
             promptText,
             startedAt: now,
+            runInBackground,
           })
           pendingAgentSpawns = nextPending
         }
@@ -954,12 +969,26 @@ export function reduce(
       const narratives = state.narratives.map(n =>
         n.state === 'active' ? narrativeTransitionFromActive(n, subAgents) : n,
       )
+      // Preserve background pending spawns past turn_end. The
+      // parent's reply lands and turn_end fires in seconds, but the
+      // bg sub-agent's JSONL transcript appears later (worker takes
+      // its own startup time). Clearing pendingAgentSpawns wholesale
+      // here causes the eventual sub_agent_started to register as
+      // an orphan with `pendingSpawns=0` and isBackgroundDispatch=false,
+      // which then derails the header phase + defer-gate logic
+      // downstream. See RFC Phase 2 §Bug 1 in
+      // reference/sub-agent-visibility-rfc.md, surfaced by
+      // bg-sub-agent-dispatch-dm.test.ts.
+      const preservedPending = new Map<string, PendingAgentSpawn>()
+      for (const [k, v] of state.pendingAgentSpawns) {
+        if (v.runInBackground) preservedPending.set(k, v)
+      }
       return {
         ...state,
         items,
         narratives,
         subAgents,
-        pendingAgentSpawns: new Map(),
+        pendingAgentSpawns: preservedPending,
         stage: 'done',
         thinking: false,
         pendingPreamble: null,

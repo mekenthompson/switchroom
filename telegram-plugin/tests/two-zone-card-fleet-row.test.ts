@@ -59,14 +59,15 @@ describe('renderFleetRow', () => {
     expect(out).not.toContain('abcdef0')
   })
 
-  it('renders running with last tool + age', () => {
+  it('renders running with humanized last-tool phrase + age (#861)', () => {
     const out = renderFleetRow(fm({
       lastActivityAt: NOW - 5000,
       lastTool: { name: 'Read', sanitisedArg: 'file.ts' },
       toolCount: 3,
     }), NOW)
-    expect(out).toContain('Read')
-    expect(out).toContain('file.ts')
+    expect(out).toContain('Reading file')
+    // Raw arg is intentionally NOT in the rendered row (#861).
+    expect(out).not.toContain('file.ts')
     expect(out).toContain('5s ago')
     expect(out).toContain('3t')
     expect(out.startsWith('↻')).toBe(true)

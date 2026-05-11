@@ -214,6 +214,58 @@ export function renderFleetRow(m: FleetMember, now: number): string {
   return `${glyph} ${role} <code>${id6}</code> · ${tools} · ${activity}`
 }
 
+/**
+ * Map a raw Claude Code tool name to a human-readable verb phrase for
+ * the fleet row. See #861 — the prior rendering leaked raw shell
+ * commands and tool-name + truncated-arg blobs into the status card,
+ * which read as terminal log spew rather than "what is the agent
+ * doing." The phrases here are intentionally short (≤22 chars) so a
+ * mobile-width fleet row stays one line.
+ *
+ * Future improvement (#861 ideal): wire the preamble field through
+ * fleet-state so a model-emitted "Searching for typing handlers"
+ * preceding the tool_use beats the generic phrase. That requires
+ * adding `preamble` to FleetMember and threading it through
+ * applyToolUse — bigger change, tracked separately.
+ */
+export function humanizeToolName(toolName: string): string {
+  switch (toolName) {
+    case 'Bash':
+    case 'BashOutput':
+      return 'Running command'
+    case 'KillShell':
+      return 'Killing shell'
+    case 'Read':
+      return 'Reading file'
+    case 'Write':
+    case 'Edit':
+    case 'NotebookEdit':
+      return 'Editing file'
+    case 'Glob':
+    case 'Grep':
+      return 'Searching files'
+    case 'WebFetch':
+      return 'Fetching URL'
+    case 'WebSearch':
+      return 'Searching the web'
+    case 'Task':
+    case 'Agent':
+      return 'Sub-agent'
+    case 'TodoWrite':
+      return 'Updating todos'
+    case 'AskUserQuestion':
+      return 'Asking user'
+    case 'ExitPlanMode':
+      return 'Exiting plan'
+    default:
+      // Unknown tool — keep the name (escaped) so a brand-new tool
+      // shows something rather than disappearing. Surface as
+      // "Using <Name>" instead of bare "<Name>" so the human-language
+      // pattern is preserved.
+      return `Using ${escapeHtml(toolName)}`
+  }
+}
+
 export function formatLastActivity(m: FleetMember, now: number): string {
   // Terminal states show "<status> <relative-time>"
   if (m.terminalAt != null) {
@@ -225,16 +277,19 @@ export function formatLastActivity(m: FleetMember, now: number): string {
     const idle = formatRelativeTime(Math.max(0, now - m.lastActivityAt))
     return `idle ${idle}`
   }
-  // Running — show last tool + age
+  // Running — show humanized tool descriptor + age. Pre-#861 this
+  // surfaced the raw tool name + truncated command (e.g. `Bash cd
+  // /home/… && gre…`); the issue documents how that reads as
+  // terminal log spew rather than a status update. Raw arg is
+  // dropped on purpose — it's never short enough to be useful on
+  // mobile and the agent-id chip + token-count already disambiguate
+  // between concurrent sub-agents.
   if (m.lastTool == null) {
     const age = formatRelativeTime(Math.max(0, now - m.lastActivityAt))
     return `started ${age}`
   }
   const age = formatRelativeTime(Math.max(0, now - m.lastActivityAt))
-  const arg = m.lastTool.sanitisedArg
-    ? ` <code>${escapeHtml(truncate(m.lastTool.sanitisedArg, 60))}</code>`
-    : ''
-  return `${escapeHtml(m.lastTool.name)}${arg} (${age})`
+  return `${humanizeToolName(m.lastTool.name)} (${age})`
 }
 
 export function glyphForFleetStatus(status: FleetStatus): string {

@@ -18,7 +18,12 @@
  * production pattern).
  */
 
-import { MemoryStorage, TelegramClient, getMarkedPeerId } from "@mtcute/node";
+import {
+  MemoryStorage,
+  TelegramClient,
+  getMarkedPeerId,
+  InputMedia,
+} from "@mtcute/node";
 import type { Message } from "@mtcute/node";
 
 export interface DriverOptions {
@@ -484,17 +489,35 @@ export class Driver {
     return toObserved(msg, false);
   }
 
-  // -------- Deferred to #866 / Phase 2d --------
-
   /**
-   * TODO(#866): send a voice note. Needed for `voice-inbound.test.ts`.
+   * Send a voice note. Wraps mtcute's `sendMedia` + `InputMedia.voice`
+   * factory. The `oggPath` must be a path to an OGG/Opus audio file
+   * (Telegram only accepts that codec for voice notes); other audio
+   * formats render as a generic audio attachment and `voice_in`
+   * transcription on the bot side will skip them.
+   *
+   * Generating a fixture locally:
+   *   ffmpeg -f lavfi -i anullsrc=r=48000:cl=mono -t 1 \
+   *     -c:a libopus -b:a 32k tests/fixtures/voice/silence-1s.opus
+   *
+   * The scenario at `scenarios/voice-inbound-dm.test.ts` references
+   * a fixture path but is `describe.skip`'d until the fixture is
+   * committed (kept out of git to keep the repo small until needed).
    */
   async sendVoice(
-    _chatId: number,
-    _oggPath: string,
-    _opts?: SendTextOptions,
+    chatId: number,
+    oggPath: string,
+    opts?: SendTextOptions,
   ): Promise<{ messageId: number }> {
-    throw new Error("Driver.sendVoice not implemented (Phase 2d)");
+    const c = this.requireClient();
+    const replyTo = opts?.replyTo ?? opts?.messageThreadId;
+    const media = InputMedia.voice(oggPath);
+    const sent = await c.sendMedia(
+      chatId,
+      media,
+      replyTo ? { replyTo } : undefined,
+    );
+    return { messageId: sent.id };
   }
 
   private requireClient(): TelegramClient {

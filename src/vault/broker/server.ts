@@ -1528,7 +1528,13 @@ export class VaultBroker {
         if ((req as { passphrase?: string }).passphrase === this.passphrase) {
           mintPassphraseAttested = true;
         } else {
-          this.auditLogger.write({
+          // writeAudit (not this.auditLogger.write directly) so the row
+          // gets peer_uid + agent_name attribution — forensics on a
+          // wrong-passphrase incident benefit from knowing which agent
+          // socket the attempt came through. The PUT mismatch path
+          // pre-dates writeAudit's injection helper, but new code at
+          // this level uses the injected variant.
+          writeAudit({
             ts: new Date().toISOString(),
             op: req.op,
             caller: auditCaller,

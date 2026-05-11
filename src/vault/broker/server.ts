@@ -1467,6 +1467,18 @@ export class VaultBroker {
       req.op === "list_grants" ||
       req.op === "revoke_grant";
     if (isGrantMgmtOp) {
+      // Decide trust upfront so both the agent-deny gate AND the
+      // peercred/cron gates below honour it. `isAdminAgent` is the
+      // admin-flagged-yaml path-as-identity equivalent of the
+      // operator socket: identity comes from the bound path
+      // (the per-agent socket is `/run/switchroom/broker/<name>/sock`),
+      // admin-ness comes from server-side config — never from the
+      // wire. Same trust posture as `isOperator`; bypasses peercred
+      // for the same reason.
+      const isAdminAgent =
+        agentName !== null &&
+        this.config?.agents?.[agentName]?.admin === true;
+      const trustedForGrantMgmt = isOperator || isAdminAgent;
       // Operator socket: trusted by path + 0600 chown; skip the cron-deny
       // and peercred-required gates below. Operator IS the operator-only
       // identity those gates were designed to verify. Audit logs reflect
@@ -1479,11 +1491,7 @@ export class VaultBroker {
         // grant-mgmt ops via their existing per-agent socket
         // (#1021 Design B). The agent already has operator-level
         // Telegram surface (`/agents`, `/vault`, `/restart`, etc.)
-        // so this is a consistent expansion. Path-as-identity is
-        // preserved: the agent name comes from the socket path,
-        // and admin-ness is read from server-side config — never
-        // from the wire.
-        const isAdminAgent = this.config?.agents?.[agentName]?.admin === true;
+        // so this is a consistent expansion.
         if (isAdminAgent) {
           // Fall through to grant-mgmt handlers below. Audit log
           // already carries the agent name + cgroup attribution.
@@ -1511,9 +1519,13 @@ export class VaultBroker {
           return;
         }
       }
-      // Operator socket bypasses both gates below — its identity is
-      // established by the bind path + 0600 chown, not peercred.
-      if (!isOperator) {
+      // Operator socket + admin agents bypass both gates below —
+      // their identity is established by the bind path + chown, not
+      // peercred. Per-agent (non-admin) connections that reach this
+      // point have already been rejected above; the only callers
+      // here are: (a) operator socket, (b) admin agent socket, or
+      // (c) some non-agent, non-operator path (legacy / dev mode).
+      if (!trustedForGrantMgmt) {
         const allowNonLinux = process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX === "1";
         if (peer === null && !allowNonLinux) {
           this.auditLogger.write({

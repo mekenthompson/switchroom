@@ -71,8 +71,9 @@ export default defineConfig({
       "**/.claude/worktrees/**",
       // UAT harness scenarios (#863) hit real Telegram and must never run
       // on the default test path. Invoke via `bun run test:uat` from
-      // telegram-plugin/.
-      "**/telegram-plugin/uat/**",
+      // telegram-plugin/. Co-located unit tests at `telegram-plugin/uat/*.test.ts`
+      // (mocked mtcute, no network) DO run on the default path.
+      "**/telegram-plugin/uat/scenarios/**",
       "**/telegram-plugin/tests/history.test.ts",
       "**/telegram-plugin/tests/ipc-server-client.test.ts",
       "**/telegram-plugin/tests/ipc-server-race.test.ts",

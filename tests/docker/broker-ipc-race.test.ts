@@ -27,12 +27,20 @@
  *     approval-kernel vault-broker` to bring the new agent's
  *     dependencies online without touching existing containers.
  *
- * Acceptance:
- *   1. All 45 lookups succeed (each returns ok=true, even for
- *      no_decision/expired states — the wire round-trip is what
- *      matters; the response state is irrelevant).
- *   2. broker / kernel containers' RestartCount stays 0
- *      across the topology change.
+ * Acceptance (post-#1017):
+ *   1. At least 80% of alice's lookups succeed across the window.
+ *      Lower than the pre-#1017 "100% no-drops" contract because
+ *      `bringUpAgentService` now deliberately recreates broker AND
+ *      kernel mid-test so the new agent's per-agent socket dirs are
+ *      actually bound. The kernel-recreate (~1-2s) is what drops
+ *      alice's in-flight kernel lookups; the broker-recreate is
+ *      invisible to alice's kernel UDS. Pre-#1017 the existing fleet
+ *      looked stable but the new agent was permanently unreachable
+ *      from broker/kernel — strictly worse.
+ *   2. BOTH broker AND kernel container IDs change across the
+ *      topology mutation. This is the positive evidence the helper's
+ *      explicit recreate fired. RestartCount is unreliable as a
+ *      signal because a recreate resets it to 0 on the new container.
  *   3. newbie reaches "first kernel-lookup answered via its own
  *      kernel socket" within 60s wall-clock from `up -d` invocation.
  *

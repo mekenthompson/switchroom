@@ -91,8 +91,9 @@ const BG_DISPATCH_PROMPT =
  * fails AC-2's closing half (card never reaches Done in 120s because
  * the orphan never terminates from the gateway's view).
  *
- * When Bug 1 + Bug 2 are fixed, remove the `.fails` modifier below
- * — the assertions are correct; only the production code is wrong.
+ * When Bug 1 + Bug 2 are fixed, change `describe.skip` to `describe`
+ * below — the assertions are correct; only the production code is
+ * wrong.
  */
 describe.skip("uat: background sub-agent visibility (#709/#776/#782/#788)", () => {
   it(

@@ -3,11 +3,20 @@
  *
  * Issue: https://github.com/switchroom/switchroom/issues/866
  *
- * `spinUp({ agent, topic })` is the single entry point a scenario
- * uses. Phase 1 ships the type shape + the lifecycle skeleton; the
- * actual `child_process.spawn` of the agent under test is stubbed
- * with TODO markers so the reviewer can see exactly where Phase 2
- * lands.
+ * `spinUp({ agent })` connects the mtcute driver and resolves the test
+ * bot's user_id, returning a Scenario the test can interact with.
+ *
+ * **Runtime model — Phase 2a (DM focus):** the test-harness agent is
+ * a standard switchroom agent the operator created once via
+ * `switchroom agent add test-harness ...` (see uat/SETUP.md). The
+ * harness does NOT spin the agent up per-scenario — it relies on the
+ * agent being already running. Per-scenario state isolation rolls in
+ * with Phase 2b once we move beyond DM smoke tests.
+ *
+ * Forum-topic routing, ephemeral STATE_DIR, child-process agents, and
+ * the progress-card observers are deferred to Phase 2b (#866 v2) — the
+ * epic's original plan was written before the Docker runtime landed
+ * and would substantially re-invent the agent lifecycle.
  */
 
 import { Driver } from "./driver.js";
@@ -19,32 +28,47 @@ import {
   type PollOptions,
   type PinnedCardSnapshot,
 } from "./assertions.js";
-import { allocatePort } from "./port-allocator.js";
+import type { ObservedMessage } from "./driver.js";
 
 export interface SpinUpOptions {
-  /** Agent name to install + run, e.g. `"clerk"`, `"test-harness"`. */
+  /**
+   * Agent name to run scenarios against, e.g. `"test-harness"`. The
+   * agent must already be configured + running (Phase 2a: standard
+   * runtime + persistent agent).
+   */
   agent: string;
   /**
-   * Forum topic slug for isolation. The harness creates the topic in
-   * the test supergroup and tears it down after the scenario.
+   * Bot username (with or without `@`) the harness should resolve to
+   * a user_id. Defaults to `process.env.TELEGRAM_TEST_BOT_USERNAME`.
    */
-  topic: string;
+  botUsername?: string;
 }
 
 export interface Scenario {
   /** mtcute driver, already connected. */
   driver: Driver;
-  /** Negative supergroup chat id; from `$SWITCHROOM_UAT_CHAT_ID`. */
-  chatId: number;
-  /** Topic id created for this scenario. */
-  threadId: number;
+  /** Test bot's Telegram user_id; doubles as the chat_id for DMs. */
+  botUserId: number;
+  /** Driver user account's Telegram user_id. */
+  driverUserId: number;
 
-  // Sugar over the assertion helpers, pre-bound to this scenario's
-  // chat + thread. Phase 1 returns a thin pass-through.
+  /** Sugar for `driver.sendText(botUserId, text)`. */
+  sendDM: (text: string) => Promise<{ messageId: number }>;
+
+  /**
+   * Wait for the next message in the bot DM chat matching `match`.
+   * `opts.from` filters by sender side: `"bot"` for replies from the
+   * test bot, `"driver"` for the driver's own echoes (rare in
+   * scenarios but useful for assertions on the outbound side).
+   */
   expectMessage: (
-    match: Parameters<typeof expectMessage>[2],
-    opts: PollOptions & { from?: "bot" | "user" },
-  ) => ReturnType<typeof expectMessage>;
+    match: string | RegExp | ((m: ObservedMessage) => boolean),
+    opts: PollOptions & { from?: "bot" | "driver" },
+  ) => Promise<ObservedMessage>;
+
+  // Phase 2b stubs — type-only so existing scenarios that reference
+  // these helpers still typecheck after this PR. Implementations land
+  // alongside `observeReactions` / `observePins` in #866 v2.
   expectReaction: (
     messageId: number,
     sequence: string[],
@@ -57,105 +81,94 @@ export interface Scenario {
     opts: PollOptions,
   ) => ReturnType<typeof waitForCardPhase>;
 
-  /** Stop the agent process, delete the topic, disconnect the driver. */
+  /** Disconnect the driver. The persistent test-harness agent keeps running. */
   tearDown: () => Promise<void>;
 }
 
-/**
- * Spin up an isolated agent + scenario context.
- *
- * Phase 1: returns a stub Scenario whose tools throw helpful "not
- * implemented" errors. The shape is correct so scenarios written
- * against it will typecheck today and run for real once Phase 2
- * lands.
- */
+interface ResolvedConfig {
+  apiId: number;
+  apiHash: string;
+  session: string;
+  botUsername: string;
+}
+
+function resolveConfig(opts: SpinUpOptions): ResolvedConfig {
+  const apiId = Number.parseInt(process.env.TELEGRAM_API_ID ?? "", 10);
+  if (!Number.isFinite(apiId)) {
+    fail("TELEGRAM_API_ID is missing or not an integer — see uat/SETUP.md §3");
+  }
+  const apiHash = process.env.TELEGRAM_API_HASH ?? "";
+  if (apiHash.length === 0) {
+    fail("TELEGRAM_API_HASH is empty — see uat/SETUP.md §3");
+  }
+  const session = process.env.TELEGRAM_UAT_DRIVER_SESSION ?? "";
+  if (session.length === 0) {
+    fail(
+      "TELEGRAM_UAT_DRIVER_SESSION is empty — run `bun run uat:login` first " +
+        "(see uat/SETUP.md §4)",
+    );
+  }
+  const botUsername =
+    opts.botUsername ?? process.env.TELEGRAM_TEST_BOT_USERNAME ?? "";
+  if (botUsername.length === 0) {
+    fail(
+      "Bot username not provided — pass `botUsername` to spinUp() or set " +
+        "TELEGRAM_TEST_BOT_USERNAME",
+    );
+  }
+  return { apiId, apiHash, session, botUsername };
+}
+
 export async function spinUp(opts: SpinUpOptions): Promise<Scenario> {
-  // TODO(#866): resolve secrets from vault.
-  //   - `telegram-test-bot-token` for the agent under test
-  //   - `telegram-uat-driver-session` for the mtcute driver
-  //   - `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` from env
-  // For now we throw early with a clear message so accidental runs
-  // before Phase 2 don't crash with confusing stack traces.
-  if (!process.env.SWITCHROOM_UAT_CHAT_ID) {
-    throw new Error(
-      "[uat/harness] SWITCHROOM_UAT_CHAT_ID is not set — see uat/SETUP.md §2",
-    );
-  }
-  const chatId = Number.parseInt(process.env.SWITCHROOM_UAT_CHAT_ID, 10);
-  if (!Number.isFinite(chatId) || chatId >= 0) {
-    throw new Error(
-      `[uat/harness] SWITCHROOM_UAT_CHAT_ID must be a negative supergroup id (got ${process.env.SWITCHROOM_UAT_CHAT_ID})`,
-    );
-  }
+  const cfg = resolveConfig(opts);
+  void opts.agent; // currently informational; #866 v2 will use it for state-dir scoping
 
-  // TODO(#866): allocate gateway port + ephemeral STATE_DIR.
-  //   const port = await allocatePort();
-  //   const stateDir = await mkdtemp(join(tmpdir(), `uat-${opts.agent}-`));
-  //   process.env.STATE_DIR is per-process — we instead pass STATE_DIR
-  //   in the spawned child's env, never mutate ours.
-  const port = await allocatePort();
-  void port; // Phase 2: feed into agent child env
-
-  // TODO(#866): create the forum topic via Bot API
-  // (`createForumTopic`) using the test bot token; capture the
-  // returned `message_thread_id` and stash for tearDown's
-  // `deleteForumTopic`.
-  const threadId = -1; // sentinel; Phase 2 fills in
-
-  // TODO(#866): spawn the agent under test as a child process.
-  //   const child = spawn(process.execPath, [agentEntry], {
-  //     env: {
-  //       ...process.env,
-  //       STATE_DIR: stateDir,
-  //       TELEGRAM_GATEWAY_PORT: String(port),
-  //       SWITCHROOM_AGENT_NAME: opts.agent,
-  //       BOT_TOKEN: <vault: telegram-test-bot-token>,
-  //     },
-  //     stdio: ["ignore", "pipe", "pipe"],
-  //   });
-  //   await waitForGatewayReady(port, { timeout: 30_000 });
-
-  // TODO(#866): connect mtcute driver.
-  //   const driver = new Driver({ apiId, apiHash, session });
-  //   await driver.connect();
   const driver = new Driver({
-    apiId: 0,
-    apiHash: "",
-    session: "<resolved-from-vault>",
+    apiId: cfg.apiId,
+    apiHash: cfg.apiHash,
+    session: cfg.session,
   });
+
+  await driver.connect();
+
+  // Resolve both IDs eagerly so scenarios can rely on them being
+  // populated by the time `spinUp` returns. Run in parallel — the
+  // two calls don't interact.
+  const [botUserId, driverUserId] = await Promise.all([
+    driver.resolveBotUserId(cfg.botUsername),
+    driver.getMyUserId(),
+  ]);
 
   const scenario: Scenario = {
     driver,
-    chatId,
-    threadId,
+    botUserId,
+    driverUserId,
+    sendDM: (text) => driver.sendText(botUserId, text),
     expectMessage: (match, pollOpts) =>
-      expectMessage(driver, chatId, match, {
+      expectMessage(driver, botUserId, match, {
         ...pollOpts,
-        threadId,
+        senderFilter:
+          pollOpts.from === "bot"
+            ? { notUserId: driverUserId }
+            : pollOpts.from === "driver"
+              ? { userId: driverUserId }
+              : undefined,
       }),
     expectReaction: (messageId, sequence, pollOpts) =>
-      expectReaction(driver, chatId, messageId, sequence, pollOpts),
-    expectPinnedCard: (pollOpts) =>
-      expectPinnedCard(driver, chatId, { ...pollOpts, threadId }),
+      expectReaction(driver, botUserId, messageId, sequence, pollOpts),
+    expectPinnedCard: (pollOpts) => expectPinnedCard(driver, botUserId, pollOpts),
     waitForCardPhase: (card, phase, pollOpts) =>
       waitForCardPhase(driver, card, phase, pollOpts),
     tearDown: async () => {
-      // TODO(#866): SIGTERM child, await exit (or SIGKILL after 5s),
-      // delete forum topic, rm -rf state dir, disconnect driver.
       await driver.disconnect().catch(() => {
-        /* idempotent */
+        /* idempotent — log-and-move-on; the persistent agent is unaffected */
       });
     },
   };
 
-  // Phase 1 marker so accidental runs fail loudly instead of silently
-  // sending nothing.
-  void opts;
-  throw new Error(
-    "[uat/harness] spinUp is scaffolded but not wired (Phase 1 stub) — see TODO markers in uat/harness.ts",
-  );
-
-  // unreachable in Phase 1; left for shape:
-  // eslint-disable-next-line no-unreachable
   return scenario;
+}
+
+function fail(msg: string): never {
+  throw new Error(`[uat/harness] ${msg}`);
 }

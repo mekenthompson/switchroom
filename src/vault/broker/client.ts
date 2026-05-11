@@ -748,12 +748,25 @@ export type ListGrantsResult =
 
 /**
  * List active grants via the broker, optionally filtered by agent.
+ *
+ * Accepts an optional `passphrase` for operator-attested listing from
+ * a non-admin agent socket (#1051 — the grant-union flow needs read
+ * access to existing grants before minting a unioned one).
  */
 export async function listGrantsViaBroker(
   agent: string | undefined,
-  opts?: BrokerClientOpts,
+  opts?: BrokerClientOpts & { passphrase?: string },
 ): Promise<ListGrantsResult> {
-  const result = await rpc({ v: 1, op: "list_grants", agent }, opts);
+  const passphrase = opts?.passphrase;
+  const result = await rpc(
+    {
+      v: 1,
+      op: "list_grants",
+      agent,
+      ...(passphrase ? { passphrase } : {}),
+    },
+    opts,
+  );
   if (result.kind === "unreachable") return { kind: "unreachable", msg: result.msg };
   const resp = result.resp;
   if (resp.ok && "grants" in resp) {

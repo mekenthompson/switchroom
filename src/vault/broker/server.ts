@@ -1523,7 +1523,13 @@ export class VaultBroker {
       // instead of silently falling through to other auth paths).
       let mintPassphraseAttested = false;
       if (
-        req.op === "mint_grant" &&
+        // #1051: also covers list_grants. The grant-union flow needs
+        // to read existing grants before minting a unioned one;
+        // without this the gateway can't see the prior key list and
+        // each fresh mint silently strands the previous .vault-token.
+        // Read-only — adds no security regression vs the mint_grant
+        // attestation that already exists for the same caller.
+        (req.op === "mint_grant" || req.op === "list_grants") &&
         (req as { passphrase?: string }).passphrase !== undefined &&
         (req as { passphrase?: string }).passphrase !== ""
       ) {

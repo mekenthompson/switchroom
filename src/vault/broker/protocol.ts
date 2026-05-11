@@ -131,6 +131,16 @@ export const ListGrantsRequestSchema = z.object({
   v: z.literal(1),
   op: z.literal("list_grants"),
   agent: z.string().optional(),
+  /**
+   * Optional operator-passphrase attestation (#1051). Same trust
+   * posture as the mint_grant attestation field (#1012 Phase 2).
+   * list_grants needs to be reachable from non-admin agent gateways
+   * so the grant-union flow can read the agent's existing keys
+   * before minting a unioned grant. Read-only — adds no security
+   * regression vs the mint_grant path that's already
+   * operator-attested.
+   */
+  passphrase: z.string().optional(),
 });
 
 export const RevokeGrantRequestSchema = z.object({

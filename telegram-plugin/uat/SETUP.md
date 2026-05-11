@@ -156,28 +156,23 @@ switchroom agent status test-harness
 boots the container, runs a preflight. On success the agent is
 running and will reply to DMs from the driver user account.
 
-> **Known papercut — fix in #1001.** The wizard currently writes the
-> `--allow-from` user_id into `access.json` as a **number**; the
-> gateway requires it as a **string** and silently ignores DMs until
-> patched. Until #1001 lands, after `agent add` succeeds, edit the
-> file by hand (the file is owned by the per-agent UID; needs sudo):
+> **Hosts upgraded from before #1009.** If you set up the
+> `test-harness` agent on an older CLI build, its
+> `access.json` may carry the two pre-fix shapes — numeric
+> `allowFrom` (silently rejected by the gateway, #1001) and a
+> placeholder `groups: {"-100…"}` entry (404 boot-probe noise,
+> #1002). Both writers were corrected in #1009, but existing
+> scaffolds aren't auto-rewritten. To rebuild a clean access.json
+> on a host that hit the old shapes:
 >
 > ```bash
-> sudo python3 -c "
-> import json
-> p = '/home/$USER/.switchroom/agents/test-harness/telegram/access.json'
-> d = json.load(open(p))
-> d['allowFrom'] = [str(x) for x in d['allowFrom']]
-> d['groups'] = {}   # see #1002: scaffold leaves a stray placeholder chat_id
-> json.dump(d, open(p, 'w'), indent=2)
-> "
+> switchroom agent stop test-harness
+> rm ~/.switchroom/agents/test-harness/telegram/access.json
+> switchroom apply       # rewrites access.json via the fixed buildAccessJson
+> switchroom agent start test-harness
 > ```
-
-> **Known papercut — fix in #1002.** The scaffold leaves a
-> placeholder `groups: {"-100…"}` entry pointing at a chat the bot
-> isn't in. The gateway probes it at boot and gets a 404 (noisy log,
-> not fatal). The `sudo python3` snippet above clears it; otherwise
-> ignore the `boot-probe-failed` log line.
+>
+> Fresh agent-add invocations on current main don't need this.
 
 ### When this agent should be running
 
@@ -256,15 +251,11 @@ bun run test:uat
 unset TELEGRAM_API_HASH TELEGRAM_UAT_DRIVER_SESSION TELEGRAM_API_ID TELEGRAM_TEST_BOT_USERNAME
 ```
 
-> **Known papercut — fix in #999.** Each `vault get --no-broker` line
-> above relies on `$SWITCHROOM_VAULT_PASSPHRASE` being set in the env
-> because the vault CLI's passphrase prompt writes to stdout — which
-> `$(...)` captures into the env var, so the prompt is never shown to
-> the operator and the read fails silently. Setting
-> `SWITCHROOM_VAULT_PASSPHRASE` first sidesteps the prompt entirely.
-> If you forget, you'll see `Error: Passphrase cannot be empty` for
-> each line and `TELEGRAM_API_HASH=` will be empty, leading to a
-> later misleading "API ID invalid" from Telegram.
+> Setting `SWITCHROOM_VAULT_PASSPHRASE` once at the top is what
+> lets the per-key `vault get --no-broker` reads work inside
+> `$(...)` substitution — the CLI now sends prompts to stderr
+> (#999), but supplying the env var avoids the prompt entirely
+> across the 3 vault reads.
 
 The vault passphrase is unset BEFORE the tests run so a misbehaving
 scenario can't smuggle it into a chat message. The remaining env

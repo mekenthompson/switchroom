@@ -183,21 +183,42 @@ describe("JTBD/talk-from-anywhere — no live code path tells the operator to le
     expect(gatewaySrcWithoutAllowedPunts()).not.toMatch(/Phase \d[a-z]? will wire/i);
   });
 
-  it("no headline error punts to 'on the host'", () => {
+  it("no headline-error closer punts to 'on the host'", () => {
     // The `on the host` substring shows up in legitimate edge-recovery
     // messages (token-write failed AFTER mint succeeded) where the
-    // operator genuinely has a host-side recovery option. Those reads
+    // operator genuinely has a host-side recovery option. Those read
     // as a fallback, not a headline.
     //
     // The anti-pattern is the HEADLINE form — the first thing the
-    // operator sees on a fresh error. Match the trailing "</i>" form
-    // that the vault renderer / fallback message uses for the
-    // closer line of an error card.
+    // operator sees on a fresh error. Match the trailing-italic closer
+    // pattern (`on the host.</i>` or `on the host shell.</i>`) since
+    // that's how renderer / fallback strings sign off a card.
+    //
+    // Caveat: this guard only catches the *closer* form. A future
+    // regression that buries "on the host" in mid-sentence headline
+    // text would slip through. Two known existing matches are inside
+    // recovery-tip <i> fallbacks (gateway.ts:7941, 8046) — those use
+    // the same closer shape and remain in the allowlist via context
+    // (they're triggered by token-write-failure-after-mint, not
+    // displayed as a primary error).
     const body = gatewaySrcWithoutAllowedPunts();
-    // Match strings like "on the host.</i>" or "on the host shell" as
-    // the closer of an error message. The bare "on the host" inside a
-    // recovery-tip parenthetical is allowed.
-    expect(body).not.toMatch(/on the host shell\b/);
+    // Strip the two known fallback patterns (token-write-fail recovery
+    // tips, NOT headline errors) so the test guards genuinely new
+    // regressions.
+    const RECOVERY_FALLBACK_PATTERNS = [
+      // Recent-denials one-tap (gateway.ts:7937-7941)
+      /Recover with:.*?on the host\.<\/i>/gs,
+      // vault_request_access (gateway.ts:8042-8046)
+      /Recover with:.*?on the host\.<\/i>/gs,
+    ];
+    let stripped = body;
+    for (const pat of RECOVERY_FALLBACK_PATTERNS) {
+      stripped = stripped.replace(pat, "");
+    }
+    // After stripping documented recovery fallbacks, the closer pattern
+    // should NOT appear anywhere.
+    expect(stripped).not.toMatch(/on the host shell\b/);
+    expect(stripped).not.toMatch(/on the host\.<\/i>/);
   });
 });
 
@@ -335,6 +356,10 @@ describe("Vision/multi-agent fleet — discoverability of admin actions", () => 
     // reads. If it doesn't say "call me when you hit VAULT-BROKER-DENIED,"
     // the agent will hold on and surface a useless `VAULT-BROKER-DENIED`
     // wall-of-text to the operator instead of asking for help.
-    expect(bridgeSrc).toMatch(/VAULT-BROKER-DENIED|vault_request_access[\s\S]{0,200}denied/i);
+    // Anchor: extract the vault_request_access tool's own description
+    // block (not the entire file) so a 'denied' reference in some other
+    // schema doesn't satisfy this test by accident.
+    const accessBlock = bridgeSrc.split("name: 'vault_request_access'")[1]?.split("name: '")[0] ?? "";
+    expect(accessBlock).toMatch(/VAULT-BROKER-DENIED|denied/i);
   });
 });

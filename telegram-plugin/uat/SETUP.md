@@ -200,6 +200,39 @@ switchroom agent start test-harness
 Phase 2b adds per-scenario state-dir scoping so this becomes
 automatic.
 
+### Optional: force progress-card on every turn (Phase 2c+ card scenarios)
+
+The gateway's `progress_card.delay_ms` defaults to 45 s, so short DM
+turns (most of UAT) never trigger the pinned card and the card-
+lifecycle scenarios (`progress-card-dm.test.ts`) skip themselves.
+To unskip — and validate `expectPinnedCard` / `waitForCardPhase`
+against real Telegram — override the delay on `test-harness` only:
+
+Edit `~/.switchroom/switchroom.yaml`, find the `test-harness:`
+block, and add the highlighted lines:
+
+```yaml
+  test-harness:
+    extends: default
+    topic_name: Test Harness
+    channels:
+      telegram:
+        progress_card:
+          delay_ms: 1000     # short — make every turn flash a card
+```
+
+Then apply + restart:
+
+```bash
+switchroom apply
+switchroom agent restart test-harness
+```
+
+Production agents keep the 45 s default; this override is test-only.
+Once configured, unskip the card scenario by changing
+`describe.skip(...)` → `describe(...)` in
+`scenarios/progress-card-dm.test.ts`.
+
 ## 6. Running scenarios — env setup
 
 The harness reads four env vars at `spinUp()` time. Source them from

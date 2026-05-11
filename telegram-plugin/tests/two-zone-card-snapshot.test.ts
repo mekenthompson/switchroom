@@ -68,7 +68,7 @@ describe('two-zone-card snapshots', () => {
       '⚙️ <b>Working…</b> · ⏱ 00:30 · 🔧 14 · 🤖 3\n' +
       '\n' +
       '<b>FLEET (3)</b>\n' +
-      '↻ researcher <code>aaaaaa</code> · 4t · Grep <code>TODO</code> (2s ago)\n' +
+      '↻ researcher <code>aaaaaa</code> · 4t · Searching files (2s ago)\n' +
       '✓ worker <code>bbbbbb</code> · 8t · done 10s ago\n' +
       '⚠ reviewer <code>cccccc</code> · 2t · idle 1m10s ago',
     )
@@ -126,7 +126,7 @@ describe('two-zone-card snapshots', () => {
       '🌀 <b>Background</b> · ⏱ 01:30 · 🔧 17 · 🤖 2\n' +
       '\n' +
       '<b>FLEET (2)</b>\n' +
-      '🌀 background <code>bbbbbb</code> · 12t · Bash <code>long-job.sh</code> (1s ago)\n' +
+      '🌀 background <code>bbbbbb</code> · 12t · Running command (1s ago)\n' +
       '✓ worker <code>aaaaaa</code> · 5t · done 30s ago',
     )
   })

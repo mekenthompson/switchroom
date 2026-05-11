@@ -38,21 +38,33 @@ function fm(over: Partial<FleetMember>): FleetMember {
 }
 
 describe('two-zone-card sanitise', () => {
-  it('does not contain raw absolute path under /etc/secrets', () => {
+  // Post-#861 the fleet row no longer renders the sanitisedArg at all
+  // (the row shows a humanized verb phrase like "Reading file" or
+  // "Running command" instead). These tests collapse to a stronger
+  // assertion: the renderer can't leak secret paths/bearer tokens no
+  // matter what shape the sanitisedArg takes, because that field
+  // doesn't reach the output.
+  it('does not contain raw absolute path even if sanitisedArg leaked one (defense-in-depth)', () => {
     const fleet = new Map([['a', fm({
-      lastTool: { name: 'Read', sanitisedArg: 'foo.key' }, // already sanitised by fleet-state
+      // Deliberately pass an *un*sanitised value here to assert the
+      // renderer can't be tricked into leaking it.
+      lastTool: { name: 'Read', sanitisedArg: '/etc/secrets/foo.key' },
     })]])
     const out = renderTwoZoneCard({ state: baseState, fleet, now: 2000 })
     expect(out).not.toContain('/etc/secrets')
-    expect(out).toContain('foo.key')
+    expect(out).not.toContain('foo.key')
+    // The row should still surface that *some* file read happened.
+    expect(out).toContain('Reading file')
   })
 
-  it('does not contain bearer-shaped tokens (sanitised upstream)', () => {
+  it('does not contain bearer-shaped tokens even if sanitisedArg leaked one', () => {
     const fleet = new Map([['a', fm({
-      lastTool: { name: 'Bash', sanitisedArg: 'curl -H "Authorization: [redacted]" https://api' },
+      lastTool: { name: 'Bash', sanitisedArg: 'curl -H "Authorization: Bearer abc123def456ghi789jkl" https://api' },
     })]])
     const out = renderTwoZoneCard({ state: baseState, fleet, now: 2000 })
-    expect(out).toContain('[redacted]')
     expect(out).not.toMatch(/Bearer\s+[A-Za-z0-9]{16,}/)
+    expect(out).not.toContain('abc123def456ghi789jkl')
+    // The row should still surface that *some* command ran.
+    expect(out).toContain('Running command')
   })
 })

@@ -159,6 +159,7 @@ export function helpText(agentName: string): string {
     ``,
     `<code>/start</code> — pairing instructions`,
     `<code>/status</code> — agent, model, auth`,
+    `<code>/vault audit &lt;agent&gt;</code> — admin: review agent's vault access + one-tap [🔓 Allow] on recent denials`,
     `<code>/commands</code> — full command list`,
   ].join("\n");
 }

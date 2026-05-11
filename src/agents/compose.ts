@@ -732,23 +732,16 @@ function emitAgentService(
   // `telegram-plugin/gateway/gateway.ts:514`.
   if (a.admin === true) {
     env.SWITCHROOM_AGENT_ADMIN = "true";
-    // SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK + the mount below: lets
-    // grant-management ops (list_grants, mint_grant, revoke_grant)
-    // route through the broker's operator socket instead of the
-    // per-agent socket. Without this, `/vault audit <name>` from
-    // the bot's container can only see the agent's own scope and
-    // the broker rejects with "Grant management ops are operator-
-    // only; agent-bound listeners cannot mint, list, or revoke
-    // grants" (see src/vault/broker/server.ts:1493).
-    //
-    // Trust model: an admin-flagged agent already has operator-
-    // level Telegram surface (`/agents`, `/logs`, `/restart` etc.).
-    // Granting vault-grant management at the broker socket is a
-    // consistent expansion. Issue #1019 tracks options 2/3 for a
-    // narrower long-term design (read-only RPC on agent path, or a
-    // dedicated foreman-bot agent).
-    env.SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK =
-      "/run/switchroom/broker/operator/sock";
+    // Note: grant-mgmt RPCs (list_grants, mint_grant, revoke_grant)
+    // for admin agents are handled by the broker on the existing
+    // per-agent socket via a server-side allowlist check
+    // (`src/vault/broker/server.ts` reads `config.agents[name].admin`
+    // before denying). #1020 originally tried to route them through
+    // the operator socket via a bind-mount + env var here, but the
+    // host operator socket's 0600/owner-only perms blocked the
+    // agent UID from connecting (#1021). #1021 Design B moves the
+    // gate into the broker; the agent-side env/mount are no longer
+    // needed.
   }
   for (const k of Object.keys(env).sort()) {
     lines.push(`      ${k}: ${JSON.stringify(env[k])}`);
@@ -759,20 +752,6 @@ function emitAgentService(
   // invariant on every regenerated compose.
   lines.push(`      - broker-${a.name}-sock:/run/switchroom/broker`);
   lines.push(`      - kernel-${a.name}-sock:/run/switchroom/kernel`);
-  if (a.admin === true) {
-    // Operator socket bind mount — pairs with the
-    // SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK env above. The broker
-    // container binds the operator socket at
-    // `/run/switchroom/broker/operator/sock` inside ITS view (see
-    // the broker service block earlier in this file) and exposes it
-    // on the host via `${HOME}/.switchroom/broker-operator/sock`.
-    // Mounting the same host directory into admin agents lets
-    // grant-management ops route through the operator socket while
-    // vault get/set continue through the per-agent socket above.
-    lines.push(
-      `      - ${homePrefix}/.switchroom/broker-operator:/run/switchroom/broker/operator:ro`,
-    );
-  }
   // Dual mounts — the same host directory is bound BOTH at the canonical
   // container path (`/state/agent`, `/state/.claude`, `/var/log/switchroom`)
   // AND at the original host path. Why both:

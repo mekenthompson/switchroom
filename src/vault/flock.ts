@@ -159,10 +159,22 @@ function pidStartTimeMs(pid: number): number | null {
     // 100 (`getconf CLK_TCK`); we can't read it from /proc directly
     // but the constant has been 100 on every common distro for 20+
     // years. If this ever changes we surface "unknown start time" by
-    // returning null in the parse failure path above rather than
-    // computing a wrong answer here.
+    // returning null via the sanity check below rather than computing
+    // a wrong answer.
     const USER_HZ = 100;
     const startEpochMs = bootEpochSec * 1000 + (starttimeTicks / USER_HZ) * 1000;
+
+    // Sanity range: process start must be between boot time and now
+    // (with a 5s slop for clock skew / leap-second weirdness). A
+    // result outside that band suggests USER_HZ drift, parsing bug,
+    // or a /proc impostor — return null and let the caller fall
+    // back to the conservative "treat as live" path.
+    const now = Date.now();
+    const bootEpochMs = bootEpochSec * 1000;
+    const SLOP_MS = 5000;
+    if (startEpochMs < bootEpochMs - SLOP_MS || startEpochMs > now + SLOP_MS) {
+      return null;
+    }
     return Math.floor(startEpochMs);
   } catch {
     return null;
@@ -263,6 +275,17 @@ function clearStaleSentinelDir(lockPath: string): boolean {
     // Defensive: if any file inside has been written recently, a
     // v0.7.14 writer may still be active. Refuse migration; caller
     // falls through to contention.
+    //
+    // KNOWN TOCTOU: a v0.7.14 writer can create a file between the
+    // recent-write readdir below and the unlink loop further down.
+    // Accepted because (a) the migration path is only relevant
+    // during the v0.7.14 → v0.7.15 upgrade window, (b) the standard
+    // `switchroom update` flow SIGTERMs the v0.7.14 broker before
+    // the v0.7.15 host CLI runs, and (c) the only way the race
+    // matters is if the v0.7.14 writer is actively writing at
+    // exactly the migration moment — operators are documented to
+    // bounce the broker first if they upgrade the CLI manually.
+    // See #979 for the upgrade-window operator note.
     const now = Date.now();
     for (const entry of readdirSync(lockPath)) {
       try {

@@ -1475,26 +1475,41 @@ export class VaultBroker {
         // Fall through to the grant-mgmt op handlers (mint_grant /
         // list_grants / revoke_grant) — no further gate needed.
       } else if (agentName !== null) {
-        // Phase 2a: agent-bound listeners are NEVER allowed to mint, list, or
-        // revoke grants. Grant management is operator-only. An agent that has
-        // its own dedicated socket has no business minting capability tokens.
-        writeAudit({
-          ts: new Date().toISOString(),
-          op: req.op,
-          caller: auditCaller,
-          pid: auditPid,
-          cgroup: auditCgroup,
-          result: "denied:agent-cannot-manage-grants",
-        });
-        socket.write(
-          encodeResponse(
-            errorResponse(
-              "DENIED",
-              "Grant management ops are operator-only; agent-bound listeners cannot mint, list, or revoke grants",
+        // Admin-flagged agents (yaml `admin: true`) are trusted with
+        // grant-mgmt ops via their existing per-agent socket
+        // (#1021 Design B). The agent already has operator-level
+        // Telegram surface (`/agents`, `/vault`, `/restart`, etc.)
+        // so this is a consistent expansion. Path-as-identity is
+        // preserved: the agent name comes from the socket path,
+        // and admin-ness is read from server-side config — never
+        // from the wire.
+        const isAdminAgent = this.config?.agents?.[agentName]?.admin === true;
+        if (isAdminAgent) {
+          // Fall through to grant-mgmt handlers below. Audit log
+          // already carries the agent name + cgroup attribution.
+        } else {
+          // Phase 2a: regular per-agent listeners are NEVER allowed to
+          // mint, list, or revoke grants. Grant management is
+          // operator-only (or admin-agent only). A non-admin agent has
+          // no business minting capability tokens.
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:agent-cannot-manage-grants",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                "Grant management ops are operator-only; agent-bound listeners cannot mint, list, or revoke grants (set `admin: true` on this agent in switchroom.yaml + restart broker if intended)",
+              ),
             ),
-          ),
-        );
-        return;
+          );
+          return;
+        }
       }
       // Operator socket bypasses both gates below — its identity is
       // established by the bind path + 0600 chown, not peercred.

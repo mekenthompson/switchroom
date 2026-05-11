@@ -6101,7 +6101,16 @@ async function runSwitchroomAuthCommand(ctx: Context, args: string[], label: str
 }
 
 function runVaultCli(args: string[], passphrase: string, stdinValue?: string): { ok: boolean; output: string } {
-  const env = { ...process.env, SWITCHROOM_VAULT_PASSPHRASE: passphrase }
+  // Suppress the #969 P3 deprecation warning on this per-spawn
+  // invocation. The gateway forwarding the operator's passphrase to
+  // the CLI (which in turn forwards it to the broker as the canonical
+  // P1a passphrase-attestation) is intended; without this silencer the
+  // warning would surface in error pre-blocks shown to the user.
+  const env = {
+    ...process.env,
+    SWITCHROOM_VAULT_PASSPHRASE: passphrase,
+    SWITCHROOM_NO_VAULT_DEPRECATION_WARNING: '1',
+  }
   try {
     let result: string
     if (stdinValue !== undefined) {

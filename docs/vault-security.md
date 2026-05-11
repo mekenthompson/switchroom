@@ -26,13 +26,13 @@ an optional expiry:
 
 ```bash
 # Read-only access to two named keys, 30-day expiry
-switchroom vault grant clerk --keys google_cal_refresh_token,google_cal_access_token --duration 30d
+switchroom vault grant clerk --keys google-cal-refresh-token,google-cal-access-token --duration 30d
 
 # Write access to any key matching a glob (issue #969 P1b)
-switchroom vault grant clerk --write 'google_cal_access_token' --duration 30d
+switchroom vault grant clerk --write 'google-cal-access-token' --duration 30d
 
 # Combined: read + rotate the same key
-switchroom vault grant clerk --keys google_cal_refresh_token --write google_cal_access_token --duration 30d
+switchroom vault grant clerk --keys google-cal-refresh-token --write google-cal-access-token --duration 30d
 ```
 
 The token is written to `~/.switchroom/agents/<agent>/.vault-token` (mode 0600).

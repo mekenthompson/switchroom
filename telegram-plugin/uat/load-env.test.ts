@@ -62,4 +62,11 @@ describe("loadUatEnv", () => {
     loadUatEnv(envFile);
     expect(process.env.UAT_TEST_SESSION).toBe("abc=def=ghi");
   });
+
+  it("skips empty values so unpopulated .env.example copies stay unset", () => {
+    writeFileSync(envFile, "UAT_TEST_EMPTY=\nUAT_TEST_QUOTED_EMPTY=\"\"\n");
+    loadUatEnv(envFile);
+    expect(process.env.UAT_TEST_EMPTY).toBeUndefined();
+    expect(process.env.UAT_TEST_QUOTED_EMPTY).toBeUndefined();
+  });
 });

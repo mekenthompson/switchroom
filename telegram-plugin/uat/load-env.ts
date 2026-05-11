@@ -34,6 +34,7 @@ export function loadUatEnv(envPath: string = UAT_ENV_FILE): void {
     ) {
       value = value.slice(1, -1);
     }
+    if (value === "") continue;
     if (process.env[key] === undefined) {
       process.env[key] = value;
     }

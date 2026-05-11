@@ -289,6 +289,20 @@ async function ensureHostMountSources(config: SwitchroomConfig): Promise<void> {
   if (!existsSync(autoUnlockPath)) {
     writeFileSync(autoUnlockPath, "", { mode: 0o600 });
   }
+
+  // vault-audit.log: same dir-vs-file race. The broker bind-mounts
+  // this file (see compose.ts broker volumes) so audit-log writes
+  // land on the host, not inside the ephemeral container fs where
+  // they'd be lost on recreate and invisible to the host CLI
+  // (`switchroom vault audit`) plus the admin-agent :ro mount
+  // wired up in #1024. Created mode 0644 because both readers
+  // (host operator + the agent UID inside admin agents) need
+  // access. Broker writes via root with CAP_DAC_OVERRIDE so
+  // mode doesn't matter on the write path.
+  const auditLogPath = join(home, ".switchroom", "vault-audit.log");
+  if (!existsSync(auditLogPath)) {
+    writeFileSync(auditLogPath, "", { mode: 0o644 });
+  }
 }
 
 /**

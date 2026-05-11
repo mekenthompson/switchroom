@@ -51,9 +51,34 @@ const mockClient = {
 
 const TelegramClientCtor = vi.fn().mockImplementation(() => mockClient);
 
+// Real implementation of mtcute's marked-peer-id helper. Inlined here
+// because `vi.mock("@mtcute/node", ...)` below replaces ALL exports;
+// re-export from a partial passthrough would couple this test file
+// to mtcute's internal layout. The semantics are stable per
+// `@mtcute/core/utils/peer-utils.js`:
+//   peerUser  → userId
+//   peerChat  → -chatId
+//   peerChannel → -1e12 - channelId
+function getMarkedPeerIdImpl(peer: { _: string; userId?: number; chatId?: number; channelId?: number }): number {
+  switch (peer._) {
+    case "peerUser":
+    case "inputPeerUser":
+      return peer.userId!;
+    case "peerChat":
+    case "inputPeerChat":
+      return -peer.chatId!;
+    case "peerChannel":
+    case "inputPeerChannel":
+      return -1e12 - peer.channelId!;
+    default:
+      throw new Error(`Invalid peer: ${peer._}`);
+  }
+}
+
 vi.mock("@mtcute/node", () => ({
   MemoryStorage: class {},
   TelegramClient: TelegramClientCtor,
+  getMarkedPeerId: getMarkedPeerIdImpl,
 }));
 
 let Driver: typeof DriverType;
@@ -376,6 +401,145 @@ describe("Driver.observeReactions", () => {
     expect(mockClient.onRawUpdate.size).toBe(1);
     await iter.return?.();
     expect(mockClient.onRawUpdate.size).toBe(0);
+  });
+
+  // Group / supergroup / forum-topic support (Phase 2e — #866).
+  // The driver normalizes raw `peer` fields via mtcute's
+  // `getMarkedPeerId` so callers pass the Bot API marked id
+  // uniformly regardless of chat type.
+
+  function rxUpdatePeerChannel(opts: {
+    channelId: number;
+    msgId: number;
+    topMsgId?: number;
+    emojis: string[];
+  }): { update: unknown } {
+    return {
+      update: {
+        _: "updateMessageReactions",
+        peer: { _: "peerChannel", channelId: opts.channelId },
+        msgId: opts.msgId,
+        topMsgId: opts.topMsgId,
+        reactions: {
+          results: opts.emojis.map((e) => ({
+            reaction: { _: "reactionEmoji", emoticon: e },
+          })),
+        },
+      },
+    };
+  }
+
+  it("accepts peerChannel (supergroup) updates with the marked -100... chatId", async () => {
+    // fails when: peer normalization regresses past the unified
+    // getMarkedPeerId call — supergroup scenarios that pass the
+    // canonical -1003852747971 chat_id would silently see zero
+    // reactions because the filter would reject peerChannel
+    // updates outright.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    // -1e12 - 3852747971 === -1003852747971 (matches Bot API form
+    // of channel_id 3852747971).
+    const chatId = -1003852747971;
+    const iter = driver.observeReactions(chatId, { messageId: 5 })[Symbol.asyncIterator]();
+    mockClient.onRawUpdate.emit(rxUpdatePeerChannel({
+      channelId: 3852747971,
+      msgId: 5,
+      emojis: ["👀"],
+    }));
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    const r = first.value as { chatId: number; emoji: string };
+    expect(r.chatId).toBe(chatId);
+    expect(r.emoji).toBe("👀");
+    await iter.return?.();
+  });
+
+  it("filters by threadId (forum topic) when supplied", async () => {
+    // fails when: the topMsgId filter is dropped — supergroup
+    // scenarios using forum topics would observe reactions from
+    // EVERY topic in the group, flooding the queue and matching
+    // emoji shapes from unrelated topics.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    const chatId = -1003852747971;
+    const iter = driver.observeReactions(chatId, { messageId: 5, threadId: 100 })[Symbol.asyncIterator]();
+    mockClient.onRawUpdate.emit(rxUpdatePeerChannel({
+      channelId: 3852747971, msgId: 5, topMsgId: 200, emojis: ["💩"],
+    }));
+    mockClient.onRawUpdate.emit(rxUpdatePeerChannel({
+      channelId: 3852747971, msgId: 5, topMsgId: 100, emojis: ["👀"],
+    }));
+    const first = await iter.next();
+    const r = first.value as { emoji: string };
+    expect(r.emoji).toBe("👀"); // 💩 from topic 200 skipped
+    await iter.return?.();
+  });
+
+  it("skips updates with an unrecognized peer shape rather than crashing", async () => {
+    // fails when: an unexpected peer kind throws past the try/catch
+    // — a single forward-incompatible update (Telegram adds peer
+    // types over time) would tear down the listener mid-scenario.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    const iter = driver.observeReactions(8288144562, { messageId: 5 })[Symbol.asyncIterator]();
+    // Garbage peer — must not throw.
+    mockClient.onRawUpdate.emit({
+      update: {
+        _: "updateMessageReactions",
+        peer: { _: "peerUnknownFuture" },
+        msgId: 5,
+        reactions: { results: [{ reaction: { _: "reactionEmoji", emoticon: "👀" } }] },
+      },
+    });
+    // Real peer should still work after the bad one.
+    mockClient.onRawUpdate.emit({
+      update: {
+        _: "updateMessageReactions",
+        peer: { _: "peerUser", userId: 8288144562 },
+        msgId: 5,
+        reactions: { results: [{ reaction: { _: "reactionEmoji", emoticon: "👍" } }] },
+      },
+    });
+    const first = await iter.next();
+    const r = first.value as { emoji: string };
+    expect(r.emoji).toBe("👍");
+    await iter.return?.();
+  });
+});
+
+describe("Driver.observePins (peer types)", () => {
+  function pinUpdatePeerChannel(opts: {
+    channelId: number;
+    msgIds: number[];
+  }): { update: unknown } {
+    return {
+      update: {
+        _: "updatePinnedMessages",
+        pinned: true,
+        peer: { _: "peerChannel", channelId: opts.channelId },
+        messages: opts.msgIds,
+      },
+    };
+  }
+
+  it("accepts peerChannel pin events using the marked -100... chatId", async () => {
+    // fails when: the peer normalization regresses for pins (mirror
+    // bug to the reactions one). Pin scenarios in supergroups
+    // would never trigger expectPinnedCard.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    const chatId = -1003852747971;
+    const iter = driver.observePins(chatId)[Symbol.asyncIterator]();
+    mockClient.onRawUpdate.emit(pinUpdatePeerChannel({
+      channelId: 3852747971,
+      msgIds: [42],
+    }));
+    const first = await iter.next();
+    const p = first.value as { chatId: number; messageId: number; pinned: boolean };
+    expect(p.chatId).toBe(chatId);
+    expect(p.messageId).toBe(42);
+    expect(p.pinned).toBe(true);
+    await iter.return?.();
   });
 });
 

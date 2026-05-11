@@ -40,7 +40,7 @@ import {
   MachineIdUnavailableError,
   readAutoUnlockFile,
 } from "../auto-unlock.js";
-import { identify, socketPathToAgent, type PeerInfo } from "./peercred.js";
+import { identify, socketPathToAgent, socketPathToIdentity, unlockSocketFor, type PeerInfo } from "./peercred.js";
 import { checkAcl, checkAclByAgent, checkEntryScope, agentSlugFromPeer, parseCronUnit } from "./acl.js";
 import {
   decodeRequest,
@@ -230,7 +230,7 @@ export class VaultBroker {
     }
 
     this.socketPath = resolve(socketPath);
-    this.unlockSocketPath = this.socketPath.replace(/\.sock$/, ".unlock.sock");
+    this.unlockSocketPath = unlockSocketFor(this.socketPath);
     this.startedAt = Date.now();
 
     // Load config
@@ -529,6 +529,95 @@ export class VaultBroker {
     });
   }
 
+  /**
+   * Bind the operator listener pair (data + unlock) at a host-bound path
+   * inside the broker container. Mirrors the legacy `_bindDataSocket` /
+   * `_bindUnlockSocket` pair, but:
+   *
+   *   - Data + unlock paths are derived from the same parent dir
+   *     (`/run/switchroom/broker/operator/{sock,unlock}`) so a single
+   *     bind-mount surfaces both to the host operator.
+   *   - Connections route through `_handleDataConnection` with
+   *     `isOperator = true`, which skips peercred (the host operator's
+   *     UID never matches the broker container's root UID; peercred
+   *     was never going to gate this) and applies operator-mode ACL +
+   *     `auditCaller="operator"`.
+   *   - The data + unlock files + their parent dir are chowned to
+   *     `operatorUid` so the host operator's shell can connect through
+   *     the bind mount.
+   *
+   * Trust: the bind path is the identity (path-as-identity, same
+   * model as per-agent sockets). Mode 0600 + chown keeps anyone but
+   * the host operator UID from connecting in the first place.
+   */
+  bindOperatorListener(socketPath: string, operatorUid: number): Promise<void> {
+    const abs = resolve(socketPath);
+    const identity = socketPathToIdentity(abs);
+    if (identity?.kind !== "operator") {
+      return Promise.reject(
+        new Error(
+          `bindOperatorListener: socket path '${abs}' does not match the canonical ` +
+          `/run/switchroom/broker/operator/sock shape — refusing to bind`,
+        ),
+      );
+    }
+    const unlockAbs = unlockSocketFor(abs);
+
+    // Reset the parent dir + remove stale sockets, mirroring
+    // bindAgentSocket. The broker has CAP_CHOWN+FOWNER+DAC_READ_SEARCH
+    // (not DAC_OVERRIDE), so a previous bind that chowned the dir to
+    // operatorUid 0700 needs the dir flipped back to root before we
+    // can recreate sockets in it.
+    if (abs.endsWith("/sock")) {
+      const dir = abs.slice(0, -"/sock".length);
+      if (existsSync(dir)) {
+        try { chownSync(dir, 0, 0); } catch { /* outside docker */ }
+        try { chmodSync(dir, 0o700); } catch { /* idempotent */ }
+      }
+    }
+    for (const p of [abs, unlockAbs]) {
+      if (existsSync(p)) {
+        try { unlinkSync(p); } catch { /* tolerate */ }
+      }
+    }
+
+    return new Promise<void>((resolveP, rejectP) => {
+      const dataServer = net.createServer((sock) => {
+        this._handleDataConnection(sock, abs, null, true);
+      });
+      dataServer.on("error", (err) => rejectP(err));
+      dataServer.listen(abs, () => {
+        try { chmodSync(abs, 0o600); } catch { /* ignore */ }
+        try { chownSync(abs, operatorUid, operatorUid); } catch { /* dev / no CAP_CHOWN */ }
+
+        // Now bind the unlock pair. Same chown target.
+        const unlockServer = net.createServer((sock) => {
+          this._handleUnlockConnection(sock);
+        });
+        unlockServer.on("error", (err) => rejectP(err));
+        unlockServer.listen(unlockAbs, () => {
+          try { chmodSync(unlockAbs, 0o600); } catch { /* ignore */ }
+          try { chownSync(unlockAbs, operatorUid, operatorUid); } catch { /* dev */ }
+
+          // Chown the parent dir so the operator can list/access its
+          // contents through the host bind mount.
+          if (abs.endsWith("/sock")) {
+            const dir = abs.slice(0, -"/sock".length);
+            try { chownSync(dir, operatorUid, operatorUid); } catch { /* dev */ }
+            try { chmodSync(dir, 0o700); } catch { /* idempotent */ }
+          }
+
+          // Track in agentServers for shutdown bookkeeping; operator
+          // identity is recorded as a sentinel agentName so existing
+          // shutdown loops walk it without special-casing.
+          this.agentServers.set(abs, { server: dataServer, agentName: "__operator__" });
+          this.agentServers.set(unlockAbs, { server: unlockServer, agentName: "__operator_unlock__" });
+          resolveP();
+        });
+      });
+    });
+  }
+
   private _bindUnlockSocket(): Promise<void> {
     return new Promise((resolve, reject) => {
       const server = net.createServer((socket) => {
@@ -553,6 +642,15 @@ export class VaultBroker {
     socket: net.Socket,
     listenerSocketPath: string = this.socketPath,
     agentName: string | null = null,
+    /**
+     * True when the connection arrived on the operator socket. Trust comes
+     * from the bind path (`/run/switchroom/broker/operator/sock`) plus the
+     * file mode 0600 + chown to operator UID enforced at bind time.
+     * peercred is not load-bearing here (the host operator UID never
+     * matches the broker container's UID, so peercred's own UID-match
+     * gate would deny on Linux). Mutually exclusive with `agentName`.
+     */
+    isOperator: boolean = false,
   ): void {
     // Identify peer immediately on accept (Linux only). Pass the accepted
     // socket so identify() can use SO_PEERCRED via bun:ffi (bun runtime) or
@@ -593,7 +691,7 @@ export class VaultBroker {
 
         if (!line) continue;
 
-        this._handleRequest(socket, peer, line, agentName);
+        this._handleRequest(socket, peer, line, agentName, isOperator);
       }
     });
 
@@ -607,6 +705,7 @@ export class VaultBroker {
     peer: import("./peercred.js").PeerInfo | null,
     line: string,
     agentName: string | null = null,
+    isOperator: boolean = false,
   ): Promise<void> {
     let req: ReturnType<typeof import("./protocol.js").decodeRequest>;
     try {
@@ -630,8 +729,9 @@ export class VaultBroker {
     // "agent:<name>" and peercred uid + cgroup ride along as informational
     // fields so audit reviewers can correlate against the host UID table.
     const auditPid = peer?.pid ?? process.pid;
-    const auditCaller =
-      agentName !== null
+    const auditCaller = isOperator
+      ? "operator"
+      : agentName !== null
         ? `agent:${agentName}`
         : peer !== null
           ? callerFromPeer(peer)
@@ -761,7 +861,9 @@ export class VaultBroker {
       //
       // Phase 2a — when agentName is set, the listener's per-agent socket
       // path is the trusted identity; we don't need peercred to gate.
-      if (agentName === null && process.platform === "linux" && peer === null) {
+      // Same goes for the operator socket: the bind path + 0600 chown to
+      // operator UID is the trust boundary, peercred is not load-bearing.
+      if (!isOperator && agentName === null && process.platform === "linux" && peer === null) {
         const reason = "Unable to identify caller (peercred unavailable); denying on Linux";
         this.auditLogger.write({
           ts: new Date().toISOString(),
@@ -802,7 +904,19 @@ export class VaultBroker {
       const listAgentSlug =
         agentName ?? (peer !== null ? agentSlugFromPeer(peer) : null);
       let visibleKeys: string[];
-      if (agentName !== null && this.config !== null) {
+      if (isOperator) {
+        // Operator socket: no agent-keyed ACL (operator isn't an agent).
+        // Only entry-scope filtering applies — keys without a scope are
+        // visible; keys whose scope.allow excludes "operator" or whose
+        // scope.deny includes "operator" are hidden. Default-deny on
+        // cross-agent secret leakage is the right shape: an operator
+        // surveying the vault sees their own / shared keys but not
+        // agent-private ones unless those entries explicitly opted in
+        // (allow includes "operator").
+        visibleKeys = Object.entries(this.secrets)
+          .filter(([, entry]) => checkEntryScope(entry.scope, "operator").allow)
+          .map(([k]) => k);
+      } else if (agentName !== null && this.config !== null) {
         // Phase 2a — agent identity is the listener's socket path. Gate
         // both visibility (per-agent secrets[]) and scope on that name.
         visibleKeys = Object.entries(this.secrets)
@@ -913,7 +1027,36 @@ export class VaultBroker {
       // Phase 2a: when agentName is set, the listener's per-agent socket
       // path established the identity at bind time. peercred uid is captured
       // for audit but does not gate.
-      if (agentName !== null && this.config !== null) {
+      if (isOperator) {
+        // Operator socket: gate solely on entry scope. Keys without a
+        // scope are accessible; keys with scope must explicitly include
+        // "operator" in scope.allow (or omit it from scope.deny when
+        // there's no allow list). Default-deny on agent-private keys is
+        // intentional — an operator surveying the box should not be
+        // able to read agent-private OAuth tokens etc. without the
+        // entry's scope opting them in.
+        const entry = this.secrets[req.key];
+        if (entry !== undefined) {
+          const scopeResult = checkEntryScope(entry.scope, "operator");
+          if (!scopeResult.allow) {
+            writeAudit({
+              ts: new Date().toISOString(),
+              op: "get",
+              key: req.key,
+              caller: auditCaller,
+              pid: auditPid,
+              cgroup: auditCgroup,
+              result: `denied:${scopeResult.reason}`,
+            });
+            socket.write(
+              encodeResponse(errorResponse("DENIED", scopeResult.reason)),
+            );
+            return;
+          }
+        }
+        // entry===undefined falls through to the existing UNKNOWN_KEY
+        // handling further down — same as agent path.
+      } else if (agentName !== null && this.config !== null) {
         const aclResult = checkAclByAgent(this.config, agentName, req.key);
         if (!aclResult.allow) {
           writeAudit({
@@ -1324,10 +1467,17 @@ export class VaultBroker {
       req.op === "list_grants" ||
       req.op === "revoke_grant";
     if (isGrantMgmtOp) {
-      // Phase 2a: agent-bound listeners are NEVER allowed to mint, list, or
-      // revoke grants. Grant management is operator-only. An agent that has
-      // its own dedicated socket has no business minting capability tokens.
-      if (agentName !== null) {
+      // Operator socket: trusted by path + 0600 chown; skip the cron-deny
+      // and peercred-required gates below. Operator IS the operator-only
+      // identity those gates were designed to verify. Audit logs reflect
+      // this via auditCaller="operator" already set above.
+      if (isOperator) {
+        // Fall through to the grant-mgmt op handlers (mint_grant /
+        // list_grants / revoke_grant) — no further gate needed.
+      } else if (agentName !== null) {
+        // Phase 2a: agent-bound listeners are NEVER allowed to mint, list, or
+        // revoke grants. Grant management is operator-only. An agent that has
+        // its own dedicated socket has no business minting capability tokens.
         writeAudit({
           ts: new Date().toISOString(),
           op: req.op,
@@ -1346,41 +1496,45 @@ export class VaultBroker {
         );
         return;
       }
-      const allowNonLinux = process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX === "1";
-      if (peer === null && !allowNonLinux) {
-        this.auditLogger.write({
-          ts: new Date().toISOString(),
-          op: req.op,
-          caller: auditCaller,
-          pid: auditPid,
-          cgroup: auditCgroup,
-          result: "denied:peercred-unavailable",
-        });
-        socket.write(
-          encodeResponse(errorResponse("DENIED", "peercred unavailable; cannot verify operator identity")),
-        );
-        return;
-      }
-      if (peer !== null && peer.systemdUnit !== null) {
-        const parsed = parseCronUnit(peer.systemdUnit);
-        if (parsed !== null) {
+      // Operator socket bypasses both gates below — its identity is
+      // established by the bind path + 0600 chown, not peercred.
+      if (!isOperator) {
+        const allowNonLinux = process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX === "1";
+        if (peer === null && !allowNonLinux) {
           this.auditLogger.write({
             ts: new Date().toISOString(),
             op: req.op,
             caller: auditCaller,
             pid: auditPid,
             cgroup: auditCgroup,
-            result: "denied:cron-cannot-manage-grants",
+            result: "denied:peercred-unavailable",
           });
           socket.write(
-            encodeResponse(
-              errorResponse(
-                "DENIED",
-                "Grant management ops are operator-only; cron units cannot mint, list, or revoke grants",
-              ),
-            ),
+            encodeResponse(errorResponse("DENIED", "peercred unavailable; cannot verify operator identity")),
           );
           return;
+        }
+        if (peer !== null && peer.systemdUnit !== null) {
+          const parsed = parseCronUnit(peer.systemdUnit);
+          if (parsed !== null) {
+            this.auditLogger.write({
+              ts: new Date().toISOString(),
+              op: req.op,
+              caller: auditCaller,
+              pid: auditPid,
+              cgroup: auditCgroup,
+              result: "denied:cron-cannot-manage-grants",
+            });
+            socket.write(
+              encodeResponse(
+                errorResponse(
+                  "DENIED",
+                  "Grant management ops are operator-only; cron units cannot mint, list, or revoke grants",
+                ),
+              ),
+            );
+            return;
+          }
         }
       }
     }
@@ -2162,6 +2316,33 @@ export async function main(): Promise<void> {
         process.stderr.write(
           `[vault-broker] failed to bind ${target}: ${(err as Error).message}\n`,
         );
+      }
+    }
+
+    // Operator listener — host-shell-reachable data + unlock pair under
+    // /run/switchroom/broker/operator/{sock,unlock}, chowned to the host
+    // operator UID. Skipped when the env var isn't set (legacy installs
+    // and tests that don't need it).
+    const operatorUidStr = process.env.SWITCHROOM_BROKER_OPERATOR_UID;
+    const operatorDir = "/run/switchroom/broker/operator";
+    if (operatorUidStr !== undefined && existsSync(operatorDir)) {
+      const operatorUid = parseInt(operatorUidStr, 10);
+      if (!Number.isFinite(operatorUid) || operatorUid <= 0) {
+        process.stderr.write(
+          `[vault-broker] SWITCHROOM_BROKER_OPERATOR_UID='${operatorUidStr}' is not a positive integer; skipping operator listener\n`,
+        );
+      } else {
+        const operatorSock = `${operatorDir}/sock`;
+        try {
+          await broker.bindOperatorListener(operatorSock, operatorUid);
+          process.stdout.write(
+            `vault-broker: operator socket listening sock=${operatorSock} uid=${operatorUid}\n`,
+          );
+        } catch (err) {
+          process.stderr.write(
+            `[vault-broker] failed to bind operator listener at ${operatorSock}: ${(err as Error).message}\n`,
+          );
+        }
       }
     }
     return;

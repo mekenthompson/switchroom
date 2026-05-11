@@ -55,40 +55,18 @@ beforeEach(() => {
 });
 
 describe("lifecycle (docker mode): start/stop/restart shellouts", () => {
-  it("startAgent calls `compose start agent-<name>` when the container exists", () => {
+  it("startAgent calls `compose up -d --force-recreate --no-deps agent-<name>` (#1018)", () => {
+    // fails when: a refactor reverts startAgent to `compose start`
+    // (or `up -d` without `--force-recreate`). Either reintroduces
+    // #1018: a `stop → edit yaml → apply → start` round leaves the
+    // container with create-time env. The restartAgent test below
+    // pins the same flag-set for symmetry.
     const calls = recordingStub({
-      ps: () => "switchroom-foo\n",
-      "compose start": () => "",
-    });
-    startAgent("foo");
-    // First call: ps probe; second: compose start
-    expect(calls.length).toBe(2);
-    expect(calls[0].args).toEqual([
-      "ps",
-      "-a",
-      "--format",
-      "{{.Names}}",
-      "--filter",
-      "name=^switchroom-foo$",
-    ]);
-    expect(calls[1].args).toEqual([
-      "compose",
-      "-p",
-      "switchroom",
-      "-f",
-      "/tmp/sw-test-compose.yml",
-      "start",
-      "agent-foo",
-    ]);
-  });
-
-  it("startAgent falls back to `compose up -d --no-deps` when the container is missing", () => {
-    const calls = recordingStub({
-      ps: () => "", // no container
       "compose up": () => "",
     });
     startAgent("foo");
-    expect(calls[1].args).toEqual([
+    expect(calls.length).toBe(1);
+    expect(calls[0].args).toEqual([
       "compose",
       "-p",
       "switchroom",
@@ -96,6 +74,7 @@ describe("lifecycle (docker mode): start/stop/restart shellouts", () => {
       "/tmp/sw-test-compose.yml",
       "up",
       "-d",
+      "--force-recreate",
       "--no-deps",
       "agent-foo",
     ]);

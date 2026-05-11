@@ -15,6 +15,7 @@ const driverSendText = vi.hoisted(() =>
   vi.fn(async () => ({ messageId: 42 })),
 );
 const driverObserveMessages = vi.hoisted(() => vi.fn());
+const driverUnpinAll = vi.hoisted(() => vi.fn(async () => undefined));
 const DriverCtor = vi.hoisted(() => vi.fn());
 
 vi.mock("../telegram-plugin/uat/driver.js", () => ({
@@ -25,6 +26,10 @@ vi.mock("../telegram-plugin/uat/driver.js", () => ({
     resolveBotUserId: driverResolveBot,
     getMyUserId: driverGetMyUserId,
     observeMessages: driverObserveMessages,
+    // Stubbed because spinUp() now calls unpinAllMessages during its
+    // settle phase (see harness.ts). Without this stub the real call
+    // throws TypeError ("not a function") and every spinUp test fails.
+    unpinAllMessages: driverUnpinAll,
   })),
 }));
 
@@ -53,7 +58,7 @@ describe("spinUp: config resolution", () => {
     // a scenario instead fails with "API ID invalid" 30 seconds later
     // from mtcute, masking the real cause.
     delete process.env.TELEGRAM_API_ID;
-    await expect(spinUp({ agent: "test-harness" })).rejects.toThrow(
+    await expect(spinUp({ agent: "test-harness", settleMs: 0 })).rejects.toThrow(
       /TELEGRAM_API_ID.*uat\/SETUP\.md/,
     );
   });
@@ -63,7 +68,7 @@ describe("spinUp: config resolution", () => {
     // start the interactive phone-prompt flow inside the test runner,
     // which is impossible to satisfy and confusing to debug.
     process.env.TELEGRAM_UAT_DRIVER_SESSION = "";
-    await expect(spinUp({ agent: "test-harness" })).rejects.toThrow(
+    await expect(spinUp({ agent: "test-harness", settleMs: 0 })).rejects.toThrow(
       /uat:login/,
     );
   });
@@ -73,7 +78,7 @@ describe("spinUp: config resolution", () => {
     // want to target a non-default bot (e.g. a per-scenario bot for
     // isolation) would silently hit the default test bot instead.
     process.env.TELEGRAM_TEST_BOT_USERNAME = "wrong_bot";
-    await spinUp({ agent: "test-harness", botUsername: "right_bot" });
+    await spinUp({ agent: "test-harness", botUsername: "right_bot", settleMs: 0 });
     expect(driverResolveBot).toHaveBeenCalledWith("right_bot");
   });
 });
@@ -83,7 +88,7 @@ describe("spinUp: lifecycle ordering", () => {
     // fails when: a refactor parallelizes connect with the id
     // resolution — resolvePeer + getMe would error with "client not
     // connected" intermittently.
-    await spinUp({ agent: "test-harness" });
+    await spinUp({ agent: "test-harness", settleMs: 0 });
     const connectOrder = driverConnect.mock.invocationCallOrder[0];
     const resolveOrder = driverResolveBot.mock.invocationCallOrder[0];
     const getMeOrder = driverGetMyUserId.mock.invocationCallOrder[0];
@@ -104,7 +109,7 @@ describe("spinUp: lifecycle ordering", () => {
       () => new Promise((r) => setTimeout(() => { getMeResolved = Date.now(); r(8_248_703_757); }, 30)),
     );
     const t0 = Date.now();
-    await spinUp({ agent: "test-harness" });
+    await spinUp({ agent: "test-harness", settleMs: 0 });
     const total = Date.now() - t0;
     // Both calls have ~30ms latency; serial would take ~60ms+, parallel ~30ms.
     expect(total).toBeLessThan(50);
@@ -118,7 +123,7 @@ describe("spinUp: lifecycle ordering", () => {
     // a PEER_ID_INVALID that's confusing to trace back to the bind
     // site.
     driverResolveBot.mockResolvedValueOnce(555_000_999);
-    const sc = await spinUp({ agent: "test-harness" });
+    const sc = await spinUp({ agent: "test-harness", settleMs: 0 });
     await sc.sendDM("hello");
     expect(driverSendText).toHaveBeenCalledWith(555_000_999, "hello");
     expect(sc.botUserId).toBe(555_000_999);
@@ -129,7 +134,7 @@ describe("spinUp: lifecycle ordering", () => {
     // explicitly relies on the standard-runtime agent staying up
     // across scenarios. Killing it would force per-scenario boot cost
     // (~30s) we explicitly chose to avoid.
-    const sc = await spinUp({ agent: "test-harness" });
+    const sc = await spinUp({ agent: "test-harness", settleMs: 0 });
     await sc.tearDown();
     expect(driverDisconnect).toHaveBeenCalledTimes(1);
   });
@@ -139,7 +144,7 @@ describe("spinUp: lifecycle ordering", () => {
     // failed its assertion would get its error shadowed by a
     // disconnect failure, hiding the real reason for the red test.
     driverDisconnect.mockRejectedValueOnce(new Error("boom"));
-    const sc = await spinUp({ agent: "test-harness" });
+    const sc = await spinUp({ agent: "test-harness", settleMs: 0 });
     await expect(sc.tearDown()).resolves.toBeUndefined();
   });
 });

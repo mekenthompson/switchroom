@@ -1492,6 +1492,11 @@ export class VaultBroker {
       req.op === "mint_grant" ||
       req.op === "list_grants" ||
       req.op === "revoke_grant";
+    // Hoisted from the isGrantMgmtOp block so the per-op handlers
+    // (list_grants at ~line 1765, mint_grant at ~line 1670) can also
+    // see the attestation flag. Used for `method=passphrase` audit
+    // attribution on the per-op success rows (#1058 reviewer Q10).
+    let mintPassphraseAttested = false;
     if (isGrantMgmtOp) {
       // Decide trust upfront so both the agent-deny gate AND the
       // peercred/cron gates below honour it. `isAdminAgent` is the
@@ -1521,7 +1526,8 @@ export class VaultBroker {
       // Wrong passphrase explicitly supplied → fail closed (mirrors
       // the PUT path at line 1206-1234 so the failure surfaces clearly
       // instead of silently falling through to other auth paths).
-      let mintPassphraseAttested = false;
+      // (`mintPassphraseAttested` is declared outside this block —
+      // see the hoist comment above the `if (isGrantMgmtOp)`.)
       if (
         // #1051: also covers list_grants. The grant-union flow needs
         // to read existing grants before minting a unioned one;
@@ -1764,6 +1770,11 @@ export class VaultBroker {
 
     if (req.op === "list_grants") {
       const grants = listGrants(this.grantsDb, req.agent);
+      // Reviewer-flagged on #1058 (Q10): stamp `method=passphrase` on
+      // the operation row when the request was operator-attested, so
+      // forensics has the same attribution on the actual list op as
+      // on the gate-allow row above. Without this the attestation is
+      // recorded but the per-op evidence reads as ambiguous.
       this.auditLogger.write({
         ts: new Date().toISOString(),
         op: "list_grants",
@@ -1771,6 +1782,7 @@ export class VaultBroker {
         pid: auditPid,
         cgroup: auditCgroup,
         result: `allowed:${grants.length}`,
+        ...(mintPassphraseAttested ? { method: "passphrase" as const } : {}),
       });
       // Strip revoked_at before sending (not part of the GrantMeta wire schema)
       const grantMetas = grants.map(({ id, agent_slug, key_allow, write_allow, expires_at, created_at, description }) => ({

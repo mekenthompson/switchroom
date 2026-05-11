@@ -8096,7 +8096,17 @@ async function performVaultAccessApproval(
       // created_at desc for stability.
       const active = list.grants
         .filter((g) => g.expires_at === null || g.expires_at > now)
-        .sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+        // Reviewer-flagged on #1058 (Q4): `created_at` is
+        // seconds-granularity, so two grants minted in the same
+        // wall-clock second tie. Secondary sort by `id` (vg_<6hex>)
+        // makes the ordering stable so item 2's drain reliably picks
+        // up item 1's just-minted grant rather than an unrelated
+        // same-second grant.
+        .sort((a, b) => {
+          const dt = (b.created_at ?? 0) - (a.created_at ?? 0);
+          if (dt !== 0) return dt;
+          return b.id.localeCompare(a.id);
+        });
       if (active.length > 0) {
         existingReadKeys = active[0]!.key_allow ?? [];
         existingWriteKeys = active[0]!.write_allow ?? [];

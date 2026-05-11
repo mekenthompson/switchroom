@@ -24,24 +24,34 @@ import { spinUp } from "../harness.js";
 const SMOKE_INBOUND = `uat-smoke ${new Date().toISOString()}`;
 
 describe("uat: DM round-trip smoke", () => {
-  it("driver DMs the test bot and observes a bot reply", async () => {
-    const sc = await spinUp({ agent: "test-harness" });
+  it(
+    "driver DMs the test bot and observes a bot reply",
+    async () => {
+      const sc = await spinUp({ agent: "test-harness" });
 
-    try {
-      await sc.sendDM(SMOKE_INBOUND);
+      try {
+        await sc.sendDM(SMOKE_INBOUND);
 
-      // 90s wall-clock budget: tolerates one rate-limit retry on the
-      // bot side + a normal Claude turn. If the agent is healthy the
-      // reply arrives in <20s.
-      const reply = await sc.expectMessage(/.+/, {
-        from: "bot",
-        timeout: 90_000,
-      });
+        // 90s wall-clock budget: tolerates one rate-limit retry on the
+        // bot side + a normal Claude turn. If the agent is healthy the
+        // reply arrives in <20s.
+        const reply = await sc.expectMessage(/.+/, {
+          from: "bot",
+          timeout: 90_000,
+        });
 
-      expect(reply.text.length).toBeGreaterThan(0);
-      expect(reply.senderUserId).toBe(sc.botUserId);
-    } finally {
-      await sc.tearDown();
-    }
-  });
+        expect(reply.text.length).toBeGreaterThan(0);
+        expect(reply.senderUserId).toBe(sc.botUserId);
+      } finally {
+        await sc.tearDown();
+      }
+    },
+    // Per-test budget — must exceed the 90s inner expectMessage
+    // deadline plus spinUp overhead (~3s mtcute connect +
+    // DEFAULT_SETTLE_MS gap + unpin), so add ~12s of headroom on top
+    // for symmetry with progress-card-dm. bun:test's default of 5s
+    // would otherwise cut the test off on any turn that takes longer
+    // than a few seconds.
+    110_000,
+  );
 });

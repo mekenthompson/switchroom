@@ -442,6 +442,24 @@ describe("waitForCardPhase", () => {
     expect(result.phase).toBe("done");
   });
 
+  it("consults detectPhase(card.text), not card.phase — recovers from a stale snapshot.phase", async () => {
+    // fails when: someone refactors the fast-path to read
+    // `card.phase === phase` instead of re-running detectPhase over
+    // the text. A snapshot taken at pin-time has phase="boot" baked
+    // in, but the gateway can edit the card to "done" before the
+    // caller invokes waitForCardPhase; reading the stale `.phase`
+    // would force a useless second subscription and timeout. The
+    // current implementation correctly re-classifies from text.
+    const driver = stubPinDriver({ edits: [] });
+    const result = await waitForCardPhase(
+      driver,
+      snap("boot", "✅ Done — text already at done, phase field stale"),
+      "done",
+      { timeout: 100 },
+    );
+    expect(result.phase).toBe("done");
+  });
+
   it("matches the FIRST edit that detects the target phase", async () => {
     // fails when: the matcher accumulates instead of short-circuits
     // — long-running scenarios would skip the early "done" edit and

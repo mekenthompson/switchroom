@@ -296,7 +296,14 @@ export async function waitForCardPhase(
   phase: CardPhase,
   opts: PollOptions,
 ): Promise<PinnedCardSnapshot> {
-  if (detectPhase(card.text) === phase) return card;
+  if (detectPhase(card.text) === phase) {
+    // Refresh the phase field — the snapshot we were handed may
+    // have a stale `phase` from when the snapshot was captured
+    // (e.g. pin-time at "boot") even though the text has since
+    // been edited to a later phase. Returning the input as-is
+    // would surface that stale phase to the caller.
+    return { ...card, phase };
+  }
   const iter = driver
     .observeMessages(card.chatId)
     [Symbol.asyncIterator]();
@@ -342,4 +349,8 @@ function detectPhase(text: string): CardPhase | "unknown" {
   if (/🤖|\bWorking\b/i.test(text)) return "working";
   if (/⏳|\bStarting\b/i.test(text)) return "boot";
   return "unknown";
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }

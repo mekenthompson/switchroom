@@ -30,7 +30,7 @@ import {
 } from "./kernel.js";
 
 const AGENT_UNIT = "switchroom-klanker.service";
-const SCOPE = "secret:openai_api_key";
+const SCOPE = "vault:secret:openai_api_key";
 const ACTION = "unlock";
 const APPROVER_SET = ["12345"];
 
@@ -216,7 +216,7 @@ describe("vd:unlock dual-dispatch (Phase 1 migration)", () => {
     });
     const nonce = consumeNonce(db, req.request_id);
     expect(nonce).not.toBeNull();
-    expect(nonce!.scope.startsWith("secret:")).toBe(true);
+    expect(nonce!.scope.startsWith("vault:secret:")).toBe(true);
     expect(nonce!.action).toBe("unlock");
     expect(nonce!.agent_unit).toBe(AGENT_UNIT);
   });

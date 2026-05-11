@@ -211,3 +211,110 @@ describe('subagent-tracker-posttool', () => {
     expect(row?.status).toBe('failed')
   })
 })
+
+describe('agent-dir resolution (RFC §Bug 2)', () => {
+  // The hooks used to look only at SWITCHROOM_AGENT_DIR and then cwd.
+  // In production neither matched the path the gateway + watcher used,
+  // so rows were written to a registry.db nobody read. The fix adds
+  // TELEGRAM_STATE_DIR (the env var start.sh exports for every agent)
+  // as a middle lookup. These tests pin the precedence + the legacy
+  // fallback so a future refactor can't silently revert.
+
+  function runWith(scriptPath: string, event: object, env: Record<string, string | undefined>) {
+    const finalEnv: Record<string, string> = { ...process.env } as Record<string, string>
+    // Clear the inherited overrides; we want a clean baseline.
+    delete finalEnv.SWITCHROOM_AGENT_DIR
+    delete finalEnv.TELEGRAM_STATE_DIR
+    for (const [k, v] of Object.entries(env)) {
+      if (v === undefined) delete finalEnv[k]
+      else finalEnv[k] = v
+    }
+    return spawnSync(process.execPath, [scriptPath], {
+      input: JSON.stringify(event),
+      encoding: 'utf8',
+      env: finalEnv,
+      timeout: 15_000,
+    })
+  }
+
+  const baseEvent = {
+    session_id: 's',
+    tool_name: 'Agent',
+    tool_use_id: 'toolu_envtest1',
+    tool_input: { subagent_type: 'w', description: 'd', run_in_background: true },
+  }
+
+  it('pretool prefers SWITCHROOM_AGENT_DIR over TELEGRAM_STATE_DIR', () => {
+    const explicit = mkdtempSync(join(tmpdir(), 'agent-dir-explicit-'))
+    const stateDirParent = mkdtempSync(join(tmpdir(), 'state-dir-parent-'))
+    mkdirSync(join(explicit, 'telegram'), { recursive: true })
+    mkdirSync(join(stateDirParent, 'telegram'), { recursive: true })
+    try {
+      const result = runWith(PRETOOL_SCRIPT, baseEvent, {
+        SWITCHROOM_AGENT_DIR: explicit,
+        TELEGRAM_STATE_DIR: join(stateDirParent, 'telegram'),
+      })
+      expect(result.status).toBe(0)
+      // Row landed in the EXPLICIT location, not the state-dir-derived one.
+      const explicitDb = join(explicit, 'telegram', 'registry.db')
+      const stateDirDb = join(stateDirParent, 'telegram', 'registry.db')
+      expect(Bun.file(explicitDb).size).toBeGreaterThan(0)
+      expect(Bun.file(stateDirDb).size).toBe(0)
+    } finally {
+      try { rmSync(explicit, { recursive: true }) } catch { /* */ }
+      try { rmSync(stateDirParent, { recursive: true }) } catch { /* */ }
+    }
+  })
+
+  it('pretool derives agentDir from TELEGRAM_STATE_DIR when SWITCHROOM_AGENT_DIR is unset (the production path)', () => {
+    const stateDirParent = mkdtempSync(join(tmpdir(), 'state-dir-only-'))
+    mkdirSync(join(stateDirParent, 'telegram'), { recursive: true })
+    try {
+      const result = runWith(PRETOOL_SCRIPT, baseEvent, {
+        TELEGRAM_STATE_DIR: join(stateDirParent, 'telegram'),
+      })
+      expect(result.status).toBe(0)
+      const dbPath = join(stateDirParent, 'telegram', 'registry.db')
+      expect(Bun.file(dbPath).size).toBeGreaterThan(0)
+      // Row landed in the state-dir-derived location.
+      const { Database } = require('bun:sqlite') as { Database: new (p: string) => {
+        prepare(sql: string): { get(...params: unknown[]): unknown }
+      } }
+      const db = new Database(dbPath)
+      const row = db.prepare('SELECT id FROM subagents WHERE id = ?').get('toolu_envtest1') as
+        | { id: string } | undefined
+      expect(row?.id).toBe('toolu_envtest1')
+    } finally {
+      try { rmSync(stateDirParent, { recursive: true }) } catch { /* */ }
+    }
+  })
+
+  it('pretool ignores TELEGRAM_STATE_DIR that does NOT end in /telegram (defensive)', () => {
+    // If TELEGRAM_STATE_DIR ever drifts to a non-canonical shape, the
+    // hook should NOT silently use it — falling through to cwd is the
+    // safer behaviour (you'll notice the wrong location quickly).
+    const weirdDir = mkdtempSync(join(tmpdir(), 'state-dir-weird-'))
+    const cwdDir = mkdtempSync(join(tmpdir(), 'cwd-dir-'))
+    mkdirSync(join(cwdDir, 'telegram'), { recursive: true })
+    try {
+      const result = spawnSync(process.execPath, [PRETOOL_SCRIPT], {
+        input: JSON.stringify(baseEvent),
+        encoding: 'utf8',
+        cwd: cwdDir,
+        env: {
+          ...process.env,
+          SWITCHROOM_AGENT_DIR: undefined as unknown as string,
+          TELEGRAM_STATE_DIR: weirdDir, // does NOT end in /telegram
+        } as Record<string, string>,
+        timeout: 15_000,
+      })
+      expect(result.status).toBe(0)
+      // Fell through to cwd, NOT the weird TELEGRAM_STATE_DIR.
+      const cwdDb = join(cwdDir, 'telegram', 'registry.db')
+      expect(Bun.file(cwdDb).size).toBeGreaterThan(0)
+    } finally {
+      try { rmSync(weirdDir, { recursive: true }) } catch { /* */ }
+      try { rmSync(cwdDir, { recursive: true }) } catch { /* */ }
+    }
+  })
+})

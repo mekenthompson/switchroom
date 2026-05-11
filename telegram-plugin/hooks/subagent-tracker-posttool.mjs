@@ -11,7 +11,13 @@
  * block the tool response.
  *
  * DB location: <agentDir>/telegram/registry.db
- *   agentDir = SWITCHROOM_AGENT_DIR env var, falling back to process.cwd()
+ *   agentDir lookup (first hit wins):
+ *     1. SWITCHROOM_AGENT_DIR env var (explicit override, mainly used in tests)
+ *     2. TELEGRAM_STATE_DIR with `/telegram` suffix stripped — the canonical
+ *        env var start.sh exports on every switchroom agent. See the
+ *        sibling pretool hook docblock for why this lookup matters (without
+ *        it the hook used to write to a registry.db nobody read).
+ *     3. process.cwd() (legacy fallback for ad-hoc invocations).
  *
  * Performance: the actual DB write is deferred via setImmediate (Node 22+
  * node:sqlite path) or non-blocking spawn (CLI fallback) so the hook returns
@@ -268,7 +274,18 @@ function main() {
   const id = event.tool_use_id ?? null
   if (!id) process.exit(0)
 
-  const agentDir = process.env.SWITCHROOM_AGENT_DIR ?? process.cwd()
+  // Same agent-dir resolution as the pretool hook (Bug 2 fix). Without
+  // the TELEGRAM_STATE_DIR derivation the posttool would write the
+  // `ended_at` row to a registry.db nobody reads, even though the row
+  // was originally inserted by the pretool hook that DID write to the
+  // correct DB (after this PR). Keep the two hooks in lock-step.
+  const stateDir = process.env.TELEGRAM_STATE_DIR
+  const derivedFromStateDir = stateDir && stateDir.endsWith('/telegram')
+    ? stateDir.slice(0, -'/telegram'.length)
+    : null
+  const agentDir = process.env.SWITCHROOM_AGENT_DIR
+    ?? derivedFromStateDir
+    ?? process.cwd()
   const dbPath = join(agentDir, 'telegram', 'registry.db')
 
   // If DB doesn't exist yet, nothing to update

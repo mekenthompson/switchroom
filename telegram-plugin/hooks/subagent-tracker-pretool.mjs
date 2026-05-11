@@ -11,7 +11,17 @@
  * block the tool call.
  *
  * DB location: <agentDir>/telegram/registry.db
- *   agentDir = SWITCHROOM_AGENT_DIR env var, falling back to process.cwd()
+ *   agentDir lookup (first hit wins):
+ *     1. SWITCHROOM_AGENT_DIR env var (explicit override, mainly used in tests)
+ *     2. TELEGRAM_STATE_DIR with `/telegram` suffix stripped — the canonical
+ *        env var start.sh exports for every switchroom agent (and the same
+ *        path the gateway + watcher resolve their DB through). Without this
+ *        the hook used to fall through to process.cwd() in production,
+ *        writing to a registry.db nobody read, leaving every bg sub-agent
+ *        invisible to the watcher. Surfaced by
+ *        bg-sub-agent-dispatch-dm.test.ts; see RFC Phase 2 §Bug 2 in
+ *        reference/sub-agent-visibility-rfc.md.
+ *     3. process.cwd() (legacy fallback for ad-hoc invocations).
  *
  * Performance: the actual DB write is deferred via setImmediate (Node 22+
  * node:sqlite path) or a non-blocking spawn (CLI fallback) so the hook
@@ -223,7 +233,17 @@ function main() {
   // misroute).
   if (event.tool_name !== 'Agent' && event.tool_name !== 'Task') process.exit(0)
 
-  const agentDir = process.env.SWITCHROOM_AGENT_DIR ?? process.cwd()
+  // Resolve agent dir: explicit env override → derive from TELEGRAM_STATE_DIR
+  // (start.sh exports this on every agent) → cwd fallback. The middle case
+  // is the production path; without it the hook silently wrote to a
+  // registry.db nobody read (#709 / #776 / #782 / #788 Bug 2).
+  const stateDir = process.env.TELEGRAM_STATE_DIR
+  const derivedFromStateDir = stateDir && stateDir.endsWith('/telegram')
+    ? stateDir.slice(0, -'/telegram'.length)
+    : null
+  const agentDir = process.env.SWITCHROOM_AGENT_DIR
+    ?? derivedFromStateDir
+    ?? process.cwd()
   const telegramDir = join(agentDir, 'telegram')
   const dbPath = join(telegramDir, 'registry.db')
 

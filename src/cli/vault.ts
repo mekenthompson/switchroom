@@ -89,14 +89,19 @@ function getVaultPath(configPath?: string): string {
 
 function promptLine(prompt: string, hidden = false): Promise<string> {
   return new Promise((resolve, reject) => {
+    // Issue #999: interactive prompts go to stderr, not stdout. Stdout
+    // is reserved for the actual secret payload (which the caller is
+    // capturing via `$(switchroom vault get ...)`); piping the prompt
+    // there silently consumed it, producing "Passphrase cannot be empty"
+    // with no visible prompt and a missing value in the captured var.
     const rl = createInterface({
       input: process.stdin,
-      output: process.stdout,
+      output: process.stderr,
     });
 
     if (hidden && process.stdin.isTTY) {
       // Disable echo for hidden input
-      process.stdout.write(prompt);
+      process.stderr.write(prompt);
       const stdin = process.stdin;
       stdin.setRawMode(true);
       stdin.resume();
@@ -108,14 +113,14 @@ function promptLine(prompt: string, hidden = false): Promise<string> {
           stdin.setRawMode(false);
           stdin.removeListener("data", onData);
           rl.close();
-          process.stdout.write("\n");
+          process.stderr.write("\n");
           resolve(input);
         } else if (char === "\u0003") {
           // Ctrl+C
           stdin.setRawMode(false);
           stdin.removeListener("data", onData);
           rl.close();
-          process.stdout.write("\n");
+          process.stderr.write("\n");
           reject(new Error("Aborted"));
         } else if (char === "\u007F" || char === "\b") {
           // Backspace

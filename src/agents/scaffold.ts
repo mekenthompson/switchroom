@@ -3603,7 +3603,12 @@ function buildAccessJson(
   resolvedTopicId?: number,
   userId?: string,
 ): string {
-  const allowFrom = userId ? [userId] : [];
+  // Issue #1001: defensive String() coercion so a numeric userId from a
+  // legacy `~/.switchroom/user.json` (saveUserConfig is typed `string`
+  // but TS can't enforce at runtime) doesn't land an unquoted JSON
+  // number in allowFrom (which the gateway then rejects as "non-string
+  // entries — treating as empty").
+  const allowFrom = userId ? [String(userId)] : [];
   if (allowFrom.length === 0) {
     console.warn(
       "  WARNING: No user ID available for access.json allowFrom. " +
@@ -3614,14 +3619,23 @@ function buildAccessJson(
     dmPolicy: "allowlist",
     allowFrom,
   };
-  // DM-only bots opt out of inheriting the global forum_chat_id into the
-  // access list. Without this, the boot probe sweeps a chat the bot isn't
-  // a member of and emits a noisy "boot-probe-failed: 400 chat not found"
-  // every restart (plus a misleading user-facing notification). See the
-  // schema doc on `dm_only` for the design rationale.
-  if (!agentConfig.dm_only) {
+  // DM-only bots opt out of inheriting the global forum_chat_id into
+  // the access list. Without this, the boot probe sweeps a chat the
+  // bot isn't a member of and emits a noisy "boot-probe-failed: 400
+  // chat not found" every restart (plus a misleading user-facing
+  // notification). See the schema doc on `dm_only` for the design
+  // rationale.
+  //
+  // Issue #1002: also skip when the resolved forum chat id is the
+  // empty string or the v0.7 sentinel "0" — those are the values
+  // `switchroom agent add --topology dm` emits when no real forum
+  // chat is in scope, and the bug surfaced as a spurious 404 on every
+  // fresh DM-topology agent.
+  const forumChatId = telegramConfig.forum_chat_id;
+  const hasRealForumChat = forumChatId !== "" && forumChatId !== "0";
+  if (!agentConfig.dm_only && hasRealForumChat) {
     access.groups = {
-      [telegramConfig.forum_chat_id]: {
+      [forumChatId]: {
         requireMention: false,
         allowFrom,
       },

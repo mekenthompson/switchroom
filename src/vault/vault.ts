@@ -9,6 +9,8 @@ import {
   fsyncSync,
   openSync,
   closeSync,
+  lstatSync,
+  realpathSync,
 } from "node:fs";
 import { dirname, basename, resolve } from "node:path";
 import { acquireLock, DEFAULT_LOCK_RETRY_MS, VaultBusyError } from "./flock.js";
@@ -60,11 +62,30 @@ const SCRYPT_MAXMEM = 128 * 1024 * 1024; // 128 MB
 function atomicWriteFileSync(path: string, data: string, mode: number): void {
   // Write to a sibling temp file then rename. Rename is atomic on the same
   // filesystem, which guarantees readers never see a half-written vault.
-  const dir = dirname(resolve(path));
-  const tmp = resolve(dir, `.${basename(path)}.${process.pid}.${Date.now()}.tmp`);
+  //
+  // Issue #1000: when `path` is a symlink (the v0.7.12+ layout has
+  // `~/.switchroom/vault.enc -> vault/vault.enc`), a naive `renameSync(tmp,
+  // path)` REPLACES the symlink with a regular file, leaving the directory
+  // entry orphaned and stale. The broker keeps reading the (untouched)
+  // target file, so writes silently don't reach it; the next
+  // `switchroom apply` then trips the divergence guard. Resolve the
+  // symlink first so the rename targets the underlying file, preserving
+  // the layout invariant.
+  let effectivePath = path;
+  try {
+    if (existsSync(path) && lstatSync(path).isSymbolicLink()) {
+      effectivePath = realpathSync(path);
+    }
+  } catch {
+    // Best-effort introspection: if we can't lstat/realpath (perm
+    // error, race, target missing), fall back to the path as given.
+    // The downstream write will surface the real failure.
+  }
+  const dir = dirname(resolve(effectivePath));
+  const tmp = resolve(dir, `.${basename(effectivePath)}.${process.pid}.${Date.now()}.tmp`);
   try {
     writeFileSync(tmp, data, { encoding: "utf8", mode });
-    renameSync(tmp, path);
+    renameSync(tmp, effectivePath);
   } catch (err) {
     try { if (existsSync(tmp)) unlinkSync(tmp); } catch {}
     throw err;

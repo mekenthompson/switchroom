@@ -26,7 +26,7 @@ export const ScheduleEntrySchema = z.object({
     .optional()
     .describe(
       "Model for this task. Defaults to claude-sonnet-4-6 (cheap, fast). " +
-      "Use claude-opus-4-6 for tasks needing complex reasoning.",
+      "Use claude-opus-4-7 for tasks needing complex reasoning.",
     ),
   secrets: z
     .array(z.string().regex(/^[a-zA-Z0-9_\-/]+$/, "Secret key names must contain only alphanumeric characters, underscores, hyphens, and forward slashes"))

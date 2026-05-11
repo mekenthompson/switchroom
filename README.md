@@ -224,7 +224,7 @@ memory:
   backend: hindsight
 
 defaults:
-  model: claude-opus-4-6   # or claude-sonnet-4-6, claude-haiku-4-5
+  model: claude-opus-4-7   # or claude-sonnet-4-6, claude-haiku-4-5
   tools: { allow: [all] }
   subagents:
     worker:
@@ -334,7 +334,7 @@ Profiles live in `profiles/` at the repo root. Bundled ones for `--profile`: `co
 
 If the agent is already in yaml, `--profile` must match the existing `extends:` value or it errors. If the yaml entry has no `extends:` and you pass `--profile`, the flag is written in additively with a warning. Running `agent create` with no `--profile` on a missing entry keeps the old "Agent not defined in switchroom.yaml" error, now with a hint to use `--profile`.
 
-Model aliases: the bare names `opus`, `sonnet`, `haiku` are accepted alongside the full IDs (`claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5`). Use whichever reads cleaner in your config.
+Model aliases: the bare names `opus`, `sonnet`, `haiku` are accepted alongside the full IDs (`claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`). Use whichever reads cleaner in your config.
 
 ### Authentication (multi-account slot pool)
 

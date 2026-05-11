@@ -24,7 +24,7 @@ Each field type has specific merge behavior when values exist at multiple layers
 
 | Field | Cascade | Description |
 |-------|---------|-------------|
-| `model` | override | Claude model (`claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5`). Haiku is the default for the handoff summarizer; agents typically use opus or sonnet. |
+| `model` | override | Claude model (`claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`). Haiku is the default for the handoff summarizer; agents typically use opus or sonnet. |
 | `extends` | — | Named profile to inherit from |
 | `tools.allow` / `tools.deny` | union | Tool permissions |
 | `soul` | per-field | Agent persona (name, style, boundaries) |

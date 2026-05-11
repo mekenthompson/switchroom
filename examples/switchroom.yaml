@@ -173,7 +173,7 @@ agents:
     topic_name: "Code"
     topic_emoji: "💻"
     extends: coder                      # inherits from inline profile above
-    model: claude-opus-4-6              # override defaults.model for this agent
+    model: claude-opus-4-7              # override defaults.model for this agent
     memory:
       collection: coding
     cli_args: ["--effort", "high"]      # escape hatch: extra exec claude flags

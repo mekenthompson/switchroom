@@ -92,6 +92,33 @@ export function bringUpAgentService(
 
   const dockerBin = opts.dockerBin ?? "docker";
   const stdio = opts.stdio ?? "inherit";
+
+  // Recreate the singletons FIRST so their per-agent volume lists pick
+  // up the new agent's socket dir before the agent itself comes online
+  // and tries to talk to them. Without this step the broker enumerates
+  // its bind-mounted /run/switchroom/broker/<agent> directories once
+  // at startup; an agent added later mounts the volume from its side
+  // but the broker never binds the matching socket, so every vault
+  // operation from the new agent fails with `VAULT-BROKER-DENIED:
+  // broker not running` (#1017). `--no-deps` keeps us from recursively
+  // bouncing other agents (only the broker + kernel are touched).
+  for (const svc of ["vault-broker", "approval-kernel"] as const) {
+    execFileSync(
+      dockerBin,
+      [
+        "compose",
+        "-f",
+        composePath,
+        "up",
+        "-d",
+        "--no-deps",
+        "--force-recreate",
+        svc,
+      ],
+      { stdio },
+    );
+  }
+
   execFileSync(
     dockerBin,
     [

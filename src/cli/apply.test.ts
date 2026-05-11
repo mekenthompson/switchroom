@@ -30,6 +30,28 @@ function makeStubConfig(agentsDir: string): SwitchroomConfig {
 }
 
 describe("runApply", () => {
+  // Sandbox HOME so the apply orchestrator's vault-layout migration check
+  // (`migrateVaultLayout(homedir(), …)`) doesn't poke the real
+  // ~/.switchroom/vault/ on the test host. Without this, every test on a
+  // box where vault layout has already migrated to v0.7.12+ (the post-
+  // migration "state D" layout) sees the real symlink + vault file and
+  // can flip the migration classifier into "divergent" → process.exit(4).
+  // Pre-fix this was an env-dependent flake.
+  let _origHome: string | undefined;
+  let _homeSandbox: string | undefined;
+  beforeEach(async () => {
+    _origHome = process.env.HOME;
+    _homeSandbox = await mkdtemp(join(tmpdir(), "switchroom-apply-home-"));
+    process.env.HOME = _homeSandbox;
+  });
+  afterEach(() => {
+    if (_origHome !== undefined) {
+      process.env.HOME = _origHome;
+    } else {
+      delete process.env.HOME;
+    }
+  });
+
   it("writes the compose YAML to the requested path", async () => {
     const dir = await mkdtemp(join(tmpdir(), "switchroom-apply-test-"));
     const outPath = join(dir, "nested", "docker-compose.yml");

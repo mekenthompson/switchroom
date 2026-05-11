@@ -67,6 +67,30 @@ export interface ObservedMessage {
   edited: boolean;
 }
 
+export interface ObservedButton {
+  /** Visible label on the button. */
+  text: string;
+  /**
+   * Inline-callback button payload (Bot API `callback_data`). UTF-8
+   * decoded from the raw `Uint8Array` mtcute exposes. Undefined for
+   * URL buttons / web-app buttons / other non-callback button kinds.
+   */
+  callbackData?: string;
+  /** URL for `url` buttons; undefined for callback buttons. */
+  url?: string;
+}
+
+/**
+ * 2-D matrix of inline buttons, matching Bot API's
+ * `inline_keyboard: [[{text, callback_data}, ...], ...]`.
+ *
+ * Only `type === "inline"` keyboards are returned by `getKeyboard` —
+ * reply-keyboard / force-reply / hide markups aren't used by the
+ * gateway for vault UX flows and would require a separate driver
+ * surface (typing the reply instead of tapping).
+ */
+export type ObservedKeyboard = ObservedButton[][];
+
 export interface ObservedReaction {
   chatId: number;
   messageId: number;
@@ -487,6 +511,81 @@ export class Driver {
     const msg = results[0];
     if (!msg) return null;
     return toObserved(msg, false);
+  }
+
+  /**
+   * Fetch the inline keyboard attached to a bot message, if any.
+   * Returns `null` for messages without an inline_keyboard (or with
+   * a non-inline markup like force-reply).
+   *
+   * Used by vault UX scenarios that need to:
+   * 1. Drive the gateway-published vault save card, audit/allow flow,
+   *    or grant approval card (epic #1012).
+   * 2. Find the `[Allow]` / `[Save]` / `[Approve]` button to press by
+   *    its label, then pass `button.callbackData` to `pressButton`.
+   *
+   * Callback `data` is decoded from the raw `Uint8Array` to UTF-8
+   * string; the gateway always encodes callback_data as ASCII/UTF-8,
+   * so this matches Bot API consumers' view. URL buttons surface as
+   * `{ text, url }` with `callbackData: undefined`.
+   */
+  async getKeyboard(
+    chatId: number,
+    messageId: number,
+  ): Promise<ObservedKeyboard | null> {
+    const c = this.requireClient();
+    const results = await c.getMessages(chatId, [messageId]);
+    const msg = results[0] as { markup?: { type: string; buttons: unknown[][] } } | null;
+    if (!msg) return null;
+    const markup = msg.markup;
+    if (!markup || markup.type !== "inline") return null;
+    const decoder = new TextDecoder();
+    return markup.buttons.map((row) =>
+      row.map((b) => {
+        const btn = b as {
+          _: string;
+          text: string;
+          data?: Uint8Array;
+          url?: string;
+        };
+        const out: ObservedButton = { text: btn.text };
+        if (btn._ === "keyboardButtonCallback" && btn.data) {
+          out.callbackData = decoder.decode(btn.data);
+        }
+        if (btn._ === "keyboardButtonUrl" && btn.url) {
+          out.url = btn.url;
+        }
+        return out;
+      }),
+    );
+  }
+
+  /**
+   * Press an inline-keyboard callback button — the MTProto path that
+   * mirrors what tapping the button in the Telegram client does.
+   *
+   * The bot receives a `callback_query` update. Bot-side handlers
+   * (e.g. the gateway's vault-audit one-tap allow handler from
+   * #969 P2b, or the agent-grant-request flow proposed in #1012)
+   * fire as if a real operator tapped.
+   *
+   * Note: the driver user must be in the bot's admin allowlist for
+   * any admin-gated button (most `/vault` callbacks are admin-gated).
+   * The harness's `test-harness` agent already includes the driver
+   * via `--allow-from` at agent-add time, so admin actions work
+   * end-to-end out of the box.
+   */
+  async pressButton(
+    chatId: number,
+    messageId: number,
+    callbackData: string,
+  ): Promise<void> {
+    const c = this.requireClient();
+    await c.getCallbackAnswer({
+      chatId,
+      message: messageId,
+      data: callbackData,
+    });
   }
 
   /**

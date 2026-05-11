@@ -1395,6 +1395,20 @@ type PendingVaultOp =
   // Issue #969 P1a: user tapped "Rename" on a vault_request_save card;
   // the next message becomes the new key name for the staged save.
   | { kind: 'rename-vault-save'; stageId: string; startedAt: number }
+  // Issue #1012 Phase 2 follow-up: operator tapped Approve on a
+  // vault_request_access card without first unlocking the vault. The
+  // next message becomes the passphrase — we cache it, delete the
+  // passphrase message, and auto-resume the approval mint flow without
+  // making the operator tap Approve a second time. Mirrors the
+  // `passphrase-for-deferred` flow from #44.
+  | {
+      kind: 'passphrase-for-access-approve'
+      stageId: string
+      cardChatId: string
+      cardMessageId: number
+      senderId: string
+      startedAt: number
+    }
 const VAULT_INPUT_TTL_MS = 5 * 60 * 1000
 const pendingVaultOps = new Map<string, PendingVaultOp>()
 
@@ -5106,6 +5120,37 @@ async function handleInbound(
         vaultPassphraseCache.set(chat_id, { passphrase, expiresAt: Date.now() + VAULT_PASSPHRASE_TTL_MS })
         if (msgId != null) await deleteSensitiveMessage(chat_id, msgId, 'vault passphrase')
         await executeDeferredSecretSave(ctx, pendingVault.deferKey, passphrase, pendingVault.cardMessageId)
+      } else if (pendingVault.kind === 'passphrase-for-access-approve') {
+        // #1012 Phase 2 follow-up: operator tapped Approve on a
+        // vault_request_access card without first unlocking. We
+        // captured the next message as the passphrase, cache it,
+        // delete the chat copy, and resume the approve flow.
+        // Wrong passphrase surfaces via the broker's
+        // DENIED:passphrase-mismatch path and edits the card to the
+        // mint_grant-failed message (see performVaultAccessApproval).
+        const passphrase = text.trim()
+        if (!passphrase) {
+          await switchroomReply(ctx, 'Passphrase cannot be empty. Ask the agent to re-issue the request card.', { html: true })
+          return
+        }
+        vaultPassphraseCache.set(chat_id, { passphrase, expiresAt: Date.now() + VAULT_PASSPHRASE_TTL_MS })
+        if (msgId != null) await deleteSensitiveMessage(chat_id, msgId, 'vault passphrase')
+        const stagedAccess = pendingVaultRequestAccesses.get(pendingVault.stageId)
+        if (!stagedAccess) {
+          // Staged entry expired between tap and passphrase reply.
+          // The 10-min TTL is generous but not infinite; surface a
+          // clear next step.
+          await ctx.api
+            .editMessageText(
+              pendingVault.cardChatId,
+              pendingVault.cardMessageId,
+              `⌛ <i>Vault unlocked, but this access-request card expired before you replied. Ask the agent to re-issue.</i>`,
+              { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+            )
+            .catch(() => {})
+          return
+        }
+        await performVaultAccessApproval(ctx, stagedAccess, pendingVault.stageId, pendingVault.senderId, passphrase)
       } else if (pendingVault.kind === 'grant-wizard' && pendingVault.awaitingCustomDuration) {
         // Issue #227: custom duration text reply for grant wizard
         const input = text.trim()
@@ -7962,6 +8007,86 @@ async function handleVaultRecentDenialCallback(ctx: Context, data: string): Prom
  * Same authorization gate as the recent-denials one-tap handler:
  * sender must be on the gateway's allowFrom list.
  */
+/**
+ * Mint the scoped grant + write the token file for an approved
+ * `vault_request_access` request. Factored out so both the direct
+ * approve-tap (passphrase already cached) and the
+ * `passphrase-for-access-approve` resume flow (passphrase captured
+ * via text-message intercept after tap-on-locked) drive identical
+ * minting behaviour. #1012 Phase 2 + follow-up.
+ */
+async function performVaultAccessApproval(
+  ctx: Context,
+  pending: PendingVaultRequestAccess,
+  stageId: string,
+  senderId: string,
+  passphrase: string,
+): Promise<void> {
+  const mintArgs: Parameters<typeof mintGrantViaBroker>[0] = {
+    agent: pending.agent,
+    keys: pending.scope === 'read' ? [pending.key] : [],
+    ttl_seconds: pending.ttl_seconds,
+    description: `auto-mint via vault_request_access (#1012, scope=${pending.scope}, by op ${senderId})`,
+    ...(pending.scope === 'write' ? { write_keys: [pending.key] } : {}),
+    passphrase,
+  }
+  const result = await mintGrantViaBroker(mintArgs)
+  if (result.kind === 'unreachable') {
+    await switchroomReply(ctx, `🔴 Broker unreachable: ${escapeHtmlForTg(result.msg)}`, { html: true })
+    return
+  }
+  if (result.kind === 'error') {
+    // Mint refused (most likely wrong passphrase). Drop the staged
+    // request so a re-attempt starts cleanly. The operator can ask
+    // the agent to re-issue, or the broker error message will tell
+    // them the next step.
+    pendingVaultRequestAccesses.delete(stageId)
+    if (pending.card_message_id != null) {
+      await ctx.api
+        .editMessageText(
+          pending.chat_id,
+          pending.card_message_id,
+          `<b>mint_grant failed:</b> ${escapeHtmlForTg(result.msg)}`,
+          { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+        )
+        .catch(() => {})
+    }
+    return
+  }
+
+  const { token, id } = result
+  const tokenPath = join(homedir(), '.switchroom', 'agents', pending.agent, '.vault-token')
+  try {
+    mkdirSync(join(homedir(), '.switchroom', 'agents', pending.agent), { recursive: true })
+    writeFileSync(tokenPath, token, { mode: 0o600 })
+  } catch (err) {
+    await switchroomReply(
+      ctx,
+      `<b>Grant created (${escapeHtmlForTg(id)}) but token write failed:</b> ` +
+      `${escapeHtmlForTg(String(err))}\n` +
+      `<i>Recover with: <code>switchroom vault grant ${escapeHtmlForTg(pending.agent)} ` +
+      `--keys ${escapeHtmlForTg(pending.key)} --duration ${Math.round(pending.ttl_seconds / 86400)}d</code> on the host.</i>`,
+      { html: true },
+    )
+    return
+  }
+
+  pendingVaultRequestAccesses.delete(stageId)
+  if (pending.card_message_id != null) {
+    const days = Math.round(pending.ttl_seconds / 86400)
+    await ctx.api
+      .editMessageText(
+        pending.chat_id,
+        pending.card_message_id,
+        `✅ Granted <b>${escapeHtmlForTg(pending.agent)}</b> ${pending.scope} access to ` +
+        `<code>${escapeHtmlForTg(pending.key)}</code> for ${days}d. ` +
+        `(grant <code>${escapeHtmlForTg(id)}</code>)`,
+        { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+      )
+      .catch(() => {})
+  }
+}
+
 async function handleVaultRequestAccessCallback(ctx: Context, data: string): Promise<void> {
   const senderId = String(ctx.from?.id ?? '')
   const access = loadAccess()
@@ -8009,86 +8134,42 @@ async function handleVaultRequestAccessCallback(ctx: Context, data: string): Pro
   }
 
   if (action === 'approve') {
-    await ctx.answerCallbackQuery({ text: '⏳ Minting grant…' }).catch(() => {})
-
-    // Attach the cached operator passphrase as broker attestation
-    // (#1012 Phase 2). Required when this handler runs in a NON-admin
-    // agent's gateway — the broker server-side allowlist (#1022) only
-    // trusts operator-socket and admin-agent paths for grant-mgmt
-    // ops. Passphrase attestation is the third trust posture, mirroring
-    // PUT (#969 P1a) — same shape, same threat surface.
-    //
-    // If the operator hasn't unlocked the vault in this chat yet,
-    // refuse before calling the broker: a non-admin agent's mint
-    // attempt without attestation would surface the same
-    // "agent-bound listeners cannot mint" error gymbro hit on the
-    // first run (screenshot in #1012 follow-up).
+    // Tap-to-unlock-and-approve: if the operator hasn't unlocked the
+    // vault in this chat yet, capture the passphrase via a pending op
+    // intercept and resume the approve flow automatically once it
+    // arrives — no second tap, no separate /vault unlock detour.
+    // Mirrors the `passphrase-for-deferred` flow from #44.
     const cached = vaultPassphraseCache.get(pending.chat_id)
     if (!cached || cached.expiresAt <= Date.now()) {
-      if (pending.card_message_id != null) {
-        await ctx.api
-          .editMessageText(
-            pending.chat_id,
-            pending.card_message_id,
-            `🔒 <b>Vault is locked.</b> Run <code>/vault unlock</code> (or any /vault command) in this chat to cache the passphrase, then ask the agent to re-issue the request card.\n\n` +
-            `<i>Approval needs operator-passphrase attestation — without it the broker refuses grant-mgmt from a non-admin agent.</i>`,
-            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
-          )
+      if (pending.card_message_id == null) {
+        await ctx
+          .answerCallbackQuery({ text: 'Card missing — ask the agent to re-issue.' })
           .catch(() => {})
+        return
       }
-      pendingVaultRequestAccesses.delete(stageId)
-      return
-    }
-
-    const mintArgs: Parameters<typeof mintGrantViaBroker>[0] = {
-      agent: pending.agent,
-      keys: pending.scope === 'read' ? [pending.key] : [],
-      ttl_seconds: pending.ttl_seconds,
-      description: `auto-mint via vault_request_access (#1012, scope=${pending.scope}, by op ${senderId})`,
-      ...(pending.scope === 'write' ? { write_keys: [pending.key] } : {}),
-      passphrase: cached.passphrase,
-    }
-    const result = await mintGrantViaBroker(mintArgs)
-    if (result.kind === 'unreachable') {
-      await switchroomReply(ctx, `🔴 Broker unreachable: ${escapeHtmlForTg(result.msg)}`, { html: true })
-      return
-    }
-    if (result.kind === 'error') {
-      await switchroomReply(ctx, `<b>mint_grant failed:</b> ${escapeHtmlForTg(result.msg)}`, { html: true })
-      return
-    }
-
-    const { token, id } = result
-    const tokenPath = join(homedir(), '.switchroom', 'agents', pending.agent, '.vault-token')
-    try {
-      mkdirSync(join(homedir(), '.switchroom', 'agents', pending.agent), { recursive: true })
-      writeFileSync(tokenPath, token, { mode: 0o600 })
-    } catch (err) {
-      await switchroomReply(
-        ctx,
-        `<b>Grant created (${escapeHtmlForTg(id)}) but token write failed:</b> ` +
-        `${escapeHtmlForTg(String(err))}\n` +
-        `<i>Recover with: <code>switchroom vault grant ${escapeHtmlForTg(pending.agent)} ` +
-        `--keys ${escapeHtmlForTg(pending.key)} --duration ${Math.round(pending.ttl_seconds / 86400)}d</code> on the host.</i>`,
-        { html: true },
-      )
-      return
-    }
-
-    pendingVaultRequestAccesses.delete(stageId)
-    if (pending.card_message_id != null) {
-      const days = Math.round(pending.ttl_seconds / 86400)
+      pendingVaultOps.set(pending.chat_id, {
+        kind: 'passphrase-for-access-approve',
+        stageId,
+        cardChatId: pending.chat_id,
+        cardMessageId: pending.card_message_id,
+        senderId,
+        startedAt: Date.now(),
+      })
+      await ctx.answerCallbackQuery({ text: '🔐 Send your passphrase…' }).catch(() => {})
       await ctx.api
         .editMessageText(
           pending.chat_id,
           pending.card_message_id,
-          `✅ Granted <b>${escapeHtmlForTg(pending.agent)}</b> ${pending.scope} access to ` +
-          `<code>${escapeHtmlForTg(pending.key)}</code> for ${days}d. ` +
-          `(grant <code>${escapeHtmlForTg(id)}</code>)`,
+          `🔐 <b>Vault is locked.</b> Reply with your passphrase as your next message — we'll unlock, mint the grant for <b>${escapeHtmlForTg(pending.agent)}</b>, and delete the passphrase message in one step.\n\n` +
+          `<i>Mint authority stays operator-only: the broker only accepts the grant when the passphrase matches.</i>`,
           { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
         )
         .catch(() => {})
+      return
     }
+
+    await ctx.answerCallbackQuery({ text: '⏳ Minting grant…' }).catch(() => {})
+    await performVaultAccessApproval(ctx, pending, stageId, senderId, cached.passphrase)
     return
   }
 

@@ -77,13 +77,21 @@ describe('vault_request_access (#1012)', () => {
     // grants DB directly. The broker is the single point of grant
     // issuance — bypassing it skips audit-log emission and breaks
     // the path-as-identity ACL contract.
-    const handlerBlock = gatewaySrc.split('async function handleVaultRequestAccessCallback')[1]?.split('async function handleVaultRequestSaveCallback')[0] ?? ''
-    expect(handlerBlock).toMatch(/mintGrantViaBroker/)
+    //
+    // The mint call lives in performVaultAccessApproval — the helper
+    // factored out so both the direct-approve path AND the
+    // tap-on-locked → passphrase-resume path drive identical minting
+    // (see telegram-plugin/tests/vault-request-access-unlock-resume.test.ts).
+    const mintHelperBlock =
+      gatewaySrc
+        .split('async function performVaultAccessApproval')[1]
+        ?.split('async function handleVaultRequestAccessCallback')[0] ?? ''
+    expect(mintHelperBlock).toMatch(/mintGrantViaBroker/)
     // Description string must carry the audit breadcrumb so post-hoc
     // forensics can tell agent-initiated grants apart from
     // operator-host-CLI grants and from /vault audit one-tap grants.
-    expect(handlerBlock).toMatch(/vault_request_access/)
-    expect(handlerBlock).toMatch(/#1012/)
+    expect(mintHelperBlock).toMatch(/vault_request_access/)
+    expect(mintHelperBlock).toMatch(/#1012/)
   })
 
   it('duration parser enforces the 90-day ceiling', () => {

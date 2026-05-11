@@ -29,7 +29,7 @@ import { spinUp } from "../harness.js";
 
 const INBOUND = `uat-card ${new Date().toISOString()}`;
 
-describe.skip("uat: progress card lifecycle on driver DM", () => {
+describe("uat: progress card lifecycle on driver DM", () => {
   it("driver sees a pinned card progress to 'done' within 60s", async () => {
     const sc = await spinUp({ agent: "test-harness" });
     try {

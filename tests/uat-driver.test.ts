@@ -45,6 +45,7 @@ const mockClient = {
   sendText: vi.fn(async () => ({ id: 999 })),
   onNewMessage: new MockEmitter<unknown>(),
   onEditMessage: new MockEmitter<unknown>(),
+  onRawUpdate: new MockEmitter<unknown>(),
 };
 
 const TelegramClientCtor = vi.fn().mockImplementation(() => mockClient);
@@ -60,6 +61,7 @@ beforeEach(async () => {
   vi.clearAllMocks();
   mockClient.onNewMessage = new MockEmitter<unknown>();
   mockClient.onEditMessage = new MockEmitter<unknown>();
+  mockClient.onRawUpdate = new MockEmitter<unknown>();
   Driver = (await import("../telegram-plugin/uat/driver.js")).Driver;
 });
 
@@ -242,6 +244,137 @@ describe("Driver.observeMessages", () => {
 
     const after = await iter.next();
     expect(after.done).toBe(true);
+  });
+});
+
+describe("Driver.observeReactions", () => {
+  // Helper — build a raw `updateMessageReactions` shape.
+  function rxUpdate(opts: {
+    peerUserId: number;
+    msgId: number;
+    emojis: string[];
+  }): { update: unknown } {
+    return {
+      update: {
+        _: "updateMessageReactions",
+        peer: { _: "peerUser", userId: opts.peerUserId },
+        msgId: opts.msgId,
+        reactions: {
+          results: opts.emojis.map((e) => ({
+            reaction: { _: "reactionEmoji", emoticon: e },
+          })),
+        },
+      },
+    };
+  }
+
+  it("emits a `+emoji` op on first reaction", async () => {
+    // fails when: the prior-set diff logic loses its initial empty
+    // baseline — first reaction wouldn't be classified as "new" and
+    // expectReaction would time out on the very first emoji.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    const iter = driver.observeReactions(67890, { messageId: 67050 })[Symbol.asyncIterator]();
+    mockClient.onRawUpdate.emit(rxUpdate({
+      peerUserId: 67890,
+      msgId: 67050,
+      emojis: ["👀"],
+    }));
+    const first = await iter.next();
+    expect(first.done).toBe(false);
+    const r = first.value as { emoji: string; op: string };
+    expect(r.emoji).toBe("👀");
+    expect(r.op).toBe("+");
+    await iter.return?.();
+  });
+
+  it("computes -old +new when setMessageReaction replaces the prior emoji", async () => {
+    // fails when: the diff direction inverts (would emit -new instead
+    // of -old) or the prior set isn't updated, producing duplicate
+    // emissions on the next call. Pins the gateway's actual
+    // call pattern: setMessageReaction REPLACES, doesn't add.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    const iter = driver.observeReactions(67890, { messageId: 67050 })[Symbol.asyncIterator]();
+    mockClient.onRawUpdate.emit(rxUpdate({
+      peerUserId: 67890, msgId: 67050, emojis: ["👀"],
+    }));
+    mockClient.onRawUpdate.emit(rxUpdate({
+      peerUserId: 67890, msgId: 67050, emojis: ["👍"],
+    }));
+    // Order: +👀, then on the replace event +👍 + -👀 (order of those
+    // last two doesn't matter, but both must come through).
+    const ops: Array<{ emoji: string; op: string }> = [];
+    for (let i = 0; i < 3; i++) {
+      const n = await iter.next();
+      if (n.done) break;
+      const v = n.value as { emoji: string; op: string };
+      ops.push({ emoji: v.emoji, op: v.op });
+    }
+    expect(ops).toEqual(expect.arrayContaining([
+      { emoji: "👀", op: "+" },
+      { emoji: "👍", op: "+" },
+      { emoji: "👀", op: "-" },
+    ]));
+    await iter.return?.();
+  });
+
+  it("filters out updates for the wrong chat or message", async () => {
+    // fails when: the chat/msg filter widens — scenarios would see
+    // reactions from every chat the driver is part of, flooding the
+    // queue and likely matching unrelated emoji shapes by accident.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    const iter = driver.observeReactions(67890, { messageId: 67050 })[Symbol.asyncIterator]();
+    mockClient.onRawUpdate.emit(rxUpdate({ peerUserId: 99, msgId: 67050, emojis: ["💩"] }));
+    mockClient.onRawUpdate.emit(rxUpdate({ peerUserId: 67890, msgId: 1, emojis: ["💩"] }));
+    mockClient.onRawUpdate.emit(rxUpdate({ peerUserId: 67890, msgId: 67050, emojis: ["👀"] }));
+    const first = await iter.next();
+    const r = first.value as { emoji: string };
+    expect(r.emoji).toBe("👀");
+    await iter.return?.();
+  });
+
+  it("skips custom-emoji reactions (out of scope for Phase 2b)", async () => {
+    // fails when: someone adds support for `reactionCustomEmoji`
+    // without resolving the document_id to an alias. Custom emojis
+    // would leak through as opaque "documentId=..." strings and break
+    // expectReaction's exact-match.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    const iter = driver.observeReactions(67890, { messageId: 67050 })[Symbol.asyncIterator]();
+    mockClient.onRawUpdate.emit({
+      update: {
+        _: "updateMessageReactions",
+        peer: { _: "peerUser", userId: 67890 },
+        msgId: 67050,
+        reactions: {
+          results: [
+            { reaction: { _: "reactionCustomEmoji", documentId: { high: 0, low: 1 } } },
+            { reaction: { _: "reactionEmoji", emoticon: "👀" } },
+          ],
+        },
+      },
+    });
+    const first = await iter.next();
+    const r = first.value as { emoji: string };
+    expect(r.emoji).toBe("👀"); // custom emoji silently skipped
+    await iter.return?.();
+  });
+
+  it("removes its onRawUpdate listener on iterator return", async () => {
+    // fails when: cleanup is dropped — `onRawUpdate` listeners
+    // accumulate across scenarios. Unlike `onNewMessage`, the raw
+    // update fires for EVERY Telegram event the driver receives
+    // (typing, presence, etc.), so a leaked listener is much
+    // louder than for the message observer.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    expect(mockClient.onRawUpdate.size).toBe(0);
+    const iter = driver.observeReactions(67890)[Symbol.asyncIterator]();
+    expect(mockClient.onRawUpdate.size).toBe(1);
+    await iter.return?.();
+    expect(mockClient.onRawUpdate.size).toBe(0);
   });
 });
 

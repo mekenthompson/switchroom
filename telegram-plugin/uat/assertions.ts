@@ -153,19 +153,78 @@ function raceTimeout<T>(p: Promise<T>, ms: number): Promise<T | "timeout"> {
 // ---------- Phase 2b stubs (deferred to follow-up PR) ----------
 
 /**
- * TODO(#866): wait for a reaction sequence on `messageId`. Each
- * emoji in `sequence` must appear (add op) in order; intermediate
- * other reactions are tolerated. Returns the full observed reaction
- * trail.
+ * Wait for a reaction `sequence` on `messageId` in `chatId`. Each
+ * emoji must appear (as an add `+` op) in the order given;
+ * intermediate add/remove ops for other emojis are tolerated.
+ *
+ * Returns the full observed trail (every add/remove seen up to and
+ * including the final match) so scenarios can do follow-up
+ * assertions on the order or count.
+ *
+ * Production note: the gateway calls `setMessageReaction` which
+ * REPLACES the prior emoji (not adds-in-addition-to). So an
+ * 👀 → 🤔 transition emits `-👀` and `+🤔` in the same observation
+ * window. This helper only watches the `+` ops, so the
+ * gateway-replace pattern reads as a clean sequence.
+ *
+ * Fast-turn note: turns shorter than the gateway's
+ * `progress-card initialDelayMs` may collapse intermediate
+ * reactions — you might only see 👀 and 👍. The sequence-match
+ * tolerates this: every emoji in `sequence` must appear in order,
+ * but we don't require it to be the ONLY emojis added.
  */
 export async function expectReaction(
-  _driver: Driver,
-  _chatId: number,
-  _messageId: number,
-  _sequence: string[],
-  _opts: PollOptions,
+  driver: Driver,
+  chatId: number,
+  messageId: number,
+  sequence: string[],
+  opts: PollOptions,
 ): Promise<ObservedReaction[]> {
-  throw new Error("expectReaction not implemented (Phase 2)");
+  if (sequence.length === 0) {
+    throw new Error("expectReaction: sequence must be non-empty");
+  }
+  const trail: ObservedReaction[] = [];
+  const iter = driver.observeReactions(chatId, { messageId })[Symbol.asyncIterator]();
+  const deadline = Date.now() + opts.timeout;
+  let cursor = 0;
+  try {
+    while (Date.now() < deadline && cursor < sequence.length) {
+      const remaining = deadline - Date.now();
+      const next = await raceTimeoutR(iter.next(), remaining);
+      if (next === "timeout") break;
+      if (next.done === true) break;
+      const r = next.value;
+      trail.push(r);
+      if (r.op === "+" && r.emoji === sequence[cursor]) {
+        cursor++;
+      }
+    }
+  } finally {
+    await iter.return?.();
+  }
+  if (cursor < sequence.length) {
+    throw new Error(
+      `expectReaction: saw ${cursor}/${sequence.length} expected emoji ` +
+        `(missing ${sequence.slice(cursor).map((e) => JSON.stringify(e)).join(", ")}) ` +
+        `on chat=${chatId} msg=${messageId} within ${opts.timeout}ms ` +
+        `(observed ops: ${trail.map((t) => `${t.op}${t.emoji}`).join(" ")})`,
+    );
+  }
+  return trail;
+}
+
+function raceTimeoutR<T>(p: Promise<T>, ms: number): Promise<T | "timeout"> {
+  if (ms <= 0) return Promise.resolve("timeout");
+  return new Promise<T | "timeout">((resolve) => {
+    const t = setTimeout(() => resolve("timeout"), ms);
+    p.then((v) => {
+      clearTimeout(t);
+      resolve(v);
+    }).catch(() => {
+      clearTimeout(t);
+      resolve("timeout");
+    });
+  });
 }
 
 export interface PinnedCardSnapshot {

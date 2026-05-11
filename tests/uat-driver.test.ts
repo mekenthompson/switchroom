@@ -40,6 +40,7 @@ class MockEmitter<T> {
 const mockClient = {
   importSession: vi.fn(async () => undefined),
   connect: vi.fn(async () => undefined),
+  startUpdatesLoop: vi.fn(async () => undefined),
   destroy: vi.fn(async () => undefined),
   sendText: vi.fn(async () => ({ id: 999 })),
   onNewMessage: new MockEmitter<unknown>(),
@@ -96,6 +97,26 @@ describe("Driver.connect", () => {
     const importOrder = mockClient.importSession.mock.invocationCallOrder[0];
     const connectOrder = mockClient.connect.mock.invocationCallOrder[0];
     expect(importOrder).toBeLessThan(connectOrder!);
+  });
+
+  it("calls startUpdatesLoop after connect so onNewMessage / onEditMessage fire for live updates", async () => {
+    // fails when: someone "simplifies" the connect chain by dropping
+    // the startUpdatesLoop call — `client.connect()` alone opens the
+    // transport but DOES NOT start dispatching incoming updates to
+    // the parsed emitters. Symptom is silent: messages arrive in
+    // Telegram (visible in the chat) but `observeMessages` never
+    // yields them, and `expectMessage` waits the full timeout. Took
+    // a debug session against a real bot reply to find the first
+    // time; this test exists so the second time is a unit-test
+    // failure on the PR, not a 90-second timeout in CI.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    expect(mockClient.startUpdatesLoop).toHaveBeenCalledTimes(1);
+    const connectOrder = mockClient.connect.mock.invocationCallOrder[0];
+    const loopOrder = mockClient.startUpdatesLoop.mock.invocationCallOrder[0];
+    // Loop must start AFTER connect — calling startUpdatesLoop before
+    // there's a transport throws.
+    expect(connectOrder).toBeLessThan(loopOrder!);
   });
 });
 

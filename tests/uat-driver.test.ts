@@ -43,6 +43,7 @@ const mockClient = {
   startUpdatesLoop: vi.fn(async () => undefined),
   destroy: vi.fn(async () => undefined),
   sendText: vi.fn(async () => ({ id: 999 })),
+  sendMedia: vi.fn(async () => ({ id: 1234 })),
   getMessages: vi.fn(async (_chatId: number, _ids: number[]) => [null]),
   onNewMessage: new MockEmitter<unknown>(),
   onEditMessage: new MockEmitter<unknown>(),
@@ -79,6 +80,13 @@ vi.mock("@mtcute/node", () => ({
   MemoryStorage: class {},
   TelegramClient: TelegramClientCtor,
   getMarkedPeerId: getMarkedPeerIdImpl,
+  // Stand-in for mtcute's `InputMedia.voice(filePath)` factory.
+  // Production returns an `InputMediaVoice` object; tests just need
+  // to assert that the factory was called with the file path and
+  // that the result was handed to client.sendMedia.
+  InputMedia: {
+    voice: (file: string) => ({ __type: "InputMediaVoice", file }),
+  },
 }));
 
 let Driver: typeof DriverType;
@@ -683,5 +691,59 @@ describe("Driver.getMessage", () => {
     mockClient.getMessages.mockResolvedValueOnce([null]);
     const msg = await driver.getMessage(67890, 999);
     expect(msg).toBeNull();
+  });
+});
+
+describe("Driver.sendVoice", () => {
+  it("wraps sendMedia with an InputMedia.voice carrying the file path", async () => {
+    // fails when: a refactor switches to sending the OGG as a
+    // generic document — Telegram only renders OGG/Opus as a voice
+    // note when sent via inputMediaUploadedDocument with a voice
+    // attribute. mtcute's InputMedia.voice factory builds the
+    // right shape; bypassing it sends the file as an attachment
+    // instead, which the bot's voice_in skill ignores.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    const sent = await driver.sendVoice(67890, "/tmp/silence.opus");
+    expect(mockClient.sendMedia).toHaveBeenCalledTimes(1);
+    const [chatId, media, params] = mockClient.sendMedia.mock.calls[0] as [
+      number,
+      { __type: string; file: string },
+      unknown,
+    ];
+    expect(chatId).toBe(67890);
+    expect(media.__type).toBe("InputMediaVoice");
+    expect(media.file).toBe("/tmp/silence.opus");
+    expect(params).toBeUndefined();
+    expect(sent.messageId).toBe(1234);
+  });
+
+  it("forwards messageThreadId via replyTo for forum-topic targeting", async () => {
+    // fails when: voice sends bypass the same threadId→replyTo
+    // routing that sendText uses — a forum-topic voice-inbound
+    // scenario would deliver the OGG into the supergroup's
+    // general topic instead of the test-scoped topic, polluting
+    // unrelated chats.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    await driver.sendVoice(-1001234567890, "/tmp/silence.opus", {
+      messageThreadId: 200,
+    });
+    const [, , params] = mockClient.sendMedia.mock.calls[0] as [
+      number,
+      unknown,
+      { replyTo: number },
+    ];
+    expect(params.replyTo).toBe(200);
+  });
+
+  it("rejects voice sends before connect() with a clear error", async () => {
+    // fails when: the requireClient guard is dropped — a scenario
+    // that races a connect-failure would throw a TypeError on
+    // null client instead of the "call connect() first" pointer.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await expect(
+      driver.sendVoice(-100, "/tmp/x.opus"),
+    ).rejects.toThrow(/call connect/);
   });
 });

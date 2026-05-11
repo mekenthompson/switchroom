@@ -68,7 +68,13 @@ describe('gateway secret-detect intercept — structural wiring', () => {
     // Rewrites effectiveText so the broadcast carries the redacted text.
     expect(tail).toMatch(/effectiveText = pipeRes\.rewritten_text/)
     // Deletes the original Telegram message containing the raw bytes.
-    expect(tail).toMatch(/bot\.api\.deleteMessage\(chat_id, msgId\)/)
+    // 2026-05-12: migrated from raw `bot.api.deleteMessage` to the
+    // `deleteSensitiveMessage` helper so failures surface to the
+    // operator via in-chat warning instead of being silently
+    // swallowed. See
+    // tests/secret-detect-delete-must-surface-failures.test.ts for
+    // the full contract pin.
+    expect(tail).toMatch(/deleteSensitiveMessage\(chat_id, msgId, 'detected secret'\)/)
     // Tells the user what was captured (masked).
     expect(tail).toMatch(/captured \$\{pipeRes\.stored\.length\} secret/)
     // Surfaces the masked form (s.masked is computed via maskToken in the pipeline).
@@ -92,8 +98,11 @@ describe('gateway secret-detect intercept — structural wiring', () => {
     expect(tail).toMatch(/deferredSecrets\.set\(/)
     expect(tail).toMatch(/suggested_slug:/)
     // 2. The original message is deleted (so the raw bytes are scrubbed
-    //    from the chat client even before the user reacts).
-    expect(tail).toMatch(/bot\.api\.deleteMessage\(chat_id, msgId\)/)
+    //    from the chat client even before the user reacts). 2026-05-12:
+    //    migrated to deleteSensitiveMessage so failures surface to the
+    //    operator via in-chat warning. See
+    //    tests/secret-detect-delete-must-surface-failures.test.ts.
+    expect(tail).toMatch(/deleteSensitiveMessage\(chat_id, msgId, 'detected secret'\)/)
     // 4. The new inline keyboard helper is used in lieu of the legacy
     //    plain-text "run /vault list" warning.
     expect(tail).toMatch(/buildDeferredSecretKeyboard\(/)

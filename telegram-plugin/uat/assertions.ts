@@ -190,7 +190,7 @@ export async function expectReaction(
   try {
     while (Date.now() < deadline && cursor < sequence.length) {
       const remaining = deadline - Date.now();
-      const next = await raceTimeoutR(iter.next(), remaining);
+      const next = await raceTimeout(iter.next(), remaining);
       if (next === "timeout") break;
       if (next.done === true) break;
       const r = next.value;
@@ -211,20 +211,6 @@ export async function expectReaction(
     );
   }
   return trail;
-}
-
-function raceTimeoutR<T>(p: Promise<T>, ms: number): Promise<T | "timeout"> {
-  if (ms <= 0) return Promise.resolve("timeout");
-  return new Promise<T | "timeout">((resolve) => {
-    const t = setTimeout(() => resolve("timeout"), ms);
-    p.then((v) => {
-      clearTimeout(t);
-      resolve(v);
-    }).catch(() => {
-      clearTimeout(t);
-      resolve("timeout");
-    });
-  });
 }
 
 export interface PinnedCardSnapshot {

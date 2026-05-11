@@ -43,6 +43,7 @@ const mockClient = {
   startUpdatesLoop: vi.fn(async () => undefined),
   destroy: vi.fn(async () => undefined),
   sendText: vi.fn(async () => ({ id: 999 })),
+  getMessages: vi.fn(async (_chatId: number, _ids: number[]) => [null]),
   onNewMessage: new MockEmitter<unknown>(),
   onEditMessage: new MockEmitter<unknown>(),
   onRawUpdate: new MockEmitter<unknown>(),
@@ -396,5 +397,127 @@ describe("Driver lifecycle", () => {
     // wondering what's wrong.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await expect(driver.sendText(-100, "x")).rejects.toThrow(/call connect/);
+  });
+});
+
+describe("Driver.observePins", () => {
+  function pinUpdate(opts: {
+    peerUserId: number;
+    msgIds: number[];
+    pinned?: boolean;
+  }): { update: unknown } {
+    return {
+      update: {
+        _: "updatePinnedMessages",
+        pinned: opts.pinned,
+        peer: { _: "peerUser", userId: opts.peerUserId },
+        messages: opts.msgIds,
+      },
+    };
+  }
+
+  it("yields one event per pinned messageId for a batched pin update", async () => {
+    // fails when: a refactor walks only msgIds[0] — the gateway can
+    // batch-pin a card + its boot header in one update; missing the
+    // second id would cause expectPinnedCard to wait forever on
+    // scenarios that pin > 1 message per turn.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    const iter = driver.observePins(67890)[Symbol.asyncIterator]();
+    mockClient.onRawUpdate.emit(pinUpdate({
+      peerUserId: 67890,
+      msgIds: [101, 102],
+      pinned: true,
+    }));
+    const a = await iter.next();
+    const b = await iter.next();
+    expect((a.value as { messageId: number }).messageId).toBe(101);
+    expect((b.value as { messageId: number }).messageId).toBe(102);
+    expect((a.value as { pinned: boolean }).pinned).toBe(true);
+    await iter.return?.();
+  });
+
+  it("treats omitted `pinned` flag as pin (TL default-true), explicit false as unpin", async () => {
+    // fails when: the default flips — the TL says `pinned` defaults
+    // to true when omitted. If we default to false, every standalone
+    // pin update reads as an unpin and expectPinnedCard skips it.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    const iter = driver.observePins(67890)[Symbol.asyncIterator]();
+    mockClient.onRawUpdate.emit(pinUpdate({ peerUserId: 67890, msgIds: [101] }));
+    mockClient.onRawUpdate.emit(pinUpdate({
+      peerUserId: 67890,
+      msgIds: [101],
+      pinned: false,
+    }));
+    const a = await iter.next();
+    const b = await iter.next();
+    expect((a.value as { pinned: boolean }).pinned).toBe(true);
+    expect((b.value as { pinned: boolean }).pinned).toBe(false);
+    await iter.return?.();
+  });
+
+  it("filters by chatId so cross-chat pins don't bleed into the iterator", async () => {
+    // fails when: peer.userId filtering moves to a downstream
+    // consumer — every chat the driver is in would flood the
+    // observer with unrelated pin events.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    const iter = driver.observePins(67890)[Symbol.asyncIterator]();
+    mockClient.onRawUpdate.emit(pinUpdate({ peerUserId: 99, msgIds: [999] }));
+    mockClient.onRawUpdate.emit(pinUpdate({ peerUserId: 67890, msgIds: [101] }));
+    const first = await iter.next();
+    expect((first.value as { messageId: number }).messageId).toBe(101);
+    await iter.return?.();
+  });
+
+  it("removes the onRawUpdate listener on iterator return", async () => {
+    // fails when: cleanup is dropped — onRawUpdate is high-volume,
+    // a leaked listener accumulates handlers across scenarios.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    expect(mockClient.onRawUpdate.size).toBe(0);
+    const iter = driver.observePins(67890)[Symbol.asyncIterator]();
+    expect(mockClient.onRawUpdate.size).toBe(1);
+    await iter.return?.();
+    expect(mockClient.onRawUpdate.size).toBe(0);
+  });
+});
+
+describe("Driver.getMessage", () => {
+  it("wraps getMessages with a single-id call and converts the result to ObservedMessage", async () => {
+    // fails when: a refactor passes the id as scalar rather than [id]
+    // — mtcute's `getMessages` accepts MaybeArray<number> and we want
+    // the array path so the result indexing is stable.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    mockClient.getMessages.mockResolvedValueOnce([
+      {
+        id: 42,
+        text: "✅ Done",
+        date: new Date("2026-05-11T04:30:00Z"),
+        chat: { id: 67890 },
+        sender: { id: 67890, type: "user", isBot: true },
+        replyToMessage: undefined,
+      } as never,
+    ]);
+    const msg = await driver.getMessage(67890, 42);
+    expect(mockClient.getMessages).toHaveBeenCalledWith(67890, [42]);
+    expect(msg).not.toBeNull();
+    expect(msg?.messageId).toBe(42);
+    expect(msg?.text).toBe("✅ Done");
+    expect(msg?.fromBot).toBe(true);
+  });
+
+  it("returns null when the message has been deleted (mtcute returns null in that slot)", async () => {
+    // fails when: a refactor unwraps without checking null — scenarios
+    // that fetch right after a card-edit race could crash on a
+    // genuinely-deleted message; the contract is "return null, let
+    // caller poll".
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    mockClient.getMessages.mockResolvedValueOnce([null]);
+    const msg = await driver.getMessage(67890, 999);
+    expect(msg).toBeNull();
   });
 });

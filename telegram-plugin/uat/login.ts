@@ -28,10 +28,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import { fileURLToPath } from "node:url";
 import { MemoryStorage, TelegramClient } from "@mtcute/node";
 
-const VAULT_KEY = "telegram-uat-driver-session";
-const VAULT_SCOPE = "test-harness";
+export const VAULT_KEY = "telegram-uat-driver-session";
+export const VAULT_SCOPE = "test-harness";
 
 async function main(): Promise<void> {
   const apiId = Number.parseInt(process.env.TELEGRAM_API_ID ?? "", 10);
@@ -96,8 +97,12 @@ async function main(): Promise<void> {
  * reject `--allow`/`--deny`). The tmpfile is created 0700-mode dir,
  * 0600 file, and `shred -u`'d after the set returns regardless of
  * outcome.
+ *
+ * Exported so `tests/uat-login.test.ts` can pin the security-critical
+ * invariants (mode 0600, `--allow test-harness`, cleanup on failure)
+ * against the real implementation.
  */
-async function writeToVault(key: string, value: string): Promise<void> {
+export async function writeToVault(key: string, value: string): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "uat-session-"));
   const path = join(dir, "session");
   try {
@@ -148,14 +153,22 @@ function fail(msg: string): never {
   process.exit(1);
 }
 
-main().catch((err) => {
-  // Defensive: if mtcute throws, the error MAY contain the session
-  // string in some adapters. Strip anything that looks like a long
-  // base64 blob before printing.
-  const sanitized = String(err?.message ?? err).replace(
-    /[A-Za-z0-9+/=_-]{64,}/g,
-    "<redacted>",
-  );
-  process.stderr.write(`uat:login failed: ${sanitized}\n`);
-  process.exit(1);
-});
+// Only run the interactive flow when invoked directly (`bun run
+// uat:login`). Tests that `import` this module for `writeToVault`
+// otherwise trigger the prompt-for-phone-number flow on every load.
+const invokedDirectly =
+  process.argv[1] !== undefined &&
+  fileURLToPath(import.meta.url) === process.argv[1];
+if (invokedDirectly) {
+  main().catch((err) => {
+    // Defensive: if mtcute throws, the error MAY contain the session
+    // string in some adapters. Strip anything that looks like a long
+    // base64 blob before printing.
+    const sanitized = String(err?.message ?? err).replace(
+      /[A-Za-z0-9+/=_-]{64,}/g,
+      "<redacted>",
+    );
+    process.stderr.write(`uat:login failed: ${sanitized}\n`);
+    process.exit(1);
+  });
+}

@@ -2,10 +2,10 @@
 
 ## v0.7.15 — vault UX epic + PID-file flock
 
-Bundles four PRs landed since v0.7.14: the second half of the #969
-vault UX epic (P0b / P1a / P1b — agent-initiated save, write-grants,
-gateway error rendering) plus the v0.7.14 sprint's final tier-3
-follow-up (#964 PID-file flock).
+Bundles five PRs landed since v0.7.14: the second half of the #969
+vault UX epic (P0b / P1a / P1b / P2c — gateway error rendering,
+agent-initiated save, write-grants, unified `/vault audit`) plus the
+v0.7.14 sprint's final tier-3 follow-up (#964 PID-file flock).
 
 ### Save secrets from Telegram, end-to-end (#969 P1a — #975)
 
@@ -83,6 +83,30 @@ Maps each marker to a copy-pasteable host command:
     #975 above.
   - `VAULT-BROKER-UNREACHABLE` → recovery hint pointing at
     `switchroom vault broker status`.
+
+### Unified `/vault audit <agent>` Telegram command (#969 P2c — #980)
+
+One mental model for operators auditing an agent's credential
+surface. Single Telegram command renders, in one card:
+
+  - Read grants for the agent (id · keys · expiry)
+  - Write grants for the agent (id · keys/globs · expiry — new
+    in #969 P1b above)
+  - `schedule[i].secrets[]` from `switchroom.yaml` (with cron
+    schedule)
+  - Summary line: N read, N write, N cron entries
+
+Previously these three surfaces were spread across `/vault grants`,
+reading `switchroom.yaml` on the host, and (for write-grants) nowhere
+— operators had to mentally union them. With write-grants now in
+play, a unified view is load-bearing.
+
+Implementation reuses `listGrantsViaBroker(agent)` once and
+partitions by `key_allow.length > 0` (read) and
+`write_allow.length > 0` (write); a grant with both capabilities
+appears in both sections. Broker failures and config-load failures
+render as inline warnings rather than blocking the rest of the
+card so partial views still ship.
 
 ### PID-file flock with holder PID in busy errors (#964 — #974)
 

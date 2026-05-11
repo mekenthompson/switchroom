@@ -5308,12 +5308,14 @@ async function handleInbound(
         if (isAuthFlowContext) {
           awaitingAuthCodeAt.delete(chat_id) // consume: one message per prompt
         }
+        // 2026-05-12: route through deleteSensitiveMessage so a
+        // failed delete posts an in-chat warning naming the leaked
+        // message id, instead of only logging to stderr (invisible
+        // on mobile). Previously the operator saw "we deleted it
+        // from chat" while the raw secret stayed visible. See
+        // tests/secret-detect-delete-must-surface-failures.test.ts.
         if (msgId != null) {
-          try {
-            await bot.api.deleteMessage(chat_id, msgId)
-          } catch (err) {
-            process.stderr.write(`[secret-detect] deleteMessage failed: ${(err as Error).message}\n`)
-          }
+          await deleteSensitiveMessage(chat_id, msgId, 'detected secret')
         }
         const lines = pipeRes.stored.map((s) =>
           `• <code>${s.masked}</code> → <code>vault:${s.actual_slug}</code>`,
@@ -5336,8 +5338,10 @@ async function handleInbound(
         // the token format) but we know this is an auth code paste because we
         // prompted for it. Delete + stage + warn so no raw bytes leak.
         awaitingAuthCodeAt.delete(chat_id) // consume: one message per prompt
+        // 2026-05-12: route through deleteSensitiveMessage. See
+        // tests/secret-detect-delete-must-surface-failures.test.ts.
         if (msgId != null) {
-          try { await bot.api.deleteMessage(chat_id, msgId) } catch {}
+          await deleteSensitiveMessage(chat_id, msgId, 'auth-flow secret')
         }
         // Issue #44: even with passphrase cached we hit this branch when the
         // pattern didn't fire — but at this point a vault write would still
@@ -5409,8 +5413,10 @@ async function handleInbound(
           suggested_slug: suggestedSlug,
           kernel_request_id: noPassKernelId ?? undefined,
         })
+        // 2026-05-12: route through deleteSensitiveMessage. See
+        // tests/secret-detect-delete-must-surface-failures.test.ts.
         if (msgId != null) {
-          try { await bot.api.deleteMessage(chat_id, msgId) } catch {}
+          await deleteSensitiveMessage(chat_id, msgId, 'detected secret')
         }
         await switchroomReply(
           ctx,
@@ -5433,8 +5439,13 @@ async function handleInbound(
         { html: true },
       )
     } catch {}
+    // 2026-05-12: route through deleteSensitiveMessage. The
+    // pipeline-error fail-closed path is the LAST line of defence —
+    // if delete fails here, the operator must know so they can
+    // delete manually. See
+    // tests/secret-detect-delete-must-surface-failures.test.ts.
     if (msgId != null) {
-      try { await bot.api.deleteMessage(chat_id, msgId) } catch {}
+      await deleteSensitiveMessage(chat_id, msgId, 'secret-detect pipeline-error fallback')
     }
     return
   }

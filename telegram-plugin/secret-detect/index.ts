@@ -25,6 +25,7 @@
  */
 import { ALL_PATTERNS } from './patterns.js'
 import { scanKeyValue, type RawHit } from './kv-scanner.js'
+import { shannonEntropy } from './entropy.js'
 import { chunk } from './chunker.js'
 import { isSuppressed } from './suppressor.js'
 import { deriveSlug } from './slug.js'
@@ -79,6 +80,29 @@ export function detectSecrets(text: string): Detection[] {
         const globalEnd = globalStart + cap.length
         // For env_key_value (captureIndex=3), the LHS is group 1.
         const keyName = p.rule_id === 'env_key_value' ? m[1] : undefined
+        // 2026-05-12: shape gate on env_key_value — the pattern matches
+        // any value after an ALLCAPS *_KEY/_TOKEN/_SECRET/_PASSWORD
+        // identifier, which previously fired on casual chat like
+        // "MY_TOKEN=hello" or "OPENAI_API_KEY=sk-yourkey" (placeholder
+        // values, code-shaped human language). Operator UAT reproduced
+        // this on 2026-05-12 — the redaction pipeline was deleting the
+        // operator's *question* and staging a card asking them to save
+        // the literal word "hello" as a vault entry.
+        //
+        // Mirror the kv_entropy gate from kv-scanner.ts: require
+        // BOTH a length floor (cuts short placeholders) AND a Shannon
+        // entropy floor (cuts low-randomness words like "hello",
+        // "yourkey", "foo"). Threshold is slightly looser than
+        // kv_entropy's 4.0 because the LHS structure already gives us
+        // higher confidence that this IS an env declaration.
+        // See tests/secret-detect-false-positives.test.ts for the
+        // pinned cases.
+        if (p.rule_id === 'env_key_value') {
+          const ENV_KV_MIN_LEN = 12
+          const ENV_KV_MIN_ENTROPY = 3.5
+          if (cap.length < ENV_KV_MIN_LEN) continue
+          if (shannonEntropy(cap) < ENV_KV_MIN_ENTROPY) continue
+        }
         raw.push({
           rule_id: p.rule_id,
           start: globalStart,

@@ -104,6 +104,14 @@ export class Driver {
     // session as authoritative and silently ignores ours.
     await this.client.importSession(this.opts.session, true);
     await this.client.connect();
+    // `connect()` opens the transport but does NOT start the updates
+    // dispatch loop — that's `start()`'s job. For a returning session
+    // (no interactive login) we have to call `startUpdatesLoop()`
+    // ourselves, otherwise `onNewMessage` / `onEditMessage` never
+    // fire and `observeMessages` silently waits forever. Symptom:
+    // `expectMessage` timing out even though the bot's reply has
+    // arrived in the chat (visible in Telegram).
+    await this.client.startUpdatesLoop();
   }
 
   async disconnect(): Promise<void> {

@@ -731,8 +731,21 @@ export function registerVaultCommand(program: Command): void {
             }
           }
 
-          // Broker is unlocked — request the key
-          const result = await getViaBrokerStructured(key, brokerOpts);
+          // Broker is unlocked — request the key.
+          // Issue #1053: include the agent's capability token so the
+          // broker's grant path (server.ts:994-1028) can bypass the
+          // peercred ACL check. Mirror the `vault set` path above
+          // (line 401-402) which has done this since #969 P1b.
+          // Without this, a freshly-minted grant (Telegram approval
+          // card) writes a token file the CLI then ignores —
+          // subsequent `vault get` still gets DENIED on the
+          // peercred ACL even though the operator just approved.
+          const getAgentSlug = process.env.SWITCHROOM_AGENT_NAME;
+          const getToken = getAgentSlug ? readVaultTokenFile(getAgentSlug) ?? undefined : undefined;
+          const result = await getViaBrokerStructured(key, {
+            ...brokerOpts,
+            ...(getToken ? { token: getToken } : {}),
+          });
 
           if (result.kind === "ok") {
             const entry = result.entry;

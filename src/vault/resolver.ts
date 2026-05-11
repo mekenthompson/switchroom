@@ -17,6 +17,7 @@ import { resolvePath } from "../config/loader.js";
 import {
   getViaBrokerStructured,
   resolveBrokerSocketPath,
+  readVaultTokenFile,
   type BrokerClientOpts,
 } from "./broker/client.js";
 
@@ -317,8 +318,19 @@ export async function resolveVaultReferencesViaBroker(
   let sawLocked = false;
   let sawNotFound = false;
 
+  // #1053: forward the agent's capability token so the broker can
+  // bypass the peercred ACL on grant-authorized keys. Without this,
+  // freshly-minted grants via the Telegram approval card flow had
+  // no effect on cascade-time `vault:<key>` resolution either —
+  // same bug class as the CLI `vault get` path.
+  const resolverAgentSlug = process.env.SWITCHROOM_AGENT_NAME;
+  const resolverToken = resolverAgentSlug
+    ? readVaultTokenFile(resolverAgentSlug) ?? undefined
+    : undefined;
+  const optsWithToken = resolverToken ? { ...opts, token: resolverToken } : opts;
+
   for (const key of refs) {
-    const result = await getViaBrokerStructured(key, opts);
+    const result = await getViaBrokerStructured(key, optsWithToken);
     if (result.kind === "ok") {
       brokerSecrets[key] = result.entry;
     } else if (result.kind === "unreachable") {

@@ -45,6 +45,7 @@ const mockClient = {
   sendText: vi.fn(async () => ({ id: 999 })),
   sendMedia: vi.fn(async () => ({ id: 1234 })),
   getMessages: vi.fn(async (_chatId: number, _ids: number[]) => [null]),
+  getCallbackAnswer: vi.fn(async () => ({ message: "ok" })),
   onNewMessage: new MockEmitter<unknown>(),
   onEditMessage: new MockEmitter<unknown>(),
   onRawUpdate: new MockEmitter<unknown>(),
@@ -744,6 +745,142 @@ describe("Driver.sendVoice", () => {
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await expect(
       driver.sendVoice(-100, "/tmp/x.opus"),
+    ).rejects.toThrow(/call connect/);
+  });
+});
+
+describe("Driver.getKeyboard", () => {
+  function fakeMsgWithKeyboard(buttons: Array<Array<{ _: string; text: string; data?: string; url?: string }>>): unknown {
+    return {
+      id: 42,
+      text: "Approve grant?",
+      date: new Date(),
+      chat: { id: 8288144562 },
+      sender: { id: 8288144562, type: "user", isBot: true },
+      markup: {
+        type: "inline",
+        buttons: buttons.map((row) =>
+          row.map((b) => {
+            const out: { _: string; text: string; data?: Uint8Array; url?: string } = {
+              _: b._,
+              text: b.text,
+            };
+            if (b.data) out.data = new TextEncoder().encode(b.data);
+            if (b.url) out.url = b.url;
+            return out;
+          }),
+        ),
+      },
+    };
+  }
+
+  it("parses inline keyboard buttons with UTF-8-decoded callback_data", async () => {
+    // fails when: a refactor swaps the decoding direction (Uint8Array
+    // → hex/base64 instead of UTF-8) — every vault-UX scenario that
+    // matches buttons by callback_data (e.g. "allow:agent=gymbro")
+    // would silently match nothing.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    mockClient.getMessages.mockResolvedValueOnce([
+      fakeMsgWithKeyboard([
+        [
+          { _: "keyboardButtonCallback", text: "Allow", data: "allow:gymbro:fatsecret" },
+          { _: "keyboardButtonCallback", text: "Deny", data: "deny:gymbro:fatsecret" },
+        ],
+      ]) as never,
+    ]);
+    const kb = await driver.getKeyboard(8288144562, 42);
+    expect(kb).not.toBeNull();
+    expect(kb).toHaveLength(1);
+    expect(kb![0]).toHaveLength(2);
+    expect(kb![0]![0]).toEqual({
+      text: "Allow",
+      callbackData: "allow:gymbro:fatsecret",
+    });
+    expect(kb![0]![1]).toEqual({
+      text: "Deny",
+      callbackData: "deny:gymbro:fatsecret",
+    });
+  });
+
+  it("represents URL buttons with `url` set and `callbackData` omitted", async () => {
+    // fails when: URL buttons surface with bogus callbackData (e.g.
+    // the URL itself decoded as bytes). A scenario that tries to
+    // pressButton(callbackData=URL) would fail server-side with
+    // BUTTON_DATA_INVALID instead of falling back to opening the URL.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    mockClient.getMessages.mockResolvedValueOnce([
+      fakeMsgWithKeyboard([
+        [{ _: "keyboardButtonUrl", text: "Open dashboard", url: "https://example.com" }],
+      ]) as never,
+    ]);
+    const kb = await driver.getKeyboard(8288144562, 42);
+    expect(kb![0]![0]).toEqual({
+      text: "Open dashboard",
+      url: "https://example.com",
+    });
+    expect(kb![0]![0]!.callbackData).toBeUndefined();
+  });
+
+  it("returns null for messages with no markup or non-inline markup", async () => {
+    // fails when: a refactor surfaces force-reply / reply-keyboard
+    // shapes as `ObservedKeyboard` — scenarios that expect inline
+    // buttons would press a "phantom" button that never existed on
+    // the wire.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    mockClient.getMessages.mockResolvedValueOnce([
+      { id: 42, text: "no buttons", date: new Date(), chat: { id: 1 }, sender: { id: 1, type: "user", isBot: true }, markup: null } as never,
+    ]);
+    expect(await driver.getKeyboard(8288144562, 42)).toBeNull();
+
+    mockClient.getMessages.mockResolvedValueOnce([
+      {
+        id: 42, text: "force reply", date: new Date(),
+        chat: { id: 1 }, sender: { id: 1, type: "user", isBot: true },
+        markup: { type: "force_reply" },
+      } as never,
+    ]);
+    expect(await driver.getKeyboard(8288144562, 42)).toBeNull();
+  });
+
+  it("returns null when the message has been deleted", async () => {
+    // fails when: deleted-race recovery is dropped — scenarios that
+    // fetch a keyboard right after a card-edit-delete race would
+    // crash; the contract is "return null, let caller poll".
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    mockClient.getMessages.mockResolvedValueOnce([null]);
+    expect(await driver.getKeyboard(8288144562, 42)).toBeNull();
+  });
+});
+
+describe("Driver.pressButton", () => {
+  it("calls getCallbackAnswer with the chat+message+data triple", async () => {
+    // fails when: a refactor passes the callback_data as `Uint8Array`
+    // (instead of letting mtcute encode the string) — mtcute's
+    // getCallbackAnswer accepts both, but production code that
+    // assumes ASCII payloads would break for any future binary-
+    // callback_data button. The harness keeps it as a string for
+    // symmetry with how `getKeyboard` returns it.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await driver.connect();
+    await driver.pressButton(8288144562, 42, "allow:gymbro:fatsecret");
+    expect(mockClient.getCallbackAnswer).toHaveBeenCalledWith({
+      chatId: 8288144562,
+      message: 42,
+      data: "allow:gymbro:fatsecret",
+    });
+  });
+
+  it("rejects when called before connect()", async () => {
+    // fails when: the requireClient guard is dropped — same
+    // class of bug as sendText/sendVoice/getMessage before
+    // connect.
+    const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
+    await expect(
+      driver.pressButton(8288144562, 42, "x"),
     ).rejects.toThrow(/call connect/);
   });
 });

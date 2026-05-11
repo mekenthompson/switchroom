@@ -8,8 +8,10 @@
  *   approval_nonces     — short-lived 8-hex callback tokens; single-use redemption.
  *   approval_audit      — append-only audit trail of every kernel event.
  *
- * Schema columns track RFC B §5 verbatim. The kernel has not shipped, so this
- * migration just runs DROP-IF-EXISTS + CREATE; no production data to migrate.
+ * Schema columns track RFC B §5 verbatim. The kernel has shipped (Phase 1c
+ * compose wiring; per-agent kernel sockets at /run/switchroom/kernel/<agent>/sock
+ * are bind-mounted into every agent container). Migration is still
+ * idempotent CREATE-IF-NOT-EXISTS so older deployments upgrade smoothly.
  *
  * No HMAC, no chains, no crypto: same-uid is game-over per docs/vault.md:227.
  */
@@ -21,19 +23,17 @@ import type { Database } from "bun:sqlite";
  * broker already does this for `vault_grants`; we piggyback on the same
  * lifecycle so a fresh vault-grants.db gets all three tables in one shot.
  *
- * Pre-ship rewrite: this drops any older approval_* tables before recreating
- * them. There is no production deployment of this kernel yet, so a clean
- * recreate is preferable to an in-place ALTER chain.
+ * Idempotent CREATE-IF-NOT-EXISTS. Earlier revisions of this file used
+ * DROP+CREATE on the assumption that no production deployment of the
+ * kernel had landed yet — that assumption broke when issue #969 P1a
+ * shipped the `vault_request_save` flow and other callsites started
+ * minting durable `allow_always` decisions. Preserving the data across
+ * broker restarts is now load-bearing for user expectations
+ * (a tap-Always decision should survive a deploy).
  */
 export function migrateApprovalSchema(db: Database): void {
-  // Drop any pre-RFC-shape tables. Order: nonces / audit first (they FK into
-  // decisions on some prior shapes), decisions last.
-  db.run(`DROP TABLE IF EXISTS approval_audit`);
-  db.run(`DROP TABLE IF EXISTS approval_nonces`);
-  db.run(`DROP TABLE IF EXISTS approval_decisions`);
-
   db.run(`
-    CREATE TABLE approval_decisions (
+    CREATE TABLE IF NOT EXISTS approval_decisions (
       id                       TEXT PRIMARY KEY,
       agent_unit               TEXT NOT NULL,
       scope                    TEXT NOT NULL,
@@ -50,13 +50,13 @@ export function migrateApprovalSchema(db: Database): void {
   `);
 
   db.run(`
-    CREATE INDEX approval_decisions_lookup
+    CREATE INDEX IF NOT EXISTS approval_decisions_lookup
     ON approval_decisions(agent_unit, scope, action)
     WHERE revoked_at IS NULL
   `);
 
   db.run(`
-    CREATE TABLE approval_nonces (
+    CREATE TABLE IF NOT EXISTS approval_nonces (
       request_id   TEXT PRIMARY KEY,
       decision_id  TEXT,
       agent_unit   TEXT NOT NULL,
@@ -74,13 +74,13 @@ export function migrateApprovalSchema(db: Database): void {
   // Index for B2 rate-cap lookup: count pending nonces per agent_unit and
   // globally. WHERE consumed_at IS NULL keeps the index lean.
   db.run(`
-    CREATE INDEX approval_nonces_pending
+    CREATE INDEX IF NOT EXISTS approval_nonces_pending
     ON approval_nonces(agent_unit, expires_at)
     WHERE consumed_at IS NULL
   `);
 
   db.run(`
-    CREATE TABLE approval_audit (
+    CREATE TABLE IF NOT EXISTS approval_audit (
       seq         INTEGER PRIMARY KEY AUTOINCREMENT,
       ts          INTEGER NOT NULL,
       agent_unit  TEXT NOT NULL,
@@ -94,7 +94,7 @@ export function migrateApprovalSchema(db: Database): void {
   `);
 
   db.run(`
-    CREATE INDEX approval_audit_by_scope
+    CREATE INDEX IF NOT EXISTS approval_audit_by_scope
     ON approval_audit(scope, ts)
   `);
 }

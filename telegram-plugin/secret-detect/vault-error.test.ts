@@ -68,7 +68,7 @@ describe("renderVaultCliError", () => {
   // The pre-fix pins are documented in
   // tests/jtbd-talk-from-anywhere.test.ts as the closed punch-list
   // items.
-  it("renders sandbox_context for verb=set with the vault_request_save tool", () => {
+  it("renders sandbox_context for verb=set with the vault_request_save tool, surfacing the affected key", () => {
     const out = renderVaultCliError(
       { kind: "sandbox_context", original: "x" },
       { verb: "set", key: "my_key" },
@@ -76,6 +76,23 @@ describe("renderVaultCliError", () => {
     expect(out.suppressRaw).toBe(true);
     expect(out.html).toMatch(/vault_request_save/);
     expect(out.html).not.toMatch(/Open a host shell/);
+    // Reviewer-flagged on #1037: pre-fix test asserted the key
+    // appeared in output (so the operator knew which key triggered
+    // the card). New copy keeps the key in <code>…</code> form via
+    // htmlEscape — assert it.
+    expect(out.html).toContain("<code>my_key</code>");
+  });
+
+  it("renders sandbox_context for verb=set WITHOUT a key (defensive fallback)", () => {
+    // The gateway sometimes doesn't have the key in hand (e.g. when
+    // the agent's stderr was opaque). Renderer should still produce
+    // useful output, not crash or render an empty <code></code>.
+    const out = renderVaultCliError(
+      { kind: "sandbox_context", original: "x" },
+      { verb: "set" },
+    );
+    expect(out.html).toMatch(/vault_request_save/);
+    expect(out.html).not.toContain("<code></code>");
   });
 
   it("renders sandbox_context for verb=get with /vault get", () => {
@@ -107,14 +124,25 @@ describe("renderVaultCliError", () => {
     expect(out.html).not.toMatch(/on the way/i);
   });
 
-  it("renders broker_unreachable pointing at /vault broker (not a host shell)", () => {
+  it("renders broker_unreachable as an honest 'tracked follow-up' instead of a false in-chat promise", () => {
+    // Pre-fix (rejected by #1037 reviewer): renderer pointed at
+    // `/vault broker status` / `/vault broker restart` — neither
+    // command is registered in the gateway dispatcher. Telling the
+    // operator to type unregistered commands is worse than the
+    // host-CLI punt it was meant to replace.
+    //
+    // Post-fix: renderer names the in-Telegram follow-up as
+    // tracked + unbuilt, and points at the host CLI for now.
+    // Honest about the gap until /vault broker {status,restart}
+    // actually ships.
     const out = renderVaultCliError(
       { kind: "broker_unreachable", original: "x" },
       { verb: "set" },
     );
     expect(out.suppressRaw).toBe(true);
     expect(out.html).toContain("broker isn't reachable");
-    expect(out.html).toMatch(/\/vault broker/);
+    expect(out.html).toMatch(/tracked as a follow-up/i);
+    expect(out.html).toMatch(/switchroom vault broker status/);
   });
 
   it("renders broker_denied pointing at /vault audit one-tap allow + vault_request_access", () => {

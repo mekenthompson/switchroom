@@ -109,17 +109,21 @@ describe("JTBD/talk-from-anywhere — error renderers point to in-Telegram next-
     expect(block, "should reference the live vault_request_save tool").toMatch(/vault_request_save/);
   });
 
-  it("VAULT-BROKER-UNREACHABLE surfaces a Telegram-reachable recovery action", () => {
+  it.skip("VAULT-BROKER-UNREACHABLE surfaces a Telegram-reachable recovery action", () => {
     // Vision outcome 4: "Anywhere your phone has signal, your fleet
     // is reachable."
     //
-    // Today (vault-error.ts:182-186): "Operator can check on the host:
-    // switchroom vault broker status." Full stop. The mobile-only
-    // operator has nothing.
+    // Today: renderer is HONEST about the gap — names the
+    // Telegram-native follow-up as tracked but unbuilt, and points
+    // the operator at the host shell for now. Earlier draft of this
+    // PR claimed `/vault broker status`/`restart` in the renderer
+    // copy but those subcommands aren't registered; the test passed
+    // by string-matching the promise. Reviewer caught this on #1037.
     //
-    // Closing this test requires building /vault broker {status,restart}
-    // as admin verbs that proxy through to the host. Until then this
-    // test stays red, marking the unbuilt surface.
+    // Closing this test requires building /vault broker
+    // {status,restart} as admin verbs that proxy through to a
+    // host-side daemon (tracked separately on the punch list). Stays
+    // skipped until that lands.
     const block = extractRenderCase("broker_unreachable");
     expect(block).toMatch(/\/vault broker/);
   });

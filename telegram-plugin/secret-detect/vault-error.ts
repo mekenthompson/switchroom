@@ -185,15 +185,21 @@ export function renderVaultCliError(
           `secret to the vault; no re-paste needed.`,
       };
     case "broker_unreachable":
+      // No Telegram-native broker control plane exists yet —
+      // `/vault broker status` and `/vault broker restart` are on
+      // the JTBD punch list but not built (the broker socket lives
+      // outside the agent container; the gateway would need a
+      // host-side daemon to drive it). Be honest about that gap
+      // rather than promising commands that don't dispatch.
       return {
         suppressRaw: true,
         html:
           `⚠️ <b>Vault broker isn't reachable.</b>\n` +
           `From inside the agent sandbox there's no fallback path. ` +
-          `Check broker health from this chat:\n` +
-          `<pre>/vault broker status</pre>\n` +
-          `<i>If the broker is wedged, <code>/vault broker restart</code> ` +
-          `from this chat. Host shell only as last resort.</i>`,
+          `Telegram-native broker recovery is tracked as a follow-up — ` +
+          `for now, on the host:\n` +
+          `<pre>switchroom vault broker status</pre>\n` +
+          `<i>Or, if the broker is wedged: <code>docker compose -p switchroom restart vault-broker</code>.</i>`,
       };
     case "broker_denied":
       // Telegram-native grant flow shipped in #969 P2b + #1012:
@@ -209,7 +215,7 @@ export function renderVaultCliError(
             ? `The agent isn't authorized to access <code>${htmlEscape(key)}</code>. `
             : `The agent isn't authorized to access this key. `) +
           `Grant access in two taps:\n` +
-          `• <code>/vault audit ${"<agent>"}</code> in this chat → tap ` +
+          `• <code>/vault audit &lt;agent&gt;</code> in this chat → tap ` +
           `[🔓 Allow${key ? ` ${htmlEscape(key)}` : ""}] on the recent denial, OR\n` +
           `• ask the agent to call <code>vault_request_access</code> — ` +
           `an approval card lands here with [✅ Approve] / [🚫 Deny].`,
@@ -234,8 +240,12 @@ function renderSandboxContextSuggestion(
     case "save":
       return (
         head +
-        `<b>Ask the agent</b> to call its <code>vault_request_save</code> ` +
-        `tool — an approval card lands here with [✅ Save once] / [🚫 Discard] / [✏️ Rename] buttons.`
+        (key
+          ? `<b>Ask the agent</b> to call its <code>vault_request_save</code> ` +
+            `tool for <code>${htmlEscape(key)}</code> — an approval card ` +
+            `lands here with [✅ Save once] / [🚫 Discard] / [✏️ Rename] buttons.`
+          : `<b>Ask the agent</b> to call its <code>vault_request_save</code> ` +
+            `tool — an approval card lands here with [✅ Save once] / [🚫 Discard] / [✏️ Rename] buttons.`)
       );
     case "get":
       return (

@@ -25,7 +25,13 @@ export type VaultWriteFn = (
 export type VaultListFn = (passphrase: string) => { ok: boolean; keys: string[] }
 
 export const defaultVaultWrite: VaultWriteFn = (slug, value, passphrase) => {
-  const env = { ...process.env, SWITCHROOM_VAULT_PASSPHRASE: passphrase }
+  // Suppress the #969 P3 deprecation warning — the gateway forwarding
+  // the operator's passphrase per-spawn is the canonical P1a flow.
+  const env = {
+    ...process.env,
+    SWITCHROOM_VAULT_PASSPHRASE: passphrase,
+    SWITCHROOM_NO_VAULT_DEPRECATION_WARNING: '1',
+  }
   try {
     const result = execFileSync(
       process.env.SWITCHROOM_CLI_PATH ?? 'switchroom',
@@ -41,7 +47,13 @@ export const defaultVaultWrite: VaultWriteFn = (slug, value, passphrase) => {
 }
 
 export const defaultVaultList: VaultListFn = (passphrase) => {
-  const env = { ...process.env, SWITCHROOM_VAULT_PASSPHRASE: passphrase }
+  // Suppress the #969 P3 deprecation warning — the gateway forwarding
+  // the operator's passphrase per-spawn is the canonical P1a flow.
+  const env = {
+    ...process.env,
+    SWITCHROOM_VAULT_PASSPHRASE: passphrase,
+    SWITCHROOM_NO_VAULT_DEPRECATION_WARNING: '1',
+  }
   try {
     const result = execFileSync(
       process.env.SWITCHROOM_CLI_PATH ?? 'switchroom',

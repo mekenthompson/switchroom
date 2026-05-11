@@ -115,6 +115,25 @@ export interface BrokerTestOpts {
    * DO NOT set outside tests.
    */
   _testVaultPath?: string;
+  /**
+   * If provided, seed `this.passphrase` so passphrase-attested ops
+   * (put with passphrase, mint_grant with passphrase per #1012 Phase 2)
+   * can be exercised without going through the real unlock flow.
+   * DO NOT set outside tests.
+   */
+  _testPassphrase?: string;
+  /**
+   * If provided, every incoming connection is treated as agent-bound
+   * with this agentName, regardless of the bind path. Lets tests
+   * exercise the agent-bound code paths (agent-deny gate, admin-agent
+   * trust, passphrase-attestation per #1012 Phase 2) without writing
+   * to `/run/switchroom/broker/<name>.sock` which a non-root test
+   * process cannot create.
+   *
+   * Mutually exclusive with operator socket flows.
+   * DO NOT set outside tests.
+   */
+  _testAgentName?: string;
 }
 
 export class VaultBroker {
@@ -169,7 +188,9 @@ export class VaultBroker {
       testOpts._testIdentify !== undefined ||
       testOpts._testAuditLogger !== undefined ||
       testOpts._testGrantsDb !== undefined ||
-      testOpts._testVaultPath !== undefined;
+      testOpts._testVaultPath !== undefined ||
+      testOpts._testPassphrase !== undefined ||
+      testOpts._testAgentName !== undefined;
     if (usingTestOpt && process.env.NODE_ENV !== "test") {
       throw new Error(
         "VaultBroker: BrokerTestOpts (_testSecrets/_testConfig/_testIdentify/_testAuditLogger/_testGrantsDb/_testVaultPath) " +
@@ -251,6 +272,9 @@ export class VaultBroker {
     // Pre-load secrets if test opts provided
     if (this.testOpts._testSecrets !== undefined) {
       this.secrets = { ...this.testOpts._testSecrets };
+    }
+    if (this.testOpts._testPassphrase !== undefined) {
+      this.passphrase = this.testOpts._testPassphrase;
     }
 
     // Ensure parent directory exists and is mode 0700.
@@ -641,7 +665,7 @@ export class VaultBroker {
   private _handleDataConnection(
     socket: net.Socket,
     listenerSocketPath: string = this.socketPath,
-    agentName: string | null = null,
+    agentName: string | null = this.testOpts._testAgentName ?? null,
     /**
      * True when the connection arrived on the operator socket. Trust comes
      * from the bind path (`/run/switchroom/broker/operator/sock`) plus the
@@ -1478,7 +1502,53 @@ export class VaultBroker {
       const isAdminAgent =
         agentName !== null &&
         this.config?.agents?.[agentName]?.admin === true;
-      const trustedForGrantMgmt = isOperator || isAdminAgent;
+      // ── Operator-passphrase attestation for grant-mgmt (#1012 Phase 2) ─
+      //
+      // When the caller forwards an operator passphrase that matches the
+      // broker's currently-unlocked passphrase, treat the call as
+      // operator-attested — bypass the agent-deny gate below.
+      //
+      // This is the path the Telegram gateway uses when an OPERATOR
+      // taps [Approve] on a `vault_request_access` card in a non-admin
+      // agent's chat (#1012). The operator already typed the
+      // passphrase via /vault unlock and the gateway has it cached
+      // per-chat; that cache is what the gateway attaches here. Same
+      // trust model and threat surface as the operator-attested PUT
+      // path used by `vault_request_save` (#969 P1a).
+      //
+      // Wrong passphrase explicitly supplied → fail closed (mirrors
+      // the PUT path at line 1206-1234 so the failure surfaces clearly
+      // instead of silently falling through to other auth paths).
+      let mintPassphraseAttested = false;
+      if (
+        req.op === "mint_grant" &&
+        (req as { passphrase?: string }).passphrase !== undefined &&
+        (req as { passphrase?: string }).passphrase !== ""
+      ) {
+        if ((req as { passphrase?: string }).passphrase === this.passphrase) {
+          mintPassphraseAttested = true;
+        } else {
+          this.auditLogger.write({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:passphrase-mismatch",
+            method: "passphrase",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                "supplied passphrase does not match the broker's unlocked passphrase",
+              ),
+            ),
+          );
+          return;
+        }
+      }
+      const trustedForGrantMgmt = isOperator || isAdminAgent || mintPassphraseAttested;
       // Operator socket: trusted by path + 0600 chown; skip the cron-deny
       // and peercred-required gates below. Operator IS the operator-only
       // identity those gates were designed to verify. Audit logs reflect
@@ -1495,11 +1565,28 @@ export class VaultBroker {
         if (isAdminAgent) {
           // Fall through to grant-mgmt handlers below. Audit log
           // already carries the agent name + cgroup attribution.
+        } else if (mintPassphraseAttested) {
+          // #1012 Phase 2: non-admin agent forwarded a valid operator
+          // passphrase — operator-attested, trusted for grant-mgmt.
+          // Same trust posture as passphrase-attested PUT (#969 P1a).
+          // Audit row gets method=passphrase so forensics can tell
+          // operator-attested mints apart from agent-bound ones.
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "allowed:passphrase-attested",
+            method: "passphrase",
+          });
+          // Fall through to grant-mgmt handlers below.
         } else {
           // Phase 2a: regular per-agent listeners are NEVER allowed to
           // mint, list, or revoke grants. Grant management is
-          // operator-only (or admin-agent only). A non-admin agent has
-          // no business minting capability tokens.
+          // operator-only (or admin-agent only) (or operator-attested
+          // via passphrase — see #1012 branch above). A non-admin
+          // agent without attestation has no business minting tokens.
           writeAudit({
             ts: new Date().toISOString(),
             op: req.op,
@@ -1512,7 +1599,7 @@ export class VaultBroker {
             encodeResponse(
               errorResponse(
                 "DENIED",
-                "Grant management ops are operator-only; agent-bound listeners cannot mint, list, or revoke grants (set `admin: true` on this agent in switchroom.yaml + restart broker if intended)",
+                "Grant management ops are operator-only; agent-bound listeners cannot mint, list, or revoke grants (set `admin: true` on this agent in switchroom.yaml + restart broker, OR forward operator-passphrase attestation if intended — see vault_request_access flow)",
               ),
             ),
           );

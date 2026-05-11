@@ -30,7 +30,7 @@ function fm(over: Partial<FleetMember>): FleetMember {
 describe('glyphForFleetStatus', () => {
   it('maps every status to a glyph', () => {
     expect(glyphForFleetStatus('running')).toBe('↻')
-    expect(glyphForFleetStatus('background')).toBe('⏸')
+    expect(glyphForFleetStatus('background')).toBe('🌀')
     expect(glyphForFleetStatus('done')).toBe('✓')
     expect(glyphForFleetStatus('failed')).toBe('✗')
     expect(glyphForFleetStatus('stuck')).toBe('⚠')

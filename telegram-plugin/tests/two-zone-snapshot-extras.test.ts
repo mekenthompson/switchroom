@@ -68,7 +68,7 @@ describe('PR-C2: two-zone card snapshot extras', () => {
       '🙊 <b>Ended without reply</b> · ⏱ 00:30 · 🔧 7 · 🤖 1\n' +
       '\n' +
       '<b>FLEET (1)</b>\n' +
-      '⏸ background <code>aaaaaa</code> · 7t · Bash <code>long.sh</code> (2s ago)',
+      '🌀 background <code>aaaaaa</code> · 7t · Bash <code>long.sh</code> (2s ago)',
     )
   })
 

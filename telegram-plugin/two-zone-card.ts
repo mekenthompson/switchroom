@@ -115,9 +115,12 @@ export function phaseFor(
     return { icon: '⚠', label: 'Stalled' }
   }
 
-  // Background: parentDone but at least one fleet member still running
+  // Background: parentDone but at least one fleet member still running.
+  // Use 🌀 (spinning vortex), not ⏸ (pause). The card is actively working
+  // — sub-agents running, tools firing — and "pause" reads as "stopped,
+  // waiting for input." See #862 for the misread that motivated this.
   if (parentDone && fleetRunning) {
-    return { icon: '⏸', label: 'Background' }
+    return { icon: '🌀', label: 'Background' }
   }
 
   // Done: parent terminal + no fleet still running
@@ -237,7 +240,7 @@ export function formatLastActivity(m: FleetMember, now: number): string {
 export function glyphForFleetStatus(status: FleetStatus): string {
   switch (status) {
     case 'running': return '↻'
-    case 'background': return '⏸'
+    case 'background': return '🌀' // see #862: ⏸ misread as 'stopped'; background means actively-but-out-of-focus
     case 'done': return '✓'
     case 'failed': return '✗'
     case 'stuck': return '⚠'

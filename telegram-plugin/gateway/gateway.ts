@@ -1349,6 +1349,17 @@ function rememberAgentButtonMeta(
 // Vault
 const vaultPassphraseCache = new Map<string, { passphrase: string; expiresAt: number }>()
 const VAULT_PASSPHRASE_TTL_MS = 30 * 60 * 1000
+/**
+ * Gateway-side guard on vault-key shape — UX gate, not a security
+ * boundary (the broker accepts any non-empty string per
+ * `src/vault/broker/protocol.ts:32`). Includes `/` so canonical
+ * namespaced keys like `fatsecret/client_id`, `mff/agent-private-key`,
+ * `microsoft/ken-tokens` are accepted in the vault_request_save /
+ * vault_request_access / [✏️ Rename] flows. See #1047.
+ */
+const VAULT_KEY_REGEX = /^[A-Za-z0-9_./-]{1,200}$/
+/** Human-readable label embedded in error messages and rename prompts. */
+const VAULT_KEY_REGEX_LABEL = "[A-Za-z0-9_./-]{1,200}"
 type PendingVaultOp =
   | { kind: 'passphrase'; op: 'list' | 'get' | 'delete' | 'set'; key?: string; startedAt: number }
   | { kind: 'value'; op: 'set'; key: string; passphrase: string; startedAt: number }
@@ -3543,10 +3554,13 @@ async function executeVaultRequestSave(args: Record<string, unknown>): Promise<{
 
   // Validate slug shape — vault keys must match a tight charset so the
   // host CLI hints render cleanly and reference resolution stays
-  // predictable. Same shape as `validateVaultKey` in the broker, kept
-  // local here to avoid pulling in the broker import.
-  if (!/^[A-Za-z0-9_.-]{1,200}$/.test(key)) {
-    throw new Error('vault_request_save: key must match [A-Za-z0-9_.-]{1,200}')
+  // predictable. Includes `/` so the canonical namespaced shape
+  // (`fatsecret/client_id`, `mff/agent-private-key`, ...) is
+  // accepted — issue #1047. The broker itself has no key regex
+  // (just `z.string().min(1)` in protocol.ts); this gateway-side
+  // gate is a UX guard, not a security boundary.
+  if (!VAULT_KEY_REGEX.test(key)) {
+    throw new Error(`vault_request_save: key must match ${VAULT_KEY_REGEX_LABEL}`)
   }
 
   const agentSlug = process.env.SWITCHROOM_AGENT_NAME || 'agent'
@@ -3629,8 +3643,8 @@ async function executeVaultRequestAccess(args: Record<string, unknown>): Promise
   if (!chat_id) throw new Error('vault_request_access: chat_id is required')
   const key = args.key as string
   if (!key || typeof key !== 'string') throw new Error('vault_request_access: key is required')
-  if (!/^[A-Za-z0-9_.-]{1,200}$/.test(key)) {
-    throw new Error('vault_request_access: key must match [A-Za-z0-9_.-]{1,200}')
+  if (!VAULT_KEY_REGEX.test(key)) {
+    throw new Error(`vault_request_access: key must match ${VAULT_KEY_REGEX_LABEL}`)
   }
   const scopeRaw = typeof args.scope === 'string' ? args.scope : 'read'
   if (scopeRaw !== 'read' && scopeRaw !== 'write') {
@@ -5182,10 +5196,10 @@ async function handleInbound(
           await switchroomReply(ctx, '⌛ That save card expired before you renamed. Ask the agent to re-issue.', { html: true })
           return
         }
-        if (!/^[A-Za-z0-9_.-]{1,200}$/.test(newKey)) {
+        if (!VAULT_KEY_REGEX.test(newKey)) {
           // Re-arm the pending state so the user can try again.
           pendingVaultOps.set(chat_id, { ...pendingVault, startedAt: Date.now() })
-          await switchroomReply(ctx, '⚠️ Key must match <code>[A-Za-z0-9_.-]</code> and be ≤ 200 chars. Send a different name.', { html: true })
+          await switchroomReply(ctx, `⚠️ Key must match <code>${VAULT_KEY_REGEX_LABEL}</code>. Send a different name.`, { html: true })
           return
         }
         staged.key = newKey

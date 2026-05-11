@@ -114,9 +114,22 @@ steps:
       fi
       export PATH="$$HOME/.bun/bin:$$PATH"
       bun install --frozen-lockfile --prefer-offline --no-progress
-      # vitest also runs telegram-plugin/tests/*.test.ts (excluding bun-only
-      # history.test.ts) for cross-package coverage, so install plugin deps.
-      (cd telegram-plugin && bun install --frozen-lockfile --prefer-offline --no-progress)
+      # Note: do NOT separately `(cd telegram-plugin && bun install …)`.
+      # `telegram-plugin` is a workspace of the root (see /package.json
+      # "workspaces"), so the root install above already brings in its
+      # deps. A second install creates `telegram-plugin/node_modules/
+      # @mtcute/node` as a shadow path; Node-style resolution from
+      # `telegram-plugin/uat/driver.ts` then walks up to that closer
+      # copy instead of the hoisted one, while `tests/uat-driver.test.ts`
+      # resolves `@mtcute/node` to the hoisted root copy. They become
+      # two physically distinct modules — `vi.mock("@mtcute/node")`
+      # only intercepts the test's copy, the driver's import escapes
+      # the mock, and every Driver.connect() blows up with "Invalid
+      # session string" instead of being mocked. This step was hard-red
+      # on main for 10+ commits before the redundant install was
+      # removed; if you find yourself wanting to re-add it, the
+      # cross-package coverage it was supposedly enabling is already
+      # provided by the hoisted root install.
       # Build dist/ before tests. Several integration tests under tests/
       # (cli.issues.test.ts, run-hook.test.ts, boot-self-test.test.ts) shell
       # out to dist/cli/switchroom.js to exercise the same binary path

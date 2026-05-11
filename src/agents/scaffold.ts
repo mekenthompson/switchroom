@@ -1567,6 +1567,25 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
  */
 export const DOCKER_TELEGRAM_PLUGIN_PATH = "/opt/switchroom/telegram-plugin";
 
+/**
+ * In-image path where Dockerfile.agent COPYs `telegram-plugin/hooks/*.mjs`.
+ * Claude Code spawns hooks as child processes from the path written into
+ * `settings.json.hooks` at scaffold time; pre-Bug-3 the scaffold emitted
+ * the operator's host repo path here, which doesn't exist inside the
+ * container — hooks silently never ran (RFC Phase 3 §Bug 3 in
+ * reference/sub-agent-visibility-rfc.md).
+ */
+export const DOCKER_HOOKS_PATH = `${DOCKER_TELEGRAM_PLUGIN_PATH}/hooks`;
+
+/**
+ * In-image path where Dockerfile.agent COPYs the `bin/*-hook.sh` family
+ * (run-hook.sh, timezone-hook.sh, workspace-stable-hook.sh,
+ * workspace-dynamic-hook.sh, user-profile-refresh-hook.sh). Same
+ * rationale as DOCKER_HOOKS_PATH — these are invoked from the
+ * scaffolded settings.json hooks block.
+ */
+export const DOCKER_BIN_PATH = "/opt/switchroom/bin";
+
 export function scaffoldAgent(
   name: string,
   agentConfigRaw: AgentConfig,
@@ -2448,7 +2467,13 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
   // in the issue sink (#425) and on the Telegram issues card (#428).
   // The wrapper preserves the original exit code, so claude code's
   // hook contract (decision: block, etc.) is unchanged.
-  const wrapper = `bash "${join(REPO_ROOT, "bin", "run-hook.sh")}"`;
+  //
+  // Path is the docker-baked location. The scaffold runs on the host but
+  // settings.json is consumed inside the agent container — referencing
+  // the host repo checkout would silently fail (RFC §Bug 3). Mirrors
+  // the `.mcp.json` plugin path which already uses DOCKER_TELEGRAM_PLUGIN_PATH
+  // for the same reason.
+  const wrapper = `bash "${join(DOCKER_BIN_PATH, "run-hook.sh")}"`;
   const wrap = (source: string, command: string): string =>
     `${wrapper} ${shellSingleQuote(source)} ${command}`;
 
@@ -2474,7 +2499,7 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
       type: "command",
       command: wrap(
         "hook:user-profile-refresh",
-        `bash "${join(REPO_ROOT, "bin", "user-profile-refresh-hook.sh")}"`,
+        `bash "${join(DOCKER_BIN_PATH, "user-profile-refresh-hook.sh")}"`,
       ),
       timeout: 10,
       async: true,
@@ -2485,7 +2510,7 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
       type: "command",
       command: wrap(
         "hook:secret-scrub-stop",
-        `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "secret-scrub-stop.mjs")}"`,
+        `node "${join(DOCKER_HOOKS_PATH, "secret-scrub-stop.mjs")}"`,
       ),
       timeout: 15,
       async: true,
@@ -2494,7 +2519,7 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
       type: "command",
       command: wrap(
         "hook:silent-end-interrupt-stop",
-        `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "silent-end-interrupt-stop.mjs")}"`,
+        `node "${join(DOCKER_HOOKS_PATH, "silent-end-interrupt-stop.mjs")}"`,
       ),
       timeout: 5,
       async: false,
@@ -2505,7 +2530,7 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
       type: "command",
       command: wrap(
         "hook:tool-label-stop",
-        `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "tool-label-stop.mjs")}"`,
+        `node "${join(DOCKER_HOOKS_PATH, "tool-label-stop.mjs")}"`,
       ),
       timeout: 5,
       async: true,
@@ -2522,7 +2547,7 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
               type: "command",
               command: wrap(
                 "hook:secret-guard-pretool",
-                `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "secret-guard-pretool.mjs")}"`,
+                `node "${join(DOCKER_HOOKS_PATH, "secret-guard-pretool.mjs")}"`,
               ),
               timeout: 10,
             },
@@ -2539,7 +2564,7 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
               type: "command",
               command: wrap(
                 "hook:subagent-tracker-pretool",
-                `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "subagent-tracker-pretool.mjs")}"`,
+                `node "${join(DOCKER_HOOKS_PATH, "subagent-tracker-pretool.mjs")}"`,
               ),
               timeout: 10,
             },
@@ -2554,7 +2579,7 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
               type: "command",
               command: wrap(
                 "hook:tool-label-pretool",
-                `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "tool-label-pretool.mjs")}"`,
+                `node "${join(DOCKER_HOOKS_PATH, "tool-label-pretool.mjs")}"`,
               ),
               timeout: 5,
             },
@@ -2577,7 +2602,7 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
               type: "command",
               command: wrap(
                 "hook:subagent-tracker-posttool",
-                `node "${join(REPO_ROOT, "telegram-plugin", "hooks", "subagent-tracker-posttool.mjs")}"`,
+                `node "${join(DOCKER_HOOKS_PATH, "subagent-tracker-posttool.mjs")}"`,
               ),
               timeout: 10,
             },
@@ -2597,7 +2622,7 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
                 type: "command",
                 command: wrap(
                   "hook:workspace-stable",
-                  `bash "${join(REPO_ROOT, "bin", "workspace-stable-hook.sh")}"`,
+                  `bash "${join(DOCKER_BIN_PATH, "workspace-stable-hook.sh")}"`,
                 ),
                 timeout: 6,
               },
@@ -2611,7 +2636,7 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
           type: "command",
           command: wrap(
             "hook:workspace-dynamic",
-            `bash "${join(REPO_ROOT, "bin", "workspace-dynamic-hook.sh")}"`,
+            `bash "${join(DOCKER_BIN_PATH, "workspace-dynamic-hook.sh")}"`,
           ),
           timeout: 5,
         },
@@ -2623,7 +2648,7 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
           type: "command",
           command: wrap(
             "hook:timezone",
-            `bash "${join(REPO_ROOT, "bin", "timezone-hook.sh")}"`,
+            `bash "${join(DOCKER_BIN_PATH, "timezone-hook.sh")}"`,
           ),
           timeout: 3,
         },

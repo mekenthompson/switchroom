@@ -230,36 +230,56 @@ Once configured, unskip the card scenario by changing
 
 ## 6. Running scenarios — env setup
 
-The harness reads four env vars at `spinUp()` time. Source them from
-vault once, run tests, then clear:
+The harness reads four env vars at `spinUp()` time. The recommended
+workflow is to materialise them once into `telegram-plugin/uat/.env`
+— the harness loads that file automatically on import (see
+`load-env.ts`). The file is gitignored repo-wide (`.env*` in
+`/.gitignore`); never commit a populated copy.
+
+Vault file perms (root:root 0600) mean the operator can't read
+`vault.enc` directly. Sourcing through the `test-harness` agent
+container — which already has these keys in its ACL — is the
+cleanest path:
 
 ```bash
-cd ~/code/switchroom/telegram-plugin
+cd ~/code/switchroom
 
 read -sp "Vault passphrase: " SWITCHROOM_VAULT_PASSPHRASE; echo
 export SWITCHROOM_VAULT_PASSPHRASE
 
-export TELEGRAM_API_ID=$(switchroom vault get --no-broker telegram-uat-api-id)
-export TELEGRAM_API_HASH=$(switchroom vault get --no-broker telegram-uat-api-hash)
-export TELEGRAM_UAT_DRIVER_SESSION=$(switchroom vault get --no-broker telegram-uat-driver-session)
-export TELEGRAM_TEST_BOT_USERNAME=meken_switchroom_test_bot
+{
+  echo "TELEGRAM_API_ID=$(docker exec switchroom-test-harness switchroom vault get telegram-uat-api-id)"
+  echo "TELEGRAM_API_HASH=$(docker exec switchroom-test-harness switchroom vault get telegram-uat-api-hash)"
+  echo "TELEGRAM_UAT_DRIVER_SESSION=$(docker exec switchroom-test-harness switchroom vault get telegram-uat-driver-session)"
+  echo "TELEGRAM_TEST_BOT_USERNAME=meken_switchroom_test_bot"
+} > telegram-plugin/uat/.env
+chmod 0600 telegram-plugin/uat/.env
 
 unset SWITCHROOM_VAULT_PASSPHRASE
-
-bun run test:uat
-
-unset TELEGRAM_API_HASH TELEGRAM_UAT_DRIVER_SESSION TELEGRAM_API_ID TELEGRAM_TEST_BOT_USERNAME
 ```
 
-> Setting `SWITCHROOM_VAULT_PASSPHRASE` once at the top is what
-> lets the per-key `vault get --no-broker` reads work inside
-> `$(...)` substitution — the CLI now sends prompts to stderr
-> (#999), but supplying the env var avoids the prompt entirely
-> across the 3 vault reads.
+> The `docker exec` path requires `test-harness` to have the three
+> `telegram-uat-*` keys in its `schedule[*].secrets` ACL (see
+> `~/.switchroom/switchroom.yaml`). If `vault get` returns
+> `VAULT-BROKER-DENIED`, add them and `switchroom apply`. The legacy
+> `vault get --no-broker` path no longer works for non-root operators
+> because the vault file is owned by the broker container's root user.
 
-The vault passphrase is unset BEFORE the tests run so a misbehaving
-scenario can't smuggle it into a chat message. The remaining env
-vars are scoped to the shell session — close the shell to clear.
+After the `.env` is in place, just run the suite — no per-shell
+export dance:
+
+```bash
+bun test telegram-plugin/uat/scenarios/
+```
+
+To rotate or refresh the file, repeat the block above. The harness
+prefers existing `process.env` entries over `.env` values, so a
+one-off env override still works (`TELEGRAM_API_ID=99999 bun test ...`).
+
+The vault passphrase is unset before the test run so a misbehaving
+scenario can't smuggle it into a chat message. The session string in
+`.env` is bearer-equivalent to the driver account — treat the file
+as a long-lived secret.
 
 ## 7. Verification checklist before running scenarios
 

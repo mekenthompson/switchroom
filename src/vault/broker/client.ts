@@ -460,9 +460,21 @@ async function rpc(
  */
 export async function getViaBrokerStructured(
   key: string,
-  opts?: BrokerClientOpts,
+  opts?: BrokerClientOpts & { token?: string },
 ): Promise<GetResult> {
-  const result = await rpc({ v: 1, op: "get", key }, opts);
+  // Include the token in the wire payload only when present. The
+  // broker validates via validateGrant (server.ts:994-1028) — when
+  // the grant authorizes read for this key, the broker bypasses
+  // path-as-identity ACL. Issue #1053: the CLI's `vault get` path
+  // wasn't forwarding the token, so freshly-minted grants via the
+  // Telegram approval card flow had no effect — the get still
+  // got denied on the peercred ACL. Mirrors the `putViaBroker`
+  // shape that has supported `token` since #969 P1b.
+  const token = opts?.token;
+  const result = await rpc(
+    { v: 1, op: "get", key, ...(token ? { token } : {}) },
+    opts,
+  );
   if (result.kind === "unreachable") {
     return { kind: "unreachable", msg: result.msg };
   }

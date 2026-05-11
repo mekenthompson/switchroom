@@ -626,6 +626,40 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
     }
   });
 
+  it("mounts the operator broker socket + sets SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK on admin agents", () => {
+    // fails when: the compose generator stops mounting the operator
+    // socket on admin-flagged agents, or stops setting the env var
+    // the broker client uses to route grant-management RPCs. Without
+    // either, `/vault audit` from an admin agent reverts to the
+    // pre-#1019 "Grant management ops are operator-only" rejection
+    // (see src/vault/broker/server.ts:1493). Pins both halves.
+    const out = generateCompose({
+      config: makeConfig({
+        alice: { admin: true },
+        bob: {},
+      }),
+    });
+    const aliceEnv = envBlockFor(out, "alice");
+    expect(aliceEnv).toMatch(
+      /SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK:\s*"\/run\/switchroom\/broker\/operator\/sock"/,
+    );
+    // The volume mount lives outside the env block — grep for the
+    // bind line directly.
+    expect(out).toMatch(
+      /agent-alice:[\s\S]*?\.switchroom\/broker-operator:\/run\/switchroom\/broker\/operator:ro/,
+    );
+
+    // Non-admin agent must NOT get either — operator socket is the
+    // privileged surface, default agents stay isolated.
+    const bobEnv = envBlockFor(out, "bob");
+    expect(bobEnv).not.toMatch(/SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK/);
+    // Confirm bob's block doesn't carry the bind: search the
+    // agent-bob section up to the next service.
+    expect(out).not.toMatch(
+      /agent-bob:[\s\S]*?broker-operator(?![\s\S]*?  agent-)/,
+    );
+  });
+
   it("surfaces yaml admin: true as SWITCHROOM_AGENT_ADMIN=true on the agent container", () => {
     // fails when: the compose generator stops propagating the
     // schema-level `admin: true` flag to the gateway's runtime env.

@@ -259,6 +259,7 @@ import { StagingMap } from '../secret-detect/staging.js'
 import { maskToken } from '../secret-detect/mask.js'
 import { defaultVaultWrite, defaultVaultList } from '../secret-detect/vault-write.js'
 import { parseVaultCliError, renderVaultCliError } from '../secret-detect/vault-error.js'
+import { recentDenialsFromAuditLog, type RecentDenial } from './recent-denials.js'
 import { detectSecrets } from '../secret-detect/index.js'
 import { classifyAdminGate } from '../admin-commands/index.js'
 import {
@@ -6326,6 +6327,31 @@ bot.use(async (ctx, next) => {
  * undefined so /status falls back to its previous (auth + uptime + agent
  * name) shape rather than blocking the reply.
  */
+/**
+ * Issue #969 P2b — read recent broker-denied vault accesses for an
+ * agent. Used by `/vault audit <agent>` to surface a one-tap
+ * "always allow" button per unique denied key, so the operator can
+ * fix a misconfigured cron without editing switchroom.yaml.
+ *
+ * Thin wrapper over the pure-functional parser in `./recent-denials.ts`
+ * which handles the actual parse + filter + group + sort logic and is
+ * unit-tested directly.
+ */
+function readRecentDenialsForAgent(
+  agentName: string,
+  windowMs: number,
+  limit: number,
+): RecentDenial[] {
+  try {
+    const auditPath = join(homedir(), '.switchroom', 'vault-audit.log')
+    if (!existsSync(auditPath)) return []
+    const raw = readFileSync(auditPath, 'utf8')
+    return recentDenialsFromAuditLog(raw, { agentName, windowMs, limit })
+  } catch {
+    return []
+  }
+}
+
 function buildAgentAudit(agentName: string): AgentAudit | undefined {
   try {
     const config = loadSwitchroomConfig()
@@ -7698,6 +7724,83 @@ function resolveAgentDirForName(agent: string): string | null {
  *   vrs:rename:<stageId>   — set up a pending-op intercept so the user's
  *                            next message is taken as a new key name.
  */
+/**
+ * Issue #969 P2b — handle a tap on the "🔓 Allow <key>" button posted by
+ * `/vault audit <agent>`'s Recent denials section. Mints a 30-day
+ * read-grant for the agent + key via the broker.
+ *
+ * The grant also unioning into the agent's existing token if one is
+ * already present is out of scope for this PR — the operator can
+ * re-mint with a wider key list if they want consolidation.
+ */
+async function handleVaultRecentDenialCallback(ctx: Context, data: string): Promise<void> {
+  const senderId = String(ctx.from?.id ?? '')
+  const access = loadAccess()
+  if (!access.allowFrom.includes(senderId)) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+  // vrd:<agent>:<key>  — parse, validate both halves against the strict
+  // slug regex before doing anything else.
+  const parts = data.split(':')
+  if (parts.length !== 3) {
+    await ctx.answerCallbackQuery({ text: 'Bad request' }).catch(() => {})
+    return
+  }
+  const [, agentName, keyName] = parts
+  if (!/^[a-z][a-z0-9-]{0,62}$/i.test(agentName)) {
+    await ctx.answerCallbackQuery({ text: 'Invalid agent name' }).catch(() => {})
+    return
+  }
+  if (!/^[A-Za-z0-9_.-]{1,200}$/.test(keyName)) {
+    await ctx.answerCallbackQuery({ text: 'Invalid key name' }).catch(() => {})
+    return
+  }
+  await ctx.answerCallbackQuery({ text: '⏳ Minting 30-day read grant…' }).catch(() => {})
+
+  const result = await mintGrantViaBroker({
+    agent: agentName,
+    keys: [keyName],
+    ttl_seconds: 30 * 24 * 60 * 60,
+    description: `auto-mint via /vault audit one-tap (#969 P2b)`,
+  })
+
+  if (result.kind === 'unreachable') {
+    await switchroomReply(ctx, `🔴 Broker unreachable: ${escapeHtmlForTg(result.msg)}`, { html: true })
+    return
+  }
+  if (result.kind === 'error') {
+    await switchroomReply(ctx, `<b>mint_grant failed:</b> ${escapeHtmlForTg(result.msg)}`, { html: true })
+    return
+  }
+  // Write the token to the agent's .vault-token file — same flow as the
+  // vault grant wizard. The agent restarts in the background pick up
+  // the new token via SWITCHROOM_AGENT_NAME on next CLI invocation.
+  const { token, id } = result
+  const tokenPath = join(homedir(), '.switchroom', 'agents', agentName, '.vault-token')
+  try {
+    mkdirSync(join(homedir(), '.switchroom', 'agents', agentName), { recursive: true })
+    writeFileSync(tokenPath, token, { mode: 0o600 })
+  } catch (err) {
+    await switchroomReply(
+      ctx,
+      `<b>Grant created (${escapeHtmlForTg(id)}) but token write failed:</b> ` +
+      `${escapeHtmlForTg(String(err))}\n` +
+      `<i>Recover with: <code>switchroom vault grant ${escapeHtmlForTg(agentName)} ` +
+      `--keys ${escapeHtmlForTg(keyName)} --duration 30d</code> on the host.</i>`,
+      { html: true },
+    )
+    return
+  }
+  await switchroomReply(
+    ctx,
+    `✅ Granted <b>${escapeHtmlForTg(agentName)}</b> read access to ` +
+    `<code>${escapeHtmlForTg(keyName)}</code> for 30 days. ` +
+    `(grant <code>${escapeHtmlForTg(id)}</code>)`,
+    { html: true },
+  )
+}
+
 async function handleVaultRequestSaveCallback(ctx: Context, data: string): Promise<void> {
   const senderId = String(ctx.from?.id ?? '')
   const access = loadAccess()
@@ -9071,13 +9174,51 @@ bot.command('vault', async ctx => {
       }
     }
     lines.push('')
+
+    // Issue #969 P2b — recent denials section + one-tap "always allow"
+    // button per unique denied key. Reads the broker's vault-audit.log
+    // and surfaces the latest unique keys the agent was denied access
+    // to. Tap a button → mint a 30-day read-grant for that key
+    // (extends the existing grant flow rather than reconciling YAML).
+    const denials = readRecentDenialsForAgent(targetAgent, 7 * 24 * 60 * 60 * 1000, 5)
+    const denialKeyboard = new InlineKeyboard()
+    if (denials.length > 0) {
+      lines.push('<b>Recent denials (last 7d):</b>')
+      for (const d of denials) {
+        const when = new Date(d.lastSeenMs).toISOString().slice(0, 16).replace('T', ' ')
+        lines.push(
+          `  <code>${escapeHtmlForTg(d.key)}</code> · ${d.count}× · last ${when}`,
+        )
+        // callback_data must stay ≤ 64 bytes. Format:
+        //   vrd:<agent>:<key>
+        // Agent + key combined are bounded by the slug regex (200 chars
+        // for key, ~64 for agent) but realistic combinations stay short.
+        // Truncate the label so the button text fits Telegram's 64-byte
+        // limit while still being readable.
+        const cb = `vrd:${targetAgent}:${d.key}`
+        if (cb.length <= 64) {
+          const label = d.key.length > 30 ? `🔓 Allow ${d.key.slice(0, 27)}…` : `🔓 Allow ${d.key}`
+          denialKeyboard.text(label, cb).row()
+        }
+      }
+      lines.push('')
+    }
+
     lines.push(
       `<i>Summary: ${readGrants.length} read grant${readGrants.length === 1 ? '' : 's'}, ` +
       `${writeGrants.length} write grant${writeGrants.length === 1 ? '' : 's'}, ` +
-      `${cronEntries.length} cron entr${cronEntries.length === 1 ? 'y' : 'ies'}.</i>`,
+      `${cronEntries.length} cron entr${cronEntries.length === 1 ? 'y' : 'ies'}, ` +
+      `${denials.length} recent denial${denials.length === 1 ? '' : 's'}.</i>`,
     )
 
-    await switchroomReply(ctx, lines.join('\n'), { html: true })
+    const chatIdAudit = String(ctx.chat!.id)
+    const threadIdAudit = resolveThreadId(chatIdAudit, ctx.message?.message_thread_id)
+    await ctx.reply(lines.join('\n'), {
+      parse_mode: 'HTML',
+      link_preview_options: { is_disabled: true },
+      ...(denials.length > 0 ? { reply_markup: denialKeyboard } : {}),
+      ...(threadIdAudit != null ? { message_thread_id: threadIdAudit } : {}),
+    })
     return
   }
 
@@ -9449,6 +9590,14 @@ bot.on('callback_query:data', async ctx => {
   // vrs:rename:<stageId>   — prompt for a new key name, then resume
   if (data.startsWith('vrs:')) {
     await handleVaultRequestSaveCallback(ctx, data)
+    return
+  }
+
+  // Issue #969 P2b: vault recent-denial one-tap approval.
+  //   vrd:<agent>:<key> — mint a 30-day read-grant for the agent + key
+  // Posted by /vault audit <agent> in the "Recent denials" section.
+  if (data.startsWith('vrd:')) {
+    await handleVaultRecentDenialCallback(ctx, data)
     return
   }
 

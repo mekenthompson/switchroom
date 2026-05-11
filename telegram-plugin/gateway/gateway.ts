@@ -1412,12 +1412,21 @@ type PendingVaultOp =
   // passphrase message, and auto-resume the approval mint flow without
   // making the operator tap Approve a second time. Mirrors the
   // `passphrase-for-deferred` flow from #44.
+  //
+  // #1051: `items` is a queue so concurrent Approve taps (operator
+  // taps card 2 before typing passphrase for card 1) don't strand
+  // earlier stages. On passphrase reply we process all queued items
+  // sequentially. Each item carries its own stageId + card refs;
+  // they're all in the same chat by construction (pendingVaultOps
+  // map is keyed by chat_id).
   | {
       kind: 'passphrase-for-access-approve'
-      stageId: string
-      cardChatId: string
-      cardMessageId: number
-      senderId: string
+      items: Array<{
+        stageId: string
+        cardChatId: string
+        cardMessageId: number
+        senderId: string
+      }>
       startedAt: number
     }
 const VAULT_INPUT_TTL_MS = 5 * 60 * 1000
@@ -5135,12 +5144,14 @@ async function handleInbound(
         if (msgId != null) await deleteSensitiveMessage(chat_id, msgId, 'vault passphrase')
         await executeDeferredSecretSave(ctx, pendingVault.deferKey, passphrase, pendingVault.cardMessageId)
       } else if (pendingVault.kind === 'passphrase-for-access-approve') {
-        // #1012 Phase 2 follow-up: operator tapped Approve on a
-        // vault_request_access card without first unlocking. We
-        // captured the next message as the passphrase, cache it,
-        // delete the chat copy, and resume the approve flow.
-        // Wrong passphrase surfaces via the broker's
-        // DENIED:passphrase-mismatch path and edits the card to the
+        // #1012 Phase 2 follow-up + #1051: operator tapped Approve on
+        // one or more vault_request_access cards without first
+        // unlocking. We captured the next message as the passphrase,
+        // cache it, delete the chat copy, and resume the approve
+        // flow for EVERY queued stage (#1051 — without the queue, a
+        // concurrent second tap orphaned the first stage). Wrong
+        // passphrase surfaces via the broker's
+        // DENIED:passphrase-mismatch path and edits each card to the
         // mint_grant-failed message (see performVaultAccessApproval).
         const passphrase = text.trim()
         if (!passphrase) {
@@ -5149,22 +5160,30 @@ async function handleInbound(
         }
         vaultPassphraseCache.set(chat_id, { passphrase, expiresAt: Date.now() + VAULT_PASSPHRASE_TTL_MS })
         if (msgId != null) await deleteSensitiveMessage(chat_id, msgId, 'vault passphrase')
-        const stagedAccess = pendingVaultRequestAccesses.get(pendingVault.stageId)
-        if (!stagedAccess) {
-          // Staged entry expired between tap and passphrase reply.
-          // The 10-min TTL is generous but not infinite; surface a
-          // clear next step.
-          await ctx.api
-            .editMessageText(
-              pendingVault.cardChatId,
-              pendingVault.cardMessageId,
-              `⌛ <i>Vault unlocked, but this access-request card expired before you replied. Ask the agent to re-issue.</i>`,
-              { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
-            )
-            .catch(() => {})
-          return
+        // Drain the queued items SEQUENTIALLY. The grant-union step
+        // inside performVaultAccessApproval lists existing grants
+        // before minting; sequential processing means the union
+        // grows monotonically (item 1 mints grant for [keyA]; item 2
+        // lists, finds [keyA], unions with keyB → mints [keyA, keyB]).
+        // Parallel processing would race on the list-and-merge.
+        for (const item of pendingVault.items) {
+          const stagedAccess = pendingVaultRequestAccesses.get(item.stageId)
+          if (!stagedAccess) {
+            // Stage expired or denied between tap and passphrase reply.
+            // Edit its card to a clean explanation; don't break the
+            // loop (sibling cards may still be valid).
+            await ctx.api
+              .editMessageText(
+                item.cardChatId,
+                item.cardMessageId,
+                `⌛ <i>Vault unlocked, but this access-request card expired or was denied before you replied. Ask the agent to re-issue if still needed.</i>`,
+                { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+              )
+              .catch(() => {})
+            continue
+          }
+          await performVaultAccessApproval(ctx, stagedAccess, item.stageId, item.senderId, passphrase)
         }
-        await performVaultAccessApproval(ctx, stagedAccess, pendingVault.stageId, pendingVault.senderId, passphrase)
       } else if (pendingVault.kind === 'grant-wizard' && pendingVault.awaitingCustomDuration) {
         // Issue #227: custom duration text reply for grant wizard
         const input = text.trim()
@@ -8051,12 +8070,71 @@ async function performVaultAccessApproval(
   senderId: string,
   passphrase: string,
 ): Promise<void> {
+  // #1051: union the new key with the agent's existing active grant
+  // before minting. Without this, each fresh Approve OVERWRITES the
+  // agent's `.vault-token` file with a single-key grant — the
+  // previous approval's grant is still in the broker DB but the
+  // agent can no longer authenticate against it (the CLI reads the
+  // file's current token, the broker validates it, sees the new key
+  // isn't in the OLD grant's key_allow, and denies).
+  //
+  // Solution: list the agent's existing non-expired grants
+  // (passphrase-attested per #1051's broker-side gate widening),
+  // find the active read-grant (most recent non-revoked,
+  // non-expired), and pass its keys ∪ new_key as `keys` to the
+  // mint call. Old grant ages out via TTL — no explicit revoke
+  // needed.
+  let existingReadKeys: string[] = [];
+  let existingWriteKeys: string[] = [];
+  if (pending.scope === 'read' || pending.scope === 'write') {
+    const list = await listGrantsViaBroker(pending.agent, { passphrase });
+    if (list.kind === 'ok') {
+      const now = Math.floor(Date.now() / 1000);
+      // Prefer the MOST RECENT non-revoked, non-expired grant. The
+      // broker's listGrants returns ALL non-revoked, but we still
+      // filter expires_at locally as defence-in-depth + sort by
+      // created_at desc for stability.
+      const active = list.grants
+        .filter((g) => g.expires_at === null || g.expires_at > now)
+        // Reviewer-flagged on #1058 (Q4): `created_at` is
+        // seconds-granularity, so two grants minted in the same
+        // wall-clock second tie. Secondary sort by `id` (vg_<6hex>)
+        // makes the ordering stable so item 2's drain reliably picks
+        // up item 1's just-minted grant rather than an unrelated
+        // same-second grant.
+        .sort((a, b) => {
+          const dt = (b.created_at ?? 0) - (a.created_at ?? 0);
+          if (dt !== 0) return dt;
+          return b.id.localeCompare(a.id);
+        });
+      if (active.length > 0) {
+        existingReadKeys = active[0]!.key_allow ?? [];
+        existingWriteKeys = active[0]!.write_allow ?? [];
+      }
+    }
+    // If list fails (broker unreachable / error), proceed without
+    // union — better to mint a single-key grant than fail closed
+    // entirely. The agent loses the prior coverage in that edge
+    // case, same as today, but the new key is granted.
+  }
+
+  // Compute the unioned key sets. Use Set to dedupe.
+  const readKeys = new Set<string>(existingReadKeys);
+  const writeKeys = new Set<string>(existingWriteKeys);
+  if (pending.scope === 'read') readKeys.add(pending.key);
+  if (pending.scope === 'write') writeKeys.add(pending.key);
+
   const mintArgs: Parameters<typeof mintGrantViaBroker>[0] = {
     agent: pending.agent,
-    keys: pending.scope === 'read' ? [pending.key] : [],
+    keys: Array.from(readKeys),
     ttl_seconds: pending.ttl_seconds,
-    description: `auto-mint via vault_request_access (#1012, scope=${pending.scope}, by op ${senderId})`,
-    ...(pending.scope === 'write' ? { write_keys: [pending.key] } : {}),
+    description:
+      `auto-mint via vault_request_access (#1012, scope=${pending.scope}, by op ${senderId}` +
+      (existingReadKeys.length + existingWriteKeys.length > 0
+        ? `, unioned with prior grant`
+        : ``) +
+      `)`,
+    ...(writeKeys.size > 0 ? { write_keys: Array.from(writeKeys) } : {}),
     passphrase,
   }
   const result = await mintGrantViaBroker(mintArgs)
@@ -8176,21 +8254,43 @@ async function handleVaultRequestAccessCallback(ctx: Context, data: string): Pro
           .catch(() => {})
         return
       }
-      pendingVaultOps.set(pending.chat_id, {
-        kind: 'passphrase-for-access-approve',
+      // #1051: if there's ALREADY a passphrase-for-access-approve
+      // pending op for this chat (operator tapped Approve on a
+      // sibling card before typing the passphrase), APPEND this
+      // stage to the existing queue instead of overwriting. When
+      // the passphrase reply lands the text-handler drains every
+      // queued stage — both cards get their grant minted off one
+      // passphrase entry. Without this, the second Approve tap
+      // orphans the first stage.
+      const existing = pendingVaultOps.get(pending.chat_id)
+      const newItem = {
         stageId,
         cardChatId: pending.chat_id,
         cardMessageId: pending.card_message_id,
         senderId,
-        startedAt: Date.now(),
+      }
+      const items =
+        existing?.kind === 'passphrase-for-access-approve'
+          ? [...existing.items.filter((it) => it.stageId !== stageId), newItem]
+          : [newItem]
+      pendingVaultOps.set(pending.chat_id, {
+        kind: 'passphrase-for-access-approve',
+        items,
+        startedAt: existing?.kind === 'passphrase-for-access-approve' ? existing.startedAt : Date.now(),
       })
-      await ctx.answerCallbackQuery({ text: '🔐 Send your passphrase…' }).catch(() => {})
+      // Card text differs slightly when joining an existing batch so
+      // the operator isn't confused by two "Reply with passphrase"
+      // cards open at once.
+      const joiningBatch = items.length > 1
+      await ctx.answerCallbackQuery({ text: joiningBatch ? `🔐 Queued — one passphrase covers ${items.length} cards` : '🔐 Send your passphrase…' }).catch(() => {})
       await ctx.api
         .editMessageText(
           pending.chat_id,
           pending.card_message_id,
-          `🔐 <b>Vault is locked.</b> Reply with your passphrase as your next message — we'll unlock, mint the grant for <b>${escapeHtmlForTg(pending.agent)}</b>, and delete the passphrase message in one step.\n\n` +
-          `<i>Mint authority stays operator-only: the broker only accepts the grant when the passphrase matches.</i>`,
+          joiningBatch
+            ? `🔐 <b>Queued behind an earlier card.</b> Type your passphrase as your next message — it covers <b>${items.length}</b> pending approvals in this chat (one entry mints all grants, no re-type per card).`
+            : `🔐 <b>Vault is locked.</b> Reply with your passphrase as your next message — we'll unlock, mint the grant for <b>${escapeHtmlForTg(pending.agent)}</b>, and delete the passphrase message in one step.\n\n` +
+              `<i>Mint authority stays operator-only: the broker only accepts the grant when the passphrase matches.</i>`,
           { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
         )
         .catch(() => {})

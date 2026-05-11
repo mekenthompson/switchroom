@@ -65,7 +65,30 @@ Other env:
 - `curl`
 - `jq`
 - `switchroom` on `PATH` (or pass `SWITCHROOM_CLI`)
-- `SWITCHROOM_VAULT_PASSPHRASE` exported so the CLI can unlock the vault non-interactively
+
+### Vault authentication
+
+**Canonical: capability grant.** The CLI authenticates to the broker via the
+agent's capability token at `~/.switchroom/agents/<agent>/.vault-token` (mode
+0600). Mint once with:
+
+```bash
+switchroom vault grant <agent> \
+  --keys google-cal-refresh-token,google-cal-client-id,google-cal-client-secret \
+  --write google-cal-access-token \
+  --duration 30d
+```
+
+The agent container's compose env sets `SWITCHROOM_AGENT_NAME` automatically;
+standalone scripts must set it. The CLI reads the token transparently and
+forwards it on every `get` / `set` call. See `docs/vault-security.md` for the
+full model.
+
+**Legacy: `SWITCHROOM_VAULT_PASSPHRASE`** (deprecated for agent-side use,
+still honoured). Setting this env var puts the master passphrase in every
+subprocess's environment, defeats the ACL model, and bypasses the broker's
+audit log. A runtime deprecation warning is emitted when the env var is
+consumed inside an agent sandbox.
 
 ## Exit codes
 

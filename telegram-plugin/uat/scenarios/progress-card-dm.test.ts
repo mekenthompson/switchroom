@@ -55,9 +55,12 @@ describe("uat: progress card lifecycle on driver DM", () => {
       }
     },
     // Per-test wall-clock budget. Must exceed the sum of inner poll
-    // deadlines (10s + 60s) plus mtcute connect + DM round-trip
-    // overhead. bun:test's default of 5s cuts the test off before
-    // the 60s inner wait can fire.
-    75_000,
+    // deadlines (10s expectPinnedCard + 60s waitForCardPhase) PLUS
+    // spinUp overhead (~3s mtcute connect + DEFAULT_SETTLE_MS gap +
+    // unpin) — call it 12s of pre-roll. Round up generously so a
+    // legitimate inner timeout surfaces as the inner-deadline error
+    // (clear), not the outer "test timed out" (confusing). bun:test's
+    // 5s default would otherwise kill the test before any poll fires.
+    90_000,
   );
 });

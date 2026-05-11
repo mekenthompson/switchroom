@@ -47,9 +47,11 @@ describe("uat: DM round-trip smoke", () => {
       }
     },
     // Per-test budget — must exceed the 90s inner expectMessage
-    // deadline plus mtcute connect overhead. bun:test's default of
-    // 5s would cut the test off on any turn that takes longer than
-    // a few seconds.
-    100_000,
+    // deadline plus spinUp overhead (~3s mtcute connect +
+    // DEFAULT_SETTLE_MS gap + unpin), so add ~12s of headroom on top
+    // for symmetry with progress-card-dm. bun:test's default of 5s
+    // would otherwise cut the test off on any turn that takes longer
+    // than a few seconds.
+    110_000,
   );
 });

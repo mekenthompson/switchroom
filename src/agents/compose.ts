@@ -752,6 +752,31 @@ function emitAgentService(
   // invariant on every regenerated compose.
   lines.push(`      - broker-${a.name}-sock:/run/switchroom/broker`);
   lines.push(`      - kernel-${a.name}-sock:/run/switchroom/kernel`);
+  if (a.admin === true) {
+    // Admin agents need read access to the host operator's vault
+    // audit log so the bot's `/vault audit <agent>` Recent-denials
+    // section (#969 P2b) can render. The bot reads from
+    // `${HOME}/.switchroom/vault-audit.log` (homedir-relative); the
+    // agent container's HOME is `/state/agent/home`, so the host
+    // file gets mounted there as a read-only file bind. Non-admin
+    // agents stay isolated.
+    //
+    // The bot only consumes this for read-only rendering; the
+    // broker is the sole writer (running in its own container with
+    // its own append-only access). Mounting :ro protects the file
+    // even from a fully-compromised admin agent.
+    //
+    // Gated on `existsSync` because the audit log is created lazily
+    // by the broker on the first ACL decision — fresh installs may
+    // not have it yet, and docker compose `up` hard-fails when a
+    // `:ro` source is missing (same pattern as the skills /
+    // credentials mounts below).
+    if (existsSync(`${hostHomeForChecks}/.switchroom/vault-audit.log`)) {
+      lines.push(
+        `      - ${homePrefix}/.switchroom/vault-audit.log:/state/agent/home/.switchroom/vault-audit.log:ro`,
+      );
+    }
+  }
   // Dual mounts — the same host directory is bound BOTH at the canonical
   // container path (`/state/agent`, `/state/.claude`, `/var/log/switchroom`)
   // AND at the original host path. Why both:

@@ -626,6 +626,65 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
     }
   });
 
+  it("admin agents get a read-only vault-audit.log mount when the host log exists", async () => {
+    // fails when: the audit-log mount is dropped from admin agent
+    // compose. The bot in the admin agent container reads
+    // `${HOME}/.switchroom/vault-audit.log` (telegram-plugin/
+    // gateway/gateway.ts:6346 — `readRecentDenialsForAgent`).
+    // Container HOME is `/state/agent/home`, so the host audit log
+    // must be mounted there. Without the mount, the bot silently
+    // returns 0 recent denials regardless of how many actually
+    // fired, breaking the /vault audit one-tap allow UX from #969 P2b.
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "compose-audit-mount-"));
+    try {
+      mkdirSync(join(tmp, ".switchroom"), { recursive: true });
+      writeFileSync(join(tmp, ".switchroom", "vault-audit.log"), "");
+      const out = generateCompose({
+        config: makeConfig({
+          alice: { admin: true },
+          bob: {},
+        }),
+        homeDir: tmp,
+      });
+      expect(out).toMatch(
+        /agent-alice:[\s\S]*?\.switchroom\/vault-audit\.log:\/state\/agent\/home\/\.switchroom\/vault-audit\.log:ro/,
+      );
+      // Non-admin gets no host audit-log mount — operator state is
+      // not exposed to ordinary agents.
+      expect(out).not.toMatch(
+        /agent-bob:[\s\S]*?vault-audit\.log(?![\s\S]*?  (?:agent|vault|approval|kernel))/,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the audit-log mount on fresh installs where the host log doesn't exist yet (no docker compose hard-fail)", async () => {
+    // fails when: the existsSync guard is dropped — docker compose
+    // `up` hard-fails when a `:ro` source path is missing. The
+    // audit log is created lazily by the broker on the first ACL
+    // decision; fresh installs (no denials ever fired) would then
+    // break the admin agent's container startup entirely. Same
+    // pattern as the skills/credentials mounts below.
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "compose-audit-fresh-"));
+    try {
+      // No vault-audit.log created — simulates fresh install.
+      const out = generateCompose({
+        config: makeConfig({ alice: { admin: true } }),
+        homeDir: tmp,
+      });
+      expect(out).not.toContain("vault-audit.log");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("admin agents get NO operator-socket mount or routing env (#1021 Design B handles grant-mgmt server-side)", () => {
     // fails when: a refactor re-introduces the pre-#1021 attempt of
     // mounting the operator socket directly into admin agents. That

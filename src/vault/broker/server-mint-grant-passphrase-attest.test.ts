@@ -248,19 +248,83 @@ describe("VaultBroker: mint_grant passphrase attestation (#1012 Phase 2)", () =>
     expect(mismatch?.method).toBe("passphrase");
   });
 
-  // ── Scope limit: only mint_grant accepts passphrase attestation ─────
+  // ── Scope: mint_grant + list_grants accept passphrase attestation ──
+  //
+  // 2026-05-12 (#1051): list_grants attestation enabled so the gateway
+  // can read existing grants before minting a unioned one — without
+  // it, the second Approve card on a non-admin agent silently strands
+  // the prior .vault-token. Read-only op, same operator-attested
+  // trust posture as mint_grant. revoke_grant stays admin-only.
 
-  it("list_grants from a non-admin agent is still DENIED (operator-only)", async () => {
-    // Scope discipline: the agent → operator approval flow only needs
-    // MINT. Listing and revoking grants is operator-side audit work
-    // and stays admin-agent-only. Pinning this so a future refactor
-    // that extends attestation to list/revoke has to consciously
-    // widen the threat surface (and add the corresponding zod schema
-    // fields).
+  it("list_grants from a non-admin agent without passphrase: still DENIED", async () => {
+    // The base agent-deny gate still applies when no attestation is
+    // presented. Only the operator-attested path is widened.
     const resp = await rpc(socketPath, {
       v: 1,
       op: "list_grants",
       agent: "gymbro",
+    });
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.code).toBe("DENIED");
+    }
+  });
+
+  it("list_grants from a non-admin agent WITH correct passphrase: ALLOWED (#1051)", async () => {
+    // Before minting a unioned grant on the second Approve, the
+    // gateway needs to list existing grants for the agent — this is
+    // the read-only attestation path that makes that possible.
+    // First seed two grants so the response isn't empty.
+    await rpc(socketPath, {
+      v: 1,
+      op: "mint_grant",
+      agent: "gymbro",
+      keys: ["fatsecret/client_id"],
+      ttl_seconds: 30 * 86400,
+      passphrase: TEST_PASSPHRASE,
+    });
+    const resp = await rpc(socketPath, {
+      v: 1,
+      op: "list_grants",
+      agent: "gymbro",
+      passphrase: TEST_PASSPHRASE,
+    });
+    expect(resp.ok).toBe(true);
+    if (resp.ok && "grants" in resp) {
+      // Find a non-revoked, non-expired grant covering fatsecret/client_id.
+      const found = resp.grants.find(
+        (g) => g.agent_slug === "gymbro" && g.key_allow.includes("fatsecret/client_id"),
+      );
+      expect(found, "expected the gymbro fatsecret/client_id grant to be listed").toBeDefined();
+    }
+  });
+
+  it("list_grants with WRONG passphrase: DENIED with passphrase-mismatch (no fall-through)", async () => {
+    // Same fail-closed shape as the mint_grant mismatch — the caller
+    // explicitly asserted operator identity, so we surface the
+    // mismatch clearly rather than silently falling through to the
+    // agent-deny gate.
+    const resp = await rpc(socketPath, {
+      v: 1,
+      op: "list_grants",
+      agent: "gymbro",
+      passphrase: "WRONG-PASSPHRASE",
+    });
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) {
+      expect(resp.code).toBe("DENIED");
+      expect(resp.msg).toMatch(/does not match/);
+    }
+  });
+
+  it("revoke_grant still requires admin agent (scope discipline)", async () => {
+    // revoke is destructive — keep it admin-only for now. The
+    // grant-union flow doesn't need revoke (old grants age out via
+    // TTL); a future PR can extend if needed.
+    const resp = await rpc(socketPath, {
+      v: 1,
+      op: "revoke_grant",
+      id: "vg_doesnotexist",
     });
     expect(resp.ok).toBe(false);
     if (!resp.ok) {

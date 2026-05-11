@@ -37,7 +37,13 @@ import {
 } from "./vault-auto-unlock.js";
 
 const DEFAULT_PID_FILE = "~/.switchroom/vault-broker.pid";
-const DEFAULT_SOCKET_PATH = "~/.switchroom/vault-broker.sock";
+/**
+ * Legacy v0.6 socket. Preserved as the explicit-config fallback so a
+ * user who points `vault.broker.socket` at this path keeps working.
+ * The runtime-aware default (operator socket under Docker, legacy
+ * elsewhere) lives in `client.ts:resolveBrokerSocketPath`.
+ */
+const LEGACY_SOCKET_PATH = "~/.switchroom/vault-broker.sock";
 
 function getSocketPath(configPath?: string): string {
   // Use the canonical resolver — honors `SWITCHROOM_VAULT_BROKER_SOCK`
@@ -49,16 +55,16 @@ function getSocketPath(configPath?: string): string {
   // unreachable even when it was fine on the canonical path.
   try {
     const config = loadConfig(configPath);
-    return resolveBrokerSocketPath({
-      vaultBrokerSocket: config.vault?.broker?.socket
-        ? resolvePath(config.vault.broker.socket)
-        : resolvePath(DEFAULT_SOCKET_PATH),
-    });
+    if (config.vault?.broker?.socket !== undefined) {
+      return resolvePath(config.vault.broker.socket);
+    }
   } catch {
-    return resolveBrokerSocketPath({
-      vaultBrokerSocket: resolvePath(DEFAULT_SOCKET_PATH),
-    });
+    // Config load failure — defer to the resolver below.
   }
+  // Defer to the broker client's resolver so Docker mode picks the
+  // operator socket (`~/.switchroom/broker-operator/sock`) and v0.6
+  // installs keep getting the legacy socket. See client.ts.
+  return resolveBrokerSocketPath();
 }
 
 function getConfigPath(configPath?: string): string | undefined {

@@ -1,5 +1,147 @@
 # Changelog
 
+## v0.7.16 — vault UX epic close-out + host-shell broker socket
+
+Five PRs landed since v0.7.15: the remaining three phases of the #969
+vault UX epic (P2a / P2b / P3 — durable approval-kernel schema,
+recent-denials one-tap allow, master-passphrase env deprecation), plus
+the long-running host-shell broker socket fix that had bit-rotted as
+#905 (now landed via #991 after a clean rebase).
+
+### Durable approval-kernel schema across broker restarts (#969 P2a — #984)
+
+The kernel's schema migration had been running `DROP-IF-EXISTS + CREATE`
+on every broker boot, on the assumption that no production deployment
+of the kernel had landed yet. That assumption broke in v0.7.15 when
+P1a's `vault_request_save` flow started minting durable
+`allow_always` decisions and the kernel container went into
+production compose. Every broker restart silently wiped operator
+approvals — tapping "Always" on a vault-save card was effectively
+"Always until next deploy."
+
+Fix: switch all three approval tables (`approval_decisions`,
+`approval_nonces`, `approval_audit`) and their indices to
+`CREATE IF NOT EXISTS`. Idempotent on a fresh DB; preserves rows on
+an existing one. No data migration needed (schema columns stable
+since introduction). Locked in by a new regression test that seeds
+each table, re-runs the migration, asserts rows survive.
+
+### Recent-denials section + one-tap allow on `/vault audit` (#969 P2b — #985)
+
+Closes the cron-denial loop. When a cron-fired skill hits a broker
+DENY (key not in `schedule[i].secrets[]`, or no write-grant for a
+new key), the failure was silent in `scheduler.jsonl` — operators
+typically found out via "the cron stopped working."
+
+`/vault audit <agent>` now surfaces a "Recent denials (last 7d)"
+section grouped by key, with a `[🔓 Allow <key>]` button per unique
+denial. Tap → 30-day read-grant minted via the broker
+(`mintGrantViaBroker`), token file written, agent picks up the grant
+on next CLI invocation.
+
+Pure-functional parser in `telegram-plugin/gateway/recent-denials.ts`
+handles malformed JSON, missing fields, stale entries, and tampered
+slug shapes defensively. 8 unit tests lock in each filter.
+
+Grants chosen over YAML reconcile because (a) write-grants from P1b
+already let agents rotate/create keys without touching
+`schedule.secrets[]`, mirroring that for reads is consistent, and
+(b) editing `switchroom.yaml` from a Telegram tap requires careful
+YAML mutation + restart fan-out — riskier in scope. The grant model
+is an additive overlay; operators who want the read pinned into
+config can still edit manually.
+
+### `SWITCHROOM_VAULT_PASSPHRASE` deprecation in sandbox + canonical-pattern docs (#969 P3 — #982)
+
+Targets a specific anti-pattern: skills that export the master
+passphrase into the agent's environment, defeating the ACL model
+and bypassing the broker's audit log. The env var path remains
+honoured for backwards compatibility AND for the canonical
+gateway-passphrase-attestation flow (P1a) — both legitimate.
+
+  - **`docs/vault-security.md`** — new canonical reference. Three
+    auth paths (capability grant, path-as-identity, operator
+    passphrase), decision flow, migration notes.
+  - **Runtime warning** at `vault` CLI `preAction`. One-shot per
+    process. Fires only when env var set AND `SWITCHROOM_RUNTIME=
+    docker` AND escape hatch unset. Stderr only. Message includes
+    the canonical `vault grant` mint command and a pointer to the
+    docs. The gateway's per-spawn invocations set
+    `SWITCHROOM_NO_VAULT_DEPRECATION_WARNING=1` to keep the
+    canonical P1a flow quiet.
+  - **`skills/token-helpers/SKILL.md`** — the in-tree skill that
+    documented the env var as a prereq is updated to advertise
+    capability grants first.
+
+### Host-shell access to the v0.7 vault broker (#991, supersedes #905)
+
+Eight host-shell CLI verbs were broken under docker mode because the
+broker only bound per-agent sockets at
+`/run/switchroom/broker/<agent>/sock` and the host CLI defaulted to
+the v0.6 host-side path which no longer exists. Every host-shell
+broker call returned "broker unreachable":
+
+  - `switchroom vault broker {status,unlock,lock}` → false-negative
+  - `switchroom vault doctor` → false-negative
+  - `switchroom vault auto-unlock {status,poll}` → false-negative
+  - `switchroom agent restart [--name|all]` → preflight blocked
+  - `switchroom vault {get,list}` → broker dead → direct-decrypt fallback
+
+This PR adds a host-shell-reachable **operator socket** as the third
+identity kind in the broker's path-as-identity model:
+
+```
+host:      ~/.switchroom/broker-operator/sock           (mode 0600, chowned to operator UID)
+          ↑ docker bind mount
+container: /run/switchroom/broker/operator/sock         (broker binds + chowns)
+```
+
+Trust model: bind path + chown + 0600 file mode. peercred is bypassed
+for this listener (host UID never matches the broker container's root
+UID) — same invariant the per-agent sockets already use.
+
+Eight slices:
+
+  1. **peercred** — `socketPathToIdentity()` returns
+     `{kind:"agent",name} | {kind:"operator"}`; backward-compat
+     `socketPathToAgent()` returns null for the operator path;
+     the allocator reserves `"operator"` as an agent name.
+  2. **broker server** — `bindOperatorListener()` binds data +
+     unlock pair, chowns to operator UID. `isOperator` flag in
+     `_handleRequest` routes to operator-mode dispatch: skip
+     peercred fail-closed, skip grant-mgmt cron-deny, apply
+     entry scope with `agentSlug="operator"` (default-deny on
+     agent-scoped keys).
+  3. **compose generator** — emits operator bind volume +
+     `SWITCHROOM_BROKER_OPERATOR_UID` env when `operatorUid` is
+     set; omitting preserves pre-fix behaviour.
+  4. **apply** — captures `SUDO_UID` (or `process.getuid()`) and
+     threads as `operatorUid`. Pre-creates the host bind dir so
+     docker doesn't auto-create it as root.
+  5. **CLI broker client** — `resolveBrokerSocketPath()` prefers
+     the operator socket under `isDockerRuntime()`, falls back to
+     the legacy v0.6 path otherwise.
+  6. **preflight + bot-token messages** — distinguishes
+     "reachable-but-locked" from "unreachable + docker-mode";
+     the new hint points at `docker compose up -d` + Telegram
+     `/vault unlock` instead of the host-side daemon command
+     that no longer exists.
+  7. **`src/runtime-mode.ts` (new)** — consolidates the three
+     existing local copies of the `SWITCHROOM_RUNTIME=docker`
+     predicate under one module so the operator-socket resolver
+     shares the detection contract.
+  8. **78 new test assertions** — peercred socket-path
+     round-trip, compose-generator operator bind + env emission,
+     host-bind absolute-path baking under homeDir override.
+
+#### Upgrade note
+
+The new operator socket only binds when `apply` re-emits the compose
+file with `operatorUid` set. Run `switchroom update` (or
+`switchroom apply --non-interactive` + `docker compose up -d
+--remove-orphans`) after upgrading to v0.7.16 to pick it up. Existing
+agent-side flows are unaffected — the change is purely additive.
+
 ## v0.7.15 — vault UX epic + PID-file flock
 
 Bundles five PRs landed since v0.7.14: the second half of the #969

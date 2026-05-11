@@ -81,7 +81,7 @@ describe("bringUpAgentService", () => {
     });
   });
 
-  it("shells out `docker compose -f <path> up -d --no-deps agent-<name>` with exact argv", () => {
+  it("recreates broker + kernel then brings up agent — three compose calls in fixed order (#1017)", () => {
     const home = mkdtempSync(join(tmpdir(), "docker-fleet-"));
     (execFileSync as any).mockReturnValue(Buffer.from(""));
 
@@ -92,19 +92,48 @@ describe("bringUpAgentService", () => {
       stdio: "ignore",
     });
 
-    expect(execFileSync).toHaveBeenCalledTimes(1);
-    const [bin, args, opts] = (execFileSync as any).mock.calls[0];
-    expect(bin).toBe("docker");
-    expect(args).toEqual([
+    // Order matters: the two singletons must be recreated BEFORE the
+    // new agent comes online so their per-agent socket-dir mounts
+    // include the new agent's subdir. See #1017 for the bug this
+    // ordering fixes.
+    expect(execFileSync).toHaveBeenCalledTimes(3);
+    const composePath = resolve(home, "compose", "docker-compose.yml");
+    const callArgs = (execFileSync as any).mock.calls.map(
+      (c: [string, string[], unknown]) => c[1],
+    );
+    expect(callArgs[0]).toEqual([
       "compose",
       "-f",
-      resolve(home, "compose", "docker-compose.yml"),
+      composePath,
+      "up",
+      "-d",
+      "--no-deps",
+      "--force-recreate",
+      "vault-broker",
+    ]);
+    expect(callArgs[1]).toEqual([
+      "compose",
+      "-f",
+      composePath,
+      "up",
+      "-d",
+      "--no-deps",
+      "--force-recreate",
+      "approval-kernel",
+    ]);
+    expect(callArgs[2]).toEqual([
+      "compose",
+      "-f",
+      composePath,
       "up",
       "-d",
       "--no-deps",
       "agent-bot",
     ]);
-    expect(opts.stdio).toBe("ignore");
+    for (const [bin, , opts] of (execFileSync as any).mock.calls) {
+      expect(bin).toBe("docker");
+      expect((opts as { stdio: string }).stdio).toBe("ignore");
+    }
   });
 
   it("respects custom dockerBin override (tests can substitute a wrapper)", () => {

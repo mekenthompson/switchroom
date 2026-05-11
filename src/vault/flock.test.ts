@@ -27,6 +27,7 @@ import { tmpdir } from "node:os";
 import {
   acquireLock,
   lockPathFor,
+  parseProcStartTimeMs,
   readLockHolder,
   VaultBusyError,
 } from "./flock.js";
@@ -397,5 +398,74 @@ describe("flock — v0.7.14 sentinel-dir migration", () => {
     } finally {
       lock.release();
     }
+  });
+});
+
+describe("parseProcStartTimeMs — comm-field-with-')' parsing (closes #989)", () => {
+  // We feed concrete fixtures so the test doesn't depend on /proc.
+  // `now` is anchored so the sanity-window check passes deterministically.
+  // Boot = 1700000000 (epoch sec, 2023-11-14). starttime ticks = 100 → 1s
+  // post-boot → start = 1700000001000ms. `now` = boot + 60s.
+  const BOOT_EPOCH_SEC = 1_700_000_000;
+  const STARTTIME_TICKS = 100; // 1s past boot at USER_HZ=100
+  const NOW_EPOCH_MS = (BOOT_EPOCH_SEC + 60) * 1000;
+  const PROC_STAT = [
+    "cpu  100 200 300 400",
+    `btime ${BOOT_EPOCH_SEC}`,
+    "processes 12345",
+  ].join("\n");
+
+  // Build a /proc/<pid>/stat line where the comm field is in parens.
+  // We need fields 1..22 (1-indexed). Most fields are placeholders.
+  function makeStatLine(pid: number, comm: string): string {
+    // field 1: pid; field 2: (comm); field 3: state; field 4..21: zeros
+    // field 22: starttime.
+    const filler = Array.from({ length: 18 }, () => "0").join(" ");
+    return `${pid} (${comm}) S ${filler} ${STARTTIME_TICKS} 0 0 0 0 0 0 0 0 0 0\n`;
+  }
+
+  it("parses cleanly when comm contains no parens", () => {
+    const stat = makeStatLine(1234, "bash");
+    const result = parseProcStartTimeMs(stat, PROC_STAT, NOW_EPOCH_MS);
+    expect(result).toBe((BOOT_EPOCH_SEC + 1) * 1000);
+  });
+
+  it("parses correctly when comm contains literal `)` characters (e.g. evil)name)", () => {
+    // The canonical adversarial case the issue calls out: a process
+    // name containing `)` would break a naive `indexOf(")")` parser
+    // but lastIndexOf(")") handles it correctly.
+    const stat = makeStatLine(1234, "evil)name");
+    const result = parseProcStartTimeMs(stat, PROC_STAT, NOW_EPOCH_MS);
+    expect(result).toBe((BOOT_EPOCH_SEC + 1) * 1000);
+  });
+
+  it("parses correctly when comm contains multiple `)` characters", () => {
+    const stat = makeStatLine(1234, "a)b)c)d)");
+    const result = parseProcStartTimeMs(stat, PROC_STAT, NOW_EPOCH_MS);
+    expect(result).toBe((BOOT_EPOCH_SEC + 1) * 1000);
+  });
+
+  it("parses correctly when comm contains literal space + `)`", () => {
+    const stat = makeStatLine(1234, "weird name) here");
+    const result = parseProcStartTimeMs(stat, PROC_STAT, NOW_EPOCH_MS);
+    expect(result).toBe((BOOT_EPOCH_SEC + 1) * 1000);
+  });
+
+  it("returns null when stat line has no `)` at all (impossible in real /proc but defensive)", () => {
+    expect(parseProcStartTimeMs("1234 bashS 0 0", PROC_STAT, NOW_EPOCH_MS)).toBeNull();
+  });
+
+  it("returns null when /proc/stat lacks btime", () => {
+    const stat = makeStatLine(1234, "bash");
+    expect(parseProcStartTimeMs(stat, "cpu  1 2 3 4\n", NOW_EPOCH_MS)).toBeNull();
+  });
+
+  it("returns null when starttime is outside the sanity window (USER_HZ drift / impostor)", () => {
+    // 100 ticks past boot = 1s past boot, but with USER_HZ=100 and
+    // starttime=1_000_000 ticks (10_000s = ~2.7h) the start would
+    // fall in the future relative to our pinned now (boot + 60s).
+    const filler = Array.from({ length: 18 }, () => "0").join(" ");
+    const stat = `1234 (bash) S ${filler} 1000000 0 0 0 0 0 0 0 0 0 0\n`;
+    expect(parseProcStartTimeMs(stat, PROC_STAT, NOW_EPOCH_MS)).toBeNull();
   });
 });

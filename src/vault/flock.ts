@@ -131,51 +131,72 @@ function pidIsLive(pid: number): boolean {
  * if the running process started AFTER the lock was acquired, the
  * PID was reused and the lock is stale. Closes #976.
  */
+/**
+ * Pure parser for /proc/<pid>/stat — split out from {@link pidStartTimeMs}
+ * so the regression cases (notably comm fields containing literal `)`,
+ * see #989) can be unit-tested without mocking the filesystem.
+ *
+ * Returns the process start time in epoch-milliseconds, or null if
+ * either input is malformed / outside the sanity window.
+ *
+ * @param statLine    The raw single line read from /proc/<pid>/stat.
+ * @param procStat    The raw contents of /proc/stat (we need the `btime` line).
+ * @param now         Current epoch-ms — accepted as a param so tests don't depend on wall-clock.
+ */
+export function parseProcStartTimeMs(
+  statLine: string,
+  procStat: string,
+  now: number,
+): number | null {
+  // The comm field (field 2 of /proc/<pid>/stat) is wrapped in parens
+  // and can contain any byte except null — including literal `)`. The
+  // canonical way to skip it is `lastIndexOf(")")` because the comm
+  // string is guaranteed to be followed by ` <state> …`, and `state`
+  // is one of " RSDZTtWXxKWPI" — none of which contain `)`. So the
+  // LAST `)` in the line always terminates the comm field.
+  const tailStart = statLine.lastIndexOf(")");
+  if (tailStart < 0) return null;
+  const tokens = statLine.slice(tailStart + 1).trim().split(/\s+/);
+  // After the closing `)`, the next field is `state` (index 0 of
+  // tokens, which corresponds to field 3 of /proc/<pid>/stat).
+  // starttime is field 22, so index 22 - 3 = 19.
+  const starttimeTicks = Number.parseInt(tokens[19] ?? "", 10);
+  if (!Number.isFinite(starttimeTicks)) return null;
+
+  // Boot wallclock (seconds since epoch) — `btime` in /proc/stat.
+  const btimeMatch = procStat.match(/^btime\s+(\d+)/m);
+  if (!btimeMatch) return null;
+  const bootEpochSec = Number.parseInt(btimeMatch[1], 10);
+  if (!Number.isFinite(bootEpochSec)) return null;
+
+  // USER_HZ (clock ticks per second). On Linux this is almost always
+  // 100 (`getconf CLK_TCK`); we can't read it from /proc directly
+  // but the constant has been 100 on every common distro for 20+
+  // years. If this ever changes we surface "unknown start time" by
+  // returning null via the sanity check below rather than computing
+  // a wrong answer.
+  const USER_HZ = 100;
+  const startEpochMs = bootEpochSec * 1000 + (starttimeTicks / USER_HZ) * 1000;
+
+  // Sanity range: process start must be between boot time and now
+  // (with a 5s slop for clock skew / leap-second weirdness). A
+  // result outside that band suggests USER_HZ drift, parsing bug,
+  // or a /proc impostor — return null and let the caller fall
+  // back to the conservative "treat as live" path.
+  const bootEpochMs = bootEpochSec * 1000;
+  const SLOP_MS = 5000;
+  if (startEpochMs < bootEpochMs - SLOP_MS || startEpochMs > now + SLOP_MS) {
+    return null;
+  }
+  return Math.floor(startEpochMs);
+}
+
 function pidStartTimeMs(pid: number): number | null {
   if (process.platform !== "linux") return null;
   try {
-    // /proc/<pid>/stat is one line. The comm field (field 2) is
-    // wrapped in parens and can contain spaces, so split on the
-    // closing `)` and parse the remaining whitespace-separated
-    // tokens. Field 22 (starttime) is index 19 of the post-`)` split.
-    const raw = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const tailStart = raw.lastIndexOf(")");
-    if (tailStart < 0) return null;
-    const tokens = raw.slice(tailStart + 1).trim().split(/\s+/);
-    // After the closing `)`, the next field is `state` (index 0 of
-    // tokens, which corresponds to field 3 of /proc/<pid>/stat).
-    // starttime is field 22, so index 22 - 3 = 19.
-    const starttimeTicks = Number.parseInt(tokens[19] ?? "", 10);
-    if (!Number.isFinite(starttimeTicks)) return null;
-
-    // Boot wallclock (seconds since epoch) — `btime` in /proc/stat.
+    const statLine = readFileSync(`/proc/${pid}/stat`, "utf8");
     const procStat = readFileSync("/proc/stat", "utf8");
-    const btimeMatch = procStat.match(/^btime\s+(\d+)/m);
-    if (!btimeMatch) return null;
-    const bootEpochSec = Number.parseInt(btimeMatch[1], 10);
-    if (!Number.isFinite(bootEpochSec)) return null;
-
-    // USER_HZ (clock ticks per second). On Linux this is almost always
-    // 100 (`getconf CLK_TCK`); we can't read it from /proc directly
-    // but the constant has been 100 on every common distro for 20+
-    // years. If this ever changes we surface "unknown start time" by
-    // returning null via the sanity check below rather than computing
-    // a wrong answer.
-    const USER_HZ = 100;
-    const startEpochMs = bootEpochSec * 1000 + (starttimeTicks / USER_HZ) * 1000;
-
-    // Sanity range: process start must be between boot time and now
-    // (with a 5s slop for clock skew / leap-second weirdness). A
-    // result outside that band suggests USER_HZ drift, parsing bug,
-    // or a /proc impostor — return null and let the caller fall
-    // back to the conservative "treat as live" path.
-    const now = Date.now();
-    const bootEpochMs = bootEpochSec * 1000;
-    const SLOP_MS = 5000;
-    if (startEpochMs < bootEpochMs - SLOP_MS || startEpochMs > now + SLOP_MS) {
-      return null;
-    }
-    return Math.floor(startEpochMs);
+    return parseProcStartTimeMs(statLine, procStat, Date.now());
   } catch {
     return null;
   }

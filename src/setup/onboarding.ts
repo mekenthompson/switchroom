@@ -88,11 +88,22 @@ export function buildAccessJson(
   topicId?: number,
   opts: { dmOnly?: boolean } = {},
 ): string {
+  // Issue #1001: defensive String() coercion so a numeric userId from a
+  // legacy `~/.switchroom/user.json` or a buggy caller can't land an
+  // unquoted JSON number in allowFrom (which the gateway then rejects
+  // as "non-string entries — treating as empty").
   const access: Record<string, unknown> = {
     dmPolicy: "allowlist",
-    allowFrom: [userId],
+    allowFrom: [String(userId)],
   };
-  if (!opts.dmOnly) {
+  // Issue #1002: when no real forum chat ID is in scope (DM topology,
+  // or the v0.7 sentinel "0"), don't write a groups entry at all —
+  // an empty-string or sentinel-id key triggers the gateway's boot
+  // probe which then 404s and logs an unhandled rejection. `dmOnly`
+  // is the explicit signal; the empty/sentinel guard catches the
+  // implicit case where the operator skipped passing a chat id.
+  const hasRealForumChat = forumChatId !== "" && forumChatId !== "0";
+  if (!opts.dmOnly && hasRealForumChat) {
     access.groups = {
       [forumChatId]: {
         requireMention: false,

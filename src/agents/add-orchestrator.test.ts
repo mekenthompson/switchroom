@@ -856,6 +856,7 @@ describe("addAgent — forum topology (#543 acceptance)", () => {
       "777",
       "-1001234567890",
       42,
+      { dmOnly: false },
     );
     // The mock captured the right shape — verify it on disk too.
     const fs = require("node:fs") as typeof import("node:fs");
@@ -901,6 +902,7 @@ describe("addAgent — forum topology (#543 acceptance)", () => {
       "888",
       "-1009999999999",
       undefined,
+      { dmOnly: false },
     );
   });
 
@@ -942,6 +944,7 @@ describe("addAgent — forum topology (#543 acceptance)", () => {
       "555",
       "",
       undefined,
+      { dmOnly: true },
     );
   });
 });

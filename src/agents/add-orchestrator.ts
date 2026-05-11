@@ -356,15 +356,19 @@ export async function addAgent(opts: AddAgentOpts): Promise<AddAgentResult> {
   }
 
   // ── Step 5b: write access.json ───────────────────────────────────────────
-  // DM mode: only the per-user `allowFrom` matters; the `groups` block is
-  // written with an empty key and ignored by the gateway.
+  // DM mode: only the per-user `allowFrom` matters; passing `dmOnly: true`
+  // tells writeAccessJson to omit the `groups` block entirely so the
+  // gateway's boot probe doesn't 404 on a synthetic empty-string chat id
+  // (#1002).
   // Forum mode: the operator supplied --forum-chat-id, which becomes the
   // group key, and (optionally) --topic-id which scopes the policy to a
   // single forum topic.
   const agentDir = created.agentDir;
   const forumChatId = opts.topology === "forum" ? (opts.forumChatId ?? "") : "";
   const forumTopicId = opts.topology === "forum" ? opts.forumTopicId : undefined;
-  writeAccessJson(agentDir, userId, forumChatId, forumTopicId);
+  writeAccessJson(agentDir, userId, forumChatId, forumTopicId, {
+    dmOnly: opts.topology === "dm",
+  });
   log(
     `[5/6] Wrote access.json (allowFrom=[${userId}]` +
       (opts.topology === "forum"

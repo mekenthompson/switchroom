@@ -698,13 +698,15 @@ export class VaultBroker {
     socket.on("data", (chunk: Buffer) => {
       buffer += chunk.toString("utf8");
 
-      // Guard against oversized buffers (>64 KiB without a newline)
+      // Guard against oversized buffers (>64 KiB without a newline).
+      // `end(resp)` not `write(resp); destroy()` so the kernel flushes
+      // `resp` to the peer before FIN — same race shape as #988's
+      // unlock-handler fix.
       if (Buffer.byteLength(buffer, "utf8") > MAX_FRAME_BYTES) {
         const resp = encodeResponse(
           errorResponse("BAD_REQUEST", "Frame exceeds 64 KiB limit"),
         );
-        socket.write(resp);
-        socket.destroy();
+        socket.end(resp);
         return;
       }
 

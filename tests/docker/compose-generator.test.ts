@@ -30,7 +30,7 @@ import {
 } from "../../src/agents/compose.js";
 import type { SwitchroomConfig } from "../../src/config/schema.js";
 
-function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Record<string, unknown> }>): SwitchroomConfig {
+function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Record<string, unknown>; admin?: boolean }>): SwitchroomConfig {
   return {
     switchroom: { version: 1, agents_dir: "~/.switchroom/agents", skills_dir: "~/.switchroom/skills" },
     telegram: { bot_token: "x" },
@@ -42,6 +42,7 @@ function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Re
         {
           extends: cfg.extends,
           settings_raw: cfg.settings_raw,
+          admin: cfg.admin,
           schedule: [],
           tools: { allow: [], deny: [] },
           hooks: undefined,
@@ -623,6 +624,29 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
         new RegExp(`SWITCHROOM_AGENT_NAME:\\s*"${a}"`),
       );
     }
+  });
+
+  it("surfaces yaml admin: true as SWITCHROOM_AGENT_ADMIN=true on the agent container", () => {
+    // fails when: the compose generator stops propagating the
+    // schema-level `admin: true` flag to the gateway's runtime env.
+    // The gateway gates `/vault`, `/agents`, `/logs`, `/grant`,
+    // `/update` etc. on `SWITCHROOM_AGENT_ADMIN === "true"`
+    // (telegram-plugin/gateway/gateway.ts:514). Without this
+    // propagation the yaml field is silently a no-op — the
+    // operator sets `admin: true`, restarts, and the bot still
+    // rejects `/vault` with "this agent isn't admin-flagged".
+    // Discovered while setting up the UAT harness's
+    // `test-harness` agent for vault-UX scenarios.
+    const out = generateCompose({
+      config: makeConfig({
+        alice: { admin: true },
+        bob: {},
+      }),
+    });
+    const aliceEnv = envBlockFor(out, "alice");
+    const bobEnv = envBlockFor(out, "bob");
+    expect(aliceEnv).toMatch(/SWITCHROOM_AGENT_ADMIN:\s*"true"/);
+    expect(bobEnv).not.toMatch(/SWITCHROOM_AGENT_ADMIN/);
   });
 
   // Layer 1 (persistent agent HOME). The agent container runs as a

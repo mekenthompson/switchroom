@@ -421,7 +421,7 @@ const TOOL_SCHEMAS = [
   {
     name: 'vault_request_access',
     description:
-      'Ask the operator (via Telegram approval card) to grant this agent read or write access to a vault key it does not yet have. Use this when you hit `VAULT-BROKER-DENIED` or when you know upfront that an upcoming task needs a key you lack. Renders a [Approve] [Deny] card; on approve, the broker mints a scoped grant token and writes it to the agent\'s `.vault-token` file — your next vault read will succeed without intervention. You CANNOT mint or self-elevate; only the operator can tap Approve. Wait for confirmation before retrying the vault op. Do NOT call this for keys you already have access to (use the normal `vault:<key>` reference) and do NOT spam-request (the operator sees every card).',
+      'Ask the operator (via Telegram approval card) to grant this agent read or write access to a vault key it does not yet have. Use this when you hit `VAULT-BROKER-DENIED` or when you know upfront that an upcoming task needs a key you lack. Renders a [Approve] [Deny] card; on approve, the broker mints a scoped grant token and writes it to the agent\'s `.vault-token` file. You CANNOT mint or self-elevate; only the operator can tap Approve. After firing this tool, END YOUR TURN cleanly — the gateway will inject a fresh inbound message (with `<channel source="vault_grant_approved">`) when the operator approves, kicking off a new turn where you can resume the original task. Do NOT call this for keys you already have access to (use the normal `vault:<key>` reference) and do NOT spam-request (the operator sees every card).',
     inputSchema: {
       type: 'object',
       properties: {

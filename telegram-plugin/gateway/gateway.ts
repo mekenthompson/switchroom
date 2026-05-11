@@ -8192,6 +8192,53 @@ async function performVaultAccessApproval(
       )
       .catch(() => {})
   }
+
+  // #1052: deliver a synthetic inbound message back to the agent so
+  // the task that fired vault_request_access auto-resumes — without
+  // this, the agent's turn ended after the tool call ("waiting for
+  // approval") and the operator has to send a fresh message to kick
+  // it back into action.
+  //
+  // Uses the existing inject_inbound primitive (cron's pattern from
+  // dispatch.ts:180-206). The bridge sees a normal channel event,
+  // renders it as `<channel source="vault_grant_approved">`, and the
+  // agent starts a new turn with the context that the operator just
+  // approved.
+  //
+  // The synthetic message text is concise + actionable so the agent
+  // knows (a) which key was approved, (b) at what scope, (c) what to
+  // do next. Meta carries the structured fields for forensics + for
+  // future filters that want to suppress these in the chat tail.
+  const grantedSyntheticTs = Date.now()
+  const synthetic: InboundMessage = {
+    type: 'inbound',
+    chatId: pending.chat_id,
+    messageId: grantedSyntheticTs, // synthetic — no Telegram message id exists
+    user: 'vault-broker',
+    userId: 0,
+    ts: grantedSyntheticTs,
+    text:
+      `✅ Operator approved your vault access request for ` +
+      `\`${pending.key}\` (scope=${pending.scope}, ` +
+      `${Math.round(pending.ttl_seconds / 86400)}d, grant=${id}). ` +
+      `The token has been written. Please resume the task that was ` +
+      `waiting on this credential — fetch via the usual switchroom vault ` +
+      `get path.`,
+    meta: {
+      source: 'vault_grant_approved',
+      agent: pending.agent,
+      key: pending.key,
+      scope: pending.scope,
+      grant_id: id,
+      stage_id: stageId,
+      operator_id: senderId,
+    },
+  }
+  const delivered = ipcServer.sendToAgent(pending.agent, synthetic)
+  process.stderr.write(
+    `telegram gateway: vault_grant_approved injection agent=${pending.agent} ` +
+    `key=${pending.key} stage=${stageId} delivered=${delivered}\n`,
+  )
 }
 
 async function handleVaultRequestAccessCallback(ctx: Context, data: string): Promise<void> {

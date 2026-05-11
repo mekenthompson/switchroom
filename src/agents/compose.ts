@@ -488,6 +488,17 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // and falls back to the interactive unlock flow, so operators who
   // never enabled auto-unlock are unaffected.
   lines.push(`      - ${homePrefix}/.switchroom/vault-auto-unlock:/state/vault-auto-unlock:ro`);
+  // Audit log — bind-mount the host file into the broker so deny/
+  // allow events the broker writes land on the host fs. Without this
+  // mount the broker writes to `/root/.switchroom/vault-audit.log`
+  // inside the container (which evaporates on recreate and is
+  // unreachable to both the host CLI `switchroom vault audit` and
+  // the admin-agent :ro mount wired in #1024). The host file is
+  // pre-created at mode 0644 by `ensureHostMountSources()` so docker
+  // doesn't auto-create a directory at the source path. Writable
+  // because broker appends; broker runs as root with CAP_DAC_OVERRIDE
+  // so file ownership/mode doesn't gate the write path. See #1025.
+  lines.push(`      - ${homePrefix}/.switchroom/vault-audit.log:/root/.switchroom/vault-audit.log`);
   // /etc/machine-id passthrough — required so the broker can derive
   // the same machine-bound key the host's `enable-auto-unlock` used
   // to seal the auto-unlock blob. The agent base image (node:22-bookworm-slim)

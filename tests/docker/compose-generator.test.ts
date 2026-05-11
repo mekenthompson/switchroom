@@ -471,6 +471,26 @@ describe("generateCompose", () => {
     expect(block).toMatch(/-\s+\/etc\/machine-id:\/etc\/machine-id:ro/);
   });
 
+  it("broker bind-mounts the host vault-audit.log onto /root/.switchroom/vault-audit.log (#1025)", () => {
+    // fails when: the broker writes its audit log to a container-local
+    // path that evaporates on recreate and is invisible to both the
+    // host CLI (`switchroom vault audit`) and the admin-agent :ro
+    // mount wired up by #1024. Broker resolves the log path via
+    // `os.homedir()` (`src/vault/broker/audit-log.ts:101`); broker
+    // runs as root so HOME=/root inside the container. Without this
+    // mount the host file never sees a single entry — exactly the
+    // failure mode #1024's Recent-denials section was meant to
+    // surface, masked by missing data. Mount is RW (not :ro) because
+    // the broker appends; `ensureHostMountSources()` in apply.ts
+    // pre-creates the source file so docker doesn't auto-create a
+    // directory at the mount path.
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const block = /vault-broker:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toMatch(
+      /-\s+\$\{HOME\}\/\.switchroom\/vault-audit\.log:\/root\/\.switchroom\/vault-audit\.log(?!:ro)/,
+    );
+  });
+
   it("kernel keeps CHOWN + FOWNER (mirrors broker socket-ownership flow)", () => {
     const out = generateCompose({ config: makeConfig({ a: {} }) });
     const block = /approval-kernel:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
@@ -662,13 +682,19 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
     }
   });
 
-  it("skips the audit-log mount on fresh installs where the host log doesn't exist yet (no docker compose hard-fail)", async () => {
-    // fails when: the existsSync guard is dropped — docker compose
-    // `up` hard-fails when a `:ro` source path is missing. The
-    // audit log is created lazily by the broker on the first ACL
-    // decision; fresh installs (no denials ever fired) would then
-    // break the admin agent's container startup entirely. Same
-    // pattern as the skills/credentials mounts below.
+  it("skips the admin-agent audit-log mount on fresh installs where the host log doesn't exist yet (no docker compose hard-fail)", async () => {
+    // fails when: the existsSync guard on the AGENT-side :ro mount
+    // is dropped — docker compose `up` hard-fails when a `:ro`
+    // source path is missing. Before #1025 the audit log was created
+    // lazily by the broker on the first ACL decision, so a fresh
+    // install (no denials ever fired) could break admin agent
+    // startup. #1025 then made `ensureHostMountSources()` pre-create
+    // the file, which closes the timing window — but we keep the
+    // existsSync guard on the agent-side mount as belt-and-braces
+    // for the `compose-only-without-apply` codepath (tests, manual
+    // re-generation). The broker-side RW mount is intentionally
+    // unconditional: apply always pre-creates it, and the broker
+    // image already expects to write there.
     const { mkdtempSync, rmSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
@@ -679,7 +705,16 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
         config: makeConfig({ alice: { admin: true } }),
         homeDir: tmp,
       });
-      expect(out).not.toContain("vault-audit.log");
+      // Agent-side :ro mount must NOT appear without the host file.
+      expect(out).not.toMatch(
+        /agent-alice:[\s\S]*?vault-audit\.log:\/state\/agent\/home\/\.switchroom\/vault-audit\.log:ro/,
+      );
+      // Broker-side RW mount IS still emitted (apply pre-creates the
+      // source). The broker depends on it for audit-log persistence
+      // across container recreate (#1025).
+      expect(out).toMatch(
+        /vault-broker:[\s\S]*?vault-audit\.log:\/root\/\.switchroom\/vault-audit\.log/,
+      );
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

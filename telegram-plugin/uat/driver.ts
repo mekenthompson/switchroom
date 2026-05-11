@@ -240,22 +240,125 @@ export class Driver {
     };
   }
 
-  // -------- Deferred to #866 / Phase 2b --------
-
   /**
-   * TODO(#866): subscribe to message-reaction updates. mtcute delivers
-   * `updateMessageReactions` via the raw update stream; the driver
-   * should compute add/remove ops vs the prior snapshot so scenarios
-   * can assert on the 👀→🤔→🔥→👍 sequence. Held out of #865 because
-   * mtcute's user-account reaction parsing has rougher edges than
-   * `onNewMessage` and benefits from a dedicated PR + test.
+   * Subscribe to message-reaction add/remove ops in `chatId` (and
+   * optionally on a specific `messageId`).
+   *
+   * Implementation notes:
+   *
+   * - mtcute parses `updateBotMessageReaction` for bot accounts; for
+   *   USER accounts (the driver) we have to handle the raw
+   *   `updateMessageReactions` ourselves via `onRawUpdate`. The TL
+   *   carries the full new reaction set, not a delta — we diff
+   *   against the prior set we've cached for the same `msgId` to
+   *   emit add (`+`) / remove (`-`) ops.
+   *
+   * - For 1:1 DMs the update's `peer` is `peerUser` carrying the
+   *   OTHER party's user_id (the bot). Filtering by
+   *   `peer.userId === chatId` matches the driver-side convention
+   *   where `chatId === botUserId`.
+   *
+   * - Reactions are emitted only when they CHANGE. The initial
+   *   reaction-add fires as `op: "+"`; a follow-up
+   *   `setMessageReaction` that REPLACES the prior emoji emits `-`
+   *   for the old + `+` for the new.
+   *
+   * - Custom emojis (`reactionCustomEmoji`) are skipped — scenarios
+   *   that need them aren't in scope and parsing them would require
+   *   resolving the document id to an alias.
    */
   observeReactions(
-    _chatId: number,
-    _opts?: { messageId?: number },
+    chatId: number,
+    opts?: { messageId?: number },
   ): AsyncIterable<ObservedReaction> {
-    throw new Error("Driver.observeReactions not implemented (#866)");
+    const c = this.requireClient();
+    const targetMsgId = opts?.messageId;
+    const queue: ObservedReaction[] = [];
+    const waiters: Array<(m: IteratorResult<ObservedReaction>) => void> = [];
+    let closed = false;
+    const prior = new Map<number, Set<string>>();
+
+    const dispatch = (r: ObservedReaction): void => {
+      const w = waiters.shift();
+      if (w) w({ value: r, done: false });
+      else queue.push(r);
+    };
+
+    const onRaw = (info: { update: unknown }): void => {
+      const u = info.update as {
+        _: string;
+        peer?: { _: string; userId?: number };
+        msgId?: number;
+        reactions?: {
+          results?: Array<{
+            reaction: { _: string; emoticon?: string };
+          }>;
+        };
+      };
+      if (u._ !== "updateMessageReactions") return;
+      if (u.peer?._ !== "peerUser") return;
+      if (u.peer.userId !== chatId) return;
+      const msgId = u.msgId;
+      if (typeof msgId !== "number") return;
+      if (targetMsgId !== undefined && msgId !== targetMsgId) return;
+
+      const now = new Set<string>();
+      for (const rc of u.reactions?.results ?? []) {
+        if (
+          rc.reaction?._ === "reactionEmoji" &&
+          typeof rc.reaction.emoticon === "string"
+        ) {
+          now.add(rc.reaction.emoticon);
+        }
+      }
+      const before = prior.get(msgId) ?? new Set<string>();
+      const date = new Date();
+      for (const e of now) {
+        if (!before.has(e)) {
+          dispatch({ chatId, messageId: msgId, emoji: e, op: "+", date });
+        }
+      }
+      for (const e of before) {
+        if (!now.has(e)) {
+          dispatch({ chatId, messageId: msgId, emoji: e, op: "-", date });
+        }
+      }
+      prior.set(msgId, now);
+    };
+
+    c.onRawUpdate.add(onRaw);
+
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      c.onRawUpdate.remove(onRaw);
+      while (waiters.length > 0) {
+        waiters.shift()?.({ value: undefined as never, done: true });
+      }
+    };
+
+    return {
+      [Symbol.asyncIterator](): AsyncIterator<ObservedReaction> {
+        return {
+          next(): Promise<IteratorResult<ObservedReaction>> {
+            if (queue.length > 0) {
+              return Promise.resolve({ value: queue.shift()!, done: false });
+            }
+            if (closed) {
+              return Promise.resolve({ value: undefined as never, done: true });
+            }
+            return new Promise((resolve) => waiters.push(resolve));
+          },
+          return(): Promise<IteratorResult<ObservedReaction>> {
+            close();
+            return Promise.resolve({ value: undefined as never, done: true });
+          },
+        };
+      },
+    };
   }
+
+  // -------- Deferred to #866 / Phase 2c --------
 
   /**
    * TODO(#866): subscribe to pin/unpin events on `chatId`/topic.

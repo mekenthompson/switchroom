@@ -213,7 +213,7 @@ export async function expectReaction(
   return trail;
 }
 
-export type CardPhase = "boot" | "working" | "done" | "error";
+export type CardPhase = "boot" | "working" | "background" | "done" | "error";
 
 export interface PinnedCardSnapshot {
   chatId: number;
@@ -338,15 +338,26 @@ export async function waitForCardPhase(
  * Detect the progress card's phase from its rendered text.
  *
  * The actual card render (telegram-plugin/progress-card.ts) uses
- * emoji markers: `✅` for done, `❌` for errors, `🤖` while the
- * agent is working, `⏳` during the boot-card window. These markers
- * are stable enough to key on for UAT — finer parsing (checklist
- * items, sub-agent status) is out of scope.
+ * emoji markers in the header: `✅` for done, `❌` for errors, `⚙️`
+ * while working (foreground), `🌀` for Background (parent done but
+ * fleet still running, see #862 / status-card-design.md §Header),
+ * and `⏳` during the boot-card window. These markers are stable
+ * enough to key on for UAT — finer parsing (checklist items,
+ * sub-agent row content) is out of scope.
+ *
+ * Phase precedence (highest first): error → done → background →
+ * working → boot. "background" sits above "working" because the
+ * Background phase implies parent reached terminal state — the
+ * card is no longer in foreground "working" mode even though the
+ * fleet is still alive. Tests asserting "is still working" should
+ * use either "working" or "background" depending on whether the
+ * parent has replied.
  */
 function detectPhase(text: string): CardPhase | "unknown" {
-  if (/✅|\bDone\b/i.test(text)) return "done";
   if (/❌|\bFailed\b|\bError\b/i.test(text)) return "error";
-  if (/🤖|\bWorking\b/i.test(text)) return "working";
+  if (/✅|\bDone\b/i.test(text)) return "done";
+  if (/🌀|\bBackground\b/i.test(text)) return "background";
+  if (/⚙️|🤖|\bWorking\b/i.test(text)) return "working";
   if (/⏳|\bStarting\b/i.test(text)) return "boot";
   return "unknown";
 }

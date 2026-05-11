@@ -504,7 +504,7 @@ describe("waitForCardPhase", () => {
 });
 
 describe("detectPhase (via expectPinnedCard)", () => {
-  it("classifies ✅ → done, ❌ → error, 🤖 → working, ⏳ → boot", async () => {
+  it("classifies ✅ → done, ❌ → error, 🤖/⚙️ → working, 🌀 → background, ⏳ → boot", async () => {
     // fails when: the phase regexes drift away from the production
     // markers — would cause every UAT scenario that asserts a phase
     // to either fail with "unknown" or grab the wrong phase.
@@ -512,6 +512,10 @@ describe("detectPhase (via expectPinnedCard)", () => {
       { text: "✅ Done — 3 items", phase: "done" },
       { text: "❌ Failed: timeout", phase: "error" },
       { text: "🤖 Working on tool call…", phase: "working" },
+      // Two-zone v2 header marker (post-#1039): ⚙️ Working… instead of 🤖.
+      { text: "⚙️ <b>Working…</b> · ⏱ 00:12 · 🔧 3", phase: "working" },
+      // Background phase — parent done, fleet still running (#1039 + RFC).
+      { text: "🌀 <b>Background</b> · ⏱ 00:30 · 🔧 7 · 🤖 1", phase: "background" },
       { text: "⏳ Starting up…", phase: "boot" },
       { text: "completely off-script text", phase: "unknown" },
     ];
@@ -523,5 +527,21 @@ describe("detectPhase (via expectPinnedCard)", () => {
       const result = await expectPinnedCard(driver, 100, { timeout: 200 });
       expect(result.phase).toBe(phase);
     }
+  });
+
+  it("done beats background when both markers appear (precedence: error > done > background > working > boot)", async () => {
+    // fails when: the precedence is reordered. A card whose final
+    // render contains both ✅ Done in the header AND a stale 🌀
+    // Background fragment somewhere (unlikely in production but
+    // achievable via a buggy render path) MUST classify as done,
+    // not background — otherwise waitForCardPhase("done") would
+    // hang on the terminal card.
+    const driver = stubPinDriver({
+      pins: [pin(1, true)],
+      fetchById: () =>
+        fetchedMsg(1, "✅ Done — 5 items (was 🌀 Background)"),
+    });
+    const result = await expectPinnedCard(driver, 100, { timeout: 200 });
+    expect(result.phase).toBe("done");
   });
 });

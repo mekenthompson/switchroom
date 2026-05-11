@@ -10,11 +10,15 @@
 import { describe, expect, it } from "vitest";
 import {
   expectMessage,
+  expectPinnedCard,
   expectReaction,
+  waitForCardPhase,
+  type PinnedCardSnapshot,
 } from "../telegram-plugin/uat/assertions.js";
 import type {
   Driver,
   ObservedMessage,
+  ObservedPin,
   ObservedReaction,
 } from "../telegram-plugin/uat/driver.js";
 
@@ -277,5 +281,229 @@ describe("expectReaction: sequence matching", () => {
     ).rejects.toThrow();
     const elapsed = Date.now() - t0;
     expect(elapsed).toBeLessThan(500);
+  });
+});
+
+// ---------- Pinned-card scenarios ----------
+
+interface PinCardStubBehaviour {
+  pins?: ObservedPin[];
+  edits?: ObservedMessage[];
+  fetchById?: (id: number) => ObservedMessage | null;
+}
+
+function stubPinDriver(b: PinCardStubBehaviour): Driver {
+  return {
+    observePins(_chatId: number): AsyncIterable<ObservedPin> {
+      const items = b.pins ?? [];
+      let i = 0;
+      return {
+        [Symbol.asyncIterator](): AsyncIterator<ObservedPin> {
+          return {
+            next(): Promise<IteratorResult<ObservedPin>> {
+              if (i < items.length) {
+                return Promise.resolve({ value: items[i++]!, done: false });
+              }
+              return new Promise(() => {});
+            },
+            return(): Promise<IteratorResult<ObservedPin>> {
+              return Promise.resolve({ value: undefined as never, done: true });
+            },
+          };
+        },
+      };
+    },
+    observeMessages(_chatId: number): AsyncIterable<ObservedMessage> {
+      const items = b.edits ?? [];
+      let i = 0;
+      return {
+        [Symbol.asyncIterator](): AsyncIterator<ObservedMessage> {
+          return {
+            next(): Promise<IteratorResult<ObservedMessage>> {
+              if (i < items.length) {
+                return Promise.resolve({ value: items[i++]!, done: false });
+              }
+              return new Promise(() => {});
+            },
+            return(): Promise<IteratorResult<ObservedMessage>> {
+              return Promise.resolve({ value: undefined as never, done: true });
+            },
+          };
+        },
+      };
+    },
+    getMessage(_chatId: number, messageId: number): Promise<ObservedMessage | null> {
+      const fetched = b.fetchById?.(messageId) ?? null;
+      return Promise.resolve(fetched);
+    },
+  } as unknown as Driver;
+}
+
+function pin(messageId: number, pinned: boolean): ObservedPin {
+  return { chatId: 100, messageId, pinned, date: new Date() };
+}
+
+function fakeEdit(messageId: number, text: string): ObservedMessage {
+  return {
+    chatId: 100,
+    messageId,
+    text,
+    senderUserId: 555,
+    fromBot: true,
+    date: new Date(),
+    edited: true,
+  };
+}
+
+function fetchedMsg(messageId: number, text: string): ObservedMessage {
+  return {
+    chatId: 100,
+    messageId,
+    text,
+    senderUserId: 555,
+    fromBot: true,
+    date: new Date(),
+    edited: false,
+  };
+}
+
+describe("expectPinnedCard", () => {
+  it("returns a snapshot with parsed phase on first pinned event", async () => {
+    // fails when: the snapshot loses the chatId — waitForCardPhase
+    // needs it to subscribe to observeMessages, and dropping it
+    // would force callers to pass it again at every transition,
+    // re-introducing the kind of binding bug we just fixed with the
+    // sendDM closure capture.
+    const driver = stubPinDriver({
+      pins: [pin(42, true)],
+      fetchById: () => fetchedMsg(42, "⏳ Starting…"),
+    });
+    const snap = await expectPinnedCard(driver, 100, { timeout: 1000 });
+    expect(snap.chatId).toBe(100);
+    expect(snap.messageId).toBe(42);
+    expect(snap.phase).toBe("boot");
+    expect(snap.text).toContain("Starting");
+  });
+
+  it("skips unpin events and keeps waiting for the next pin", async () => {
+    // fails when: unpin events are treated as matches — the gateway
+    // does pin → unpin → re-pin during reflow; matching on the first
+    // unpin would surface a stale card text.
+    const driver = stubPinDriver({
+      pins: [pin(99, false), pin(42, true)],
+      fetchById: () => fetchedMsg(42, "🤖 Working…"),
+    });
+    const snap = await expectPinnedCard(driver, 100, { timeout: 1000 });
+    expect(snap.messageId).toBe(42);
+    expect(snap.phase).toBe("working");
+  });
+
+  it("keeps polling when getMessage returns null (race against delete)", async () => {
+    // fails when: a refactor treats null-result as a fatal error
+    // and aborts — a pin event then a quick edit-delete-edit cycle
+    // would crash the scenario instead of recovering on the next
+    // pin/edit.
+    let calls = 0;
+    const driver = stubPinDriver({
+      pins: [pin(42, true), pin(43, true)],
+      fetchById: (id) => {
+        calls++;
+        return id === 43 ? fetchedMsg(43, "✅ Done") : null;
+      },
+    });
+    const snap = await expectPinnedCard(driver, 100, { timeout: 1000 });
+    expect(snap.messageId).toBe(43);
+    expect(calls).toBe(2);
+  });
+
+  it("times out with a chat-id-bearing error when no pin arrives", async () => {
+    // fails when: the error message loses the chat_id, making CI
+    // flake reports ambiguous between "card never pinned" and "wrong
+    // chat being watched".
+    const driver = stubPinDriver({ pins: [] });
+    await expect(
+      expectPinnedCard(driver, 100, { timeout: 80 }),
+    ).rejects.toThrow(/chat=100.*80ms/);
+  });
+});
+
+describe("waitForCardPhase", () => {
+  function snap(phase: PinnedCardSnapshot["phase"], text: string): PinnedCardSnapshot {
+    return { chatId: 100, messageId: 42, text, phase };
+  }
+
+  it("resolves immediately when the input snapshot is already at the target phase", async () => {
+    // fails when: the fast-path early-return is removed — a scenario
+    // that observes the very first card-render at "done" (fast turn
+    // with delay_ms small) would re-subscribe to observeMessages and
+    // wait forever for an edit that never comes.
+    const driver = stubPinDriver({ edits: [] });
+    const result = await waitForCardPhase(driver, snap("done", "✅ Done"), "done", { timeout: 100 });
+    expect(result.phase).toBe("done");
+  });
+
+  it("matches the FIRST edit that detects the target phase", async () => {
+    // fails when: the matcher accumulates instead of short-circuits
+    // — long-running scenarios would skip the early "done" edit and
+    // race a later turn's "working" edit, returning the wrong card.
+    const driver = stubPinDriver({
+      edits: [
+        fakeEdit(42, "🤖 Working on item 1…"),
+        fakeEdit(42, "🤖 Working on item 2…"),
+        fakeEdit(42, "✅ Done — 2 items"),
+      ],
+    });
+    const result = await waitForCardPhase(driver, snap("boot", "⏳ Starting"), "done", { timeout: 1000 });
+    expect(result.phase).toBe("done");
+    expect(result.text).toContain("Done");
+  });
+
+  it("ignores edits to other messages in the chat (multi-card chats)", async () => {
+    // fails when: the messageId filter is dropped — a chat with two
+    // concurrent agents would interleave their card edits and the
+    // helper would resolve on the wrong agent's "done".
+    const driver = stubPinDriver({
+      edits: [
+        fakeEdit(99, "✅ Done — different card"),
+        fakeEdit(42, "✅ Done — our card"),
+      ],
+    });
+    const result = await waitForCardPhase(driver, snap("working", "🤖"), "done", { timeout: 1000 });
+    expect(result.messageId).toBe(42);
+    expect(result.text).toContain("our card");
+  });
+
+  it("times out with a message-id-bearing error when phase never lands", async () => {
+    // fails when: the error message loses the message_id, making
+    // a stuck-card report ambiguous about which card is misbehaving.
+    const driver = stubPinDriver({
+      edits: [fakeEdit(42, "🤖 Working forever…")],
+    });
+    await expect(
+      waitForCardPhase(driver, snap("working", "🤖"), "done", { timeout: 80 }),
+    ).rejects.toThrow(/card 42.*phase="done".*80ms/);
+  });
+});
+
+describe("detectPhase (via expectPinnedCard)", () => {
+  it("classifies ✅ → done, ❌ → error, 🤖 → working, ⏳ → boot", async () => {
+    // fails when: the phase regexes drift away from the production
+    // markers — would cause every UAT scenario that asserts a phase
+    // to either fail with "unknown" or grab the wrong phase.
+    const cases: Array<{ text: string; phase: string }> = [
+      { text: "✅ Done — 3 items", phase: "done" },
+      { text: "❌ Failed: timeout", phase: "error" },
+      { text: "🤖 Working on tool call…", phase: "working" },
+      { text: "⏳ Starting up…", phase: "boot" },
+      { text: "completely off-script text", phase: "unknown" },
+    ];
+    for (const { text, phase } of cases) {
+      const driver = stubPinDriver({
+        pins: [pin(1, true)],
+        fetchById: () => fetchedMsg(1, text),
+      });
+      const result = await expectPinnedCard(driver, 100, { timeout: 200 });
+      expect(result.phase).toBe(phase);
+    }
   });
 });

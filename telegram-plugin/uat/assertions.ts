@@ -213,41 +213,133 @@ export async function expectReaction(
   return trail;
 }
 
+export type CardPhase = "boot" | "working" | "done" | "error";
+
 export interface PinnedCardSnapshot {
+  chatId: number;
   messageId: number;
   text: string;
-  html?: string;
-  /** Production phase markers: `boot` | `working` | `done` | `error`. */
-  phase: string;
+  /** Detected phase, or `"unknown"` when the text doesn't match any marker. */
+  phase: CardPhase | "unknown";
 }
 
 /**
- * TODO(#866): wait for a pinned message to appear in
- * `chatId`/topic (the progress card). Resolves with a snapshot of
- * its current text/phase.
+ * Wait for a pinned message to appear in `chatId` (the progress
+ * card). Resolves with a snapshot of its current text + phase.
+ *
+ * Implementation:
+ * 1. Subscribe to `driver.observePins(chatId)`.
+ * 2. On the first pin event, fetch the message text via
+ *    `driver.getMessage` (the pin update carries only ids).
+ * 3. Return a snapshot with the parsed phase.
+ *
+ * Fast-turn note: the gateway's `progress_card.delay_ms` (default
+ * 45s) suppresses the card entirely for short turns. UAT runs
+ * against the standard-runtime test-harness agent will time out
+ * here unless the operator sets `delay_ms` to something small in
+ * `switchroom.yaml` under the agent's `channels.telegram` block.
  */
 export async function expectPinnedCard(
-  _driver: Driver,
-  _chatId: number,
-  _opts: PollOptions & { threadId?: number },
+  driver: Driver,
+  chatId: number,
+  opts: PollOptions & { threadId?: number },
 ): Promise<PinnedCardSnapshot> {
-  throw new Error("expectPinnedCard not implemented (Phase 2)");
+  void opts.threadId; // forum/topic routing rolls in with Phase 2d
+  const iter = driver.observePins(chatId)[Symbol.asyncIterator]();
+  const deadline = Date.now() + opts.timeout;
+  try {
+    while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      const next = await raceTimeout(iter.next(), remaining);
+      if (next === "timeout") break;
+      if (next.done === true) break;
+      const pin = next.value;
+      if (!pin.pinned) continue; // skip unpin events; we want pins
+      // Fetch the message body to compose the snapshot. If the
+      // message has been deleted in the gap between pin event and
+      // lookup, treat as a miss and keep waiting.
+      const msg = await driver.getMessage(chatId, pin.messageId).catch(() => null);
+      if (!msg) continue;
+      return {
+        chatId,
+        messageId: pin.messageId,
+        text: msg.text,
+        phase: detectPhase(msg.text),
+      };
+    }
+  } finally {
+    await iter.return?.();
+  }
+  throw new Error(
+    `expectPinnedCard: no pinned message in chat=${chatId} within ${opts.timeout}ms`,
+  );
 }
 
 /**
- * TODO(#866): wait for the pinned progress card to transition to
- * `phase`. The harness must read live edits, not just the snapshot
- * captured by `expectPinnedCard`.
+ * Wait for the pinned progress card to transition to `phase`.
+ *
+ * The gateway updates the card via `editMessage`, NOT by sending a
+ * new message. We observe edits via `driver.observeMessages` on
+ * the card's chat, filter to `msg.messageId === card.messageId`,
+ * and detect the target phase via the same regex set as
+ * `detectPhase`. If the snapshot we were handed is already at the
+ * target phase (e.g. a fast-turn scenario where the card was
+ * first-rendered straight at `done`), resolve immediately.
+ *
+ * The iterator yields a fresh `PinnedCardSnapshot` for each
+ * matching edit, so callers can chain phase transitions
+ * (`boot → working → done`) without re-subscribing.
  */
 export async function waitForCardPhase(
-  _driver: Driver,
-  _card: PinnedCardSnapshot,
-  _phase: "boot" | "working" | "done" | "error",
-  _opts: PollOptions,
+  driver: Driver,
+  card: PinnedCardSnapshot,
+  phase: CardPhase,
+  opts: PollOptions,
 ): Promise<PinnedCardSnapshot> {
-  throw new Error("waitForCardPhase not implemented (Phase 2)");
+  if (detectPhase(card.text) === phase) return card;
+  const iter = driver
+    .observeMessages(card.chatId)
+    [Symbol.asyncIterator]();
+  const deadline = Date.now() + opts.timeout;
+  try {
+    while (Date.now() < deadline) {
+      const remaining = deadline - Date.now();
+      const next = await raceTimeout(iter.next(), remaining);
+      if (next === "timeout") break;
+      if (next.done === true) break;
+      const msg = next.value;
+      if (msg.messageId !== card.messageId) continue;
+      const detected = detectPhase(msg.text);
+      if (detected === phase) {
+        return {
+          chatId: card.chatId,
+          messageId: card.messageId,
+          text: msg.text,
+          phase,
+        };
+      }
+    }
+  } finally {
+    await iter.return?.();
+  }
+  throw new Error(
+    `waitForCardPhase: card ${card.messageId} did not reach phase="${phase}" within ${opts.timeout}ms`,
+  );
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/**
+ * Detect the progress card's phase from its rendered text.
+ *
+ * The actual card render (telegram-plugin/progress-card.ts) uses
+ * emoji markers: `✅` for done, `❌` for errors, `🤖` while the
+ * agent is working, `⏳` during the boot-card window. These markers
+ * are stable enough to key on for UAT — finer parsing (checklist
+ * items, sub-agent status) is out of scope.
+ */
+function detectPhase(text: string): CardPhase | "unknown" {
+  if (/✅|\bDone\b/i.test(text)) return "done";
+  if (/❌|\bFailed\b|\bError\b/i.test(text)) return "error";
+  if (/🤖|\bWorking\b/i.test(text)) return "working";
+  if (/⏳|\bStarting\b/i.test(text)) return "boot";
+  return "unknown";
 }

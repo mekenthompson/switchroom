@@ -358,18 +358,103 @@ export class Driver {
     };
   }
 
-  // -------- Deferred to #866 / Phase 2c --------
-
   /**
-   * TODO(#866): subscribe to pin/unpin events on `chatId`/topic.
-   * Used for progress-card-lifecycle assertions.
+   * Subscribe to pin/unpin events on `chatId`. Used for
+   * progress-card-lifecycle assertions.
+   *
+   * mtcute doesn't expose a parsed event for `updatePinnedMessages`
+   * — it comes through raw. Same shape as `observeReactions`. The
+   * raw update carries `messages: number[]` (one or many msg ids
+   * pinned/unpinned in one batch) plus a `pinned?: boolean` flag.
+   *
+   * 1:1 DM peer filter: `peer._ === "peerUser" && peer.userId === chatId`.
+   * Forum/channel routing rolls in with Phase 2d.
    */
   observePins(
-    _chatId: number,
+    chatId: number,
     _opts?: { threadId?: number },
   ): AsyncIterable<ObservedPin> {
-    throw new Error("Driver.observePins not implemented (#866)");
+    const c = this.requireClient();
+    const queue: ObservedPin[] = [];
+    const waiters: Array<(p: IteratorResult<ObservedPin>) => void> = [];
+    let closed = false;
+
+    const dispatch = (p: ObservedPin): void => {
+      const w = waiters.shift();
+      if (w) w({ value: p, done: false });
+      else queue.push(p);
+    };
+
+    const onRaw = (info: { update: unknown }): void => {
+      const u = info.update as {
+        _: string;
+        pinned?: boolean;
+        peer?: { _: string; userId?: number };
+        messages?: number[];
+      };
+      if (u._ !== "updatePinnedMessages") return;
+      if (u.peer?._ !== "peerUser") return;
+      if (u.peer.userId !== chatId) return;
+      const ids = u.messages ?? [];
+      const pinned = u.pinned !== false; // default-true per TL (`pinned` omitted = pin)
+      const date = new Date();
+      for (const messageId of ids) {
+        dispatch({ chatId, messageId, pinned, date });
+      }
+    };
+
+    c.onRawUpdate.add(onRaw);
+
+    const close = (): void => {
+      if (closed) return;
+      closed = true;
+      c.onRawUpdate.remove(onRaw);
+      while (waiters.length > 0) {
+        waiters.shift()?.({ value: undefined as never, done: true });
+      }
+    };
+
+    return {
+      [Symbol.asyncIterator](): AsyncIterator<ObservedPin> {
+        return {
+          next(): Promise<IteratorResult<ObservedPin>> {
+            if (queue.length > 0) {
+              return Promise.resolve({ value: queue.shift()!, done: false });
+            }
+            if (closed) {
+              return Promise.resolve({ value: undefined as never, done: true });
+            }
+            return new Promise((resolve) => waiters.push(resolve));
+          },
+          return(): Promise<IteratorResult<ObservedPin>> {
+            close();
+            return Promise.resolve({ value: undefined as never, done: true });
+          },
+        };
+      },
+    };
   }
+
+  /**
+   * Fetch a single message by id. Used by `expectPinnedCard` to grab
+   * the card text once a pin event fires (the pin update carries
+   * just the id — content has to be looked up separately).
+   *
+   * Returns `null` when the message doesn't exist or has been
+   * deleted between the pin event and this lookup.
+   */
+  async getMessage(
+    chatId: number,
+    messageId: number,
+  ): Promise<ObservedMessage | null> {
+    const c = this.requireClient();
+    const results = await c.getMessages(chatId, [messageId]);
+    const msg = results[0];
+    if (!msg) return null;
+    return toObserved(msg, false);
+  }
+
+  // -------- Deferred to #866 / Phase 2d --------
 
   /**
    * TODO(#866): send a voice note. Needed for `voice-inbound.test.ts`.
@@ -379,7 +464,7 @@ export class Driver {
     _oggPath: string,
     _opts?: SendTextOptions,
   ): Promise<{ messageId: number }> {
-    throw new Error("Driver.sendVoice not implemented (#866)");
+    throw new Error("Driver.sendVoice not implemented (Phase 2d)");
   }
 
   private requireClient(): TelegramClient {

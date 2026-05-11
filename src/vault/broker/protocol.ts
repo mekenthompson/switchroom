@@ -116,6 +116,15 @@ export const MintGrantRequestSchema = z.object({
    * Issue #969 P1b.
    */
   write_keys: z.array(z.string().min(1)).optional(),
+  /**
+   * Optional operator-passphrase attestation (#1012 Phase 2). When
+   * present and matching the broker's currently-unlocked passphrase,
+   * the call is treated as operator-attested regardless of the
+   * caller's agent identity — non-admin agents can mint grants on
+   * behalf of an operator who tapped Approve in their Telegram chat.
+   * Same trust posture used by PUT (`vault_request_save`).
+   */
+  passphrase: z.string().optional(),
 });
 
 export const ListGrantsRequestSchema = z.object({

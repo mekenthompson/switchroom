@@ -1466,6 +1466,47 @@ function sweepPendingVaultRequestSaves(): void {
 }
 
 /**
+ * Issue #1012 — agent-initiated vault ACL request. The agent calls
+ * `vault_request_access` when it hits VAULT-BROKER-DENIED (or
+ * preemptively, when it knows it'll need a key it doesn't yet have).
+ * The card carries [Approve] / [Deny] inline buttons; only the
+ * operator can mint the grant (same authorization gate as the
+ * existing /vault audit one-tap allow flow). The agent never sees
+ * the grant token directly — `mintGrantViaBroker` writes it to the
+ * agent's `.vault-token` file, which the agent's CLI reads on the
+ * next vault request.
+ *
+ * Mirrors PendingVaultRequestSave above (#969 P1a). No secret
+ * material is staged here — only the request metadata.
+ */
+interface PendingVaultRequestAccess {
+  /** Agent that initiated the request (process.env.SWITCHROOM_AGENT_NAME). */
+  agent: string
+  /** Chat the card was rendered into; edited on tap. */
+  chat_id: string
+  /** Card message id (filled in after we send the card). */
+  card_message_id?: number
+  /** Vault key the agent wants to read. */
+  key: string
+  /** 'read' (default) or 'write'. */
+  scope: 'read' | 'write'
+  /** Optional rationale the agent supplied; rendered on the card. */
+  reason?: string
+  /** Grant TTL in seconds (max 90 days; null = never, refused). */
+  ttl_seconds: number
+  /** Unix-ms timestamp; entries are reaped after VAULT_REQUEST_ACCESS_TTL_MS. */
+  staged_at: number
+}
+const pendingVaultRequestAccesses = new Map<string, PendingVaultRequestAccess>()
+const VAULT_REQUEST_ACCESS_TTL_MS = 10 * 60 * 1000
+function sweepPendingVaultRequestAccesses(): void {
+  const cutoff = Date.now() - VAULT_REQUEST_ACCESS_TTL_MS
+  for (const [k, v] of pendingVaultRequestAccesses) {
+    if (v.staged_at < cutoff) pendingVaultRequestAccesses.delete(k)
+  }
+}
+
+/**
  * Mint an approval-kernel decision row for a deferred-secret card
  * (MIGRATION.md §1). Best-effort: if the kernel/broker is unreachable, we
  * return null and the caller proceeds with the legacy-only path so the
@@ -2413,6 +2454,7 @@ const ALLOWED_TOOLS = new Set([
   'ask_user',
   'send_sticker', 'send_gif',
   'vault_request_save',
+  'vault_request_access',
 ])
 
 async function executeToolCall(tool: string, args: Record<string, unknown>): Promise<unknown> {
@@ -2454,6 +2496,8 @@ async function executeToolCall(tool: string, args: Record<string, unknown>): Pro
       return executeSendGif(args)
     case 'vault_request_save':
       return executeVaultRequestSave(args)
+    case 'vault_request_access':
+      return executeVaultRequestAccess(args)
     default:
       throw new Error(`unknown tool: ${tool}`)
   }
@@ -3523,6 +3567,113 @@ async function executeVaultRequestSave(args: Record<string, unknown>): Promise<{
       {
         type: 'text',
         text: `vault_request_save: card sent (stage_id=${stageId}, key=${key}). The user must tap a button before the secret is persisted; do not assume success until you see the user's next message confirming the outcome.`,
+      },
+    ],
+  }
+}
+
+/**
+ * Issue #1012 — render the agent-initiated ACL request approval card.
+ * Same visual language as the recent-denials one-tap allow (#969 P2b)
+ * but with the agent's own reason and an explicit [Deny] path.
+ */
+function buildVaultRequestAccessKeyboard(stageId: string): { inline_keyboard: Array<Array<{ text: string; callback_data: string }>> } {
+  return {
+    inline_keyboard: [
+      [
+        { text: '✅ Approve', callback_data: `vra:approve:${stageId}` },
+        { text: '🚫 Deny', callback_data: `vra:deny:${stageId}` },
+      ],
+    ],
+  }
+}
+
+function renderVaultRequestAccessCard(req: PendingVaultRequestAccess): string {
+  const lines: string[] = []
+  const scopeLabel = req.scope === 'write' ? 'write' : 'read'
+  const days = Math.round(req.ttl_seconds / 86400)
+  const durationLabel = days >= 1 ? `${days}d` : `${Math.round(req.ttl_seconds / 3600)}h`
+  lines.push(`🔐 <b>${escapeHtmlForTg(req.agent)}</b> wants vault access`)
+  lines.push(`key: <code>${escapeHtmlForTg(req.key)}</code>`)
+  lines.push(`scope: <code>${scopeLabel}</code> · duration: <code>${durationLabel}</code>`)
+  if (req.reason && req.reason.length > 0) {
+    lines.push(`why: <i>${escapeHtmlForTg(req.reason)}</i>`)
+  }
+  lines.push('')
+  lines.push(`<i>Tap Approve to mint a scoped grant token (same flow as <code>switchroom vault grant</code>). Tap Deny to refuse — the agent will receive a denial result.</i>`)
+  return lines.join('\n')
+}
+
+/**
+ * `vault_request_access` tool — agent surfaces an approval card asking
+ * the operator to grant a vault ACL it doesn't yet have. See #1012.
+ * Auth boundary: only operators on the gateway allowFrom list can tap;
+ * the agent itself can only REQUEST.
+ */
+async function executeVaultRequestAccess(args: Record<string, unknown>): Promise<{ content: Array<{ type: string; text: string }> }> {
+  const chat_id = args.chat_id as string
+  if (!chat_id) throw new Error('vault_request_access: chat_id is required')
+  const key = args.key as string
+  if (!key || typeof key !== 'string') throw new Error('vault_request_access: key is required')
+  if (!/^[A-Za-z0-9_.-]{1,200}$/.test(key)) {
+    throw new Error('vault_request_access: key must match [A-Za-z0-9_.-]{1,200}')
+  }
+  const scopeRaw = typeof args.scope === 'string' ? args.scope : 'read'
+  if (scopeRaw !== 'read' && scopeRaw !== 'write') {
+    throw new Error('vault_request_access: scope must be "read" or "write"')
+  }
+  const reason = typeof args.reason === 'string' ? args.reason : undefined
+  // Duration: accept a "30d" / "12h" string from the agent OR default
+  // to 30 days. Cap at 90 days — beyond that the operator should use
+  // the host CLI and pick the lifetime explicitly. Refuse "never"
+  // requests outright; agent-initiated grants must have a sunset.
+  let ttl_seconds = 30 * 24 * 60 * 60
+  const durRaw = args.duration
+  if (typeof durRaw === 'string' && durRaw.length > 0) {
+    const m = durRaw.match(/^(\d+)([dh])$/)
+    if (!m) {
+      throw new Error('vault_request_access: duration must look like "30d" or "12h"')
+    }
+    const n = Number(m[1])
+    const unit = m[2]
+    const parsed = unit === 'd' ? n * 86400 : n * 3600
+    const NINETY_DAYS = 90 * 86400
+    if (parsed <= 0 || parsed > NINETY_DAYS) {
+      throw new Error('vault_request_access: duration must be > 0 and <= 90d')
+    }
+    ttl_seconds = parsed
+  }
+  assertAllowedChat(chat_id)
+
+  const agentSlug = process.env.SWITCHROOM_AGENT_NAME || 'agent'
+
+  const stageId = randomBytes(4).toString('hex')
+  const pending: PendingVaultRequestAccess = {
+    agent: agentSlug,
+    chat_id,
+    key,
+    scope: scopeRaw,
+    reason,
+    ttl_seconds,
+    staged_at: Date.now(),
+  }
+  pendingVaultRequestAccesses.set(stageId, pending)
+  sweepPendingVaultRequestAccesses()
+
+  const text = renderVaultRequestAccessCard(pending)
+  const threadId = args.message_thread_id != null ? Number(args.message_thread_id) : undefined
+  const sent = await lockedBot.api.sendMessage(chat_id, text, {
+    parse_mode: 'HTML',
+    reply_markup: buildVaultRequestAccessKeyboard(stageId),
+    ...(threadId != null && Number.isFinite(threadId) ? { message_thread_id: threadId } : {}),
+  })
+  pending.card_message_id = sent.message_id
+
+  return {
+    content: [
+      {
+        type: 'text',
+        text: `vault_request_access: card sent (stage_id=${stageId}, key=${key}, scope=${scopeRaw}). Wait for the operator to tap Approve or Deny — do not retry the vault read until you see a confirmation message. If the card times out (10 min) you can re-request.`,
       },
     ],
   }
@@ -7801,6 +7952,123 @@ async function handleVaultRecentDenialCallback(ctx: Context, data: string): Prom
   )
 }
 
+/**
+ * Issue #1012 — handle a tap on the vault_request_access approval card.
+ *   vra:approve:<stageId> — mint a scoped grant token via the broker,
+ *                           write the token to the agent's
+ *                           `.vault-token` file, edit card to success.
+ *   vra:deny:<stageId>    — drop the staged request, edit card to denied.
+ *
+ * Same authorization gate as the recent-denials one-tap handler:
+ * sender must be on the gateway's allowFrom list.
+ */
+async function handleVaultRequestAccessCallback(ctx: Context, data: string): Promise<void> {
+  const senderId = String(ctx.from?.id ?? '')
+  const access = loadAccess()
+  if (!access.allowFrom.includes(senderId)) {
+    await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+    return
+  }
+  const parts = data.split(':')
+  if (parts.length < 3) {
+    await ctx.answerCallbackQuery({ text: 'Bad request' }).catch(() => {})
+    return
+  }
+  const action = parts[1]
+  const stageId = parts.slice(2).join(':')
+  const pending = pendingVaultRequestAccesses.get(stageId)
+  if (!pending) {
+    await ctx.answerCallbackQuery({ text: 'Card expired — ask the agent to re-request.' }).catch(() => {})
+    if (ctx.callbackQuery?.message) {
+      await ctx.api
+        .editMessageText(
+          ctx.callbackQuery.message.chat.id,
+          ctx.callbackQuery.message.message_id,
+          '⌛ <i>This access-request card expired before you tapped. Ask the agent to re-issue if the need still stands.</i>',
+          { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+        )
+        .catch(() => {})
+    }
+    return
+  }
+
+  if (action === 'deny') {
+    pendingVaultRequestAccesses.delete(stageId)
+    await ctx.answerCallbackQuery({ text: '🚫 Denied' }).catch(() => {})
+    if (pending.card_message_id != null) {
+      await ctx.api
+        .editMessageText(
+          pending.chat_id,
+          pending.card_message_id,
+          `🚫 <i>Denied. <b>${escapeHtmlForTg(pending.agent)}</b> will not get access to <code>${escapeHtmlForTg(pending.key)}</code>.</i>`,
+          { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+        )
+        .catch(() => {})
+    }
+    return
+  }
+
+  if (action === 'approve') {
+    await ctx.answerCallbackQuery({ text: '⏳ Minting grant…' }).catch(() => {})
+
+    // Mirror the recent-denials handler (#969 P2b): mint via broker
+    // with the operator's intent (operator socket = capability),
+    // then write the token to the agent's `.vault-token` file so
+    // the agent's next CLI invocation picks it up.
+    const mintArgs: Parameters<typeof mintGrantViaBroker>[0] = {
+      agent: pending.agent,
+      keys: pending.scope === 'read' ? [pending.key] : [],
+      ttl_seconds: pending.ttl_seconds,
+      description: `auto-mint via vault_request_access (#1012, scope=${pending.scope}, by op ${senderId})`,
+      ...(pending.scope === 'write' ? { write_keys: [pending.key] } : {}),
+    }
+    const result = await mintGrantViaBroker(mintArgs)
+    if (result.kind === 'unreachable') {
+      await switchroomReply(ctx, `🔴 Broker unreachable: ${escapeHtmlForTg(result.msg)}`, { html: true })
+      return
+    }
+    if (result.kind === 'error') {
+      await switchroomReply(ctx, `<b>mint_grant failed:</b> ${escapeHtmlForTg(result.msg)}`, { html: true })
+      return
+    }
+
+    const { token, id } = result
+    const tokenPath = join(homedir(), '.switchroom', 'agents', pending.agent, '.vault-token')
+    try {
+      mkdirSync(join(homedir(), '.switchroom', 'agents', pending.agent), { recursive: true })
+      writeFileSync(tokenPath, token, { mode: 0o600 })
+    } catch (err) {
+      await switchroomReply(
+        ctx,
+        `<b>Grant created (${escapeHtmlForTg(id)}) but token write failed:</b> ` +
+        `${escapeHtmlForTg(String(err))}\n` +
+        `<i>Recover with: <code>switchroom vault grant ${escapeHtmlForTg(pending.agent)} ` +
+        `--keys ${escapeHtmlForTg(pending.key)} --duration ${Math.round(pending.ttl_seconds / 86400)}d</code> on the host.</i>`,
+        { html: true },
+      )
+      return
+    }
+
+    pendingVaultRequestAccesses.delete(stageId)
+    if (pending.card_message_id != null) {
+      const days = Math.round(pending.ttl_seconds / 86400)
+      await ctx.api
+        .editMessageText(
+          pending.chat_id,
+          pending.card_message_id,
+          `✅ Granted <b>${escapeHtmlForTg(pending.agent)}</b> ${pending.scope} access to ` +
+          `<code>${escapeHtmlForTg(pending.key)}</code> for ${days}d. ` +
+          `(grant <code>${escapeHtmlForTg(id)}</code>)`,
+          { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+        )
+        .catch(() => {})
+    }
+    return
+  }
+
+  await ctx.answerCallbackQuery({ text: 'Unknown action' }).catch(() => {})
+}
+
 async function handleVaultRequestSaveCallback(ctx: Context, data: string): Promise<void> {
   const senderId = String(ctx.from?.id ?? '')
   const access = loadAccess()
@@ -9590,6 +9858,14 @@ bot.on('callback_query:data', async ctx => {
   // vrs:rename:<stageId>   — prompt for a new key name, then resume
   if (data.startsWith('vrs:')) {
     await handleVaultRequestSaveCallback(ctx, data)
+    return
+  }
+
+  // Issue #1012: agent-initiated vault ACL request approval card.
+  // vra:approve:<stageId> — mint scoped grant via broker, write token
+  // vra:deny:<stageId>    — refuse, edit card to denied
+  if (data.startsWith('vra:')) {
+    await handleVaultRequestAccessCallback(ctx, data)
     return
   }
 

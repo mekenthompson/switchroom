@@ -418,6 +418,23 @@ const TOOL_SCHEMAS = [
       required: ['chat_id', 'key', 'value'],
     },
   },
+  {
+    name: 'vault_request_access',
+    description:
+      'Ask the operator (via Telegram approval card) to grant this agent read or write access to a vault key it does not yet have. Use this when you hit `VAULT-BROKER-DENIED` or when you know upfront that an upcoming task needs a key you lack. Renders a [Approve] [Deny] card; on approve, the broker mints a scoped grant token and writes it to the agent\'s `.vault-token` file — your next vault read will succeed without intervention. You CANNOT mint or self-elevate; only the operator can tap Approve. Wait for confirmation before retrying the vault op. Do NOT call this for keys you already have access to (use the normal `vault:<key>` reference) and do NOT spam-request (the operator sees every card).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chat_id: { type: 'string', description: 'Chat to render the approval card in (use the chat_id of the user message that triggered the workflow).' },
+        key: { type: 'string', description: 'Vault key the agent wants access to (matches the key shown in the VAULT-BROKER-DENIED error, e.g. `fatsecret/credentials`).' },
+        scope: { type: 'string', enum: ['read', 'write'], description: 'Access scope: "read" (default) for `vault:<key>` references; "write" if the agent needs to put new values.' },
+        reason: { type: 'string', description: 'Short human-readable rationale rendered on the card (e.g. "to look up today\'s food log entries"). Helps the operator decide.' },
+        duration: { type: 'string', description: 'Requested grant TTL, like "30d" or "12h". Default 30d, capped at 90d. Beyond 90d the operator should use the host CLI explicitly.' },
+        message_thread_id: { type: 'string', description: 'Forum topic thread ID. Auto-applied from the last inbound message if not specified.' },
+      },
+      required: ['chat_id', 'key'],
+    },
+  },
 ]
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOL_SCHEMAS }))

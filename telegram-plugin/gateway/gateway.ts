@@ -7973,7 +7973,11 @@ async function handleVaultRecentDenialCallback(ctx: Context, data: string): Prom
     await ctx.answerCallbackQuery({ text: 'Invalid agent name' }).catch(() => {})
     return
   }
-  if (!/^[A-Za-z0-9_.-]{1,200}$/.test(keyName)) {
+  // #1047: same canonical key shape as vault_request_save /
+  // vault_request_access — namespaced keys like `fatsecret/client_id`
+  // must round-trip through the /vault audit one-tap Allow flow too,
+  // not just the agent-initiated approval cards.
+  if (!VAULT_KEY_REGEX.test(keyName)) {
     await ctx.answerCallbackQuery({ text: 'Invalid key name' }).catch(() => {})
     return
   }

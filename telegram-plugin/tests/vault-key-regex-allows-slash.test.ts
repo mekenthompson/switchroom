@@ -83,6 +83,24 @@ describe("vault-key regex accepts canonical slash-namespaced keys (#1047)", () =
     ).toMatch(ACCEPTS_SLASH);
   });
 
+  it("/vault audit one-tap Allow callback validation includes '/' in the charclass", () => {
+    // Reviewer-caught oversight on #1049: the
+    // handleVaultRecentDenialCallback handler (#969 P2b) validates
+    // the keyName parsed from the inline-button callback_data with
+    // its own copy of the key regex. Without this site updated, the
+    // exact bug from #1047 — operator opens /vault audit on a
+    // denied `fatsecret/client_id`, taps [Allow] — would surface
+    // "Invalid key name" even though the agent-initiated card flow
+    // works.
+    const ix = gatewaySrc.indexOf("'Invalid key name'");
+    expect(ix, "could not find /vault audit Invalid key name error").toBeGreaterThan(0);
+    const window = gatewaySrc.slice(Math.max(0, ix - 400), ix);
+    expect(
+      window,
+      "/vault audit one-tap allow should accept '/' (e.g. fatsecret/client_id)",
+    ).toMatch(ACCEPTS_SLASH);
+  });
+
   it("user-facing rename error message names the slash as allowed", () => {
     // The visible error text guides the operator on what's allowed.
     // If we widened the regex but didn't update the message, the

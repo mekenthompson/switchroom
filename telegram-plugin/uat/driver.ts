@@ -18,7 +18,7 @@
  * production pattern).
  */
 
-import { MemoryStorage, TelegramClient } from "@mtcute/node";
+import { MemoryStorage, TelegramClient, getMarkedPeerId } from "@mtcute/node";
 import type { Message } from "@mtcute/node";
 
 export interface DriverOptions {
@@ -253,10 +253,15 @@ export class Driver {
    *   against the prior set we've cached for the same `msgId` to
    *   emit add (`+`) / remove (`-`) ops.
    *
-   * - For 1:1 DMs the update's `peer` is `peerUser` carrying the
-   *   OTHER party's user_id (the bot). Filtering by
-   *   `peer.userId === chatId` matches the driver-side convention
-   *   where `chatId === botUserId`.
+   * - DM / group / supergroup all supported. `chatId` follows the
+   *   Bot API marked-id convention (positive for users, negative
+   *   for groups, -100… for supergroups/channels). Internally we
+   *   normalize the raw `peer` field with mtcute's `getMarkedPeerId`
+   *   so callers never see raw TL peer types.
+   *
+   * - `threadId` filters to a forum-topic id (the raw update's
+   *   `topMsgId`). Useful for supergroup-with-topics scenarios; a
+   *   no-op for DMs/basic groups.
    *
    * - Reactions are emitted only when they CHANGE. The initial
    *   reaction-add fires as `op: "+"`; a follow-up
@@ -269,10 +274,11 @@ export class Driver {
    */
   observeReactions(
     chatId: number,
-    opts?: { messageId?: number },
+    opts?: { messageId?: number; threadId?: number },
   ): AsyncIterable<ObservedReaction> {
     const c = this.requireClient();
     const targetMsgId = opts?.messageId;
+    const targetThread = opts?.threadId;
     const queue: ObservedReaction[] = [];
     const waiters: Array<(m: IteratorResult<ObservedReaction>) => void> = [];
     let closed = false;
@@ -287,8 +293,9 @@ export class Driver {
     const onRaw = (info: { update: unknown }): void => {
       const u = info.update as {
         _: string;
-        peer?: { _: string; userId?: number };
+        peer?: unknown;
         msgId?: number;
+        topMsgId?: number;
         reactions?: {
           results?: Array<{
             reaction: { _: string; emoticon?: string };
@@ -296,11 +303,21 @@ export class Driver {
         };
       };
       if (u._ !== "updateMessageReactions") return;
-      if (u.peer?._ !== "peerUser") return;
-      if (u.peer.userId !== chatId) return;
+      if (!u.peer) return;
+      // mtcute's getMarkedPeerId handles peerUser / peerChat / peerChannel
+      // uniformly — normalizes to Bot API marked-id form (-100... for
+      // supergroups, -... for basic groups, positive for users).
+      let peerId: number;
+      try {
+        peerId = getMarkedPeerId(u.peer as Parameters<typeof getMarkedPeerId>[0]);
+      } catch {
+        return; // unrecognized peer shape
+      }
+      if (peerId !== chatId) return;
       const msgId = u.msgId;
       if (typeof msgId !== "number") return;
       if (targetMsgId !== undefined && msgId !== targetMsgId) return;
+      if (targetThread !== undefined && u.topMsgId !== targetThread) return;
 
       const now = new Set<string>();
       for (const rc of u.reactions?.results ?? []) {
@@ -367,8 +384,15 @@ export class Driver {
    * raw update carries `messages: number[]` (one or many msg ids
    * pinned/unpinned in one batch) plus a `pinned?: boolean` flag.
    *
-   * 1:1 DM peer filter: `peer._ === "peerUser" && peer.userId === chatId`.
-   * Forum/channel routing rolls in with Phase 2d.
+   * DM / group / supergroup all supported. `chatId` follows the Bot
+   * API marked-id convention; internally we normalize the raw `peer`
+   * field with mtcute's `getMarkedPeerId`.
+   *
+   * Forum-topic filtering (the `threadId` opt) is currently unused
+   * here — `updatePinnedMessages` doesn't carry `topMsgId`, only
+   * the chat-level peer + message ids. Scenarios that need per-topic
+   * pin scoping should filter consumer-side via `driver.getMessage`
+   * to look up the pinned message's thread context.
    */
   observePins(
     chatId: number,
@@ -389,12 +413,18 @@ export class Driver {
       const u = info.update as {
         _: string;
         pinned?: boolean;
-        peer?: { _: string; userId?: number };
+        peer?: unknown;
         messages?: number[];
       };
       if (u._ !== "updatePinnedMessages") return;
-      if (u.peer?._ !== "peerUser") return;
-      if (u.peer.userId !== chatId) return;
+      if (!u.peer) return;
+      let peerId: number;
+      try {
+        peerId = getMarkedPeerId(u.peer as Parameters<typeof getMarkedPeerId>[0]);
+      } catch {
+        return; // unrecognized peer shape
+      }
+      if (peerId !== chatId) return;
       const ids = u.messages ?? [];
       const pinned = u.pinned !== false; // default-true per TL (`pinned` omitted = pin)
       const date = new Date();

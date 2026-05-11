@@ -45,7 +45,22 @@ export interface SpinUpOptions {
    * a user_id. Defaults to `process.env.TELEGRAM_TEST_BOT_USERNAME`.
    */
   botUsername?: string;
+  /**
+   * Settle delay (ms) after the driver connects, before the scenario's
+   * first send. Gives the previous scenario's turn time to finish its
+   * outbound stream on the agent side. Without this the next inbound
+   * lands while the gateway is still pinning/editing the prior turn's
+   * card, the gateway reuses the existing pin via edit (instead of
+   * pinning a new message), and observePins-based assertions miss the
+   * event entirely. Default {@link DEFAULT_SETTLE_MS}; set to 0 for
+   * single-scenario runs where the cooldown is dead time. Scenarios
+   * that account for this in their outer `it()` budget should add the
+   * settle on top of inner poll deadlines.
+   */
+  settleMs?: number;
 }
+
+export const DEFAULT_SETTLE_MS = 8_000;
 
 export interface Scenario {
   /** mtcute driver, already connected. */
@@ -141,6 +156,21 @@ export async function spinUp(opts: SpinUpOptions): Promise<Scenario> {
     driver.resolveBotUserId(cfg.botUsername),
     driver.getMyUserId(),
   ]);
+
+  // Unpin FIRST, then settle. Order matters: the gateway is a logical
+  // singleton for the chat's pinned card — on every turn it tries to
+  // edit the existing pin rather than pin a fresh one, so observePins
+  // (a transition listener) sees nothing on the next turn. Unpinning
+  // forces the agent to issue a fresh `pin` event we can observe.
+  // The settle delay then absorbs (a) the unpin's own propagation
+  // round-trip and (b) any tail-end edits from the prior scenario's
+  // turn still in flight. Doing unpin before settle keeps the gap a
+  // single window of dead time rather than two stacked waits.
+  await driver.unpinAllMessages(botUserId);
+  const settleMs = opts.settleMs ?? DEFAULT_SETTLE_MS;
+  if (settleMs > 0) {
+    await new Promise((resolve) => setTimeout(resolve, settleMs));
+  }
 
   const scenario: Scenario = {
     driver,

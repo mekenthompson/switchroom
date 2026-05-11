@@ -176,6 +176,26 @@ export class Driver {
   }
 
   /**
+   * Unpin every pinned message in `chatId`. Used by the harness's
+   * settle phase: a stale pin from the previous scenario's turn would
+   * otherwise be reused by the gateway via edit (no new pin event),
+   * making `expectPinnedCard` time out. Best-effort — logs and swallows
+   * Telegram errors so an unrelated network drop / flood-wait doesn't
+   * abort spinUp before the scenario runs. The next assertion (e.g.
+   * `expectPinnedCard`) will fail loudly with its own deadline if the
+   * unpin actually mattered, so the warning is enough to root-cause
+   * post-hoc without a silent failure mode.
+   */
+  async unpinAllMessages(chatId: number): Promise<void> {
+    const c = this.requireClient();
+    await c.unpinAllMessages(chatId).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      // eslint-disable-next-line no-console -- harness diagnostic
+      console.warn(`[uat/driver] unpinAllMessages(${chatId}) failed: ${msg}`);
+    });
+  }
+
+  /**
    * Resolve a bot username (with or without `@`) to its user_id. The
    * resulting id doubles as the chat_id for DMing the bot from the
    * driver — Telegram DMs use the peer's user_id as the chat_id.

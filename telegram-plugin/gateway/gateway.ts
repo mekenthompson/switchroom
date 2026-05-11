@@ -1539,7 +1539,7 @@ async function mintDeferredSecretKernelRequest(
   try {
     const r = await approvalRequest({
       agent_unit: `switchroom-${agentName}.service`,
-      scope: `secret:${slug}`,
+      scope: `vault:secret:${slug}`,
       action: 'unlock',
       approver_set: approverSet,
       why: 'Unlock vault to save a deferred secret detected in chat.',

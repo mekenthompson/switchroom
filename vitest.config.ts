@@ -59,6 +59,8 @@ export default defineConfig({
       "**/src/vault/broker/server-write-grants.test.ts",
       // Passphrase-attestation suite (issue #969 P1a) — bun:sqlite.
       "**/src/vault/broker/server-passphrase-attest.test.ts",
+      // mint_grant passphrase-attestation suite (#1012 Phase 2) — bun:sqlite.
+      "**/src/vault/broker/server-mint-grant-passphrase-attest.test.ts",
       "**/src/vault/broker/client-token.test.ts",
       "**/src/vault/broker/server-unlock.test.ts",
       "**/src/vault/broker/auto-unlock.test.ts",

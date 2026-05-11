@@ -681,6 +681,14 @@ export interface MintGrantOpts extends BrokerClientOpts {
    * Issue #969 P1b.
    */
   write_keys?: string[];
+  /**
+   * Optional operator-passphrase attestation (#1012 Phase 2). When set,
+   * the broker treats the call as operator-attested regardless of the
+   * caller's agent identity — non-admin agents can mint grants on
+   * behalf of an operator who tapped Approve in their Telegram chat.
+   * Same trust posture used by PUT (`vault_request_save`).
+   */
+  passphrase?: string;
 }
 
 export type MintGrantResult =
@@ -703,6 +711,7 @@ export async function mintGrantViaBroker(
       ttl_seconds: opts.ttl_seconds,
       description: opts.description,
       ...(opts.write_keys !== undefined ? { write_keys: opts.write_keys } : {}),
+      ...(opts.passphrase !== undefined ? { passphrase: opts.passphrase } : {}),
     },
     opts,
   );

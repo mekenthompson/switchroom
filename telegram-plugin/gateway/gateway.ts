@@ -8011,16 +8011,42 @@ async function handleVaultRequestAccessCallback(ctx: Context, data: string): Pro
   if (action === 'approve') {
     await ctx.answerCallbackQuery({ text: '⏳ Minting grant…' }).catch(() => {})
 
-    // Mirror the recent-denials handler (#969 P2b): mint via broker
-    // with the operator's intent (operator socket = capability),
-    // then write the token to the agent's `.vault-token` file so
-    // the agent's next CLI invocation picks it up.
+    // Attach the cached operator passphrase as broker attestation
+    // (#1012 Phase 2). Required when this handler runs in a NON-admin
+    // agent's gateway — the broker server-side allowlist (#1022) only
+    // trusts operator-socket and admin-agent paths for grant-mgmt
+    // ops. Passphrase attestation is the third trust posture, mirroring
+    // PUT (#969 P1a) — same shape, same threat surface.
+    //
+    // If the operator hasn't unlocked the vault in this chat yet,
+    // refuse before calling the broker: a non-admin agent's mint
+    // attempt without attestation would surface the same
+    // "agent-bound listeners cannot mint" error gymbro hit on the
+    // first run (screenshot in #1012 follow-up).
+    const cached = vaultPassphraseCache.get(pending.chat_id)
+    if (!cached || cached.expiresAt <= Date.now()) {
+      if (pending.card_message_id != null) {
+        await ctx.api
+          .editMessageText(
+            pending.chat_id,
+            pending.card_message_id,
+            `🔒 <b>Vault is locked.</b> Run <code>/vault unlock</code> (or any /vault command) in this chat to cache the passphrase, then ask the agent to re-issue the request card.\n\n` +
+            `<i>Approval needs operator-passphrase attestation — without it the broker refuses grant-mgmt from a non-admin agent.</i>`,
+            { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+          )
+          .catch(() => {})
+      }
+      pendingVaultRequestAccesses.delete(stageId)
+      return
+    }
+
     const mintArgs: Parameters<typeof mintGrantViaBroker>[0] = {
       agent: pending.agent,
       keys: pending.scope === 'read' ? [pending.key] : [],
       ttl_seconds: pending.ttl_seconds,
       description: `auto-mint via vault_request_access (#1012, scope=${pending.scope}, by op ${senderId})`,
       ...(pending.scope === 'write' ? { write_keys: [pending.key] } : {}),
+      passphrase: cached.passphrase,
     }
     const result = await mintGrantViaBroker(mintArgs)
     if (result.kind === 'unreachable') {

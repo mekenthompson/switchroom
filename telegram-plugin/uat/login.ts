@@ -30,6 +30,9 @@ import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import { fileURLToPath } from "node:url";
 import { MemoryStorage, TelegramClient } from "@mtcute/node";
+import { loadUatEnv } from "./load-env.js";
+
+loadUatEnv();
 
 export const VAULT_KEY = "telegram-uat-driver-session";
 export const VAULT_SCOPE = "test-harness";

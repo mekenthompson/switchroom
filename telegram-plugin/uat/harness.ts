@@ -29,6 +29,9 @@ import {
   type PinnedCardSnapshot,
 } from "./assertions.js";
 import type { ObservedMessage } from "./driver.js";
+import { loadUatEnv } from "./load-env.js";
+
+loadUatEnv();
 
 export interface SpinUpOptions {
   /**

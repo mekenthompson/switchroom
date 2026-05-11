@@ -112,49 +112,114 @@ If the driver account is locked entirely (e.g. SPAM_WAIT), only the
 account owner can resolve it via support@telegram.org. The harness has
 no recourse.
 
-## 5. Worktree-based agent install (NOT `switchroom agent add`)
+## 5. The `test-harness` agent (Phase 2a — DM focus)
 
-The UAT harness does **not** persistently install the test-harness
-agent through `switchroom agent add` (which writes a systemd unit + a
-persistent state dir — wrong shape for hermetic test runs). Instead,
-the harness `exec`s the agent as a child process per scenario with:
+Phase 2a tests run against a **persistent** `test-harness` agent
+created once via `switchroom agent add`. This pivots from the epic's
+original child-process-per-scenario plan (written before the Docker
+runtime landed) — the standard runtime now gets us most of the
+hermeticity we want without re-inventing the agent lifecycle. Forum
+topic + per-scenario STATE_DIR isolation rolls in with Phase 2b.
 
-- `STATE_DIR=$(mktemp -d)` — ephemeral; teardown rm-rfs it.
-- A unique `TELEGRAM_GATEWAY_PORT` (see port allocator note below).
-- `SWITCHROOM_AGENT_NAME=test-harness`.
-- The test bot token loaded from `telegram-test-bot-token`.
+### One-shot agent creation
 
-The Phase 1 scaffold stubs this out in `harness.ts`; Phase 2 wires it
-end-to-end.
+```bash
+# Resolve the driver's user_id once via mtcute (the helper prints
+# only the integer id to stdout; the session string never appears):
+cd ~/code/switchroom/telegram-plugin
+read -sp "Vault passphrase: " SWITCHROOM_VAULT_PASSPHRASE; echo
+export SWITCHROOM_VAULT_PASSPHRASE
+DRIVER_UID=$(bun uat/driver-info.ts)
+echo "Driver user_id: $DRIVER_UID"
 
-## 6. Port allocator vs unix sockets
+# Then create the agent. `--topology dm --allow-from $DRIVER_UID`
+# bypasses the @BotFather DM-pair flow and writes the driver's
+# user_id directly into allowFrom — so the bot will respond only
+# to DMs from the driver, never from arbitrary Telegram users
+# (important: the test bot's token is in vault scoped to
+# `test-harness` only, but the bot itself is publicly reachable
+# on Telegram).
+SWITCHROOM_BOT_TOKEN=$(switchroom vault get --no-broker telegram-test-bot-token) \
+  switchroom agent add test-harness \
+    --profile default \
+    --topology dm \
+    --bot-username meken_switchroom_test_bot \
+    --allow-from "$DRIVER_UID"
+unset SWITCHROOM_BOT_TOKEN SWITCHROOM_VAULT_PASSPHRASE
 
-Phase 1 commits to a **process-wide port allocator** (see
-`uat/port-allocator.ts`) rather than unix sockets. Rationale:
+# Verify the agent is up:
+switchroom agent status test-harness
+```
 
-- The gateway already speaks IP loopback to the bridge; switching to
-  unix sockets is a code change in `gateway/` we don't want bundled
-  with the UAT scaffold work.
-- Tests only ever run from one harness process, so a node-local
-  monotonic counter starting at a high ephemeral port (default 47000)
-  is enough to avoid collisions with the system + with sibling
-  scenarios in the same run.
-- The allocator also `bind()`s a probe socket and releases it before
-  returning, which catches "port already in use by another process"
-  before the agent boots and produces a confusing crash.
+`agent add` runs the n+1 wizard: scaffolds the per-agent dir under
+`~/.switchroom/agents/test-harness/`, refreshes the compose file,
+boots the container, runs a preflight. On success the agent is
+running and will reply to DMs from the driver user account.
 
-If we ever want concurrent harness runs from CI, swap to unix sockets;
-the harness API takes a `transport` shape so it's a one-line change.
+### When this agent should be running
+
+- During UAT runs: yes. Scenarios fail with `expectMessage` timeouts
+  if the agent isn't responding.
+- Idle: harmless to leave running. It consumes one Claude turn only
+  when DMed by the driver — no scheduled work, no MCP polls.
+
+### Resetting state between runs
+
+Phase 2a accepts mild state pollution across scenarios (the agent's
+history accumulates). To reset hard:
+
+```bash
+switchroom agent stop test-harness
+rm -rf ~/.switchroom/agents/test-harness/state
+switchroom agent start test-harness
+```
+
+Phase 2b adds per-scenario state-dir scoping so this becomes
+automatic.
+
+## 6. Running scenarios — env setup
+
+The harness reads four env vars at `spinUp()` time. Source them from
+vault once, run tests, then clear:
+
+```bash
+cd ~/code/switchroom/telegram-plugin
+
+read -sp "Vault passphrase: " SWITCHROOM_VAULT_PASSPHRASE; echo
+export SWITCHROOM_VAULT_PASSPHRASE
+
+export TELEGRAM_API_ID=$(switchroom vault get --no-broker telegram-uat-api-id)
+export TELEGRAM_API_HASH=$(switchroom vault get --no-broker telegram-uat-api-hash)
+export TELEGRAM_UAT_DRIVER_SESSION=$(switchroom vault get --no-broker telegram-uat-driver-session)
+export TELEGRAM_TEST_BOT_USERNAME=meken_switchroom_test_bot
+
+unset SWITCHROOM_VAULT_PASSPHRASE
+
+bun run test:uat
+
+unset TELEGRAM_API_HASH TELEGRAM_UAT_DRIVER_SESSION TELEGRAM_API_ID TELEGRAM_TEST_BOT_USERNAME
+```
+
+The vault passphrase is unset BEFORE the tests run so a misbehaving
+scenario can't smuggle it into a chat message. The remaining env
+vars are scoped to the shell session — close the shell to clear.
 
 ## 7. Verification checklist before running scenarios
 
-- [ ] `switchroom vault get telegram-test-bot-token` returns a token.
-- [ ] `switchroom vault get telegram-uat-driver-session` returns a
-      session string (the command output may be redacted by the
-      vault — that's fine, you only need exit code 0).
-- [ ] `$SWITCHROOM_UAT_CHAT_ID` exported and is a negative int.
-- [ ] Test bot is admin in the supergroup.
-- [ ] Driver user is admin in the supergroup.
-- [ ] Topics enabled in the supergroup.
+- [ ] `switchroom vault list` shows `telegram-test-bot-token`,
+      `telegram-uat-api-id`, `telegram-uat-api-hash`,
+      `telegram-uat-driver-session` (and `telegram-uat-chat-id` for
+      Phase 2b).
+- [ ] `switchroom agent status test-harness` reports the agent active.
+- [ ] Driver user can DM `@meken_switchroom_test_bot` from Telegram
+      and get a reply (manual sanity check before automating).
 
-When all six are checked, `bun run test:uat` is safe to run.
+When all three are checked, the env block above + `bun run test:uat`
+is safe to run.
+
+## 8. Port allocator vs unix sockets (Phase 1 scaffold note)
+
+The Phase 1 `port-allocator.ts` is held in reserve for Phase 2b's
+child-process flow — Phase 2a (standard-runtime agent) doesn't need
+it. Kept rather than deleted because the allocator's bind-probe is
+the right shape for what 2b will need.

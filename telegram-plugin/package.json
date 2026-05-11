@@ -21,7 +21,8 @@
     "build": "node scripts/build.mjs",
     "prepublishOnly": "npm run build",
     "test:uat": "vitest run --config ../vitest.uat.config.ts",
-    "uat:login": "bun uat/login.ts"
+    "uat:login": "bun uat/login.ts",
+    "uat:driver-info": "bun uat/driver-info.ts"
   },
   "dependencies": {
     "@grammyjs/runner": "^2.0.3",

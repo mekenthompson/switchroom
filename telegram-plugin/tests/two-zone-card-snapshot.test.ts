@@ -123,10 +123,10 @@ describe('two-zone-card snapshots', () => {
       now: NOW,
     })
     expect(out).toBe(
-      '⏸ <b>Background</b> · ⏱ 01:30 · 🔧 17 · 🤖 2\n' +
+      '🌀 <b>Background</b> · ⏱ 01:30 · 🔧 17 · 🤖 2\n' +
       '\n' +
       '<b>FLEET (2)</b>\n' +
-      '⏸ background <code>bbbbbb</code> · 12t · Bash <code>long-job.sh</code> (1s ago)\n' +
+      '🌀 background <code>bbbbbb</code> · 12t · Bash <code>long-job.sh</code> (1s ago)\n' +
       '✓ worker <code>aaaaaa</code> · 5t · done 30s ago',
     )
   })

@@ -2010,8 +2010,7 @@ export class VaultBroker {
           pid: process.pid,
           result: "denied:unable to verify caller identity",
         });
-        socket.write("ERR unable to verify caller identity\n");
-        socket.destroy();
+        socket.end("ERR unable to verify caller identity\n");
         return;
       }
     }
@@ -2027,8 +2026,7 @@ export class VaultBroker {
       if (newlineIdx === -1) {
         // Guard against massive input
         if (Buffer.byteLength(buffer, "utf8") > 4096) {
-          socket.write("ERR passphrase too long\n");
-          socket.destroy();
+          socket.end("ERR passphrase too long\n");
           buffer = "";
         }
         return;
@@ -2048,8 +2046,12 @@ export class VaultBroker {
           cgroup: auditCgroup,
           result: "denied:passphrase cannot be empty",
         });
-        socket.write("ERR passphrase cannot be empty\n");
-        socket.destroy();
+        // Use `end(line)` not `write(line); destroy()`. The latter
+        // races: `destroy()` closes the socket immediately and the
+        // kernel can drop the buffered response before the peer reads
+        // it. The client then times out claiming "broker didn't reply"
+        // even though the broker did the right thing — issue #988.
+        socket.end("ERR passphrase cannot be empty\n");
         return;
       }
 
@@ -2063,7 +2065,7 @@ export class VaultBroker {
           cgroup: auditCgroup,
           result: "allowed",
         });
-        socket.write("OK\n");
+        socket.end("OK\n");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         // Audit-log secret-leak guard (#206 review):
@@ -2094,10 +2096,11 @@ export class VaultBroker {
         // (which KDF, which cipher, whether the file is even a vault).
         // Stderr (operator console) and audit log keep the verbose
         // form for diagnostics; the wire surface is now constant.
-        socket.write("ERR decryption failed\n");
-      } finally {
-        socket.destroy();
+        socket.end("ERR decryption failed\n");
       }
+      // No finally-destroy: socket.end(line) flushes `line` then sends
+      // FIN cleanly. A destroy() after end() would re-introduce the
+      // race documented above.
     });
 
     socket.on("error", () => {

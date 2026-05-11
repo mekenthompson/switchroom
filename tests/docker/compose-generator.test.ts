@@ -626,13 +626,16 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
     }
   });
 
-  it("mounts the operator broker socket + sets SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK on admin agents", () => {
-    // fails when: the compose generator stops mounting the operator
-    // socket on admin-flagged agents, or stops setting the env var
-    // the broker client uses to route grant-management RPCs. Without
-    // either, `/vault audit` from an admin agent reverts to the
-    // pre-#1019 "Grant management ops are operator-only" rejection
-    // (see src/vault/broker/server.ts:1493). Pins both halves.
+  it("admin agents get NO operator-socket mount or routing env (#1021 Design B handles grant-mgmt server-side)", () => {
+    // fails when: a refactor re-introduces the pre-#1021 attempt of
+    // mounting the operator socket directly into admin agents. That
+    // approach (#1020 originally) didn't work because the operator
+    // socket file is 0600 owned by the HOST operator UID — the
+    // agent UID can't connect through the bind mount. #1021 Design B
+    // moved the gate into the broker (server-side admin allowlist
+    // check), so the agent doesn't need any extra socket plumbing.
+    // Pinning the absence here keeps a future "let me just add an
+    // operator-socket mount back" PR from getting through.
     const out = generateCompose({
       config: makeConfig({
         alice: { admin: true },
@@ -640,23 +643,11 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
       }),
     });
     const aliceEnv = envBlockFor(out, "alice");
-    expect(aliceEnv).toMatch(
-      /SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK:\s*"\/run\/switchroom\/broker\/operator\/sock"/,
-    );
-    // The volume mount lives outside the env block — grep for the
-    // bind line directly.
-    expect(out).toMatch(
-      /agent-alice:[\s\S]*?\.switchroom\/broker-operator:\/run\/switchroom\/broker\/operator:ro/,
-    );
-
-    // Non-admin agent must NOT get either — operator socket is the
-    // privileged surface, default agents stay isolated.
-    const bobEnv = envBlockFor(out, "bob");
-    expect(bobEnv).not.toMatch(/SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK/);
-    // Confirm bob's block doesn't carry the bind: search the
-    // agent-bob section up to the next service.
+    expect(aliceEnv).not.toMatch(/SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK/);
+    // Confirm alice's service block doesn't carry an operator bind
+    // (search up to the next service entry).
     expect(out).not.toMatch(
-      /agent-bob:[\s\S]*?broker-operator(?![\s\S]*?  agent-)/,
+      /agent-alice:[\s\S]*?\.switchroom\/broker-operator(?![\s\S]*?  (?:agent|vault|approval|kernel))/,
     );
   });
 

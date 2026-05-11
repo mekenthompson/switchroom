@@ -345,35 +345,6 @@ export function resolveBrokerSocketPath(opts?: BrokerClientOpts): string {
 }
 
 /**
- * For grant-management RPCs (`mint_grant`, `list_grants`,
- * `revoke_grant`), return a BrokerClientOpts that routes through the
- * operator socket when `SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK` is set
- * — typically on admin-flagged agents (`admin: true` in switchroom.yaml,
- * see `src/agents/compose.ts`).
- *
- * Without this rerouting, the broker rejects grant ops from agent-
- * bound sockets with "Grant management ops are operator-only; agent-
- * bound listeners cannot mint, list, or revoke grants"
- * (`src/vault/broker/server.ts:1493`).
- *
- * Falls through to the caller's opts unchanged when the env isn't set
- * — non-admin agents AND host CLI invocations keep their existing
- * socket resolution.
- *
- * Issue #1019 tracks the wider design space (read-only RPC on agent
- * path, dedicated foreman agent); this Option-1 implementation is
- * the smallest change that unblocks `/vault audit` and #1012 testing.
- */
-export function preferOperatorSocket(opts?: BrokerClientOpts): BrokerClientOpts {
-  const operatorEnv = process.env.SWITCHROOM_VAULT_BROKER_OPERATOR_SOCK;
-  if (!operatorEnv) return opts ?? {};
-  // Explicit caller-supplied socket wins — tests + special-case host
-  // callers can still pin a specific socket regardless of env.
-  if (opts?.socket) return opts;
-  return { ...(opts ?? {}), socket: operatorEnv };
-}
-
-/**
  * Result of a single RPC: either a parsed broker response, or an
  * "unreachable" status with a human-readable reason. Internal helper
  * — public API on top distinguishes denied vs not-found vs unreachable.
@@ -733,7 +704,7 @@ export async function mintGrantViaBroker(
       description: opts.description,
       ...(opts.write_keys !== undefined ? { write_keys: opts.write_keys } : {}),
     },
-    preferOperatorSocket(opts),
+    opts,
   );
   if (result.kind === "unreachable") return { kind: "unreachable", msg: result.msg };
   const resp = result.resp;
@@ -761,7 +732,7 @@ export async function listGrantsViaBroker(
   agent: string | undefined,
   opts?: BrokerClientOpts,
 ): Promise<ListGrantsResult> {
-  const result = await rpc({ v: 1, op: "list_grants", agent }, preferOperatorSocket(opts));
+  const result = await rpc({ v: 1, op: "list_grants", agent }, opts);
   if (result.kind === "unreachable") return { kind: "unreachable", msg: result.msg };
   const resp = result.resp;
   if (resp.ok && "grants" in resp) {
@@ -783,7 +754,7 @@ export async function revokeGrantViaBroker(
   id: string,
   opts?: BrokerClientOpts,
 ): Promise<RevokeGrantResult> {
-  const result = await rpc({ v: 1, op: "revoke_grant", id }, preferOperatorSocket(opts));
+  const result = await rpc({ v: 1, op: "revoke_grant", id }, opts);
   if (result.kind === "unreachable") return { kind: "unreachable", msg: result.msg };
   const resp = result.resp;
   if (resp.ok && "revoked" in resp) {

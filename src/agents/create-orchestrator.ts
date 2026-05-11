@@ -54,6 +54,19 @@ export interface CreateAgentOpts {
    * Default: false (leave artefacts for retry).
    */
   rollbackOnFail?: boolean;
+  /**
+   * Optional explicit bot username for exact-equality validation. Use when
+   * the bot's username deliberately doesn't contain the agent slug (e.g.
+   * UAT setup uses `meken_switchroom_test_bot` for agent `test-harness`).
+   * When set, the slug-in-username assertion is replaced by an exact
+   * match against this username; mismatch still fails.
+   *
+   * Threaded through from `switchroom agent add --bot-username` via
+   * `add-orchestrator.ts`. Without this passthrough, the CLI flag is
+   * silently ignored at this second validation step and the slug check
+   * rejects mismatched names even with `--loose`.
+   */
+  botUsername?: string;
 }
 
 export interface CreationResult {
@@ -115,6 +128,7 @@ export async function createAgent(
     telegramBotToken,
     configPath: configPathOpt,
     rollbackOnFail = false,
+    botUsername,
   } = opts;
 
   // ── Step 0: Validate name slug (before any disk writes) ───────────────────
@@ -135,14 +149,17 @@ export async function createAgent(
 
   // ── Step 2: Validate bot token and assert username matches agent slug ────
   // Uses getMe to verify the token is valid AND that the returned username
-  // contains the agent slug — catches copy-paste mistakes like writing
-  // clerk's token into finn's .env before any disk writes occur.
-  await validateBotTokenMatchesAgent(telegramBotToken, name).catch((err: Error) => {
-    throw new Error(
-      `Bot token validation failed — check the token and try again. ` +
-        `(${err.message})`,
-    );
-  });
+  // matches what the operator expects — either by slug-substring (default)
+  // or by exact equality when `botUsername` is supplied (the `--bot-username`
+  // path used when the bot is intentionally named without the slug).
+  await validateBotTokenMatchesAgent(telegramBotToken, name, botUsername).catch(
+    (err: Error) => {
+      throw new Error(
+        `Bot token validation failed — check the token and try again. ` +
+          `(${err.message})`,
+      );
+    },
+  );
 
   // ── Step 3: Determine configPath and ensure agent in yaml ─────────────────
   const configPath =

@@ -273,12 +273,20 @@ export async function addAgent(opts: AddAgentOpts): Promise<AddAgentResult> {
   log(`\n[1/6] Scaffolding agent "${opts.name}" (profile=${resolvedProfile}, topology=${opts.topology})`);
 
   // ── Step 2: scaffold + auth session ──────────────────────────────────────
+  // `botUsername` is threaded through so the second bot-token validation
+  // (inside createAgent) uses exact-equality against the operator-declared
+  // username when the bot is intentionally named without the slug. Without
+  // this passthrough, `--bot-username` is honoured by the BotFather
+  // walkthrough above but rejected by the slug-contains check inside
+  // createAgent — making `--bot-username` (and `--loose`) silently
+  // ineffective for the use case they were added for.
   const created = await createAgent({
     name: opts.name,
     profile: resolvedProfile,
     telegramBotToken: resolvedBotToken,
     configPath: opts.configPath,
     rollbackOnFail: true,
+    botUsername: opts.botUsername,
   });
 
   // ── Step 2b: prune bundled skills the operator dropped ───────────────────

@@ -106,7 +106,14 @@ describe("createAgent", () => {
         configPath: ws.configPath,
       });
 
-      expect(validateBotTokenMatchesAgent).toHaveBeenCalledWith("fake:token", "bot");
+      // Third arg is the optional `botUsername` (used by `--bot-username`
+      // exact-match path). Default path = `undefined` so the slug-contains
+      // assertion in validateBotTokenMatchesAgent kicks in.
+      expect(validateBotTokenMatchesAgent).toHaveBeenCalledWith(
+        "fake:token",
+        "bot",
+        undefined,
+      );
       expect(scaffoldAgent).toHaveBeenCalledOnce();
       expect(writeAgentEnv).toHaveBeenCalledWith(
         join(ws.agentsDir, "bot"),
@@ -286,6 +293,35 @@ describe("createAgent", () => {
       expect(scaffoldAgent).not.toHaveBeenCalled();
       const yamlBody = readFileSync(ws.configPath, "utf-8");
       expect(yamlBody).not.toMatch(/\bbot:/);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it("forwards botUsername to validateBotTokenMatchesAgent so --bot-username actually swaps slug-contains for exact-match", async () => {
+    // fails when: a refactor drops the botUsername passthrough — the
+    // `switchroom agent add --bot-username` flag is silently honoured
+    // by the BotFather walkthrough's first validation but then
+    // rejected by the slug-contains check inside createAgent. This is
+    // the exact bug that blocked UAT setup (#866 follow-up): agent
+    // `test-harness` paired with bot `meken_switchroom_test_bot`
+    // cannot pass slug-contains, and the operator's `--bot-username`
+    // override was being silently discarded here.
+    const ws = makeWorkspace();
+    try {
+      await createAgent({
+        name: "test-harness",
+        profile: "general",
+        telegramBotToken: "fake:token",
+        configPath: ws.configPath,
+        botUsername: "meken_switchroom_test_bot",
+      });
+
+      expect(validateBotTokenMatchesAgent).toHaveBeenCalledWith(
+        "fake:token",
+        "test-harness",
+        "meken_switchroom_test_bot",
+      );
     } finally {
       ws.cleanup();
     }

@@ -51,6 +51,11 @@ export interface ObservedMessage {
   messageId: number;
   threadId?: number;
   text: string;
+  /**
+   * Sender's user_id (or channel_id, for posts in a channel). Used by
+   * `expectMessage` to filter `from: "bot"` vs `from: "driver"`.
+   */
+  senderUserId: number;
   fromBot: boolean;
   date: Date;
   /** `true` when this observation is an edit of an earlier message. */
@@ -122,6 +127,33 @@ export class Driver {
     const replyTo = opts?.replyTo ?? opts?.messageThreadId;
     const sent = await c.sendText(chatId, text, replyTo ? { replyTo } : undefined);
     return { messageId: sent.id };
+  }
+
+  /**
+   * Return the driver's own Telegram user_id. Cached after first call.
+   */
+  async getMyUserId(): Promise<number> {
+    const c = this.requireClient();
+    const me = await c.getMe();
+    return me.id;
+  }
+
+  /**
+   * Resolve a bot username (with or without `@`) to its user_id. The
+   * resulting id doubles as the chat_id for DMing the bot from the
+   * driver — Telegram DMs use the peer's user_id as the chat_id.
+   */
+  async resolveBotUserId(username: string): Promise<number> {
+    const c = this.requireClient();
+    const handle = username.startsWith("@") ? username : `@${username}`;
+    const peer = await c.resolvePeer(handle);
+    // For a bot/user the resolved peer is `inputPeerUser` carrying the
+    // numeric `userId` we need.
+    const u = peer as { userId?: number; channelId?: number };
+    if (typeof u.userId === "number") return u.userId;
+    throw new Error(
+      `Driver.resolveBotUserId: '${handle}' did not resolve to a user (got ${JSON.stringify(peer)})`,
+    );
   }
 
   /**
@@ -253,6 +285,7 @@ function toObserved(msg: Message, edited: boolean): ObservedMessage {
     messageId: msg.id,
     threadId: msg.replyToMessage?.threadId ?? undefined,
     text: msg.text ?? "",
+    senderUserId: msg.sender.id,
     fromBot: msg.sender.type === "user" && msg.sender.isBot === true,
     date: msg.date,
     edited,

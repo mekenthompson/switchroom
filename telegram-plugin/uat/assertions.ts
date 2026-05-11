@@ -68,21 +68,89 @@ export async function expectEventually(
   });
 }
 
-// ---------- Phase 2 stubs ----------
+// ---------- Phase 2a (DM smoke) ----------
+
+export interface ExpectMessageOptions extends PollOptions {
+  threadId?: number;
+  /**
+   * Filter the observed stream by sender. `userId` matches exact
+   * senders; `notUserId` excludes a specific sender (used by the
+   * harness to translate `from: "bot"` into "anyone but the driver").
+   */
+  senderFilter?: { userId: number } | { notUserId: number };
+}
 
 /**
- * TODO(#866): wait for the bot to send a message in `chatId`/topic
- * matching `match` (substring, regex, or predicate over the raw
- * `ObservedMessage`). Returns the matched message.
+ * Wait for the next message in `chatId` (optionally a forum topic)
+ * matching `match` — a substring, regex, or predicate over the raw
+ * `ObservedMessage`. Returns the matched message.
+ *
+ * The implementation iterates the live `driver.observeMessages`
+ * stream, so messages sent *before* the call started are not
+ * considered; backfill is a Phase 2b helper.
  */
 export async function expectMessage(
-  _driver: Driver,
-  _chatId: number,
-  _match: string | RegExp | ((m: ObservedMessage) => boolean),
-  _opts: PollOptions & { threadId?: number; from?: "bot" | "user" },
+  driver: Driver,
+  chatId: number,
+  match: string | RegExp | ((m: ObservedMessage) => boolean),
+  opts: ExpectMessageOptions,
 ): Promise<ObservedMessage> {
-  throw new Error("expectMessage not implemented (Phase 2)");
+  const predicate = compileMatcher(match);
+  const senderOk = compileSenderFilter(opts.senderFilter);
+  const iter = driver.observeMessages(chatId, opts.threadId !== undefined ? { threadId: opts.threadId } : undefined)[Symbol.asyncIterator]();
+  const deadline = Date.now() + opts.timeout;
+
+  try {
+    while (Date.now() < deadline) {
+      // Race the next observation against the remaining timeout so
+      // we don't hang forever if no messages arrive.
+      const remaining = deadline - Date.now();
+      const next = await raceTimeout(iter.next(), remaining);
+      if (next === "timeout") break;
+      if (next.done === true) break;
+      const msg = next.value;
+      if (!senderOk(msg)) continue;
+      if (predicate(msg)) return msg;
+    }
+  } finally {
+    await iter.return?.();
+  }
+  throw new Error(
+    `expectMessage: no matching message in chat=${chatId} within ${opts.timeout}ms`,
+  );
 }
+
+function compileMatcher(
+  match: string | RegExp | ((m: ObservedMessage) => boolean),
+): (m: ObservedMessage) => boolean {
+  if (typeof match === "string") return (m) => m.text.includes(match);
+  if (match instanceof RegExp) return (m) => match.test(m.text);
+  return match;
+}
+
+function compileSenderFilter(
+  f: ExpectMessageOptions["senderFilter"],
+): (m: ObservedMessage) => boolean {
+  if (!f) return () => true;
+  if ("userId" in f) return (m) => m.senderUserId === f.userId;
+  return (m) => m.senderUserId !== f.notUserId;
+}
+
+function raceTimeout<T>(p: Promise<T>, ms: number): Promise<T | "timeout"> {
+  if (ms <= 0) return Promise.resolve("timeout");
+  return new Promise<T | "timeout">((resolve) => {
+    const t = setTimeout(() => resolve("timeout"), ms);
+    p.then((v) => {
+      clearTimeout(t);
+      resolve(v);
+    }).catch(() => {
+      clearTimeout(t);
+      resolve("timeout");
+    });
+  });
+}
+
+// ---------- Phase 2b stubs (deferred to follow-up PR) ----------
 
 /**
  * TODO(#866): wait for a reaction sequence on `messageId`. Each

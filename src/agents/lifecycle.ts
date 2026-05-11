@@ -176,13 +176,18 @@ function containerExists(name: string): boolean {
 
 export function startAgent(name: string): void {
   try {
-    // If the container has never been created, `compose start` errors
-    // out — fall back to `up -d --no-deps` to bring it online.
-    if (containerExists(name)) {
-      dockerSync(composeArgs(["start", serviceKey(name)]));
-    } else {
-      dockerSync(composeArgs(["up", "-d", "--no-deps", serviceKey(name)]));
-    }
+    // Always `up -d --force-recreate --no-deps`. See restartAgent's
+    // comment for the rationale on each flag (#932 / #944). Same logic
+    // applies here: an operator running `agent start` after `agent
+    // stop` + a yaml edit + `apply` reasonably expects the new env
+    // block / mount changes to take effect. `compose start` (no
+    // recreate) silently reuses the existing container with its
+    // create-time env, which was the operator-reported symptom in
+    // #1018. Force-recreate covers both the "first ever boot" case
+    // (no existing container, recreate is a no-op cost) and the
+    // "stop → edit → start" case — the only cost is a fresh container
+    // spin-up (~1-2s), cheap relative to the surprise of stale env.
+    dockerSync(composeArgs(["up", "-d", "--force-recreate", "--no-deps", serviceKey(name)]));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to start agent "${name}": ${message}`);

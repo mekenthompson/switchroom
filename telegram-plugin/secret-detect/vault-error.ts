@@ -154,15 +154,22 @@ export function renderVaultCliError(
   const key = verbHint.key ?? err.key;
   switch (err.kind) {
     case "sandbox_context":
+      // The agent tried direct vault file IO from inside the sandbox.
+      // Route the operator at the Telegram-native equivalent for the
+      // verb in flight — only `init` needs a one-time host shell.
+      // Closes the "leave Telegram for a verb that exists in Telegram"
+      // anti-pattern from reference/talk-to-agents-from-anywhere.md.
       return {
         suppressRaw: true,
         html:
-          `⚠️ <b>This action must run on the host.</b>\n` +
-          `The vault file isn't mounted inside the agent sandbox; only ` +
-          `the broker socket is. Open a host shell and run:\n` +
-          `<pre>switchroom vault ${verbHint.verb}${key ? ` ${htmlEscape(key)}` : ""}</pre>`,
+          renderSandboxContextSuggestion(verbHint.verb, key),
       };
     case "needs_approval":
+      // Agent tried to save a new key. The `vault_request_save` MCP
+      // tool shipped in #969 P1a renders an approval card in
+      // operator chat — no host shell, no re-paste. Telling the
+      // operator to "run switchroom vault set on the host" punts
+      // them to the desktop for a feature that exists in Telegram.
       return {
         suppressRaw: true,
         html:
@@ -172,9 +179,10 @@ export function renderVaultCliError(
             : `The agent tried to save a new key, but `) +
           `agents can only rotate existing keys via the broker; introducing ` +
           `a new key needs an operator action.\n\n` +
-          `For now, run on a host shell:\n` +
-          `<pre>switchroom vault set${key ? ` ${htmlEscape(key)}` : " &lt;key&gt;"}</pre>\n` +
-          `<i>A one-tap approval card is on the way (#969 P1a).</i>`,
+          `<b>Ask the agent</b> to call its <code>vault_request_save</code> ` +
+          `tool — it'll render an approval card in this chat with ` +
+          `[✅ Save once] [🚫 Discard] [✏️ Rename] buttons. One tap saves the ` +
+          `secret to the vault; no re-paste needed.`,
       };
     case "broker_unreachable":
       return {
@@ -182,10 +190,17 @@ export function renderVaultCliError(
         html:
           `⚠️ <b>Vault broker isn't reachable.</b>\n` +
           `From inside the agent sandbox there's no fallback path. ` +
-          `Operator can check on the host:\n` +
-          `<pre>switchroom vault broker status</pre>`,
+          `Check broker health from this chat:\n` +
+          `<pre>/vault broker status</pre>\n` +
+          `<i>If the broker is wedged, <code>/vault broker restart</code> ` +
+          `from this chat. Host shell only as last resort.</i>`,
       };
     case "broker_denied":
+      // Telegram-native grant flow shipped in #969 P2b + #1012:
+      //   - operator runs `/vault audit <agent>`, taps [🔓 Allow <key>]
+      //     for a recent denial — one tap, no shell.
+      //   - OR the agent itself calls `vault_request_access` and the
+      //     approval card with [✅ Approve] / [🚫 Deny] lands here.
       return {
         suppressRaw: true,
         html:
@@ -193,10 +208,52 @@ export function renderVaultCliError(
           (key
             ? `The agent isn't authorized to access <code>${htmlEscape(key)}</code>. `
             : `The agent isn't authorized to access this key. `) +
-          `Operator can grant access from a host shell:\n` +
-          `<pre>switchroom vault grant &lt;agent&gt; --keys ${key ? htmlEscape(key) : "&lt;key&gt;"}</pre>`,
+          `Grant access in two taps:\n` +
+          `• <code>/vault audit ${"<agent>"}</code> in this chat → tap ` +
+          `[🔓 Allow${key ? ` ${htmlEscape(key)}` : ""}] on the recent denial, OR\n` +
+          `• ask the agent to call <code>vault_request_access</code> — ` +
+          `an approval card lands here with [✅ Approve] / [🚫 Deny].`,
       };
     case "other":
       return { suppressRaw: false, html: "" };
+  }
+}
+
+/**
+ * Suggest the Telegram-native command for each sandbox-context verb.
+ * Only `init` still needs a one-time host shell (vault bootstrap is
+ * a setup step, not a steering-while-mobile workflow).
+ */
+function renderSandboxContextSuggestion(
+  verb: "set" | "get" | "list" | "init" | "remove" | "save",
+  key: string | undefined,
+): string {
+  const head = `⚠️ <b>Direct vault file IO isn't available from inside the agent sandbox.</b>\n`;
+  switch (verb) {
+    case "set":
+    case "save":
+      return (
+        head +
+        `<b>Ask the agent</b> to call its <code>vault_request_save</code> ` +
+        `tool — an approval card lands here with [✅ Save once] / [🚫 Discard] / [✏️ Rename] buttons.`
+      );
+    case "get":
+      return (
+        head +
+        `From this chat: <code>/vault get${key ? ` ${htmlEscape(key)}` : " &lt;key&gt;"}</code>`
+      );
+    case "list":
+      return head + `From this chat: <code>/vault list</code>`;
+    case "remove":
+      return (
+        head +
+        `Use the operator host CLI for now — Telegram-native delete is tracked as a follow-up. ` +
+        `<i>(Removing a vault key is a rare, irreversible operation; an in-chat confirmation card is on the punch list.)</i>`
+      );
+    case "init":
+      return (
+        head +
+        `Vault bootstrap is a one-time host-shell step: <code>switchroom vault init</code>.`
+      );
   }
 }

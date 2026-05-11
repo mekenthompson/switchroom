@@ -6,6 +6,21 @@ RFC B Phase 1 landed the kernel core: SQLite schema (`approval_decisions`,
 the Telegram approval-card primitive, drift detection, single-use nonce
 consumption, and the `/approvals list|revoke` command surface.
 
+## ⚠️ Phase 1 is **audit-only**, not enforcing
+
+The dual-dispatch call sites described below (starting with `vd:unlock`
+in PR #830) record an approval-kernel decision *alongside* the legacy
+verdict but **do not yet gate on it**. A kernel-`deny` does NOT block
+the legacy path; only the audit log gains a kernel row. This is
+intentional for Phase 1 — we want production traffic flowing through
+the kernel so we can compare verdicts against legacy outcomes before
+making it authoritative.
+
+Phase 2 will switch each call site so the legacy path defers to the
+kernel verdict (deny → block, allow-with-nonce → consume on success).
+Until then, do not assume a kernel `deny` row means access was
+prevented; double-check the legacy table for that call site.
+
 What's intentionally still on the legacy paths:
 
 ## 1. Deferred-secret unlock (`vd:unlock` / `vd:cancel`)

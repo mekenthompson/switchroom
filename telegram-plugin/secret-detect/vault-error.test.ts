@@ -62,17 +62,57 @@ describe("parseVaultCliError", () => {
 });
 
 describe("renderVaultCliError", () => {
-  it("renders sandbox_context with a host-CLI suggestion", () => {
+  // 2026-05-12: renderer copy migrated from host-CLI suggestions to
+  // Telegram-native next-step actions (vault_request_save, /vault
+  // audit, /vault broker status). Tests below assert the new copy.
+  // The pre-fix pins are documented in
+  // tests/jtbd-talk-from-anywhere.test.ts as the closed punch-list
+  // items.
+  it("renders sandbox_context for verb=set with the vault_request_save tool, surfacing the affected key", () => {
     const out = renderVaultCliError(
       { kind: "sandbox_context", original: "x" },
       { verb: "set", key: "my_key" },
     );
     expect(out.suppressRaw).toBe(true);
-    expect(out.html).toContain("must run on the host");
-    expect(out.html).toContain("switchroom vault set my_key");
+    expect(out.html).toMatch(/vault_request_save/);
+    expect(out.html).not.toMatch(/Open a host shell/);
+    // Reviewer-flagged on #1037: pre-fix test asserted the key
+    // appeared in output (so the operator knew which key triggered
+    // the card). New copy keeps the key in <code>…</code> form via
+    // htmlEscape — assert it.
+    expect(out.html).toContain("<code>my_key</code>");
   });
 
-  it("renders needs_approval with the affected key + host hint + P1a teaser", () => {
+  it("renders sandbox_context for verb=set WITHOUT a key (defensive fallback)", () => {
+    // The gateway sometimes doesn't have the key in hand (e.g. when
+    // the agent's stderr was opaque). Renderer should still produce
+    // useful output, not crash or render an empty <code></code>.
+    const out = renderVaultCliError(
+      { kind: "sandbox_context", original: "x" },
+      { verb: "set" },
+    );
+    expect(out.html).toMatch(/vault_request_save/);
+    expect(out.html).not.toContain("<code></code>");
+  });
+
+  it("renders sandbox_context for verb=get with /vault get", () => {
+    const out = renderVaultCliError(
+      { kind: "sandbox_context", original: "x" },
+      { verb: "get", key: "my_key" },
+    );
+    expect(out.html).toMatch(/\/vault get/);
+    expect(out.html).toMatch(/my_key/);
+  });
+
+  it("renders sandbox_context for verb=init with the one-time-host-shell note", () => {
+    const out = renderVaultCliError(
+      { kind: "sandbox_context", original: "x" },
+      { verb: "init" },
+    );
+    expect(out.html).toMatch(/one-time host-shell|switchroom vault init/);
+  });
+
+  it("renders needs_approval naming the live vault_request_save tool (not a 'on the way' stub)", () => {
     const out = renderVaultCliError(
       { kind: "needs_approval", original: "x", key: "telegram_bot_token" },
       { verb: "save" },
@@ -80,35 +120,47 @@ describe("renderVaultCliError", () => {
     expect(out.suppressRaw).toBe(true);
     expect(out.html).toContain("operator approval required");
     expect(out.html).toContain("<code>telegram_bot_token</code>");
-    expect(out.html).toContain("switchroom vault set telegram_bot_token");
-    expect(out.html).toContain("P1a"); // forward-pointer to the upcoming flow
+    expect(out.html).toMatch(/vault_request_save/);
+    expect(out.html).not.toMatch(/on the way/i);
   });
 
-  it("renders broker_unreachable with the status command", () => {
+  it("renders broker_unreachable as an honest 'tracked follow-up' instead of a false in-chat promise", () => {
+    // Pre-fix (rejected by #1037 reviewer): renderer pointed at
+    // `/vault broker status` / `/vault broker restart` — neither
+    // command is registered in the gateway dispatcher. Telling the
+    // operator to type unregistered commands is worse than the
+    // host-CLI punt it was meant to replace.
+    //
+    // Post-fix: renderer names the in-Telegram follow-up as
+    // tracked + unbuilt, and points at the host CLI for now.
+    // Honest about the gap until /vault broker {status,restart}
+    // actually ships.
     const out = renderVaultCliError(
       { kind: "broker_unreachable", original: "x" },
       { verb: "set" },
     );
     expect(out.suppressRaw).toBe(true);
     expect(out.html).toContain("broker isn't reachable");
-    expect(out.html).toContain("switchroom vault broker status");
+    expect(out.html).toMatch(/tracked as a follow-up/i);
+    expect(out.html).toMatch(/switchroom vault broker status/);
   });
 
-  it("renders broker_denied with a grant command + key", () => {
+  it("renders broker_denied pointing at /vault audit one-tap allow + vault_request_access", () => {
     const out = renderVaultCliError(
       { kind: "broker_denied", original: "x", key: "shared_token" },
       { verb: "set" },
     );
     expect(out.suppressRaw).toBe(true);
     expect(out.html).toContain("refused the request");
-    expect(out.html).toContain("switchroom vault grant");
+    expect(out.html).toMatch(/\/vault audit/);
+    expect(out.html).toMatch(/vault_request_access/);
     expect(out.html).toContain("shared_token");
   });
 
-  it("prefers verbHint.key over parser-extracted key (verbHint wins for host suggestion)", () => {
+  it("prefers verbHint.key over parser-extracted key (verbHint wins for in-Telegram next-step)", () => {
     // The gateway always knows the key the user asked for; rendering
     // must use that over any heuristic extraction so a parser glitch
-    // can't surface the wrong key in the host command suggestion.
+    // can't surface the wrong key in the in-chat next-step suggestion.
     const out = renderVaultCliError(
       { kind: "broker_denied", original: "x", key: "parser-extracted" },
       { verb: "set", key: "gateway-supplied" },

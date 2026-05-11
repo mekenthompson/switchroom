@@ -81,7 +81,7 @@ function extractRenderCase(kind: string): string {
 // ── JTBD signal: error messages tell the user what to do *in Telegram* ──
 
 describe("JTBD/talk-from-anywhere — error renderers point to in-Telegram next-steps", () => {
-  it.skip("VAULT-BROKER-DENIED mentions the Telegram-native grant flow, not just the host CLI", () => {
+  it("VAULT-BROKER-DENIED mentions the Telegram-native grant flow, not just the host CLI", () => {
     // Signs it's working: "A short reply should be enough to course-correct."
     // Principle 1: "When something fails, does the error tell the user what to do next?"
     //
@@ -97,7 +97,7 @@ describe("JTBD/talk-from-anywhere — error renderers point to in-Telegram next-
     expect(block).toMatch(/vault_request_access|\/vault audit/);
   });
 
-  it.skip("VAULT-NEEDS-APPROVAL renderer drops the 'card is on the way' stub and points to the live tool", () => {
+  it("VAULT-NEEDS-APPROVAL renderer drops the 'card is on the way' stub and points to the live tool", () => {
     // Principle 1: error tells the user what to do next.
     //
     // Today (vault-error.ts:167-178): renderer contains the literal
@@ -113,36 +113,52 @@ describe("JTBD/talk-from-anywhere — error renderers point to in-Telegram next-
     // Vision outcome 4: "Anywhere your phone has signal, your fleet
     // is reachable."
     //
-    // Today (vault-error.ts:182-186): "Operator can check on the host:
-    // switchroom vault broker status." Full stop. The mobile-only
-    // operator has nothing.
+    // Today: renderer is HONEST about the gap — names the
+    // Telegram-native follow-up as tracked but unbuilt, and points
+    // the operator at the host shell for now. Earlier draft of this
+    // PR claimed `/vault broker status`/`restart` in the renderer
+    // copy but those subcommands aren't registered; the test passed
+    // by string-matching the promise. Reviewer caught this on #1037.
     //
-    // Closing this test requires building /vault broker {status,restart}
-    // as admin verbs that proxy through to the host. Until then this
-    // test stays red, marking the unbuilt surface.
+    // Closing this test requires building /vault broker
+    // {status,restart} as admin verbs that proxy through to a
+    // host-side daemon (tracked separately on the punch list). Stays
+    // skipped until that lands.
     const block = extractRenderCase("broker_unreachable");
     expect(block).toMatch(/\/vault broker/);
   });
 
-  it.skip("VAULT-SANDBOX-CONTEXT points at the in-Telegram alternative for the relevant verb", () => {
+  it("VAULT-SANDBOX-CONTEXT points at the in-Telegram alternative for the relevant verb", async () => {
     // Anti-pattern: "A mobile experience that's really a web view of
     // the desktop UI."
     //
-    // Today (vault-error.ts:155-163): "Open a host shell and run
+    // Pre-fix (vault-error.ts:155-163): "Open a host shell and run
     // `switchroom vault <verb>`." Verbs that hit this:
-    //   - set    → vault_request_save (shipped, #969 P1a)
-    //   - get    → /vault get (shipped)
-    //   - list   → /vault list (shipped)
-    //   - remove → no Telegram equivalent yet
-    //   - init   → terminal-only (one-time bootstrap, acceptable)
+    //   - set / save → vault_request_save (shipped, #969 P1a)
+    //   - get        → /vault get (shipped)
+    //   - list       → /vault list (shipped)
+    //   - remove     → host CLI for now, documented as such
+    //   - init       → host CLI (one-time bootstrap, acceptable)
     //
-    // The renderer should drop the host-shell punt and route to the
-    // shipped Telegram path. "init" is the only legitimate edge — and
-    // even that should say "this is a one-time host-shell setup," not
-    // pretend it's the operator's job to know that.
-    const block = extractRenderCase("sandbox_context");
-    expect(block, "no blanket 'open a host shell' directive").not.toMatch(/Open a host shell/);
-    expect(block).toMatch(/vault_request_save|\/vault (get|list|delete)/);
+    // After-fix: renderer routes to Telegram-native for verbs that
+    // have a Telegram path, and explicitly NAMES the one-time-host
+    // edges. Test by calling the renderer — its output is multiple
+    // branches inside a switch + helper, so static-source slicing
+    // doesn't capture the helper body.
+    const { renderVaultCliError } = await import("../telegram-plugin/secret-detect/vault-error.js");
+
+    // The four verbs that hit Telegram-native paths.
+    for (const verb of ["set", "save", "get", "list"] as const) {
+      const rendered = renderVaultCliError({ kind: "sandbox_context" }, { verb });
+      expect(
+        rendered.html,
+        `verb=${verb}: should not say 'Open a host shell'`,
+      ).not.toMatch(/Open a host shell/);
+      expect(
+        rendered.html,
+        `verb=${verb}: should mention Telegram-native path`,
+      ).toMatch(/vault_request_save|\/vault (get|list)/);
+    }
   });
 });
 
@@ -335,19 +351,21 @@ describe("Principles/consistency — every operator approval card uses the same 
 // ── Vision outcome 2 (multi-agent fleet): admin gating is discoverable ──
 
 describe("Vision/multi-agent fleet — discoverability of admin actions", () => {
-  it.skip("/help or /vault help mentions /vault audit and the agent vault_request_access tool", () => {
+  it("/help or /vault help mentions /vault audit and the agent vault_request_access tool", () => {
     // Anti-pattern: "Relying on a dashboard the user has to open to see
     // state." Sibling: relying on the user to know which tool/command
     // exists. The bot's own help text should advertise the operator's
     // fleet-management surface.
     //
-    // Today: /vault help (gateway.ts:9314-9328) lists unlock/lock/set/
-    // get/delete/grant/grants/audit/status. Good for /vault. But /help
-    // (the top-level) is silent on the admin surface — a new operator
-    // discovers /vault audit only by typing /vault. Add a discoverability
-    // line to /help.
-    const helpBlock = gatewaySrc.split("bot.command('help'")[1]?.split("bot.command('")[0] ?? "";
-    expect(helpBlock, "/help should mention /vault audit for admin operators").toMatch(/\/vault audit/);
+    // Gateway's `/help` handler calls `buildHelpText` from
+    // `telegram-plugin/welcome-text.ts:helpText()`. That's where the
+    // user-visible copy lives; the gateway is just the dispatcher.
+    const welcomeTextSrc = readFileSync(
+      resolve(REPO_ROOT, "telegram-plugin/welcome-text.ts"),
+      "utf-8",
+    );
+    const helpFn = welcomeTextSrc.split("export function helpText")[1]?.split("\nexport ")[0] ?? "";
+    expect(helpFn, "/help should mention /vault audit for admin operators").toMatch(/\/vault audit/);
   });
 
   it("vault_request_access tool description tells the agent when to call it (#1012)", () => {

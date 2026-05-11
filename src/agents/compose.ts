@@ -245,6 +245,13 @@ interface AgentServiceData {
   resources: ResourceDefaults;
   /** Capability extras the operator requested AND we stripped. */
   strippedCaps: string[];
+  /**
+   * Yaml-level `admin: true` flag — when set, surfaces as
+   * `SWITCHROOM_AGENT_ADMIN=true` on the agent container so the
+   * gateway permits admin slash commands (`/vault`, `/agents`,
+   * `/logs`, `/grant`, `/update` etc). Default false.
+   */
+  admin: boolean;
 }
 
 /** Per-agent metadata exposed to doctor checks (and tests). */
@@ -257,7 +264,14 @@ export function describeAgents(config: SwitchroomConfig): AgentServiceData[] {
     const uid = allocateAgentUid(name);
     const resources = resolveResourceDefaults(name, profile);
     const strippedCaps = readStrippedCaps(agent);
-    out.push({ name, uid, profile, resources, strippedCaps });
+    out.push({
+      name,
+      uid,
+      profile,
+      resources,
+      strippedCaps,
+      admin: agent.admin === true,
+    });
     void resolved;
   }
   return out;
@@ -710,6 +724,14 @@ function emitAgentService(
   // Same env+mount pattern broker/kernel/scheduler already use.
   if (switchroomConfigPath) {
     env.SWITCHROOM_CONFIG = "/state/config/switchroom.yaml";
+  }
+  // SWITCHROOM_AGENT_ADMIN: gateway gates `/agents`, `/logs`, `/grant`,
+  // `/vault`, `/update` etc. on this env var being `"true"`. The agent
+  // schema's `admin: true` flag must surface here — otherwise the
+  // yaml field is silently a no-op. The gateway reads it at
+  // `telegram-plugin/gateway/gateway.ts:514`.
+  if (a.admin === true) {
+    env.SWITCHROOM_AGENT_ADMIN = "true";
   }
   for (const k of Object.keys(env).sort()) {
     lines.push(`      ${k}: ${JSON.stringify(env[k])}`);

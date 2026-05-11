@@ -91,6 +91,7 @@ describe("_tryAutoUnlockFromCredentials", () => {
   // Save/restore env vars touched across tests
   let prevCredsDir: string | undefined;
   let prevNonLinux: string | undefined;
+  let prevAutoUnlockPath: string | undefined;
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auto-unlock-test-"));
@@ -103,8 +104,23 @@ describe("_tryAutoUnlockFromCredentials", () => {
 
     prevCredsDir = process.env.CREDENTIALS_DIRECTORY;
     prevNonLinux = process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
+    prevAutoUnlockPath = process.env.SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH;
     // Silence stderr noise from auto-unlock log lines
     process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = "1";
+    // Pin the machine-bound auto-unlock path inside the test's tmpDir so
+    // the broker's `_tryAutoUnlockFromMachineBoundFile()` short-circuits
+    // (file doesn't exist) and falls through to the systemd-credentials
+    // path that this suite is actually exercising. Without this, on an
+    // operator's machine where `~/.switchroom/vault-auto-unlock` IS
+    // present, the broker reads the OPERATOR'S real blob, decrypts it
+    // with the host's machine-id, applies the operator's real
+    // passphrase to the test's fixture vault, and fails with a
+    // misleading "vault rejected the passphrase" — case 2 was hard-red
+    // on every developer machine running this suite for that reason.
+    process.env.SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH = path.join(
+      tmpDir,
+      "vault-auto-unlock-nonexistent",
+    );
   });
 
   afterEach(() => {
@@ -123,6 +139,11 @@ describe("_tryAutoUnlockFromCredentials", () => {
       delete process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX;
     } else {
       process.env.SWITCHROOM_BROKER_ALLOW_NON_LINUX = prevNonLinux;
+    }
+    if (prevAutoUnlockPath === undefined) {
+      delete process.env.SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH;
+    } else {
+      process.env.SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH = prevAutoUnlockPath;
     }
   });
 

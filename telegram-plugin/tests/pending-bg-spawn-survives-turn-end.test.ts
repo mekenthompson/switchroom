@@ -155,3 +155,96 @@ describe('reducer: turn_end pending-spawn preservation (RFC §Bug 1)', () => {
     expect(state.pendingAgentSpawns.size).toBe(0)
   })
 })
+
+describe('reducer: tool_result preserves bg pending spawn (RFC §Bug 5)', () => {
+  // The Agent tool with `run_in_background:true` returns IMMEDIATELY
+  // (the dispatch is the result). So the chronology is:
+  //   tool_use(bg)  → pending entry added (runInBackground:true)
+  //   tool_result   → ← THIS deleted the pending entry pre-fix
+  //   turn_end      → Bug 1 fix preserves bg entries here
+  //   sub_agent_started — late, after worker JSONL appears
+  //
+  // The Bug 1 fix only addressed the turn_end deletion. The earlier
+  // tool_result deletion still stranded bg entries before turn_end
+  // could even preserve them. Production trace:
+  //   `correlated=orphan pendingSpawns=0` despite `bg=true` at
+  //   tool_use time.
+
+  it('tool_result for a bg Agent dispatch DOES NOT delete the pending entry', () => {
+    let state = startedTurn()
+    state = reduce(state, {
+      kind: 'tool_use',
+      toolName: 'Agent',
+      toolUseId: 'tu-bg-result',
+      input: { prompt: 'bg', run_in_background: true },
+    }, NOW - 80)
+    expect(state.pendingAgentSpawns.get('tu-bg-result')?.runInBackground).toBe(true)
+
+    state = reduce(state, {
+      kind: 'tool_result',
+      toolUseId: 'tu-bg-result',
+      isError: false,
+    }, NOW - 70)
+
+    // Bg pending entry MUST survive tool_result so the eventual
+    // sub_agent_started can still correlate.
+    expect(state.pendingAgentSpawns.size).toBe(1)
+    expect(state.pendingAgentSpawns.has('tu-bg-result')).toBe(true)
+  })
+
+  it('tool_result for a FOREGROUND Agent dispatch still deletes the pending entry (no regression)', () => {
+    let state = startedTurn()
+    state = reduce(state, {
+      kind: 'tool_use',
+      toolName: 'Agent',
+      toolUseId: 'tu-fg-result',
+      input: { prompt: 'fg', run_in_background: false },
+    }, NOW - 80)
+    expect(state.pendingAgentSpawns.size).toBe(1)
+
+    state = reduce(state, {
+      kind: 'tool_result',
+      toolUseId: 'tu-fg-result',
+      isError: false,
+    }, NOW - 70)
+
+    // Foreground spawn that never produced a sub_agent_started during
+    // its tool_use → tool_result window is dead. Clean up the pending
+    // entry so it doesn't leak forward.
+    expect(state.pendingAgentSpawns.size).toBe(0)
+  })
+
+  it('end-to-end: tool_use(bg) → tool_result → turn_end → late sub_agent_started correlates', () => {
+    // The full production chronology this bug bit. Surfaced in
+    // bg-sub-agent-dispatch-dm.test.ts running live against Telegram.
+    let state = startedTurn()
+    state = reduce(state, {
+      kind: 'tool_use',
+      toolName: 'Agent',
+      toolUseId: 'tu-bg-e2e',
+      input: { prompt: 'bg e2e test', run_in_background: true },
+    }, NOW - 80)
+    state = reduce(state, {
+      kind: 'tool_result',
+      toolUseId: 'tu-bg-e2e',
+      isError: false,
+    }, NOW - 60)
+    state = reduce(state, { kind: 'turn_end', durationMs: 30 }, NOW)
+    // Pending entry MUST still be alive at this point — tool_result
+    // preserved it (Bug 5 fix), turn_end preserved it (Bug 1 fix).
+    expect(state.pendingAgentSpawns.size).toBe(1)
+    expect(state.pendingAgentSpawns.has('tu-bg-e2e')).toBe(true)
+
+    state = reduce(state, {
+      kind: 'sub_agent_started',
+      agentId: 'agt-bg-e2e',
+      subagentType: 'general-purpose',
+      firstPromptText: 'bg e2e test',
+    }, NOW + 5_000)
+
+    const sub = state.subAgents.get('agt-bg-e2e')
+    expect(sub).toBeDefined()
+    expect(sub!.parentToolUseId).toBe('tu-bg-e2e')
+    expect(state.pendingAgentSpawns.size).toBe(0)
+  })
+})

@@ -42,6 +42,7 @@ import {
   isInteractive,
 } from "../setup/prompt.js";
 import { captureEvent, captureException } from "../analytics/posthog.js";
+import { insertVaultBrokerApprovalAuth } from "./setup-posture-rewrite.js";
 
 const STEP_PENDING = chalk.gray("○");
 const STEP_ACTIVE = chalk.blue("->");
@@ -863,6 +864,52 @@ async function stepAutoUnlock(
       ),
     );
     console.log(chalk.gray("  Retry with: switchroom apply && docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml restart vault-broker"));
+  }
+
+  // Posture prompt: passphrase (two-factor, default) vs telegram-id
+  // (single-factor smoother UX). Only offered when auto-unlock is in
+  // place — telegram-id requires the broker to be unlocked already.
+  console.log("");
+  console.log(chalk.gray("  Approve vault grants with the passphrase each time (more secure)"));
+  console.log(chalk.gray("  or trust your Telegram account alone (smoother UX)?"));
+  const PASSPHRASE_CHOICE = "passphrase — prompt for vault passphrase on every Approve (two-factor)";
+  const TELEGRAM_ID_CHOICE = "telegram-id — Approve tap mints immediately, no passphrase prompt (single-factor)";
+  const choice = await askChoice("  Approval posture", [PASSPHRASE_CHOICE, TELEGRAM_ID_CHOICE]);
+  if (choice === TELEGRAM_ID_CHOICE) {
+    try {
+      const yamlPath = existsSync(resolve(process.cwd(), "switchroom.yaml"))
+        ? resolve(process.cwd(), "switchroom.yaml")
+        : resolve(process.cwd(), "switchroom.yml");
+      if (existsSync(yamlPath)) {
+        const content = readFileSync(yamlPath, "utf-8");
+        // Use a YAML-aware rewrite scoped to vault.broker — the previous
+        // regex matched any top-level `broker:` and could land the
+        // posture key under the wrong block.
+        const result = insertVaultBrokerApprovalAuth(content, "telegram-id");
+        if (result.kind === "rewritten") {
+          writeFileSync(yamlPath, result.content, "utf-8");
+          console.log(
+            chalk.green(`  ${STEP_DONE} Set vault.broker.approvalAuth: telegram-id in ${yamlPath}`),
+          );
+        } else if (result.kind === "already-set") {
+          console.log(chalk.gray("  approvalAuth already set — leaving it alone."));
+        } else {
+          console.log(
+            chalk.yellow(
+              "  Could not locate vault.broker block — add `approvalAuth: telegram-id` under `vault.broker:` manually.",
+            ),
+          );
+        }
+      }
+    } catch (err) {
+      console.log(
+        chalk.yellow(
+          `  Could not write approvalAuth: ${err instanceof Error ? err.message : String(err)}`,
+        ),
+      );
+    }
+  } else {
+    console.log(chalk.green(`  ${STEP_DONE} Keeping default passphrase posture (two-factor)`));
   }
 }
 

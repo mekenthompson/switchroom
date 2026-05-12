@@ -1435,8 +1435,30 @@ export const VaultConfigSchema = z.object({
         "container by docker compose. Tilde-expansion happens " +
         "at read time."
       ),
+      approvalAuth: z
+        .enum(["passphrase", "telegram-id"])
+        .default("passphrase")
+        .describe(
+          "Posture for tap-to-Approve on vault grant cards. `passphrase` " +
+          "(default) prompts the operator to type the vault passphrase on " +
+          "every Approve — two-factor (Telegram ID + passphrase). " +
+          "`telegram-id` mints immediately on Approve with no passphrase " +
+          "prompt — single-factor (Telegram ID only); REQUIRES " +
+          "`autoUnlock: true` so the broker already holds the passphrase. " +
+          "Trades a factor of security for smoother UX; opt-in only."
+        ),
     })
     .default({})
+    .superRefine((broker, ctx) => {
+      if (broker.approvalAuth === "telegram-id" && broker.autoUnlock !== true) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "`vault.broker.approvalAuth: telegram-id` requires `autoUnlock: true` — single-factor approval needs the broker already unlocked at startup.",
+          path: ["approvalAuth"],
+        });
+      }
+    })
     .describe(
       "Vault-broker daemon configuration. The broker holds the decrypted vault " +
       "in memory and serves secrets to cron scripts via a Unix socket, so the " +

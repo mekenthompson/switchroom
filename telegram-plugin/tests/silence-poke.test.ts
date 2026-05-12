@@ -7,6 +7,8 @@ import {
   consumeArmedPoke,
   endTurn,
   silencePokeEnabled,
+  formatPokeText,
+  formatFrameworkFallbackText,
   __tickForTests,
   __setDepsForTests,
   __getStateForTests,
@@ -328,6 +330,60 @@ describe('silence-poke — system reminder text', () => {
     const text = consumeArmedPoke()
     expect(text).toContain('3 minutes')
     expect(text).toContain('stuck')
+  })
+})
+
+// CC-4 from `docs/status-ask-cause-classes.md`: wording is load-bearing
+// (`reference/conversational-pacing.md` § Silence-poke ladder). Snapshot
+// the exact strings here so a refactor that drops a key phrase fails
+// loud at test time. If you genuinely need to change the wording,
+// update the snapshot AND the design doc together.
+describe('silence-poke — wording snapshots (CC-4)', () => {
+  it('soft poke text is unchanged', () => {
+    expect(formatPokeText('soft')).toMatchInlineSnapshot(
+      `"[silence-poke] You've been silent to the user for 75s. If you're still working on this, send one short conversational reply — e.g. "still going, working through X" — so they know you're alive. Keep it brief; don't restate the task. If you're about to finish within the next few seconds, skip the update."`,
+    )
+  })
+
+  it('firm poke text is unchanged', () => {
+    expect(formatPokeText('firm')).toMatchInlineSnapshot(
+      `"[silence-poke] 3 minutes silent. Please send an update now — what you're working on, or whether you're stuck. If something is taking unusually long (slow tool, network, waiting on a sub-agent), say so explicitly."`,
+    )
+  })
+
+  it('framework fallback — working at 300s', () => {
+    expect(formatFrameworkFallbackText('working', 300_000)).toMatchInlineSnapshot(
+      `"still working… (no update from agent in 5 min)"`,
+    )
+  })
+
+  it('framework fallback — thinking at 300s', () => {
+    expect(formatFrameworkFallbackText('thinking', 300_000)).toMatchInlineSnapshot(
+      `"still thinking… (no update from agent in 5 min)"`,
+    )
+  })
+
+  it('framework fallback — minutes derived from silenceMs, not hard-coded', () => {
+    // The "N min" suffix MUST track ctx.silenceMs so the wording stays
+    // honest if the 300s threshold is tuned. If a refactor accidentally
+    // hard-codes "5 min", these cases break.
+    expect(formatFrameworkFallbackText('working', 360_000)).toBe(
+      'still working… (no update from agent in 6 min)',
+    )
+    expect(formatFrameworkFallbackText('working', 600_000)).toBe(
+      'still working… (no update from agent in 10 min)',
+    )
+  })
+
+  it('framework fallback — minutes floor at 1 even when silenceMs is small', () => {
+    // Defensive: a future caller might invoke with sub-minute silenceMs.
+    // Rendering "0 min" reads as nonsense; floor at 1.
+    expect(formatFrameworkFallbackText('working', 30_000)).toBe(
+      'still working… (no update from agent in 1 min)',
+    )
+    expect(formatFrameworkFallbackText('working', 0)).toBe(
+      'still working… (no update from agent in 1 min)',
+    )
   })
 })
 

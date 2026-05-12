@@ -2494,13 +2494,15 @@ silencePoke.startTimer({
     emitRuntimeMetric(event)
   },
   onFrameworkFallback: async (ctx) => {
-    // Derive the "N min" suffix from ctx.silenceMs so the wording stays
-    // honest if threshold is tuned. PR2 reviewer note #2.
-    const minutes = Math.max(1, Math.round(ctx.silenceMs / 60_000))
-    const suffix = `(no update from agent in ${minutes} min)`
-    const text = ctx.fallbackKind === 'thinking'
-      ? `still thinking… ${suffix}`
-      : `still working… ${suffix}`
+    // Wording is load-bearing — extracted to `formatFrameworkFallbackText`
+    // in `silence-poke.ts` so it can be snapshot-tested in isolation
+    // (CC-4 in `docs/status-ask-cause-classes.md`). Derives "N min" suffix
+    // from `ctx.silenceMs` so the wording stays honest if the 300s
+    // threshold is tuned.
+    const text = silencePoke.formatFrameworkFallbackText(
+      ctx.fallbackKind,
+      ctx.silenceMs,
+    )
     try {
       await robustApiCall(
         () => bot.api.sendMessage(ctx.chatId, text, {

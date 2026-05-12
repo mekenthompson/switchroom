@@ -159,7 +159,7 @@ Three cause classes pinned by executable UAT scenarios, one stale scenario delet
 
 **Left unaddressed (parked):**
 
-- **CC-4 framework-fallback wording.** Cheap to add as a snapshot unit test in a follow-up; deferred because the wording lives in `silence-poke.ts:formatPokeText` and the load-bearing piece (the wire path) is now covered.
+- **CC-4 framework-fallback wording.** ~~Cheap to add as a snapshot unit test in a follow-up; deferred because the wording lives in `silence-poke.ts:formatPokeText` and the load-bearing piece (the wire path) is now covered.~~ **Addressed:** `formatFrameworkFallbackText` extracted from the gateway's `onFrameworkFallback` callback into `silence-poke.ts` alongside `formatPokeText`. Both functions now have inline snapshot tests in `silence-poke.test.ts` § "wording snapshots (CC-4)" — 6 cases covering soft, firm, working-at-300s, thinking-at-300s, derived-minutes, and the 1-min floor.
 - **CC-5 subagent flag leak.** Requires a controlled gateway-abort path that's intrusive to mock at UAT level. Deferred until the silent-end-recovery code (#1131) gets a wider rework — the same path would need the `endTurn` call.
 - **CC-7 (full coverage extension).** This PR's fuzz block covers the existing regex set. Extending the classifier itself with new variants needs production hindsight access to avoid false positives. Out of scope without prod read access.
 - **CC-8 boot card silenced on real crash.** A scenario can be written but the marker semantics interact with #1142's freshness window — likely worth its own PR rather than bundling here.

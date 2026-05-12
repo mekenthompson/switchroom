@@ -1,4 +1,13 @@
 import { execFileSync } from "node:child_process";
+import {
+  accessSync,
+  chmodSync,
+  constants as fsConstants,
+  existsSync,
+  mkdirSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:net";
 
 /**
@@ -149,10 +158,99 @@ export function isHindsightContainerExists(): boolean {
 }
 
 /**
+ * Pick a tmpfs-backed directory for the LLM-key env-file.
+ *
+ * Resolution order:
+ *   1. `/run/switchroom/hindsight/` — preferred on systemd hosts, tmpfs by default.
+ *   2. `/dev/shm/switchroom-hindsight/` — fallback when `/run` is read-only
+ *      (rootless containers, some hardened hosts).
+ *
+ * If neither parent is writable we throw rather than silently writing the
+ * secret to persistent disk (e.g. `/tmp`, which is *not* tmpfs on every
+ * distro and outlives container restarts).
+ *
+ * Exported for the doctor probe and tests.
+ */
+export function pickHindsightSecretDir(): string {
+  const candidates = ["/run/switchroom/hindsight", "/dev/shm/switchroom-hindsight"];
+  const errors: string[] = [];
+  for (const dir of candidates) {
+    try {
+      mkdirSync(dir, { recursive: true, mode: 0o700 });
+      // Probe that we can actually write a file here. mkdirSync can succeed
+      // on a read-only mount that already has the dir; the write probe is
+      // the only honest test.
+      accessSync(dir, fsConstants.W_OK);
+      return dir;
+    } catch (err) {
+      errors.push(`${dir}: ${(err as Error).message}`);
+    }
+  }
+  throw new Error(
+    "No writable tmpfs location for the Hindsight LLM key env-file. " +
+      "Tried (in order):\n  " +
+      errors.join("\n  ") +
+      "\n\nRefusing to fall back to /tmp because it isn't tmpfs on every " +
+      "distro; the API key would otherwise survive on persistent disk.",
+  );
+}
+
+/**
+ * Path to the secret env-file. Single fixed name per container — there's
+ * only one `switchroom-hindsight` container, so a stable path is fine.
+ */
+export function hindsightSecretEnvFilePath(): string {
+  return `${pickHindsightSecretDir()}/llm-key.env`;
+}
+
+/**
+ * Write the LLM API key to a tmpfs-backed env-file with mode 0600.
+ *
+ * Why an env-file instead of `-e`:
+ *   - `docker inspect <container>` exposes `-e` values in `.Config.Env`
+ *     to anyone in the docker group.
+ *   - `docker run -e KEY=VALUE ...` writes the secret to the parent
+ *     process's command line, which lands in shell history and journald.
+ *
+ * With `--env-file`, the value lives only in (a) the file on tmpfs, and
+ * (b) the container's own process environment. `docker inspect` shows
+ * `.Config.Env` *without* env-file values.
+ *
+ * Cleanup story:
+ *   - `stopHindsight()` unlinks the file (best-effort).
+ *   - The dir lives on tmpfs, so a host reboot wipes it.
+ *   - The container has `--restart unless-stopped`, but the env-file is
+ *     read at `docker run` time only (one-shot copy into the container's
+ *     env), so a stale-or-deleted file post-start doesn't matter for
+ *     restarts: the kernel keeps the env around for the container's
+ *     lifetime regardless of the host file. A subsequent `docker run`
+ *     (i.e. operator re-running `switchroom memory --start`) will
+ *     re-create the file from scratch.
+ */
+export function writeHindsightLlmKeyFile(apiKey: string): string {
+  const path = hindsightSecretEnvFilePath();
+  // Single-line env-file: docker --env-file accepts `KEY=VALUE` per line.
+  // The value can contain `=` but not embedded newlines; OpenAI / Anthropic /
+  // Google API keys are all opaque base64-ish strings so that's not a real
+  // constraint, but we trim defensively.
+  const trimmed = apiKey.trim();
+  if (trimmed.includes("\n") || trimmed.includes("\r")) {
+    throw new Error("Hindsight LLM API key contains a newline; refusing to write.");
+  }
+  writeFileSync(path, `HINDSIGHT_API_LLM_API_KEY=${trimmed}\n`, { mode: 0o600 });
+  // Re-chmod in case umask / pre-existing file altered the bits.
+  chmodSync(path, 0o600);
+  return path;
+}
+
+/**
  * Start the Hindsight Docker container.
  *
  * @param provider - Optional LLM provider (e.g., "ollama", "openai", "anthropic")
- * @param apiKey - Optional LLM API key (e.g., OpenAI key)
+ * @param apiKey - Optional LLM API key (e.g., OpenAI key). When present,
+ *   passed via a tmpfs `--env-file` so it doesn't appear in `docker
+ *   inspect`'s `.Config.Env` or in shell history / journald. See
+ *   `writeHindsightLlmKeyFile()` for the threat model.
  * @param ports - Optional host port mapping. If omitted, tries upstream
  *   defaults (8888/9999) then 18888/19999.
  */
@@ -170,8 +268,18 @@ export function startHindsight(
     // for the rationale and how it relates to vectorize-io/hindsight#1284.
     "-e", `HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE=${HINDSIGHT_DEFAULT_MAX_OBSERVATIONS_PER_SCOPE}`,
   ];
+  // Non-secret env stays on `-e` — provider name isn't sensitive and is
+  // useful as a debugging breadcrumb in `docker inspect`.
   if (provider) envArgs.push("-e", `HINDSIGHT_API_LLM_PROVIDER=${provider}`);
-  if (apiKey) envArgs.push("-e", `HINDSIGHT_API_LLM_API_KEY=${apiKey}`);
+
+  // The API key is sensitive; route it through a tmpfs env-file instead
+  // of `-e KEY=VALUE`. See writeHindsightLlmKeyFile() for the threat model.
+  const envFileArgs: string[] = [];
+  if (apiKey) {
+    const envFilePath = writeHindsightLlmKeyFile(apiKey);
+    envFileArgs.push("--env-file", envFilePath);
+  }
+
   const args = [
     "run", "-d",
     "--name", "switchroom-hindsight",
@@ -180,6 +288,7 @@ export function startHindsight(
     "-p", `127.0.0.1:${uiPort}:9999`,
     "-v", "switchroom-hindsight-data:/home/hindsight/.pg0",
     ...envArgs,
+    ...envFileArgs,
     "ghcr.io/vectorize-io/hindsight:latest",
   ];
 
@@ -188,6 +297,10 @@ export function startHindsight(
 
 /**
  * Stop and remove the Hindsight Docker container.
+ *
+ * Also unlinks the LLM-key env-file on tmpfs (best-effort) so a stopped
+ * container doesn't leave the key sitting at a predictable path. A host
+ * reboot also wipes it (tmpfs), and a re-`startHindsight()` rewrites it.
  */
 export function stopHindsight(): void {
   try {
@@ -196,6 +309,14 @@ export function stopHindsight(): void {
   try {
     execFileSync("docker", ["rm", "switchroom-hindsight"], { stdio: "pipe" });
   } catch { /* container may already be removed */ }
+  // Best-effort cleanup. We probe both candidate dirs because the file
+  // may have been written under whichever was writable at start time.
+  for (const dir of ["/run/switchroom/hindsight", "/dev/shm/switchroom-hindsight"]) {
+    const path = `${dir}/llm-key.env`;
+    try {
+      if (existsSync(path)) unlinkSync(path);
+    } catch { /* nothing to clean up */ }
+  }
 }
 
 /**

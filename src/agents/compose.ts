@@ -252,6 +252,22 @@ interface AgentServiceData {
    * `/logs`, `/grant`, `/update` etc). Default false.
    */
   admin: boolean;
+  /**
+   * Operator-declared env vars from the cascade-resolved agent config
+   * (`agent.env` block in switchroom.yaml). Propagated into the
+   * compose `environment:` block so child processes forked
+   * BEFORE start.sh's `export` lines (e.g. the gateway sidecar at
+   * `profiles/_base/start.sh.hbs:88`) can see them. Without this
+   * route, env vars set in switchroom.yaml are silently lossy for
+   * the gateway — they only reach Claude itself via the start.sh
+   * exports much later in the boot sequence.
+   *
+   * Repo/humanizer/channel-derived env stays in `userEnvQuoted` for
+   * scaffold.ts only — those are agent-shell-scoped, not container-
+   * wide. The schema's user-facing `env:` field is the one that
+   * mirrors here.
+   */
+  userEnv: Record<string, string>;
 }
 
 /** Per-agent metadata exposed to doctor checks (and tests). */
@@ -271,6 +287,10 @@ export function describeAgents(config: SwitchroomConfig): AgentServiceData[] {
       resources,
       strippedCaps,
       admin: agent.admin === true,
+      // Read user env from the cascade-resolved config so defaults +
+      // profile + agent layers all contribute. Empty object when the
+      // operator hasn't declared any (the common case).
+      userEnv: { ...(resolved.env ?? {}) },
     });
     void resolved;
   }
@@ -753,6 +773,14 @@ function emitAgentService(
     // agent UID from connecting (#1021). #1021 Design B moves the
     // gate into the broker; the agent-side env/mount are no longer
     // needed.
+  }
+  // Merge operator-declared env vars from the agent's `env:` block.
+  // System-managed keys (HOME, NPM_*, SWITCHROOM_*) win on collision —
+  // an operator can't override the runtime contract from yaml. A
+  // collision warning would help, but skipped for now (rare in
+  // practice; doctor check could add this later).
+  for (const [k, v] of Object.entries(a.userEnv)) {
+    if (env[k] === undefined) env[k] = v;
   }
   for (const k of Object.keys(env).sort()) {
     lines.push(`      ${k}: ${JSON.stringify(env[k])}`);

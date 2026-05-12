@@ -27,8 +27,9 @@
  * don't collide.
  */
 
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { homedir } from 'node:os'
 
 export interface SilentEndState {
   /** The chat the silent turn was for — used by operator-facing diagnostics. */
@@ -50,16 +51,22 @@ export interface SilentEndDeps {
   log?: (line: string) => void
 }
 
-function resolveStateDir(deps?: SilentEndDeps): string | null {
+function resolveStateDir(deps?: SilentEndDeps): string {
   if (deps?.stateDir != null) return deps.stateDir
   const env = process.env.TELEGRAM_STATE_DIR
-  return env != null && env !== '' ? env : null
+  if (env != null && env !== '') return env
+  // Same fallback the gateway (`gateway.ts STATE_DIR`) and the Stop
+  // hook (`silent-end-interrupt-stop.mjs getStateDir`) already use.
+  // Discovered during UAT overnight 2026-05-13: test-harness ran
+  // without `TELEGRAM_STATE_DIR` set, so the writer returned null
+  // path → no state file ever appeared → hook always read "no
+  // silent-end pending" → silent-end recovery never engaged. The
+  // hook + writer have to agree on the path.
+  return join(homedir(), '.claude', 'channels', 'telegram')
 }
 
-function resolveStatePath(deps?: SilentEndDeps): string | null {
-  const dir = resolveStateDir(deps)
-  if (dir == null) return null
-  return join(dir, 'silent-end-pending.json')
+function resolveStatePath(deps?: SilentEndDeps): string {
+  return join(resolveStateDir(deps), 'silent-end-pending.json')
 }
 
 function emitLog(deps: SilentEndDeps | undefined, line: string): void {
@@ -72,15 +79,16 @@ function emitLog(deps: SilentEndDeps | undefined, line: string): void {
  * retryCount from a prior write IFF the prior write's turnKey matches.
  * Otherwise resets to 0.
  *
- * No-op when `TELEGRAM_STATE_DIR` is unset (host-side / out-of-container
- * contexts).
+ * State path: `${TELEGRAM_STATE_DIR ?? ~/.claude/channels/telegram}/
+ * silent-end-pending.json` — exactly matching the path the Stop hook
+ * (silent-end-interrupt-stop.mjs) reads. The parent dir is created
+ * with `mkdir -p` if it doesn't exist (fresh-install case).
  */
 export function writeSilentEndState(
   args: { chatId: string; threadId: number | null; turnKey: string },
   deps?: SilentEndDeps,
 ): void {
   const statePath = resolveStatePath(deps)
-  if (statePath == null) return
   let retryCount = 0
   try {
     if (existsSync(statePath)) {
@@ -100,6 +108,12 @@ export function writeSilentEndState(
     timestamp: Date.now(),
   }
   try {
+    // The fallback path may not exist on a fresh install — mkdir-p
+    // before writing. Cheap and idempotent. Without this the writer
+    // throws ENOENT in environments where the operator hasn't booted
+    // claude before (the dir is normally created by claude itself
+    // on first run).
+    mkdirSync(dirname(statePath), { recursive: true })
     writeFileSync(statePath, JSON.stringify(state), 'utf8')
     emitLog(
       deps,
@@ -124,7 +138,6 @@ export function writeSilentEndState(
  */
 export function clearSilentEndState(turnKey: string, deps?: SilentEndDeps): void {
   const statePath = resolveStatePath(deps)
-  if (statePath == null) return
   if (!existsSync(statePath)) return
   try {
     const prev = JSON.parse(readFileSync(statePath, 'utf8')) as Partial<SilentEndState>
@@ -142,7 +155,7 @@ export function clearSilentEndState(turnKey: string, deps?: SilentEndDeps): void
  */
 export function readSilentEndState(deps?: SilentEndDeps): SilentEndState | null {
   const statePath = resolveStatePath(deps)
-  if (statePath == null || !existsSync(statePath)) return null
+  if (!existsSync(statePath)) return null
   try {
     return JSON.parse(readFileSync(statePath, 'utf8')) as SilentEndState
   } catch {

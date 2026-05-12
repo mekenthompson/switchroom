@@ -2272,34 +2272,23 @@ function postLegacyBanner(
 }
 
 // ─── Session/PTY tail state ───────────────────────────────────────────────
-// Progress-card-related state has been deleted (#1122 PR3). The variable
-// `progressDriver` is retained as a permanent `null` so the dozens of
-// optional-chained call sites scattered through this file
-// (`progressDriver?.ingest(...)`, etc) remain valid TypeScript and
-// short-circuit to no-ops at runtime. The type is `any` so TS doesn't
-// resolve `progressDriver?.X` to `never` (it would otherwise complain
-// about non-existent properties). Those dead call sites will be swept
-// in a follow-up cleanup PR; until then the runtime is provably
-// equivalent to a no-op driver.
+// The pinned progress card was deleted in #1122 PR3. The variables below
+// are retained as permanent `null` so the dozens of optional-chained
+// call sites scattered through this file (`progressDriver?.ingest(...)`,
+// `unpinProgressCardForChat?.(...)`, etc.) remain valid TypeScript and
+// short-circuit to no-ops at runtime. `progressDriver` is typed `any`
+// so TS doesn't resolve `progressDriver?.X` to `never`.
 const streamMode = process.env.SWITCHROOM_TG_STREAM_MODE ?? 'checklist'
 const TURN_FLUSH_SAFETY_ENABLED = isTurnFlushSafetyEnabled()
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const progressDriver: any = null
-let unpinProgressCardForChat: ((chatId: string, threadId: number | undefined) => void) | null = null
-// #654: expose pinMgr lookups + completion to the turn-flush block
-// (defined upstream of where pinMgr is constructed). Set inside
-// startGatewayServer right after pinMgr is created.
-let getPinnedProgressCardMessageId: ((turnKey: string, agentId?: string) => number | null) | null = null
-let completeProgressCardTurn:
+const unpinProgressCardForChat: ((chatId: string, threadId: number | undefined) => void) | null = null
+const getPinnedProgressCardMessageId: ((turnKey: string, agentId?: string) => number | null) | null = null
+const completeProgressCardTurn:
   | ((args: { chatId: string; threadId: number | undefined; turnKey: string }) => void)
   | null = null
-// #689: SIGTERM-time flush. For each currently-pinned progress card, edit
-// the message body to a "Restart interrupted this work" banner and unpin.
-// Returns when every entry has either resolved or the budget elapses.
-// Set inside startGatewayServer right after pinMgr is created.
-let flushProgressCardsForShutdown:
-  | ((opts: { signal: string; reason?: string; budgetMs: number }) => Promise<void>)
-  | null = null
+// #1122 PR3: flushProgressCardsForShutdown deleted with the card. No
+// replacement needed — there are no pinned progress messages to flush.
 let subagentWatcher: SubagentWatcherHandle | null = null
 
 // ─── IPC server ───────────────────────────────────────────────────────────
@@ -2452,9 +2441,13 @@ silencePoke.startTimer({
     emitRuntimeMetric(event)
   },
   onFrameworkFallback: async (ctx) => {
+    // Derive the "N min" suffix from ctx.silenceMs so the wording stays
+    // honest if threshold is tuned. PR2 reviewer note #2.
+    const minutes = Math.max(1, Math.round(ctx.silenceMs / 60_000))
+    const suffix = `(no update from agent in ${minutes} min)`
     const text = ctx.fallbackKind === 'thinking'
-      ? 'still thinking… (no update from agent in 5 min)'
-      : 'still working… (no update from agent in 5 min)'
+      ? `still thinking… ${suffix}`
+      : `still working… ${suffix}`
     try {
       await robustApiCall(
         () => bot.api.sendMessage(ctx.chatId, text, {
@@ -12014,24 +12007,8 @@ async function shutdown(signal: string): Promise<void> {
   // so a wedged Telegram API can't block shutdown. Reads the same reason
   // we just stamped into clean-shutdown.json so the banner mirrors the
   // marker.
-  if (flushProgressCardsForShutdown != null) {
-    let bannerReason: string | undefined
-    try {
-      const m = readCleanShutdownMarker(GATEWAY_CLEAN_SHUTDOWN_MARKER_PATH)
-      if (m?.reason != null && m.reason.length > 0) bannerReason = m.reason
-    } catch {
-      // best-effort — banner just falls back to signal-only
-    }
-    try {
-      await flushProgressCardsForShutdown({
-        signal,
-        ...(bannerReason != null ? { reason: bannerReason } : {}),
-        budgetMs: SHUTDOWN_PROGRESS_FLUSH_BUDGET_MS,
-      })
-    } catch (err) {
-      process.stderr.write(`telegram gateway: shutdown.flush_progress_cards_failed err=${(err as Error).message}\n`)
-    }
-  }
+  // #1122 PR3/PR4: flushProgressCardsForShutdown is permanently null
+  // after the progress card was deleted. Dead block removed.
 
   // Stop the long-poll health check before draining so it doesn't trigger
   // a stall-recovery restart while we're already in shutdown.

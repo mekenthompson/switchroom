@@ -1,0 +1,54 @@
+/**
+ * Pure resolver for the vault grant-card approval posture.
+ *
+ * Extracted from gateway.ts so unit tests can exercise the negative
+ * path (telegram-id with unreadable auto-unlock blob) without dragging
+ * the gateway's top-level startup IIFE under the vitest runner.
+ *
+ * Behaviour pinned by `tests/vault-approval-posture.test.ts`:
+ *  - `approvalAuth` absent / `passphrase` → returns passphrase posture
+ *    with no passphrase loaded.
+ *  - `approvalAuth: telegram-id` + readable blob → returns telegram-id
+ *    posture with the blob contents.
+ *  - `approvalAuth: telegram-id` + unreadable blob → THROWS. The
+ *    gateway propagates this and refuses to boot. We never silently
+ *    downgrade the operator's declared posture.
+ */
+
+export interface VaultBrokerPostureConfig {
+  approvalAuth?: string
+  autoUnlockCredentialPath?: string
+}
+
+export interface ResolvedPosture {
+  mode: 'passphrase' | 'telegram-id'
+  passphrase: string | null
+  credPath?: string
+}
+
+export function resolveVaultApprovalPosture(
+  broker: VaultBrokerPostureConfig | undefined,
+  reader: (path: string) => string,
+  env: { HOME?: string } = process.env,
+): ResolvedPosture {
+  if (broker?.approvalAuth !== 'telegram-id') {
+    return { mode: 'passphrase', passphrase: null }
+  }
+  const credPathRaw = broker.autoUnlockCredentialPath ?? '~/.switchroom/vault-auto-unlock'
+  const credPath = credPathRaw.replace(/^~/, env.HOME ?? '')
+  let loaded: string
+  try {
+    loaded = reader(credPath)
+  } catch (err) {
+    throw new Error(
+      `telegram gateway: vault.broker.approvalAuth=telegram-id but reading ` +
+        `auto-unlock blob at ${credPath} failed: ${(err as Error).message}. ` +
+        `Refusing to boot — silently falling back to passphrase posture ` +
+        `would invert the operator's declared security posture. ` +
+        `Either repair the auto-unlock blob (rerun \`switchroom setup\` / ` +
+        `\`switchroom vault auto-unlock\`) or remove ` +
+        `vault.broker.approvalAuth from switchroom.yaml.`,
+    )
+  }
+  return { mode: 'telegram-id', passphrase: loaded, credPath }
+}

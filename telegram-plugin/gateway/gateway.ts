@@ -318,6 +318,7 @@ import {
   approvalRecord,
 } from '../../src/vault/approvals/client.js'
 import { readAutoUnlockFile } from '../../src/vault/auto-unlock.js'
+import { resolveVaultApprovalPosture } from '../vault-approval-posture.js'
 import {
   openTurnsDb,
   markOrphanedAsRestarted,
@@ -1598,36 +1599,29 @@ const VAULT_PASSPHRASE_TTL_MS = 30 * 60 * 1000
 let VAULT_APPROVAL_AUTH_MODE: 'passphrase' | 'telegram-id' = 'passphrase'
 let AUTO_UNLOCK_PASSPHRASE: string | null = null
 
-function initVaultApprovalPosture(): void {
+export function initVaultApprovalPosture(): void {
+  let cfg: ReturnType<typeof loadSwitchroomConfig>
   try {
-    const cfg = loadSwitchroomConfig()
-    const broker = cfg.vault?.broker
-    if (broker?.approvalAuth === 'telegram-id') {
-      VAULT_APPROVAL_AUTH_MODE = 'telegram-id'
-      const credPathRaw = broker.autoUnlockCredentialPath ?? '~/.switchroom/vault-auto-unlock'
-      const credPath = credPathRaw.replace(/^~/, process.env.HOME ?? '')
-      try {
-        AUTO_UNLOCK_PASSPHRASE = readAutoUnlockFile(credPath)
-        process.stderr.write(
-          `telegram gateway: vault approval posture = telegram-id ` +
-            `(single-factor; auto-unlock blob loaded from ${credPath})\n`,
-        )
-      } catch (err) {
-        process.stderr.write(
-          `telegram gateway: vault.broker.approvalAuth=telegram-id but reading ` +
-            `auto-unlock blob failed: ${(err as Error).message}. ` +
-            `Falling back to passphrase posture for this session.\n`,
-        )
-        VAULT_APPROVAL_AUTH_MODE = 'passphrase'
-        AUTO_UNLOCK_PASSPHRASE = null
-      }
-    }
+    cfg = loadSwitchroomConfig()
   } catch (err) {
     // Best-effort — gateway may run in dirs where loadSwitchroomConfig
     // fails. Stay on the default passphrase posture.
     process.stderr.write(
       `telegram gateway: could not load switchroom config for vault approval ` +
         `posture (${(err as Error).message}); defaulting to passphrase.\n`,
+    )
+    return
+  }
+  // Posture-load failures (below) propagate — they are intentional
+  // hard-fails. The schema guarantees telegram-id implies autoUnlock:true,
+  // so a missing/corrupt blob at runtime is a refuse-to-boot condition.
+  const resolved = resolveVaultApprovalPosture(cfg.vault?.broker, readAutoUnlockFile)
+  VAULT_APPROVAL_AUTH_MODE = resolved.mode
+  AUTO_UNLOCK_PASSPHRASE = resolved.passphrase
+  if (resolved.mode === 'telegram-id') {
+    process.stderr.write(
+      `telegram gateway: vault approval posture = telegram-id ` +
+        `(single-factor; auto-unlock blob loaded from ${resolved.credPath})\n`,
     )
   }
 }

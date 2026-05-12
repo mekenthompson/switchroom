@@ -493,6 +493,34 @@ export function getLatestInboundMessageId(
   return row?.message_id ?? null
 }
 
+/**
+ * Look up the role + text of a single message by (chat_id, message_id).
+ * Returns `null` if no row exists (the message predates history, the
+ * row was reaped, or history is disabled). Used by the reaction-trigger
+ * handler (#1074) to decide whether a reacted-to message is bot-authored
+ * AND to pull the preview text for the synthesized inbound — both in
+ * one DB hit, so the trigger predicate doesn't need a Telegram API call
+ * per reaction.
+ *
+ * Telegram message_ids are unique within a chat regardless of thread,
+ * so we match on (chat_id, message_id) and ignore thread_id — same as
+ * recordEdit / recordReaction.
+ */
+export function lookupMessageRoleAndText(
+  chatId: string,
+  messageId: number,
+): { role: 'user' | 'assistant'; text: string } | null {
+  const row = requireDb()
+    .prepare(
+      `SELECT role, text FROM messages WHERE chat_id = ? AND message_id = ? LIMIT 1`,
+    )
+    .get(chatId, messageId) as
+    | { role: 'user' | 'assistant'; text: string | null }
+    | undefined
+  if (!row) return null
+  return { role: row.role, text: row.text ?? '' }
+}
+
 export function getRecentOutboundCount(
   chatId: string,
   withinSeconds: number,

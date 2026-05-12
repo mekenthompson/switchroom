@@ -5617,9 +5617,26 @@ async function handleInbound(
     }
     if (agentName) {
       try {
-        const { interruptAgent } = await import('../../src/agents/lifecycle.js')
-        const { pid } = interruptAgent(agentName)
-        process.stderr.write(`telegram gateway: interrupt-marker SIGINT sent agent=${agentName} pid=${pid}\n`)
+        // The gateway runs INSIDE the agent container in docker mode,
+        // so calling `interruptAgent` (which probes `docker inspect`
+        // for the PID) always returns "no running PID" — the host's
+        // docker socket isn't visible to us. Skip the PID round-trip
+        // entirely and use tmux send-keys directly: the tmux socket
+        // is local to our container. Discovered during UAT overnight
+        // 2026-05-13 — pre-fix every `!` interrupt produced an
+        // "Agent has no running PID" stderr line and the user got
+        // ghosted because the SIGINT never fired.
+        const { sendAgentInterrupt } = await import('../../src/agents/tmux.js')
+        const r = sendAgentInterrupt({ agentName })
+        if ('ok' in r) {
+          process.stderr.write(
+            `telegram gateway: interrupt-marker SIGINT delivered via tmux send-keys agent=${agentName}\n`,
+          )
+        } else {
+          process.stderr.write(
+            `telegram gateway: interrupt-marker SIGINT via tmux failed agent=${agentName}: ${r.error}\n`,
+          )
+        }
       } catch (err) {
         process.stderr.write(`telegram gateway: interrupt-marker SIGINT failed: ${(err as Error).message}\n`)
       }

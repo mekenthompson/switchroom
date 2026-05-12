@@ -29,7 +29,7 @@
  *
  *    ```bash
  *    for k in uat/concurrent-a uat/concurrent-b ; do
- *      TMPF=$(mktemp); printf '%s' "sentinel-${k##*/}" > "$TMPF"
+ *      TMPF=$(mktemp); printf '%s' "sentinel-$(basename "$k")" > "$TMPF"
  *      switchroom vault set "$k" --file "$TMPF" --format string
  *      shred -u "$TMPF"
  *    done

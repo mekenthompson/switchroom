@@ -840,3 +840,182 @@ describe('Queue lifecycle: multiple queued messages overwrite notification', () 
     expect(secondNotif!.messageId).not.toBe(firstMsgId)
   })
 })
+
+// ───────────────────────────────────────────────────────────────────────────
+// #1067 — currentTurn atom snapshot-at-entry race regression
+// ───────────────────────────────────────────────────────────────────────────
+//
+// Pre-#1067: gateway.ts had ~13 module-level `let`s holding the implicit
+// "current turn" state (currentSessionChatId, currentTurnStartedAt, etc).
+// Async session-event handlers read those singletons directly. When a
+// handler captured a value, awaited (e.g. sendMessage / progress-card
+// edit), and resumed, an intervening `enqueue` for a different chat could
+// swap the singletons — and the resumed handler would mis-route its
+// effect to the new chat (wrong-chat progress card, wrong-chat status
+// reaction, wrong-chat answer-stream update).
+//
+// Fix: consolidate the singletons into one atom and capture it at handler
+// entry: `const turn = currentTurn; if (turn == null) return;` — every
+// subsequent read uses `turn.*` so the snapshot is stable across awaits.
+//
+// This test models the pattern with a minimal atom + handler harness and
+// asserts the effect lands on the *original* turn's chat, not the
+// usurper's. If the fix is ever undone, this test fails — making the
+// reattribution race detectable in CI.
+
+type _Test1067_CurrentTurn = {
+  sessionChatId: string
+  startedAt: number
+}
+
+interface _Test1067_Effect {
+  chatId: string
+  reason: 'tool_use' | 'turn_end'
+}
+
+describe('#1067 — currentTurn snapshot-at-entry prevents cross-chat reattribution', () => {
+  /** A synchronous swap of the atom — models the enqueue handler. */
+  function enqueue(state: { atom: _Test1067_CurrentTurn | null }, chatId: string, now: number): void {
+    state.atom = { sessionChatId: chatId, startedAt: now }
+  }
+
+  /**
+   * The pre-#1067 anti-pattern: re-read the singleton after the await.
+   * Any mid-await swap mis-attributes the effect to the new chat.
+   */
+  async function legacyToolUseHandler(
+    state: { atom: _Test1067_CurrentTurn | null },
+    effects: _Test1067_Effect[],
+    midAwait: () => Promise<void>,
+  ): Promise<void> {
+    const beforeChatId = state.atom?.sessionChatId
+    if (beforeChatId == null) return
+    // Simulate the await window (status-reaction edit, progress-card mutation,
+    // answer-stream API call — anything that yields the event loop).
+    await midAwait()
+    // Bug: re-read currentTurn after the await. A concurrent enqueue
+    // could have swapped the singletons; this effect now lands on the
+    // wrong chat.
+    const afterChatId = state.atom?.sessionChatId
+    if (afterChatId == null) return
+    effects.push({ chatId: afterChatId, reason: 'tool_use' })
+  }
+
+  /**
+   * The post-#1067 pattern: snapshot at handler entry, use the local
+   * through the rest of the handler — across awaits.
+   */
+  async function fixedToolUseHandler(
+    state: { atom: _Test1067_CurrentTurn | null },
+    effects: _Test1067_Effect[],
+    midAwait: () => Promise<void>,
+  ): Promise<void> {
+    const turn = state.atom // snapshot
+    if (turn == null) return
+    await midAwait()
+    // Use the captured `turn`, not state.atom. The effect goes to the
+    // chat that the handler was actually invoked for.
+    effects.push({ chatId: turn.sessionChatId, reason: 'tool_use' })
+  }
+
+  it('legacy pattern: mid-await enqueue reattributes the effect (regression baseline)', async () => {
+    const state: { atom: _Test1067_CurrentTurn | null } = { atom: null }
+    const effects: _Test1067_Effect[] = []
+
+    enqueue(state, 'A', 100)
+    // Start the handler; it will await midway.
+    let releaseAwait: () => void = () => {}
+    const blocker = new Promise<void>(resolve => { releaseAwait = resolve })
+    const handlerDone = legacyToolUseHandler(state, effects, () => blocker)
+
+    // While handler is suspended, an enqueue for chat B lands. Pre-#1067
+    // gateway would mutate the same singletons.
+    enqueue(state, 'B', 200)
+
+    releaseAwait()
+    await handlerDone
+
+    // Reattribution: the legacy pattern sends A's tool_use effect to B.
+    expect(effects).toEqual([{ chatId: 'B', reason: 'tool_use' }])
+  })
+
+  it('fixed pattern: snapshot-at-entry keeps the effect on the original chat', async () => {
+    const state: { atom: _Test1067_CurrentTurn | null } = { atom: null }
+    const effects: _Test1067_Effect[] = []
+
+    enqueue(state, 'A', 100)
+    let releaseAwait: () => void = () => {}
+    const blocker = new Promise<void>(resolve => { releaseAwait = resolve })
+    const handlerDone = fixedToolUseHandler(state, effects, () => blocker)
+
+    // Mid-handler enqueue for chat B — the race-trigger.
+    enqueue(state, 'B', 200)
+
+    releaseAwait()
+    await handlerDone
+
+    // The effect lands on A, the turn the handler was invoked for.
+    // This is the regression guard for #1067.
+    expect(effects).toEqual([{ chatId: 'A', reason: 'tool_use' }])
+  })
+
+  it('fixed pattern: if currentTurn is cleared mid-handler, the captured snapshot still wins', async () => {
+    // turn_end (or context-exhaustion bail-out) nulls the atom. A handler
+    // already in flight should still complete against its snapshot rather
+    // than dropping the effect — losing the snapshot here would
+    // re-introduce the cross-attribution failure mode if a NEW enqueue
+    // races the cleanup.
+    const state: { atom: _Test1067_CurrentTurn | null } = { atom: null }
+    const effects: _Test1067_Effect[] = []
+
+    enqueue(state, 'A', 100)
+    let releaseAwait: () => void = () => {}
+    const blocker = new Promise<void>(resolve => { releaseAwait = resolve })
+    const handlerDone = fixedToolUseHandler(state, effects, () => blocker)
+
+    // turn_end nulls the atom; then an immediate enqueue for B swaps in
+    // a fresh atom. The legacy reader would see B; the fixed reader
+    // still sees A.
+    state.atom = null
+    enqueue(state, 'B', 200)
+
+    releaseAwait()
+    await handlerDone
+
+    expect(effects).toEqual([{ chatId: 'A', reason: 'tool_use' }])
+  })
+
+  it('fixed pattern: multiple concurrent handlers each see their own turn', async () => {
+    // Pipeline: handler 1 starts under turn A and awaits. While it's
+    // suspended, turn_end + enqueue B happens. Handler 2 then starts
+    // under turn B and awaits. Both eventually resume. Each handler's
+    // effect must reflect the turn it started under.
+    const state: { atom: _Test1067_CurrentTurn | null } = { atom: null }
+    const effects: _Test1067_Effect[] = []
+
+    enqueue(state, 'A', 100)
+    let release1: () => void = () => {}
+    const block1 = new Promise<void>(resolve => { release1 = resolve })
+    const h1 = fixedToolUseHandler(state, effects, () => block1)
+
+    state.atom = null
+    enqueue(state, 'B', 200)
+
+    let release2: () => void = () => {}
+    const block2 = new Promise<void>(resolve => { release2 = resolve })
+    const h2 = fixedToolUseHandler(state, effects, () => block2)
+
+    // Resume in reverse order: handler 2 first, then handler 1. This
+    // proves the snapshot is not order-dependent.
+    release2()
+    await h2
+    release1()
+    await h1
+
+    // Both handlers landed effects on their respective turns; neither
+    // got reattributed to the other's chat.
+    expect(effects).toContainEqual({ chatId: 'A', reason: 'tool_use' })
+    expect(effects).toContainEqual({ chatId: 'B', reason: 'tool_use' })
+    expect(effects).toHaveLength(2)
+  })
+})

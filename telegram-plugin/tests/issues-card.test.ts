@@ -493,3 +493,52 @@ describe("createIssuesCardHandle — persistence (#472 #19)", () => {
     }
   });
 });
+
+// ─── #1075 — THREAD_NOT_FOUND propagation ───────────────────────────────────
+//
+// In production the gateway wires the issues-card's `bot` adapter through
+// `robustApiCall`, which throws a wrapped error with `message ==
+// 'THREAD_NOT_FOUND'` when the underlying GrammyError matches "thread not
+// found". The card module's job is to NOT crash — it should log and
+// re-post on the next refresh (the same path it uses for "message not
+// found" stale-edit recovery). Both shapes are tested here.
+
+describe("createIssuesCardHandle — #1075 thread-deleted resilience", () => {
+  it("re-posts the card when an edit throws THREAD_NOT_FOUND", async () => {
+    const bot = makeFakeBot();
+    const handle = createIssuesCardHandle({
+      agentName: "klanker",
+      chatId: "1",
+      bot,
+      now: () => 1_000_000,
+    });
+    await handle.refresh([makeEvent({ summary: "first" })]);
+    expect(bot.sent).toHaveLength(1);
+
+    // Mid-flight, the topic gets deleted. The wrapped adapter throws
+    // the special THREAD_NOT_FOUND error on the next edit.
+    bot.editMessageText = async () => {
+      throw Object.assign(new Error("THREAD_NOT_FOUND"), { original: null });
+    };
+    await handle.refresh([makeEvent({ summary: "after thread delete" })]);
+    // Card was forced to re-post (sent twice).
+    expect(bot.sent).toHaveLength(2);
+    // And it should NOT have crashed — handle still operates.
+    expect(handle.messageId()).not.toBeNull();
+  });
+
+  it("does not crash when sendMessage itself throws THREAD_NOT_FOUND", async () => {
+    const bot = makeFakeBot();
+    bot.sendMessage = async () => {
+      throw Object.assign(new Error("THREAD_NOT_FOUND"), { original: null });
+    };
+    const handle = createIssuesCardHandle({
+      agentName: "klanker",
+      chatId: "1",
+      bot,
+    });
+    // First refresh — should swallow the THREAD_NOT_FOUND, no crash.
+    await expect(handle.refresh([makeEvent({})])).resolves.toBeUndefined();
+    expect(handle.messageId()).toBeNull();
+  });
+});

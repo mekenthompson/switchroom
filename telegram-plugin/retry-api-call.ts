@@ -170,3 +170,83 @@ export function createRetryApiCall(
     throw giveUpErr
   }
 }
+
+/**
+ * Compose a swallowing wrapper around a `retryApiCall` instance.
+ *
+ * Use this for **fire-and-forget** Telegram API callsites — boot/issues/
+ * subagent cards, "agent restarting" notices, reactions on stale targets,
+ * anything where the caller previously had `.catch(() => {})`. The wrapper
+ * resolves to `undefined` on the cases retryApiCall throws (THREAD_NOT_FOUND,
+ * give-up after network retries, GrammyError 403/400-not-chat, …) and logs
+ * a one-line note to `log` so the failure is at least visible in stderr.
+ *
+ * Why not just `.catch(() => {})` at the callsite? Two reasons:
+ *
+ *   1. We want THREAD_NOT_FOUND specifically to NOT crash but to be
+ *      *visible* — `.catch(() => {})` silently swallows everything, which
+ *      hid #1075 for months. The log here surfaces it.
+ *   2. Callers shouldn't have to remember to wrap each raw `bot.api.*`
+ *      with the retry policy AND the swallow — this is one function.
+ *
+ * For callsites that legitimately need to inspect failure (e.g. drop
+ * thread_id and retry on main chat), use `retryApiCall` directly and
+ * handle `THREAD_NOT_FOUND` explicitly — see `gateway.ts:2806` for the
+ * canonical pattern (the reply chunk loop).
+ */
+export function createSwallowingRetryApiCall(
+  retry: <T>(fn: () => Promise<T>, opts?: RetryCallOpts) => Promise<T>,
+  log?: (line: string) => void,
+): <T>(fn: () => Promise<T>, opts?: RetryCallOpts) => Promise<T | undefined> {
+  return async function swallow<T>(
+    fn: () => Promise<T>,
+    opts?: RetryCallOpts,
+  ): Promise<T | undefined> {
+    try {
+      return await retry(fn, opts)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const verb = opts?.verb ?? 'api-call'
+      log?.(`telegram gateway: ${verb} swallowed: ${msg}\n`)
+      return undefined
+    }
+  }
+}
+
+/**
+ * Helper for callsites that pass `message_thread_id` and want to fall
+ * back to the main chat when the thread is deleted.
+ *
+ * The caller provides a `send` closure that takes `threadId?: number` and
+ * builds its own request. On THREAD_NOT_FOUND, `send(undefined)` is invoked
+ * once more — the wrapper drops the thread id and re-tries; everything
+ * else falls through to the underlying retry policy.
+ *
+ * Returns the final API response (typed as `T` — fallback resolved, or
+ * threadId-bearing call resolved). On non-thread errors, propagates as
+ * `retry` does.
+ */
+export async function retryWithThreadFallback<T>(
+  retry: <U>(fn: () => Promise<U>, opts?: RetryCallOpts) => Promise<U>,
+  send: (threadId: number | undefined) => Promise<T>,
+  opts: { threadId: number | undefined; chat_id: string; verb?: string },
+): Promise<T> {
+  try {
+    return await retry(() => send(opts.threadId), {
+      ...(opts.threadId != null ? { threadId: opts.threadId } : {}),
+      chat_id: opts.chat_id,
+      ...(opts.verb != null ? { verb: opts.verb } : {}),
+    })
+  } catch (err) {
+    if (err instanceof Error && err.message === 'THREAD_NOT_FOUND') {
+      // Drop the thread id and retry once on the main chat. Don't pass
+      // threadId in opts so a *second* thread-not-found (shouldn't
+      // happen) just propagates as a normal error.
+      return await retry(() => send(undefined), {
+        chat_id: opts.chat_id,
+        ...(opts.verb != null ? { verb: opts.verb } : {}),
+      })
+    }
+    throw err
+  }
+}

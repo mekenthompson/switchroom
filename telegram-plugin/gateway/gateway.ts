@@ -57,7 +57,11 @@ import { type DraftStreamHandle } from '../draft-stream.js'
 import { handlePtyPartialPure, type PtyHandlerState } from '../pty-partial-handler.js'
 import { handleStreamReply } from '../stream-reply-handler.js'
 import { createChatLock } from '../chat-lock.js'
-import { createRetryApiCall } from '../retry-api-call.js'
+import {
+  createRetryApiCall,
+  createSwallowingRetryApiCall,
+  retryWithThreadFallback,
+} from '../retry-api-call.js'
 import { installTgPostLogger, withTgPostTags } from '../shared/bot-runtime.js'
 import { emitCardEvent } from '../card-event-log.js'
 import { buildAttachmentPath, assertInsideInbox } from '../attachment-path.js'
@@ -1380,6 +1384,110 @@ const robustApiCall = createRetryApiCall({
   log: (line) => process.stderr.write(line),
 })
 
+// Fire-and-forget wrapper for outbound surfaces that previously had
+// `.catch(() => {})` directly on `bot.api.*` calls. Resolves to undefined
+// (instead of crashing the gateway) on THREAD_NOT_FOUND, give-up, 403,
+// and any non-benign error — logs a one-liner so the failure isn't
+// completely silent. See #1075.
+const swallowingApiCall = createSwallowingRetryApiCall(
+  robustApiCall,
+  (line) => process.stderr.write(line),
+)
+
+/**
+ * Adapter factory for `startBootCard`'s `BotApiForBootCard` interface.
+ *
+ * Wraps each call through `robustApiCall` so flood-wait / not-found /
+ * THREAD_NOT_FOUND are handled by the standard policy instead of bubbling
+ * up to crash the boot path (#1075). `threadId` is the topic the card is
+ * posted into; passed to retryApiCall opts so the wrapper can fall back
+ * to the main chat on stale-thread 400s.
+ *
+ * Boot-card itself already wraps each send/edit in try/catch, so on the
+ * THREAD_NOT_FOUND throw the card just logs and stops updating — which
+ * is the correct UX: if the user deleted the topic, there's nothing to
+ * edit anyway.
+ */
+function wrapBootCardApi(
+  threadId: number | undefined,
+): import('./boot-card.js').BotApiForBootCard {
+  const opts = (chat_id: string): { threadId?: number; chat_id: string; verb: string } => ({
+    chat_id,
+    verb: 'boot-card',
+    ...(threadId != null ? { threadId } : {}),
+  })
+  return {
+    sendMessage: async (cid, text, sendOpts) => {
+      const sent = await robustApiCall(
+        () =>
+          lockedBot.api.sendMessage(
+            cid,
+            text,
+            sendOpts as Parameters<typeof lockedBot.api.sendMessage>[2],
+          ),
+        opts(cid),
+      )
+      return sent as { message_id: number }
+    },
+    editMessageText: (cid, mid, text, editOpts) =>
+      robustApiCall(
+        () =>
+          lockedBot.api.editMessageText(
+            cid,
+            mid,
+            text,
+            editOpts as Parameters<typeof lockedBot.api.editMessageText>[3],
+          ),
+        opts(cid),
+      ) as Promise<unknown>,
+  }
+}
+
+/**
+ * Adapter factory for `createIssuesCardHandle`'s bot interface. Same
+ * shape as `wrapBootCardApi` — wraps each call through `robustApiCall`
+ * so THREAD_NOT_FOUND surfaces as an inspectable throw inside the card
+ * handle's own try/catch (where it already logs + re-posts). Without the
+ * wrapper, the raw grammY GrammyError previously bubbled and crashed
+ * the gateway. See #1075.
+ */
+function wrapIssuesCardApi(
+  threadId: number | undefined,
+): import('../issues-card.js').BotApiForIssuesCard {
+  const opts = (chat_id: string): { threadId?: number; chat_id: string; verb: string } => ({
+    chat_id,
+    verb: 'issues-card',
+    ...(threadId != null ? { threadId } : {}),
+  })
+  return {
+    sendMessage: async (cid, text, sendOpts) => {
+      const sent = await robustApiCall(
+        () =>
+          lockedBot.api.sendMessage(
+            cid,
+            text,
+            sendOpts as Parameters<typeof lockedBot.api.sendMessage>[2],
+          ),
+        opts(cid),
+      )
+      return sent as { message_id: number }
+    },
+    editMessageText: (cid, mid, text, editOpts) =>
+      robustApiCall(
+        () =>
+          lockedBot.api.editMessageText(
+            cid,
+            mid,
+            text,
+            editOpts as Parameters<typeof lockedBot.api.editMessageText>[3],
+          ),
+        opts(cid),
+      ) as Promise<unknown>,
+    deleteMessage: (cid, mid) =>
+      robustApiCall(() => lockedBot.api.deleteMessage(cid, mid), opts(cid)) as Promise<unknown>,
+  }
+}
+
 // ─── Structured outbound log ──────────────────────────────────────────────
 function logOutbound(
   path: 'reply' | 'stream_reply' | 'backstop' | 'pty_preview' | 'edit' | 'forward' | 'answer_lane',
@@ -2119,15 +2227,41 @@ function postLegacyBanner(
 ): void {
   const text = `🎛️ Switchroom restarted — ready. (took ~${ageSec}s)`
   process.stderr.write(`telegram gateway: ${site}: posting legacy banner chat_id=${chatId}\n`)
-  lockedBot.api.sendMessage(chatId, text, {
-    parse_mode: 'HTML', link_preview_options: { is_disabled: true },
-    ...(threadId != null ? { message_thread_id: threadId } : {}),
-    ...(ackMessageId != null ? { reply_parameters: { message_id: ackMessageId } } : {}),
-  }).then(sent => {
-    if (HISTORY_ENABLED) { try { recordOutbound({ chat_id: chatId, thread_id: threadId ?? null, message_ids: [sent.message_id], texts: [text], attachment_kinds: [] }) } catch {} }
-  }).catch((err: Error) => {
-    process.stderr.write(`telegram gateway: ${site}: legacy banner send failed: ${err.message}\n`)
-  })
+  // #1075: thread-id-bearing call — route through robustApiCall so a
+  // stale thread (THREAD_NOT_FOUND) becomes a swallowed log line, not
+  // a crash. Use retryWithThreadFallback so the banner still lands on
+  // the main chat when the topic is gone.
+  retryWithThreadFallback(
+    robustApiCall,
+    (tid) =>
+      lockedBot.api.sendMessage(chatId, text, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+        ...(tid != null ? { message_thread_id: tid } : {}),
+        ...(ackMessageId != null ? { reply_parameters: { message_id: ackMessageId } } : {}),
+      }),
+    { threadId, chat_id: chatId, verb: 'legacy-banner' },
+  )
+    .then((sent) => {
+      if (HISTORY_ENABLED) {
+        try {
+          recordOutbound({
+            chat_id: chatId,
+            thread_id: threadId ?? null,
+            message_ids: [sent.message_id],
+            texts: [text],
+            attachment_kinds: [],
+          })
+        } catch {
+          /* best-effort */
+        }
+      }
+    })
+    .catch((err: Error) => {
+      process.stderr.write(
+        `telegram gateway: ${site}: legacy banner send failed: ${err.message}\n`,
+      )
+    })
 }
 
 // ─── Progress card + session/PTY tail state ───────────────────────────────
@@ -2206,22 +2340,7 @@ function ensureIssuesCard(chatId: string, threadId: number | undefined): void {
     )
     return
   }
-  const botApi: import('../issues-card.js').BotApiForIssuesCard = {
-    sendMessage: (cid, text, opts) =>
-      lockedBot.api.sendMessage(
-        cid,
-        text,
-        opts as Parameters<typeof lockedBot.api.sendMessage>[2],
-      ) as Promise<{ message_id: number }>,
-    editMessageText: (cid, mid, text, opts) =>
-      lockedBot.api.editMessageText(
-        cid,
-        mid,
-        text,
-        opts as Parameters<typeof lockedBot.api.editMessageText>[3],
-      ),
-    deleteMessage: (cid, mid) => lockedBot.api.deleteMessage(cid, mid),
-  }
+  const botApi: import('../issues-card.js').BotApiForIssuesCard = wrapIssuesCardApi(threadId)
   activeIssuesCard = createIssuesCardHandle({
     agentName: agentDisplayName,
     chatId,
@@ -2347,10 +2466,7 @@ const ipcServer: IpcServer = createIpcServer({
           const agentDir = resolveAgentDirFromEnv()
           const agentSlug = process.env.SWITCHROOM_AGENT_NAME ?? client.agentName ?? '-'
           const agentDisplayName = resolvePersonaName(agentSlug)
-          const botApiForCard: import('./boot-card.js').BotApiForBootCard = {
-            sendMessage: (cid, text, opts) => lockedBot.api.sendMessage(cid, text, opts as Parameters<typeof lockedBot.api.sendMessage>[2]) as Promise<{ message_id: number }>,
-            editMessageText: (cid, mid, text, opts) => lockedBot.api.editMessageText(cid, mid, text, opts as Parameters<typeof lockedBot.api.editMessageText>[3]),
-          }
+          const botApiForCard: import('./boot-card.js').BotApiForBootCard = wrapBootCardApi(threadId)
           // Symmetric to the boot path: claim ownership synchronously so a
           // second bridge-reconnect in the same lifetime can't race against
           // an in-flight sendMessage here either (#489).
@@ -2839,11 +2955,14 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
   // (#585) provide the visual gap that the placeholder used to fill.
 
   const deleteStalePreview = async (id: number): Promise<void> => {
-    try {
-      await lockedBot.api.deleteMessage(chat_id, id)
-    } catch (err) {
-      process.stderr.write(`telegram gateway: failed to delete stale preview ${id}: ${(err as Error).message}\n`)
-    }
+    // #1075: operates on a message in a (possibly-deleted) thread. The
+    // "delete not found" case is already swallowed by robustApiCall; on
+    // THREAD_NOT_FOUND, swallowingApiCall logs + returns undefined so the
+    // reply flow continues with a fresh send.
+    await swallowingApiCall(
+      () => lockedBot.api.deleteMessage(chat_id, id),
+      { chat_id, verb: 'reply.deleteStalePreview' },
+    )
   }
 
   logStreamingEvent({
@@ -2951,35 +3070,63 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
   // back to the per-file path for any non-all-photo set.
   const allPhotos = files.length >= 2 && files.length <= 10
     && files.every((f) => PHOTO_EXTS.has(extname(f).toLowerCase()))
+  // #1075: thread-id-bearing file sends. Mirror the chunk-loop's
+  // THREAD_NOT_FOUND fallback (deleted topic → drop the thread and
+  // resend on the main chat) so an attachment-bearing reply doesn't
+  // crash when the user deletes the topic mid-flight.
+  const replyParams =
+    reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : {}
   if (allPhotos) {
-    const baseOpts = {
-      ...(reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : {}),
-      ...(threadId != null ? { message_thread_id: threadId } : {}),
-    }
     const media = files.map((f) => ({
       type: 'photo' as const,
       media: new InputFile(f),
     }))
-    const sent = await robustApiCall(
-      () => lockedBot.api.sendMediaGroup(chat_id, media, baseOpts),
-      { threadId, chat_id },
+    const sent = await retryWithThreadFallback(
+      robustApiCall,
+      (tid) => {
+        const baseOpts = {
+          ...replyParams,
+          ...(tid != null ? { message_thread_id: tid } : {}),
+        }
+        return lockedBot.api.sendMediaGroup(chat_id, media, baseOpts)
+      },
+      { threadId, chat_id, verb: 'sendMediaGroup' },
     )
+    if (threadId != null) {
+      // If the fallback dropped the thread id, propagate that decision
+      // to subsequent calls in this reply (no further retries needed).
+      // We can't observe which branch resolved cleanly, so peek at the
+      // first sent message: Telegram echoes message_thread_id only when
+      // present in the request. Absent → fallback fired.
+      const first = sent[0] as { message_thread_id?: number } | undefined
+      if (first && first.message_thread_id == null) threadId = undefined
+    }
     for (const m of sent) sentIds.push(m.message_id)
   } else {
     for (const f of files) {
       const ext = extname(f).toLowerCase()
       const input = new InputFile(f)
-      const baseOpts = {
-        ...(reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : {}),
-        ...(threadId != null ? { message_thread_id: threadId } : {}),
+      const isPhoto = PHOTO_EXTS.has(ext)
+      const sent = await retryWithThreadFallback<{ message_id: number; message_thread_id?: number }>(
+        robustApiCall,
+        (tid) => {
+          const baseOpts = {
+            ...replyParams,
+            ...(tid != null ? { message_thread_id: tid } : {}),
+          }
+          return isPhoto
+            ? lockedBot.api.sendPhoto(chat_id, input, baseOpts)
+            : lockedBot.api.sendDocument(chat_id, input, baseOpts)
+        },
+        { threadId, chat_id, verb: isPhoto ? 'sendPhoto' : 'sendDocument' },
+      )
+      // Mirror the threadId-clear above so the *next* file in the
+      // loop skips the doomed thread without paying for another
+      // round trip + retry.
+      if (threadId != null && sent.message_thread_id == null) {
+        threadId = undefined
       }
-      if (PHOTO_EXTS.has(ext)) {
-        const sent = await robustApiCall(() => lockedBot.api.sendPhoto(chat_id, input, baseOpts), { threadId, chat_id })
-        sentIds.push(sent.message_id)
-      } else {
-        const sent = await robustApiCall(() => lockedBot.api.sendDocument(chat_id, input, baseOpts), { threadId, chat_id })
-        sentIds.push(sent.message_id)
-      }
+      sentIds.push(sent.message_id)
     }
   }
 
@@ -3409,7 +3556,18 @@ async function executeAskUser(rawArgs: Record<string, unknown>): Promise<unknown
 
   let messageId: number | null = null
   try {
-    const sent = await lockedBot.api.sendMessage(args.chatId, args.question, sendOpts)
+    // #1075: thread-id-bearing — route through retryWithThreadFallback
+    // so a deleted topic still gets the ask_user card on the main chat.
+    const sent = await retryWithThreadFallback<{ message_id: number }>(
+      robustApiCall,
+      (tid) => {
+        const opts = { ...sendOpts }
+        if (tid == null) delete opts.message_thread_id
+        else opts.message_thread_id = tid
+        return lockedBot.api.sendMessage(args.chatId, args.question, opts)
+      },
+      { threadId, chat_id: args.chatId, verb: 'ask_user.sendMessage' },
+    )
     messageId = sent.message_id
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -3426,14 +3584,23 @@ async function executeAskUser(rawArgs: Record<string, unknown>): Promise<unknown
       if (!entry) return
       // Edit the question to remove buttons + show timeout state.
       // Best-effort: a failed edit doesn't change the outcome.
-      void lockedBot.api.editMessageText(
-        args.chatId,
-        entry.messageId!,
-        `${args.question}\n\n<i>⏱ no response within ${Math.round(args.timeoutMs / 1000)}s</i>`,
-        { parse_mode: 'HTML' },
-      ).catch((e: unknown) => {
-        process.stderr.write(`telegram gateway: ask_user timeout-edit failed askId=${askId}: ${(e as Error).message}\n`)
-      })
+      // #1075: edit operates on a message inside the (possibly-deleted)
+      // thread — swallow on THREAD_NOT_FOUND so we don't crash on
+      // timeout cleanup.
+      void swallowingApiCall(
+        () =>
+          lockedBot.api.editMessageText(
+            args.chatId,
+            entry.messageId!,
+            `${args.question}\n\n<i>⏱ no response within ${Math.round(args.timeoutMs / 1000)}s</i>`,
+            { parse_mode: 'HTML' },
+          ),
+        {
+          chat_id: args.chatId,
+          verb: 'ask_user.timeout-edit',
+          ...(threadId != null ? { threadId } : {}),
+        },
+      )
       resolveTool({ content: [{ type: 'text', text: JSON.stringify({ kind: 'timeout' } satisfies AskUserOutcome) }] })
     }, args.timeoutMs)
 
@@ -3492,11 +3659,20 @@ async function executeSendSticker(rawArgs: Record<string, unknown>): Promise<unk
     }
   }
 
-  const sendOpts: Record<string, unknown> = {}
-  if (threadId != null) sendOpts.message_thread_id = threadId
-  if (replyTo != null) sendOpts.reply_parameters = { message_id: replyTo }
+  const baseSendOpts: Record<string, unknown> = {}
+  if (replyTo != null) baseSendOpts.reply_parameters = { message_id: replyTo }
 
-  const sent = await lockedBot.api.sendSticker(args.chatId, args.fileId, sendOpts)
+  // #1075: thread-id-bearing — drop the thread on THREAD_NOT_FOUND so
+  // the sticker still lands on the main chat.
+  const sent = await retryWithThreadFallback<{ message_id: number }>(
+    robustApiCall,
+    (tid) => {
+      const opts = { ...baseSendOpts }
+      if (tid != null) opts.message_thread_id = tid
+      return lockedBot.api.sendSticker(args.chatId, args.fileId, opts)
+    },
+    { threadId, chat_id: args.chatId, verb: 'sendSticker' },
+  )
   process.stderr.write(
     `telegram gateway [outbound] ${new Date().toISOString()} path=sticker ` +
     `chat=${args.chatId} msg_id=${sent.message_id} ` +
@@ -3536,12 +3712,20 @@ async function executeSendGif(rawArgs: Record<string, unknown>): Promise<unknown
     }
   }
 
-  const sendOpts: Record<string, unknown> = {}
-  if (args.caption != null) sendOpts.caption = args.caption
-  if (threadId != null) sendOpts.message_thread_id = threadId
-  if (replyTo != null) sendOpts.reply_parameters = { message_id: replyTo }
+  const baseSendOpts: Record<string, unknown> = {}
+  if (args.caption != null) baseSendOpts.caption = args.caption
+  if (replyTo != null) baseSendOpts.reply_parameters = { message_id: replyTo }
 
-  const sent = await lockedBot.api.sendAnimation(args.chatId, args.animationRef, sendOpts)
+  // #1075: thread-id-bearing — drop the thread on THREAD_NOT_FOUND.
+  const sent = await retryWithThreadFallback<{ message_id: number }>(
+    robustApiCall,
+    (tid) => {
+      const opts = { ...baseSendOpts }
+      if (tid != null) opts.message_thread_id = tid
+      return lockedBot.api.sendAnimation(args.chatId, args.animationRef, opts)
+    },
+    { threadId, chat_id: args.chatId, verb: 'sendAnimation' },
+  )
   process.stderr.write(
     `telegram gateway [outbound] ${new Date().toISOString()} path=gif ` +
     `chat=${args.chatId} msg_id=${sent.message_id} ref_kind=${args.refKind}\n`,
@@ -3702,14 +3886,21 @@ async function executeVaultRequestSave(args: Record<string, unknown>): Promise<{
   pendingVaultRequestSaves.set(stageId, pending)
   sweepPendingVaultRequestSaves()
 
-  // Send the approval card.
+  // Send the approval card. #1075: route through retryWithThreadFallback
+  // so a deleted topic still lands the card on the main chat instead of
+  // crashing the tool call.
   const text = renderVaultRequestSaveCard(pending, agentSlug)
   const threadId = args.message_thread_id != null ? Number(args.message_thread_id) : undefined
-  const sent = await lockedBot.api.sendMessage(chat_id, text, {
-    parse_mode: 'HTML',
-    reply_markup: buildVaultRequestSaveKeyboard(stageId),
-    ...(threadId != null && Number.isFinite(threadId) ? { message_thread_id: threadId } : {}),
-  })
+  const sent = await retryWithThreadFallback<{ message_id: number }>(
+    robustApiCall,
+    (tid) =>
+      lockedBot.api.sendMessage(chat_id, text, {
+        parse_mode: 'HTML',
+        reply_markup: buildVaultRequestSaveKeyboard(stageId),
+        ...(tid != null && Number.isFinite(tid) ? { message_thread_id: tid } : {}),
+      }),
+    { threadId, chat_id, verb: 'vault_request_save.card' },
+  )
   pending.card_message_id = sent.message_id
 
   return {
@@ -3812,11 +4003,17 @@ async function executeVaultRequestAccess(args: Record<string, unknown>): Promise
 
   const text = renderVaultRequestAccessCard(pending)
   const threadId = args.message_thread_id != null ? Number(args.message_thread_id) : undefined
-  const sent = await lockedBot.api.sendMessage(chat_id, text, {
-    parse_mode: 'HTML',
-    reply_markup: buildVaultRequestAccessKeyboard(stageId),
-    ...(threadId != null && Number.isFinite(threadId) ? { message_thread_id: threadId } : {}),
-  })
+  // #1075: deleted-topic safe — fall back to main chat.
+  const sent = await retryWithThreadFallback<{ message_id: number }>(
+    robustApiCall,
+    (tid) =>
+      lockedBot.api.sendMessage(chat_id, text, {
+        parse_mode: 'HTML',
+        reply_markup: buildVaultRequestAccessKeyboard(stageId),
+        ...(tid != null && Number.isFinite(tid) ? { message_thread_id: tid } : {}),
+      }),
+    { threadId, chat_id, verb: 'vault_request_access.card' },
+  )
   pending.card_message_id = sent.message_id
 
   return {
@@ -3944,8 +4141,16 @@ async function executeSendTyping(args: Record<string, unknown>): Promise<unknown
 async function executePinMessage(args: Record<string, unknown>): Promise<unknown> {
   if (!args.chat_id) throw new Error('pin_message: chat_id is required')
   if (!args.message_id) throw new Error('pin_message: message_id is required')
-  assertAllowedChat(args.chat_id as string)
-  await lockedBot.api.pinChatMessage(args.chat_id as string, Number(args.message_id))
+  const pinChatId = args.chat_id as string
+  assertAllowedChat(pinChatId)
+  // #1075: wrap through robustApiCall so flood-wait / transient network
+  // errors are retried. THREAD_NOT_FOUND on a stale topic surfaces to the
+  // agent as a tool-error — pinning a vanished message is genuinely a
+  // failure the agent should see.
+  await robustApiCall(
+    () => lockedBot.api.pinChatMessage(pinChatId, Number(args.message_id)),
+    { chat_id: pinChatId, verb: 'pin_message' },
+  )
   return { content: [{ type: 'text', text: `pinned message ${args.message_id}` }] }
 }
 
@@ -4252,33 +4457,56 @@ function handleSessionEvent(ev: SessionEvent): void {
             isPrivateChat: turn.isDm,
             threadId: turn.sessionThreadId,
             sendMessageDraft: sendMessageDraftFn,
+            // #1075: route through robustApiCall so flood-wait,
+            // benign-400, and THREAD_NOT_FOUND are handled uniformly
+            // instead of crashing the answer-stream loop on a deleted
+            // forum topic. answer-stream's own try/catch already
+            // tolerates undefined returns from editMessageText.
             sendMessage: async (chatId, text, params) => {
-              const msg = await bot.api.sendMessage(chatId, text, {
-                parse_mode: params?.parse_mode,
-                ...(params?.message_thread_id != null
-                  ? { message_thread_id: params.message_thread_id }
-                  : {}),
-                ...(params?.link_preview_options != null
-                  ? { link_preview_options: params.link_preview_options }
-                  : {}),
-                ...(params?.reply_parameters != null
-                  ? { reply_parameters: params.reply_parameters }
-                  : {}),
-              })
+              const tid = params?.message_thread_id
+              const msg = await robustApiCall(
+                () =>
+                  bot.api.sendMessage(chatId, text, {
+                    parse_mode: params?.parse_mode,
+                    ...(tid != null ? { message_thread_id: tid } : {}),
+                    ...(params?.link_preview_options != null
+                      ? { link_preview_options: params.link_preview_options }
+                      : {}),
+                    ...(params?.reply_parameters != null
+                      ? { reply_parameters: params.reply_parameters }
+                      : {}),
+                  }),
+                {
+                  chat_id: chatId,
+                  verb: 'answer-stream.sendMessage',
+                  ...(tid != null ? { threadId: tid } : {}),
+                },
+              )
               return { message_id: msg.message_id }
             },
-            editMessageText: (chatId, messageId, text, params) =>
-              bot.api.editMessageText(chatId, messageId, text, {
-                parse_mode: params?.parse_mode,
-                ...(params?.message_thread_id != null
-                  ? { message_thread_id: params.message_thread_id }
-                  : {}),
-                ...(params?.link_preview_options != null
-                  ? { link_preview_options: params.link_preview_options }
-                  : {}),
-              }),
+            editMessageText: (chatId, messageId, text, params) => {
+              const tid = params?.message_thread_id
+              return robustApiCall(
+                () =>
+                  bot.api.editMessageText(chatId, messageId, text, {
+                    parse_mode: params?.parse_mode,
+                    ...(tid != null ? { message_thread_id: tid } : {}),
+                    ...(params?.link_preview_options != null
+                      ? { link_preview_options: params.link_preview_options }
+                      : {}),
+                  }),
+                {
+                  chat_id: chatId,
+                  verb: 'answer-stream.editMessageText',
+                  ...(tid != null ? { threadId: tid } : {}),
+                },
+              )
+            },
             deleteMessage: (chatId, messageId) =>
-              bot.api.deleteMessage(chatId, messageId),
+              robustApiCall(
+                () => bot.api.deleteMessage(chatId, messageId),
+                { chat_id: chatId, verb: 'answer-stream.deleteMessage' },
+              ),
             log: (msg) => process.stderr.write(`telegram gateway: ${msg}\n`),
             warn: (msg) => process.stderr.write(`telegram gateway: ${msg}\n`),
             // Issue #203: route answer-lane events through the streaming
@@ -4347,11 +4575,21 @@ function handleSessionEvent(ev: SessionEvent): void {
           parse_mode: 'HTML' as const,
           ...(threadId != null ? { message_thread_id: threadId } : {}),
         }
-        void bot.api.sendMessage(
-          chatId,
-          '⚠️ <b>Context window full</b> — send <code>/restart</code> to start a fresh session.',
-          warnOpts,
-        ).catch(() => {})
+        // #1075: thread-id-bearing, fire-and-forget — swallow on
+        // THREAD_NOT_FOUND so a deleted topic doesn't crash the gateway.
+        void swallowingApiCall(
+          () =>
+            bot.api.sendMessage(
+              chatId,
+              '⚠️ <b>Context window full</b> — send <code>/restart</code> to start a fresh session.',
+              warnOpts,
+            ),
+          {
+            chat_id: chatId,
+            verb: 'context-exhaust-warning',
+            ...(threadId != null ? { threadId } : {}),
+          },
+        )
         const ctrl = activeStatusReactions.get(statusKey(chatId, threadId))
         if (ctrl) ctrl.setError()
         purgeReactionTracking(statusKey(chatId, threadId))
@@ -4644,14 +4882,30 @@ function handleSessionEvent(ev: SessionEvent): void {
             // user deleted the card, parse-mode conflict), fall back to
             // a fresh send for chunk[0] — accepts a 2-message outcome
             // for that edge case rather than dropping the answer.
+            // #1075: route turn-flush sends/edits through robustApiCall.
+            // Edit-in-place isn't thread-id-bearing on its own (the
+            // target message id implies a thread), so a stale-thread
+            // 400 just fails the edit and the loop falls back to fresh
+            // sendMessage. sendMessage IS thread-id-bearing — drop the
+            // thread on THREAD_NOT_FOUND so the captured prose still
+            // lands somewhere instead of being lost entirely.
             let firstSendUsedEdit = false
+            let liveThreadId: number | undefined = backstopThreadId
             if (backstopCardMessageId != null && htmlChunks.length > 0) {
               try {
-                await bot.api.editMessageText(
-                  backstopChatId,
-                  backstopCardMessageId,
-                  htmlChunks[0],
-                  sendOpts,
+                await robustApiCall(
+                  () =>
+                    bot.api.editMessageText(
+                      backstopChatId,
+                      backstopCardMessageId,
+                      htmlChunks[0],
+                      sendOpts,
+                    ),
+                  {
+                    chat_id: backstopChatId,
+                    verb: 'turn-flush.editMessageText',
+                    ...(liveThreadId != null ? { threadId: liveThreadId } : {}),
+                  },
                 )
                 sentIds.push(backstopCardMessageId)
                 firstSendUsedEdit = true
@@ -4659,11 +4913,33 @@ function handleSessionEvent(ev: SessionEvent): void {
                 process.stderr.write(
                   `telegram gateway: turn-flush card-takeover edit failed: ${(err as Error).message} — falling back to sendMessage\n`,
                 )
+                if (err instanceof Error && err.message === 'THREAD_NOT_FOUND') {
+                  liveThreadId = undefined
+                }
               }
             }
             const remainingChunks = firstSendUsedEdit ? htmlChunks.slice(1) : htmlChunks
             for (const c of remainingChunks) {
-              const sent = await bot.api.sendMessage(backstopChatId, c, sendOpts)
+              const sent = await retryWithThreadFallback(
+                robustApiCall,
+                (tid) => {
+                  const opts = {
+                    parse_mode: 'HTML' as const,
+                    link_preview_options: { is_disabled: true },
+                    ...(tid != null ? { message_thread_id: tid } : {}),
+                  }
+                  return bot.api.sendMessage(backstopChatId, c, opts)
+                },
+                {
+                  threadId: liveThreadId,
+                  chat_id: backstopChatId,
+                  verb: 'turn-flush.sendMessage',
+                },
+              )
+              if (liveThreadId != null) {
+                const sentMsg = sent as { message_thread_id?: number }
+                if (sentMsg.message_thread_id == null) liveThreadId = undefined
+              }
               sentIds.push(sent.message_id)
             }
             if (HISTORY_ENABLED && sentIds.length > 0) {
@@ -5144,15 +5420,22 @@ async function handleInbound(
       }
     }
     if (interrupt.emptyBody) {
-      try {
-        await bot.api.sendMessage(
+      // #1075: thread-id-bearing — route through swallowingApiCall so
+      // a deleted topic doesn't crash the gateway; the reaction
+      // already acked the user so a missing follow-up is tolerable.
+      await swallowingApiCall(
+        () =>
+          bot.api.sendMessage(
+            chat_id,
+            '⚡ Interrupted. Send your replacement instruction now.',
+            messageThreadId != null ? { message_thread_id: messageThreadId } : {},
+          ),
+        {
           chat_id,
-          '⚡ Interrupted. Send your replacement instruction now.',
-          messageThreadId != null ? { message_thread_id: messageThreadId } : {},
-        )
-      } catch {
-        /* swallow — the reaction already acked */
-      }
+          verb: 'interrupt-empty-body',
+          ...(messageThreadId != null ? { threadId: messageThreadId } : {}),
+        },
+      )
       return
     }
     // Replace the inbound text with the body and continue normal
@@ -5402,7 +5685,13 @@ async function handleInbound(
       if (verb === 'ignore' || verb === 'forget') {
         secretStaging.delete(staged.chat_id, staged.message_id)
         await switchroomReply(ctx, 'ok — ignored. nothing stored.', { html: true })
-        if (msgId != null) void bot.api.deleteMessage(chat_id, msgId).catch(() => {})
+        // #1075: operates on a message in a (possibly-deleted) thread.
+        if (msgId != null) {
+          void swallowingApiCall(
+            () => bot.api.deleteMessage(chat_id, msgId),
+            { chat_id, verb: 'staged-secret.delete-ignored' },
+          )
+        }
         return
       }
       if (verb === 'stash' || verb === 'rename') {
@@ -5865,11 +6154,17 @@ async function handleInbound(
 
   if (!delivered) {
     const threadOpts = messageThreadId != null ? { message_thread_id: messageThreadId } : {}
-    void bot.api.sendMessage(
-      chat_id,
-      '⏳ Agent is restarting, please wait…',
-      { ...threadOpts },
-    ).catch(() => {})
+    // #1075: thread-id-bearing — swallow via robustApiCall so a deleted
+    // topic doesn't crash the gateway. Fire-and-forget; the user-visible
+    // hint is non-critical (the inbound is queued either way).
+    void swallowingApiCall(
+      () => bot.api.sendMessage(chat_id, '⏳ Agent is restarting, please wait…', { ...threadOpts }),
+      {
+        chat_id,
+        verb: 'agent-restarting-notice',
+        ...(messageThreadId != null ? { threadId: messageThreadId } : {}),
+      },
+    )
   }
 }
 
@@ -5952,7 +6247,14 @@ async function deleteSensitiveMessage(
   reason: string,
 ): Promise<void> {
   try {
-    await bot.api.deleteMessage(chatId, msgId)
+    // #1075: wrap through robustApiCall for flood-wait retries. THIS
+    // ONE must still throw on permanent failure — the caller's contract
+    // is "delete the secret, otherwise log loudly + warn user", and
+    // swallowing would lose the audit signal.
+    await robustApiCall(
+      () => bot.api.deleteMessage(chatId, msgId),
+      { chat_id: chatId, verb: 'deleteSensitiveMessage' },
+    )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     process.stderr.write(
@@ -5962,15 +6264,15 @@ async function deleteSensitiveMessage(
     // In-chat warning so the user knows to delete manually. Best-effort
     // — if this also fails (rare; same chat just rejected our delete),
     // the stderr log is the audit trail.
-    try {
-      await bot.api.sendMessage(
-        chatId,
-        `⚠️ <b>Could not auto-delete message containing your ${escapeHtmlForTg(reason)}.</b>\n\nPlease delete message <code>${msgId}</code> manually so the value is not retained in chat history.\n\n<i>Reason: ${escapeHtmlForTg(msg)}</i>`,
-        { parse_mode: 'HTML' },
-      )
-    } catch {
-      /* best-effort warning — primary signal already on stderr */
-    }
+    await swallowingApiCall(
+      () =>
+        bot.api.sendMessage(
+          chatId,
+          `⚠️ <b>Could not auto-delete message containing your ${escapeHtmlForTg(reason)}.</b>\n\nPlease delete message <code>${msgId}</code> manually so the value is not retained in chat history.\n\n<i>Reason: ${escapeHtmlForTg(msg)}</i>`,
+          { parse_mode: 'HTML' },
+        ),
+      { chat_id: chatId, verb: 'deleteSensitiveMessage.warning' },
+    )
   }
 }
 
@@ -6297,17 +6599,22 @@ function notifyDetachedFailure(
       preBlock(snippet)
     // Fire-and-forget — we're off the command-handler context and don't
     // have an await to block on anyway.
-    lockedBot.api
-      .sendMessage(chatId, text, {
-        parse_mode: 'HTML',
-        link_preview_options: { is_disabled: true },
-        ...(threadId != null ? { message_thread_id: threadId } : {}),
-      })
-      .catch((err: unknown) => {
-        process.stderr.write(
-          `telegram gateway: notifyDetachedFailure send failed: ${err}\n`,
-        )
-      })
+    // #1075: thread-id-bearing, fire-and-forget — swallow on
+    // THREAD_NOT_FOUND so a deleted topic doesn't crash the detached-
+    // failure handler.
+    void swallowingApiCall(
+      () =>
+        lockedBot.api.sendMessage(chatId, text, {
+          parse_mode: 'HTML',
+          link_preview_options: { is_disabled: true },
+          ...(threadId != null ? { message_thread_id: threadId } : {}),
+        }),
+      {
+        chat_id: chatId,
+        verb: 'notifyDetachedFailure',
+        ...(threadId != null ? { threadId } : {}),
+      },
+    )
   }
 }
 
@@ -6317,7 +6624,12 @@ async function sweepBeforeSelfRestart(): Promise<void> {
   try {
     await sweepActivePins(
       agentDir,
-      (chatId, messageId) => lockedBot.api.unpinChatMessage(chatId, messageId),
+      // #1075: wrap unpin so a deleted thread doesn't abort the sweep.
+      (chatId, messageId) =>
+        robustApiCall(
+          () => lockedBot.api.unpinChatMessage(chatId, messageId),
+          { chat_id: chatId, verb: 'pre-restart-sweep.unpin' },
+        ),
       { log: (msg) => process.stderr.write(`telegram gateway: pre-restart pin sweep — ${msg}\n`) },
     )
   } catch (err) {
@@ -6993,11 +7305,18 @@ bot.command('restart', async ctx => {
     const threadId = resolveThreadId(chatId, ctx.message?.message_thread_id)
     const ackText = buildRestartAckText(name)
     let ackId: number | null = null
+    // #1075: thread-id-bearing — fall back to main chat on
+    // THREAD_NOT_FOUND so the ack still lands somewhere.
     try {
-      const sent = await lockedBot.api.sendMessage(chatId, ackText, {
-        parse_mode: 'HTML', link_preview_options: { is_disabled: true },
-        ...(threadId != null ? { message_thread_id: threadId } : {}),
-      })
+      const sent = await retryWithThreadFallback<{ message_id: number }>(
+        robustApiCall,
+        (tid) =>
+          lockedBot.api.sendMessage(chatId, ackText, {
+            parse_mode: 'HTML', link_preview_options: { is_disabled: true },
+            ...(tid != null ? { message_thread_id: tid } : {}),
+          }),
+        { threadId, chat_id: chatId, verb: 'restart.ack' },
+      )
       ackId = sent.message_id
       if (HISTORY_ENABLED) {
         try { recordOutbound({ chat_id: chatId, thread_id: threadId ?? null, message_ids: [sent.message_id], texts: [`🔄 Restarting ${name}…`], attachment_kinds: [] }) } catch {}
@@ -7090,11 +7409,17 @@ async function handleNewOrResetCommand(ctx: Context, kind: 'new' | 'reset'): Pro
     ? buildNewSessionAckText(name, flushed > 0)
     : buildResetSessionAckText(name, flushed > 0)
   let ackId: number | null = null
+  // #1075: thread-id-bearing — fall back to main chat.
   try {
-    const sent = await lockedBot.api.sendMessage(chatId, ackText, {
-      parse_mode: 'HTML', link_preview_options: { is_disabled: true },
-      ...(threadId != null ? { message_thread_id: threadId } : {}),
-    })
+    const sent = await retryWithThreadFallback<{ message_id: number }>(
+      robustApiCall,
+      (tid) =>
+        lockedBot.api.sendMessage(chatId, ackText, {
+          parse_mode: 'HTML', link_preview_options: { is_disabled: true },
+          ...(tid != null ? { message_thread_id: tid } : {}),
+        }),
+      { threadId, chat_id: chatId, verb: 'new-or-reset.ack' },
+    )
     ackId = sent.message_id
     if (HISTORY_ENABLED) {
       try { recordOutbound({ chat_id: chatId, thread_id: threadId ?? null, message_ids: [sent.message_id], texts: [ackText], attachment_kinds: [] }) } catch {}
@@ -7229,12 +7554,18 @@ bot.command('update', async ctx => {
     `\nThe gateway will restart as part of the recreate step; watch ` +
     `for the post-restart greeting card to confirm completion.`
   let ackId: number | null = null
+  // #1075: thread-id-bearing — fall back to main chat.
   try {
-    const sent = await lockedBot.api.sendMessage(chatId, ackText, {
-      parse_mode: 'HTML',
-      link_preview_options: { is_disabled: true },
-      ...(threadId != null ? { message_thread_id: threadId } : {}),
-    })
+    const sent = await retryWithThreadFallback<{ message_id: number }>(
+      robustApiCall,
+      (tid) =>
+        lockedBot.api.sendMessage(chatId, ackText, {
+          parse_mode: 'HTML',
+          link_preview_options: { is_disabled: true },
+          ...(tid != null ? { message_thread_id: tid } : {}),
+        }),
+      { threadId, chat_id: chatId, verb: 'update.ack' },
+    )
     ackId = sent.message_id
     if (HISTORY_ENABLED) {
       try {
@@ -9019,11 +9350,20 @@ async function handleVaultGrantCallback(ctx: Context, data: string): Promise<voi
       const chatId = String(ctx.chat?.id ?? ctx.from?.id ?? '')
       const threadId = ctx.callbackQuery?.message?.message_thread_id
       if (chatId) {
-        await bot.api.sendMessage(chatId, cardText, {
-          parse_mode: 'HTML',
-          reply_markup: confirmKeyboard,
-          ...(threadId != null ? { message_thread_id: threadId } : {}),
-        }).catch(() => {})
+        // #1075: thread-id-bearing — swallow on THREAD_NOT_FOUND.
+        await swallowingApiCall(
+          () =>
+            bot.api.sendMessage(chatId, cardText, {
+              parse_mode: 'HTML',
+              reply_markup: confirmKeyboard,
+              ...(threadId != null ? { message_thread_id: threadId } : {}),
+            }),
+          {
+            chat_id: chatId,
+            verb: 'vault-revoke-confirm-fallback',
+            ...(threadId != null ? { threadId } : {}),
+          },
+        )
       }
     })
     return
@@ -10445,11 +10785,20 @@ bot.on('callback_query:data', async ctx => {
     if (ipcServer.clientCount() === 0) {
       // No bridge connected — the agent's gone. Tell the user so they
       // don't think the button silently swallowed their tap.
-      void bot.api.sendMessage(
-        cbChatId,
-        '⏳ Agent is restarting — your button tap was queued but won\'t be processed until it comes back.',
-        cbThreadId != null ? { message_thread_id: cbThreadId } : {},
-      ).catch(() => {})
+      // #1075: thread-id-bearing — swallow on THREAD_NOT_FOUND.
+      void swallowingApiCall(
+        () =>
+          bot.api.sendMessage(
+            cbChatId,
+            '⏳ Agent is restarting — your button tap was queued but won\'t be processed until it comes back.',
+            cbThreadId != null ? { message_thread_id: cbThreadId } : {},
+          ),
+        {
+          chat_id: cbChatId,
+          verb: 'button-tap-restarting-notice',
+          ...(cbThreadId != null ? { threadId: cbThreadId } : {}),
+        },
+      )
     }
     // #710: strip the keyboard after tap so the buttons can't be
     // double-fired. Default policy is single-use — preserve the
@@ -10875,11 +11224,21 @@ async function handleRefusal(
         { type: 'emoji', emoji: '🚫' as ReactionTypeEmoji['emoji'] },
       ]).catch(() => {})
     }
-    await bot.api.sendMessage(
-      chat_id,
-      refusalText,
-      messageThreadId != null ? { message_thread_id: messageThreadId } : {},
-    ).catch(() => {})
+    // #1075: thread-id-bearing — swallow on THREAD_NOT_FOUND so a
+    // deleted topic doesn't crash the refusal handler.
+    await swallowingApiCall(
+      () =>
+        bot.api.sendMessage(
+          chat_id,
+          refusalText,
+          messageThreadId != null ? { message_thread_id: messageThreadId } : {},
+        ),
+      {
+        chat_id,
+        verb: 'refusal-handler',
+        ...(messageThreadId != null ? { threadId: messageThreadId } : {}),
+      },
+    )
     // Loud stderr: this category gets monitored. A passport_data inbound
     // is unusual enough to warrant operator attention.
     process.stderr.write(
@@ -11488,12 +11847,22 @@ if (streamMode === 'checklist') {
     const banner = `⚠️ <b>Restart interrupted this work</b>\n<i>${escapeHtmlForTg(subtitle)}</i>`
     void sweepActivePins(
       startupAgentDir,
-      (chatId, messageId) => lockedBot.api.unpinChatMessage(chatId, messageId),
+      // #1075: wrap unpin so flood-wait + THREAD_NOT_FOUND don't crash sweep.
+      (chatId, messageId) =>
+        robustApiCall(
+          () => lockedBot.api.unpinChatMessage(chatId, messageId),
+          { chat_id: chatId, verb: 'startup-sweep.unpin' },
+        ),
       {
         log: (msg) => process.stderr.write(`telegram gateway: startup pin sweep — ${msg}\n`),
         timeoutMs: 5_000,
         editBeforeUnpin: async (pin) => {
-          await lockedBot.api.editMessageText(pin.chatId, pin.messageId, banner, { parse_mode: 'HTML' })
+          // #1075: pin's message may be in a deleted thread. Wrap to
+          // swallow THREAD_NOT_FOUND so the sweep continues with unpin.
+          await swallowingApiCall(
+            () => lockedBot.api.editMessageText(pin.chatId, pin.messageId, banner, { parse_mode: 'HTML' }),
+            { chat_id: pin.chatId, verb: 'startup-sweep.editBeforeUnpin' },
+          )
         },
       },
     )
@@ -11504,9 +11873,28 @@ if (streamMode === 'checklist') {
   // set, the active-pins sidecar calls, and the pin/unpin API wiring —
   // previously all inline here.
   const pinMgr = createPinManager({
-    pin: (chatId, messageId, opts) => lockedBot.api.pinChatMessage(chatId, messageId, opts),
-    unpin: (chatId, messageId) => lockedBot.api.unpinChatMessage(chatId, messageId),
-    deleteMessage: (chatId, messageId) => lockedBot.api.deleteMessage(chatId, messageId),
+    // #1075: route pin/unpin/delete through robustApiCall so a deleted
+    // forum thread (THREAD_NOT_FOUND) doesn't crash the gateway —
+    // pinChatMessage / unpinChatMessage / deleteMessage all operate on
+    // a message in a thread, so the API rejects them once the thread is
+    // gone. The pin-manager already swallows pin/unpin errors via the
+    // outer log path, so a THREAD_NOT_FOUND throw just stops the
+    // re-pin attempt without further damage.
+    pin: (chatId, messageId, opts) =>
+      robustApiCall(
+        () => lockedBot.api.pinChatMessage(chatId, messageId, opts),
+        { chat_id: chatId, verb: 'pinChatMessage' },
+      ),
+    unpin: (chatId, messageId) =>
+      robustApiCall(
+        () => lockedBot.api.unpinChatMessage(chatId, messageId),
+        { chat_id: chatId, verb: 'unpinChatMessage' },
+      ),
+    deleteMessage: (chatId, messageId) =>
+      robustApiCall(
+        () => lockedBot.api.deleteMessage(chatId, messageId),
+        { chat_id: chatId, verb: 'deleteMessage' },
+      ),
     addPin: (entry) => {
       const agentDir = resolveAgentDirFromEnv()
       if (agentDir != null) addActivePin(agentDir, entry)
@@ -11544,7 +11932,12 @@ if (streamMode === 'checklist') {
           : undefined
       return pinnedMessage?.message_id
     },
-    pin: (chatId, messageId, opts) => lockedBot.api.pinChatMessage(chatId, messageId, opts),
+    // #1075: same retry policy as the main pin-manager.
+    pin: (chatId, messageId, opts) =>
+      robustApiCall(
+        () => lockedBot.api.pinChatMessage(chatId, messageId, opts),
+        { chat_id: chatId, verb: 'pinChatMessage' },
+      ),
     log: (line) => process.stderr.write(line),
   })
 
@@ -11580,8 +11973,19 @@ if (streamMode === 'checklist') {
     const banner = `⚠️ <b>Restart interrupted this work</b>\n${reasonLine}`
     process.stderr.write(`telegram gateway: shutdown.flush_progress_cards count=${entries.length} signal=${signal}\n`)
 
-    const editOps = entries.map(({ chatId, threadId, turnKey, agentId, messageId }) =>
-      lockedBot.api.editMessageText(chatId, messageId, banner, { parse_mode: 'HTML' })
+    const editOps = entries.map(({ chatId, threadId, turnKey, agentId, messageId }) => {
+      // #1075: pin's message may be in a deleted thread. swallowingApiCall
+      // catches THREAD_NOT_FOUND so a single bad pin doesn't block the
+      // others in the budget window.
+      const tidNum = threadId != null ? Number(threadId) : undefined
+      return swallowingApiCall(
+        () => lockedBot.api.editMessageText(chatId, messageId, banner, { parse_mode: 'HTML' }),
+        {
+          chat_id: chatId,
+          verb: 'shutdown.flush_progress_card_edit',
+          ...(tidNum != null && Number.isFinite(tidNum) ? { threadId: tidNum } : {}),
+        },
+      )
         .then(() => {
           process.stderr.write(`telegram gateway: shutdown.flush_progress_card_edit ok turnKey=${turnKey} agentId=${agentId} msgId=${messageId}\n`)
         })
@@ -11595,8 +11999,8 @@ if (streamMode === 'checklist') {
           // off unpinned than left frozen.
           const tid = threadId != null ? Number(threadId) : undefined
           pinMgr.unpinForChat(chatId, tid)
-        }),
-    )
+        })
+    })
 
     let timedOut = false
     const budget = new Promise<void>((resolve) => {
@@ -11821,9 +12225,20 @@ if (streamMode === 'checklist') {
         // hook will re-create it on the next silent-end if needed.
       }
       if (threadId != null) {
-        lockedBot.api.sendMessage(chatId, `✅ Done — ${summary}`).catch((err: Error) => {
-          process.stderr.write(`telegram gateway: completion message failed: ${err.message}\n`)
-        })
+        // #1075: thread-id-bearing — this is the per-turn "Done" line.
+        // Note: we don't pass `message_thread_id` in opts (intentional —
+        // the sendMessage shape here is bare). The thread-route is via the
+        // chatId already being the topic. swallow to avoid crashing the
+        // onTurnComplete callback.
+        const tidNum = Number(threadId)
+        void swallowingApiCall(
+          () => lockedBot.api.sendMessage(chatId, `✅ Done — ${summary}`),
+          {
+            chat_id: chatId,
+            verb: 'turn-complete.done',
+            ...(Number.isFinite(tidNum) ? { threadId: tidNum } : {}),
+          },
+        )
       }
       // Phase 3 of #332: update the progress-card pin with the idle footer so
       // the user can see at a glance when the agent last replied.
@@ -11839,9 +12254,17 @@ if (streamMode === 'checklist') {
           const footer = formatIdleFooter(turnRows, Date.now())
           const pinnedMsgId = pinMgr.pinnedMessageId(turnKey)
           if (pinnedMsgId != null) {
-            lockedBot.api.editMessageText(chatId, pinnedMsgId, footer, { parse_mode: 'HTML' }).catch((err: Error) => {
-              process.stderr.write(`telegram gateway: idle-footer edit failed chatId=${chatId} msgId=${pinnedMsgId}: ${err.message}\n`)
-            })
+            // #1075: pinned message's thread may have been deleted —
+            // swallow THREAD_NOT_FOUND so the next turn isn't blocked.
+            const tidNum = threadId != null ? Number(threadId) : undefined
+            void swallowingApiCall(
+              () => lockedBot.api.editMessageText(chatId, pinnedMsgId, footer, { parse_mode: 'HTML' }),
+              {
+                chat_id: chatId,
+                verb: 'idle-footer.edit',
+                ...(tidNum != null && Number.isFinite(tidNum) ? { threadId: tidNum } : {}),
+              },
+            )
           }
         } catch (err) {
           process.stderr.write(`telegram gateway: idle-footer render failed chatId=${chatId}: ${(err as Error).message}\n`)
@@ -12207,7 +12630,13 @@ void (async () => {
                   return null
                 }
               },
-              (chatId, messageId) => lockedBot.api.unpinChatMessage(chatId, messageId),
+              // #1075: wrap unpin so a stale-thread/transient error doesn't
+              // abort the sweep.
+              (chatId, messageId) =>
+                robustApiCall(
+                  () => lockedBot.api.unpinChatMessage(chatId, messageId),
+                  { chat_id: chatId, verb: 'bot-authored-pin-sweep.unpin' },
+                ),
               { log: (msg) => process.stderr.write(`telegram gateway: bot-authored pin sweep — ${msg}\n`) },
             ).then(() => {
               // After sweep: post a user-facing notice for each failed probe
@@ -12218,9 +12647,14 @@ void (async () => {
               if (!notifyChat) return
               for (const { chatId, reason } of bootProbeFailures) {
                 const text = `⚠️ <b>Boot probe failed</b>\nCould not reach chat <code>${chatId}</code> at startup — bot may not be a member.\n<i>${reason}</i>`
-                lockedBot.api.sendMessage(notifyChat, text, { parse_mode: 'HTML' }).catch((e: unknown) => {
-                  process.stderr.write(`telegram gateway: boot-probe-notify failed: ${e}\n`)
-                })
+                // #1075: notify chat is a DM (no thread_id), so
+                // THREAD_NOT_FOUND can't fire — but route through
+                // swallowingApiCall so flood-wait and any future thread
+                // additions are covered uniformly.
+                void swallowingApiCall(
+                  () => lockedBot.api.sendMessage(notifyChat, text, { parse_mode: 'HTML' }),
+                  { chat_id: notifyChat, verb: 'boot-probe-notify' },
+                )
               }
             }).catch(() => {})
           }
@@ -12311,10 +12745,7 @@ void (async () => {
                   const agentDir = resolveAgentDirFromEnv()
                   const agentSlug = process.env.SWITCHROOM_AGENT_NAME ?? '-'
                   const agentDisplayName = resolvePersonaName(agentSlug)
-                  const botApiForCard: import('./boot-card.js').BotApiForBootCard = {
-                    sendMessage: (cid, text, opts) => lockedBot.api.sendMessage(cid, text, opts as Parameters<typeof lockedBot.api.sendMessage>[2]) as Promise<{ message_id: number }>,
-                    editMessageText: (cid, mid, text, opts) => lockedBot.api.editMessageText(cid, mid, text, opts as Parameters<typeof lockedBot.api.editMessageText>[3]),
-                  }
+                  const botApiForCard: import('./boot-card.js').BotApiForBootCard = wrapBootCardApi(threadId)
                   // Claim emission ownership synchronously BEFORE the await so
                   // the bridge-reconnect dedupe (which can run during this
                   // sendMessage round-trip) sees an in-flight emit. See #489.
@@ -12470,13 +12901,22 @@ void (async () => {
               sendNotification: (text: string) => {
                 const ownerChatId = loadAccess().allowFrom[0]
                 if (!ownerChatId) return
-                void lockedBot.api.sendMessage(ownerChatId, text, {
-                  parse_mode: 'HTML',
-                  link_preview_options: { is_disabled: true },
-                  ...(TOPIC_ID != null ? { message_thread_id: TOPIC_ID } : {}),
-                }).catch((err: Error) => {
-                  process.stderr.write(`telegram gateway: subagent-watcher notification failed: ${err.message}\n`)
-                })
+                // #1075: thread-id-bearing — route through swallowingApiCall
+                // so a deleted TOPIC_ID forum thread doesn't crash the
+                // gateway. Notifications are best-effort.
+                void swallowingApiCall(
+                  () =>
+                    lockedBot.api.sendMessage(ownerChatId, text, {
+                      parse_mode: 'HTML',
+                      link_preview_options: { is_disabled: true },
+                      ...(TOPIC_ID != null ? { message_thread_id: TOPIC_ID } : {}),
+                    }),
+                  {
+                    chat_id: ownerChatId,
+                    verb: 'subagent-watcher-notification',
+                    ...(TOPIC_ID != null ? { threadId: TOPIC_ID } : {}),
+                  },
+                )
               },
               log: (msg) => process.stderr.write(`telegram gateway: ${msg}\n`),
               // Option C (#393): route stall detections into the progress-card

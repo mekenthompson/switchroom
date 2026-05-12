@@ -19,7 +19,24 @@ Flow:
  11. Save last recall to state (for PostCompact re-injection)
 
 Exit codes:
-  0 — always (graceful degradation on any error)
+  0 — normal success (incl. graceful in-flight errors like recall API
+      timeouts where we still produce a valid hookSpecificOutput).
+  0 — uncaught exception in non-debug mode. Switchroom #1070 (redo,
+      after #1085 review): recall.py is registered as a DIRECT Claude
+      Code plugin hook (`vendor/hindsight-memory/hooks/hooks.json`),
+      NOT wrapped by `bin/run-hook.sh`. Per Claude Code's
+      UserPromptSubmit hook contract, exit 2 BLOCKS the user's
+      prompt and surfaces stderr to the user — so a hindsight outage
+      would block every turn. We instead exit 0 (agent prompt
+      assembly proceeds with no memories), emit a bounded stderr
+      line for journald, and shell out directly to `switchroom
+      issues record` so the #424 issue-sink still captures the
+      failure on the operator's issues card. The subprocess call
+      is fault-tolerant — if it fails for any reason, we still
+      exit 0 with the safe stdout shape.
+  2 — debug mode any error. HINDSIGHT_DEBUG=1 operators are
+      live-debugging and want maximum signal — full traceback to
+      stderr and non-zero exit. Existing behaviour.
 """
 
 import hashlib
@@ -711,15 +728,146 @@ def main():
     json.dump(output, sys.stdout)
 
 
+def _redact_secrets(text: str) -> str:
+    """Best-effort inline scrub for the obvious leak shapes that show
+    up in HTTP error messages (`lib/client.py:73` formats the URL into
+    the RuntimeError, and the URL may include query-string credentials).
+
+    We don't have a python-callable bridge to the TS `secret-detect`
+    module, so this is a small regex pass covering:
+      * Authorization: Bearer <token>
+      * ?key=val and &key=val for keys matching token|key|secret|auth
+      * x-api-key: <value> header shape
+
+    Bounded by `re` (anchored, no catastrophic alternation) so this is
+    safe to run on a 400-char input. Returns `text` unchanged if no
+    matches; on regex-engine error, falls back to returning the raw
+    text — redaction is best-effort, not a security boundary, and the
+    server-side detail handler (#1069) re-scans before persistence.
+    """
+    import re
+
+    try:
+        # Bearer tokens — case-insensitive
+        text = re.sub(
+            r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}",
+            r"\1<redacted>",
+            text,
+        )
+        # x-api-key / api-key header values
+        text = re.sub(
+            r"(?i)(x?-?api[-_]?key\s*[:=]\s*)([A-Za-z0-9._\-]{8,})",
+            r"\1<redacted>",
+            text,
+        )
+        # Query-string credentials: ?token=…, &api_key=…, ?secret=…
+        text = re.sub(
+            r"(?i)([?&](?:[a-z0-9_\-]*?(?:token|key|secret|auth|password|pass)"
+            r"[a-z0-9_\-]*?)=)([^&\s]{4,})",
+            r"\1<redacted>",
+            text,
+        )
+        return text
+    except Exception:
+        return text
+
+
+def _record_issue_safely(detail: str, class_name: str) -> None:
+    """Fire-and-forget call into `switchroom issues record`. Bounded by
+    timeout; never raises. The agent's responsiveness on a hindsight
+    outage depends on this NOT propagating any failure.
+    """
+    import subprocess
+
+    try:
+        subprocess.run(
+            [
+                "switchroom",
+                "issues",
+                "record",
+                "--severity",
+                "warn",
+                "--source",
+                "hindsight.recall",
+                "--code",
+                "recall_failed",
+                "--summary",
+                f"Hindsight recall failed: {class_name}",
+                "--detail-stdin",
+                "--quiet",
+            ],
+            input=detail,
+            text=True,
+            timeout=5,
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:
+        # Hard swallow. The agent stays responsive even if the issue
+        # sink is wedged, missing, or the CLI isn't on PATH. The stderr
+        # line above is the operator's only signal in that case.
+        pass
+
+
 if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"[Hindsight] Unexpected error in recall: {e}", file=sys.stderr)
-        # Exit 2 in debug mode surfaces errors to Claude; 0 degrades silently
+        # Switchroom #1070 (redo per #1085 review).
+        #
+        # recall.py is a DIRECT Claude Code plugin hook (see
+        # vendor/hindsight-memory/hooks/hooks.json). It is NOT wrapped
+        # by bin/run-hook.sh, so the `non-zero exit → record_failure`
+        # pipeline does NOT apply here. Per Claude Code's hook
+        # contract, exit 2 on UserPromptSubmit BLOCKS the user's
+        # prompt and surfaces stderr to them — which would turn a
+        # hindsight outage into "every turn blocked".
+        #
+        # Correct posture: exit 0 with the same safe-empty stdout
+        # shape as the no-memories success path (recall.py line ~660
+        # — `return` with no JSON dumped), so the agent's prompt
+        # assembly proceeds with no memories. Then shell out directly
+        # to `switchroom issues record` so the operator still sees
+        # the failure on their issues card. The subprocess call is
+        # fault-tolerant; if it fails for any reason the agent still
+        # stays responsive.
+        #
+        # Debug mode (HINDSIGHT_DEBUG=1) keeps the legacy posture —
+        # traceback + exit 2 — because live-debugging operators want
+        # maximum signal and have opted in.
+        _msg = str(e)
+        if len(_msg) > 400:
+            _msg = _msg[:400] + "…"
+        _msg = _redact_secrets(_msg)
+        _class = type(e).__name__
+        _detail = f"{_class}: {_msg}"
+        print(
+            f"[Hindsight] Unexpected error in recall: {_detail}",
+            file=sys.stderr,
+        )
+
+        # Decide on debug-branch behaviour. load_config may itself be
+        # what failed in main() (it's called early), so guard.
+        _is_debug = False
         try:
             from lib.config import load_config
 
-            sys.exit(2 if load_config().get("debug") else 0)
+            _is_debug = bool(load_config().get("debug"))
         except Exception:
-            sys.exit(0)
+            pass
+
+        if _is_debug:
+            import traceback
+
+            traceback.print_exc(file=sys.stderr)
+            # Debug-mode exit 2 is intentional and unchanged —
+            # operators with HINDSIGHT_DEBUG=1 are chasing a broken
+            # recall and want the hook to surface its failure.
+            sys.exit(2)
+
+        # Non-debug: route the failure to the issue-sink, then exit
+        # 0 with no stdout (agent's prompt assembly treats absent
+        # additionalContext as "no recall this turn").
+        _record_issue_safely(_detail, _class)
+        sys.exit(0)

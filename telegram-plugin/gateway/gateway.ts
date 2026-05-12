@@ -13093,6 +13093,14 @@ void (async () => {
           if (watcherAgentDir != null) {
             subagentWatcher = startSubagentWatcher({
               agentDir: watcherAgentDir,
+              // Issue #1116 (Bug A): restrict project-dir enumeration to
+              // the slug Claude Code mints for this agent's cwd (which
+              // start.sh sets to agentDir before launching claude — see
+              // profiles/_base/start.sh.hbs `cd "{{agentDir}}"`). Foreign-
+              // slug shadow dirs left over from a prior CLAUDE_PROJECT_DIR
+              // accident no longer pollute the watcher with phantom
+              // registrations + ENOENT log spam + false stalls.
+              agentCwd: watcherAgentDir,
               // Bug 0 fix: previously omitted, leaving the watcher unable to
               // write liveness/stall/turn_end updates to the registry DB.
               // Liveness writes are now persisted across the gateway lifetime.

@@ -879,4 +879,267 @@ describe('startSubagentWatcher', () => {
       h.watcher.stop()
     })
   })
+
+  // ─── Issue #1116 regressions ─────────────────────────────────────────────
+
+  describe('issue #1116 — project-dir slug filter (Bug A)', () => {
+    /**
+     * Claude Code keys its `.claude/projects/<slug>/` dirs off the cwd it
+     * was launched in. Over time an agent's home can accumulate stale
+     * project dirs from prior boots (or from a sibling agent that briefly
+     * shared the home via a wayward `CLAUDE_PROJECT_DIR`). Pre-#1116 the
+     * watcher enumerated every project dir under `<agentDir>/.claude/projects/`
+     * and registered any `agent-*.jsonl` it found, which produced phantom
+     * registry entries whose backing files vanish on the next session-cleanup
+     * tick (ENOENT spam + false stall notifications, per the issue's
+     * smoking-gun log).
+     *
+     * The fix: when `agentCwd` is supplied, the watcher restricts
+     * enumeration to the project dir whose slug matches
+     * `sanitizeCwdToProjectName(agentCwd)`. Foreign-slug shadow dirs are
+     * skipped entirely.
+     */
+
+    let tmpRoot = ''
+    const startedWatchers: Array<{ stop(): void }> = []
+
+    beforeEach(() => {
+      tmpRoot = mkdtempSync(join(tmpdir(), 'switchroom-watcher-1116-slug-'))
+    })
+
+    afterEach(() => {
+      while (startedWatchers.length) {
+        try { startedWatchers.pop()?.stop() } catch { /* ignore */ }
+      }
+      try { rmSync(tmpRoot, { recursive: true, force: true }) } catch { /* ignore */ }
+    })
+
+    function startWatcherSync(opts: { agentDir: string; agentCwd?: string }): {
+      notifications: string[]
+      logs: string[]
+      poll: () => void
+      watcher: ReturnType<typeof startSubagentWatcher>
+    } {
+      const notifications: string[] = []
+      const logs: string[] = []
+      const intervals: Array<{ fn: () => void; ref: number }> = []
+      const timeouts: Array<{ fn: () => void; ref: number }> = []
+      let nextRef = 1
+      const watcher = startSubagentWatcher({
+        agentDir: opts.agentDir,
+        ...(opts.agentCwd !== undefined ? { agentCwd: opts.agentCwd } : {}),
+        sendNotification: (text) => notifications.push(text),
+        stallThresholdMs: 60_000,
+        rescanMs: 500,
+        now: () => Date.now(),
+        setInterval: (fn) => {
+          const ref = nextRef++
+          intervals.push({ fn, ref })
+          return { ref }
+        },
+        clearInterval: (handle) => {
+          const { ref } = handle as { ref: number }
+          const idx = intervals.findIndex((i) => i.ref === ref)
+          if (idx !== -1) intervals.splice(idx, 1)
+        },
+        setTimeout: (fn) => {
+          const ref = nextRef++
+          timeouts.push({ fn, ref })
+          return { ref }
+        },
+        clearTimeout: (handle) => {
+          const { ref } = handle as { ref: number }
+          const idx = timeouts.findIndex((t) => t.ref === ref)
+          if (idx !== -1) timeouts.splice(idx, 1)
+        },
+        log: (msg) => logs.push(msg),
+      })
+      startedWatchers.push(watcher)
+      return {
+        notifications,
+        logs,
+        poll: () => intervals[0]?.fn(),
+        watcher,
+      }
+    }
+
+    it('skips foreign-slug project dirs when agentCwd is provided', () => {
+      // Layout: an agent whose real cwd is /home/test/agent-own. Its
+      // home contains BOTH its own project dir (-home-test-agent-own)
+      // AND a stale foreign one (-home-test-agent-foreign) left over
+      // from a prior boot. Each contains a sub-agent JSONL with a
+      // distinct agentId.
+      const agentDir = join(tmpRoot, 'agent')
+      const agentCwd = '/home/test/agent-own'
+      const ownSubagents = join(agentDir, '.claude', 'projects', '-home-test-agent-own', 'sess-A', 'subagents')
+      const foreignSubagents = join(agentDir, '.claude', 'projects', '-home-test-agent-foreign', 'sess-B', 'subagents')
+      mkdirSync(ownSubagents, { recursive: true })
+      mkdirSync(foreignSubagents, { recursive: true })
+      writeFileSync(
+        join(ownSubagents, 'agent-ownworker.jsonl'),
+        buildJSONL(subAgentUserMsg('legit work')),
+      )
+      writeFileSync(
+        join(foreignSubagents, 'agent-foreignworker.jsonl'),
+        buildJSONL(subAgentUserMsg('stale shadow')),
+      )
+
+      const h = startWatcherSync({ agentDir, agentCwd })
+      h.poll()
+
+      const reg = h.watcher.getRegistry()
+      expect(reg.has('ownworker')).toBe(true)
+      expect(reg.has('foreignworker')).toBe(false)
+    })
+
+    it('does NOT emit "read error" ENOENT for foreign-slug files that vanish mid-scan', () => {
+      // Simulates the smoking-gun log line from the issue. Foreign-slug
+      // JSONL is deleted from disk before the watcher's first readSubTail.
+      // With the slug filter in place the foreign agent is never even
+      // registered, so no ENOENT log line is emitted.
+      const agentDir = join(tmpRoot, 'agent')
+      const agentCwd = '/home/test/agent-own'
+      const ownSubagents = join(agentDir, '.claude', 'projects', '-home-test-agent-own', 'sess-A', 'subagents')
+      const foreignSubagents = join(agentDir, '.claude', 'projects', '-home-test-agent-foreign', 'sess-B', 'subagents')
+      mkdirSync(ownSubagents, { recursive: true })
+      mkdirSync(foreignSubagents, { recursive: true })
+      writeFileSync(
+        join(ownSubagents, 'agent-ownworker.jsonl'),
+        buildJSONL(subAgentUserMsg('legit work')),
+      )
+      const foreignJsonl = join(foreignSubagents, 'agent-foreignworker.jsonl')
+      writeFileSync(foreignJsonl, buildJSONL(subAgentUserMsg('about to vanish')))
+
+      const h = startWatcherSync({ agentDir, agentCwd })
+      // Reap the foreign file the way Claude Code's session cleanup
+      // would, *before* the first poll runs.
+      rmSync(foreignJsonl)
+      h.poll()
+
+      // Polls should not produce a "read error … ENOENT" log line.
+      const enoentLogs = h.logs.filter((l) => l.includes('read error') && l.includes('ENOENT'))
+      expect(enoentLogs).toHaveLength(0)
+      // And the foreign agent must not be registered.
+      expect(h.watcher.getRegistry().has('foreignworker')).toBe(false)
+    })
+  })
+
+  describe('issue #1116 — terminal cleanup must not re-fire completion (Bug B)', () => {
+    /**
+     * Pre-#1116: after `TERMINAL_CLEANUP_GRACE_MS` (30s) elapsed,
+     * `cleanupTerminalAgent` deleted the agentId from `registry` and
+     * the JSONL path from `knownFiles`. The JSONL itself stayed on disk
+     * (Claude Code keeps the file). The next `rescanSubagentDirs` poll
+     * found the JSONL absent from `knownFiles`, re-added it, called
+     * `registerAgent` with a fresh `completionNotified=false` entry,
+     * read the terminal `turn_duration` line again, and fired a SECOND
+     * `✓ Worker done` notification. This loops every grace-window
+     * (~30s); for the operator it manifests as the same handful of
+     * sub-agents announcing completion every ~6 min indefinitely.
+     */
+
+    let tmpRoot = ''
+    const startedWatchers: Array<{ stop(): void }> = []
+
+    beforeEach(() => {
+      tmpRoot = mkdtempSync(join(tmpdir(), 'switchroom-watcher-1116-rerun-'))
+    })
+
+    afterEach(() => {
+      while (startedWatchers.length) {
+        try { startedWatchers.pop()?.stop() } catch { /* ignore */ }
+      }
+      try { rmSync(tmpRoot, { recursive: true, force: true }) } catch { /* ignore */ }
+    })
+
+    it('does NOT re-fire "Worker done" after terminal cleanup grace expires and rescan rediscovers the JSONL', () => {
+      const agentDir = join(tmpRoot, 'agent')
+      const subagentsDir = join(agentDir, '.claude', 'projects', 'p1', 'sess-A', 'subagents')
+      mkdirSync(subagentsDir, { recursive: true })
+      const jsonlPath = join(subagentsDir, 'agent-loopme.jsonl')
+
+      // Boot with an empty subagents dir, then write a post-boot JSONL so
+      // the agent is registered non-historical (otherwise the historical
+      // shortcut suppresses the completion notification entirely).
+      const notifications: string[] = []
+      const intervals: Array<{ fn: () => void; ref: number }> = []
+      const timeouts: Array<{ fn: () => void; ref: number }> = []
+      let nextRef = 1
+      const watcher = startSubagentWatcher({
+        agentDir,
+        sendNotification: (text) => notifications.push(text),
+        stallThresholdMs: 60_000,
+        rescanMs: 500,
+        now: () => Date.now(),
+        setInterval: (fn) => {
+          const ref = nextRef++
+          intervals.push({ fn, ref })
+          return { ref }
+        },
+        clearInterval: (handle) => {
+          const { ref } = handle as { ref: number }
+          const idx = intervals.findIndex((i) => i.ref === ref)
+          if (idx !== -1) intervals.splice(idx, 1)
+        },
+        setTimeout: (fn) => {
+          const ref = nextRef++
+          timeouts.push({ fn, ref })
+          return { ref }
+        },
+        clearTimeout: (handle) => {
+          const { ref } = handle as { ref: number }
+          const idx = timeouts.findIndex((t) => t.ref === ref)
+          if (idx !== -1) timeouts.splice(idx, 1)
+        },
+        log: () => {},
+      })
+      startedWatchers.push(watcher)
+
+      const poll = () => intervals[0]?.fn()
+      const fireScheduledCleanups = () => {
+        let fired = 0
+        while (timeouts.length) {
+          const next = timeouts.shift()!
+          next.fn()
+          fired++
+        }
+        return fired
+      }
+
+      // Step 1: post-boot, write an in-flight JSONL → poll registers it.
+      writeFileSync(jsonlPath, buildJSONL(subAgentUserMsg('Do the task')))
+      poll()
+      expect(watcher.getRegistry().has('loopme')).toBe(true)
+      expect(watcher.getRegistry().get('loopme')?.historical).toBe(false)
+
+      // Step 2: append turn_duration → poll → state=done → "Worker done" fires.
+      appendFileSync(jsonlPath, buildJSONL(subAgentTurnDuration()))
+      poll()
+      const firstRoundNotifs = notifications.filter((n) => n.includes('Worker done'))
+      expect(firstRoundNotifs).toHaveLength(1)
+
+      // Step 3: fire the terminal-cleanup grace timer (drains the
+      // scheduled cleanup). Registry entry should be gone.
+      const fired = fireScheduledCleanups()
+      expect(fired).toBeGreaterThan(0)
+      expect(watcher.getRegistry().has('loopme')).toBe(false)
+
+      // Step 4: the JSONL is STILL on disk — Claude Code doesn't delete
+      // it after the sub-agent finishes. The next poll re-scans the dir
+      // and finds the file. Pre-fix: re-registers the agent and fires a
+      // SECOND "Worker done". Post-fix: re-discovery is a no-op for
+      // an agentId we've already announced as terminal.
+      poll()
+      const afterRescanNotifs = notifications.filter((n) => n.includes('Worker done'))
+      expect(
+        afterRescanNotifs.length,
+        `Expected exactly 1 "Worker done" notification, got ${afterRescanNotifs.length}: ${JSON.stringify(afterRescanNotifs)}`,
+      ).toBe(1)
+
+      // And another poll for good measure — still exactly one.
+      poll()
+      poll()
+      expect(notifications.filter((n) => n.includes('Worker done'))).toHaveLength(1)
+    })
+  })
 })

@@ -150,6 +150,7 @@ import {
   parseAgentCallback,
   extractAgentButtonMeta,
   keyboardIsSingleUse,
+  finalizeCallback,
   type AgentButtonMeta,
 } from '../inline-keyboard-callbacks.js'
 import {
@@ -223,6 +224,7 @@ import type { AgentAudit } from '../welcome-text.js'
 import { shouldSweepChatAtBoot } from './boot-sweep-filter.js'
 
 import { createIpcServer, type IpcClient, type IpcServer } from './ipc-server.js'
+import { createPendingInboundBuffer } from './pending-inbound-buffer.js'
 import { createPollHealthCheck, type PollHealthCheckHandle } from './poll-health.js'
 import type {
   ToolCallMessage,
@@ -2620,12 +2622,42 @@ silencePoke.startTimer({
   },
 })
 
+// Per-agent buffer for synthetic inbounds the gateway couldn't deliver
+// because the bridge wasn't connected at send-time. Drained on
+// bridge-register so a fresh client picks up missed wake-ups before
+// any other work happens. See #1150 — pre-buffer, an Approve tap on a
+// vault_request_access card during the 100ms bridge-reconnect window
+// would mint the grant but silently drop the `vault_grant_approved`
+// inbound, leaving the agent stuck waiting for a manual poke.
+const pendingInboundBuffer = createPendingInboundBuffer()
+
 const ipcServer: IpcServer = createIpcServer({
   socketPath: SOCKET_PATH,
 
   onClientRegistered(client: IpcClient) {
     process.stderr.write(`telegram gateway: bridge registered — agent=${client.agentName}\n`)
     client.send({ type: 'status', status: 'agent_connected' })
+
+    // #1150: drain any synthetic inbounds queued for this agent while
+    // the bridge was offline. Done BEFORE the boot-card path below so
+    // the agent wakes up to its missed wake-ups first, even if the
+    // boot card edit happens to be slow. Skip drain when agentName is
+    // null (pre-handshake / anonymous client) — those clients are
+    // bridges that never registered an identity and can't have
+    // accumulated buffered inbounds keyed by name.
+    if (client.agentName != null) {
+      const pending = pendingInboundBuffer.drain(client.agentName)
+      for (const msg of pending) {
+        try {
+          client.send(msg)
+        } catch (err) {
+          process.stderr.write(
+            `telegram gateway: pending-inbound drain failed agent=${client.agentName} ` +
+            `source=${msg.meta?.source ?? '-'}: ${(err as Error).message}\n`,
+          )
+        }
+      }
+    }
 
     // If the agent reconnected after a /restart (or any restart), post a boot
     // card. The restart-marker carries the ack chat; if absent we fall back to
@@ -2929,6 +2961,12 @@ const ipcServer: IpcServer = createIpcServer({
     process.stderr.write(
       `telegram gateway: inject_inbound agent=${msg.agentName} source=${source} prompt_key=${promptKey} delivered=${delivered}\n`,
     )
+    // #1150: same buffer-on-failure pattern as vault_grant_approved.
+    // Cron fires use this path too — if a cron-driven wake-up lands
+    // mid bridge-reconnect, buffer it for the next register.
+    if (!delivered) {
+      pendingInboundBuffer.push(msg.agentName, msg.inbound)
+    }
   },
 
   log: (msg) => process.stderr.write(`telegram gateway: ipc — ${msg}\n`),
@@ -9134,6 +9172,16 @@ async function performVaultAccessApproval(
     `telegram gateway: vault_grant_approved injection agent=${pending.agent} ` +
     `key=${pending.key} stage=${stageId} delivered=${delivered}\n`,
   )
+  // #1150 root cause: if `delivered=false` the bridge wasn't connected
+  // at send-time (mid-reconnect, claude-session bouncing between
+  // turns, etc). Pre-fix this just logged + dropped — the agent stayed
+  // idle forever and the operator had to poke. Now we buffer the
+  // inbound so the next bridge-register call drains it. Bounded to
+  // 32 entries per agent (see pending-inbound-buffer.ts) — a never-
+  // reconnecting bridge can't fill memory.
+  if (!delivered) {
+    pendingInboundBuffer.push(pending.agent, synthetic)
+  }
 }
 
 async function handleVaultRequestAccessCallback(ctx: Context, data: string): Promise<void> {
@@ -9178,6 +9226,45 @@ async function handleVaultRequestAccessCallback(ctx: Context, data: string): Pro
           { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
         )
         .catch(() => {})
+    }
+    // #1150 sibling: invariant-3 was missing on the deny path too. The
+    // agent originally ended its turn after `vault_request_access` and
+    // waits for the gateway to wake it. On approve we already inject
+    // `vault_grant_approved` (#1052); now we mirror that for deny so
+    // the agent can pick the fallback path (apologise to the user,
+    // try a different approach, skip the feature) instead of staying
+    // wedged forever. Buffer-on-failure so a mid-reconnect bridge
+    // still receives this on its next register.
+    const denyTs = Date.now()
+    const denyInbound: InboundMessage = {
+      type: 'inbound',
+      chatId: pending.chat_id,
+      messageId: denyTs,
+      user: 'vault-broker',
+      userId: 0,
+      ts: denyTs,
+      text:
+        `🚫 Operator denied your vault access request for ` +
+        `\`${pending.key}\` (scope=${pending.scope}). ` +
+        `The credential is unavailable — pick a fallback for the original task ` +
+        `(apologise to the user, try a different approach, or skip the feature). ` +
+        `Do NOT re-request this key without first asking the user.`,
+      meta: {
+        source: 'vault_grant_denied',
+        agent: pending.agent,
+        key: pending.key,
+        scope: pending.scope,
+        stage_id: stageId,
+        operator_id: senderId,
+      },
+    }
+    const denyDelivered = ipcServer.sendToAgent(pending.agent, denyInbound)
+    process.stderr.write(
+      `telegram gateway: vault_grant_denied injection agent=${pending.agent} ` +
+      `key=${pending.key} stage=${stageId} delivered=${denyDelivered}\n`,
+    )
+    if (!denyDelivered) {
+      pendingInboundBuffer.push(pending.agent, denyInbound)
     }
     return
   }
@@ -12075,6 +12162,10 @@ function flushReactionBatch(batch: ReactionBatch): void {
     `telegram gateway: reactions.dispatch agent=${agentName} chat=${batch.chatId} ` +
     `count=${batch.reactions.length} batched=${batch.batched} delivered=${delivered}\n`,
   )
+  // #1150: buffer-on-failure for reaction-triggered wake-ups too.
+  if (!delivered) {
+    pendingInboundBuffer.push(agentName, inbound)
+  }
 }
 
 // ─── Inbound message_reaction handler ────────────────────────────────────

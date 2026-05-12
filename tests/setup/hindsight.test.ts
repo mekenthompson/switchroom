@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 
 // Mock execFileSync so `docker run` never actually fires. We capture
 // the args to assert on the command shape.
@@ -102,10 +102,13 @@ describe("hindsight secret routing (#1068)", () => {
     expect(mode).toBe("ro");
     writtenPath = hostPath;
 
-    // Host file exists and is mode 0600 with bare-value contents.
+    // Host file exists with bare-value contents. Mode is 0644 (not 0600)
+    // so the non-root `hindsight` user inside the container can read it
+    // even when host UID != container UID; the 0700 parent dir is the
+    // real access control. See writeHindsightLlmKeyFile() jsdoc.
     expect(existsSync(hostPath)).toBe(true);
     const fileMode = statSync(hostPath).mode & 0o777;
-    expect(fileMode).toBe(0o600);
+    expect(fileMode).toBe(0o644);
     const content = readFileSync(hostPath, "utf-8");
     expect(content).toBe("sk-bind-mount-test");
   });
@@ -131,6 +134,11 @@ describe("hindsight secret routing (#1068)", () => {
     expect(shim).toContain("exec /app/start-all.sh");
     // The shim must NOT contain the literal key value.
     expect(shim).not.toContain("sk-shim-test");
+    // Fail-loud guards: explicit `|| exit 1` after the `$()` assignment
+    // (POSIX `set -e` doesn't propagate from $() inside an assignment),
+    // and an empty-value check so we never boot Hindsight with KEY="".
+    expect(shim).toMatch(/\|\| exit 1/);
+    expect(shim).toContain('[ -n "$key" ]');
 
     // Capture for cleanup.
     for (let i = 0; i < args.length - 1; i++) {
@@ -200,7 +208,7 @@ describe("hindsight secret routing (#1068)", () => {
     // Simulate a host that has the old envfile layout sitting around.
     const dir = pickHindsightSecretDir();
     const legacyPath = `${dir}/llm-key.env`;
-    require("node:fs").writeFileSync(legacyPath, "HINDSIGHT_API_LLM_API_KEY=stale\n", { mode: 0o600 });
+    writeFileSync(legacyPath, "HINDSIGHT_API_LLM_API_KEY=stale\n", { mode: 0o600 });
     expect(existsSync(legacyPath)).toBe(true);
 
     stopHindsight();

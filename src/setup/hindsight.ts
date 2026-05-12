@@ -212,7 +212,7 @@ export function hindsightSecretFilePath(): string {
 export const HINDSIGHT_SECRET_CONTAINER_PATH = "/run/secrets/hindsight-llm-key";
 
 /**
- * Write the LLM API key to a tmpfs-backed file with mode 0600. The file
+ * Write the LLM API key to a tmpfs-backed file (mode 0644). The file
  * contains JUST the key value (no `KEY=` prefix) — the in-container
  * shim does the `export` step.
  *
@@ -236,6 +236,18 @@ export const HINDSIGHT_SECRET_CONTAINER_PATH = "/run/secrets/hindsight-llm-key";
  * docker has no view into. `docker inspect .Config.Env` won't contain
  * the key.
  *
+ * Why file mode 0644 (not 0600):
+ *   - The host parent dir (`pickHindsightSecretDir`) is mode 0700 owned
+ *     by the current user — that's where access control happens. Other
+ *     host users can't even traverse into the dir.
+ *   - The bind-mount preserves numeric UID into the container, where
+ *     Hindsight runs as user `hindsight` (non-root, per upstream's
+ *     `USER hindsight` in Dockerfile.standalone). If the host UID
+ *     doesn't match the container's `hindsight` UID, mode 0600 would
+ *     break `cat` inside the shim with EACCES. 0644 lets the
+ *     containerized non-root user read the file regardless of UID
+ *     mapping; the dir's 0700 still keeps other host users out.
+ *
  * Cleanup story:
  *   - `stopHindsight()` unlinks the host file (best-effort).
  *   - The dir lives on tmpfs, so a host reboot wipes it.
@@ -251,9 +263,11 @@ export function writeHindsightLlmKeyFile(apiKey: string): string {
   // No trailing newline — the shim uses `$(cat …)` and a trailing
   // newline gets stripped by command substitution anyway, but keeping
   // the file byte-exact avoids surprises if someone inspects it.
-  writeFileSync(path, trimmed, { mode: 0o600 });
+  // Mode 0644 — see jsdoc rationale above. The 0700 parent dir is the
+  // real access control.
+  writeFileSync(path, trimmed, { mode: 0o644 });
   // Re-chmod in case umask / pre-existing file altered the bits.
-  chmodSync(path, 0o600);
+  chmodSync(path, 0o644);
   return path;
 }
 
@@ -301,11 +315,25 @@ export function startHindsight(
     // Override CMD via `--entrypoint sh` + args after the image. The
     // shim must exec the upstream CMD (`/app/start-all.sh`) so that
     // PID-1 semantics, signal handling, and tini-style behavior are
-    // preserved. The `set -e` guards a missing/unreadable secret file
-    // — fail loud rather than booting Hindsight with no API key.
+    // preserved.
+    //
+    // Fail-loud guards (in this order):
+    //   1. `set -eu` catches unset/empty intermediate vars.
+    //   2. `key=$(cat …) || exit 1` — POSIX `set -e` does NOT propagate
+    //      failures from `$(…)` inside a simple assignment, so we make
+    //      the failure explicit. Catches missing bind-mount source,
+    //      EACCES on the mounted file (e.g. UID mismatch with the
+    //      Hindsight user), or any cat failure.
+    //   3. `[ -n "$key" ] || exit 1` — refuse to boot Hindsight with an
+    //      empty API key. This is the "silent boot with no key" guard
+    //      the previous `set -e`-only version actually failed to provide.
+    //
+    // Exit-1 means docker logs the failure and `--restart unless-stopped`
+    // backs off rather than looping forever; `docker logs
+    // switchroom-hindsight` shows the shim's stderr.
     cmdOverride = [
       "-c",
-      `set -e; export HINDSIGHT_API_LLM_API_KEY="$(cat ${HINDSIGHT_SECRET_CONTAINER_PATH})"; exec /app/start-all.sh`,
+      `set -eu; key=$(cat ${HINDSIGHT_SECRET_CONTAINER_PATH}) || exit 1; [ -n "$key" ] || exit 1; export HINDSIGHT_API_LLM_API_KEY="$key"; exec /app/start-all.sh`,
     ];
   }
 

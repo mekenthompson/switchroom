@@ -81,6 +81,13 @@ export interface StreamSendOpts {
    * accept this parameter, so the controller omits it from edit opts.
    */
   protect_content?: boolean
+  /**
+   * When true, the initial `sendMessage` is silent (no device ping).
+   * Has no effect on `editMessageText` — Telegram never pings on edits.
+   * Used by mid-turn `stream_reply` calls under the #1122 conversational
+   * pacing redesign so only the final answer pings.
+   */
+  disable_notification?: boolean
 }
 
 export type RetryPolicy = <T>(
@@ -113,6 +120,11 @@ export interface StreamControllerConfig {
    * accept protect_content.
    */
   protectContent?: boolean
+  /**
+   * When true, the initial `sendMessage` is silent (no device ping).
+   * editMessageText never pings regardless. Default false. #1122.
+   */
+  disableNotification?: boolean
   /**
    * Inline keyboard markup attached to every send and edit. Without this,
    * editMessageText strips any previously attached keyboard. The progress-
@@ -228,6 +240,7 @@ export function createStreamController(cfg: StreamControllerConfig): DraftStream
         }
       : {}),
     ...(protectContent === true ? { protect_content: true } : {}),
+    ...(cfg.disableNotification === true ? { disable_notification: true } : {}),
   }
 
   // Strip parse_mode from a copy of opts — used for the parse-entities

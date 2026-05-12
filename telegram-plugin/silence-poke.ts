@@ -172,15 +172,22 @@ export function noteOutbound(key: string, now: number): void {
   s.lastOutboundAt = now
   s.pokesFired = 0
   s.pokeArmed = null
-  s.subagentDispatchActive = false
+  // Intentionally DO NOT clear `subagentDispatchActive` here. The
+  // model's `reply` narrating the dispatch ("spinning up @reviewer")
+  // is itself the outbound that resets the silence clock — clearing
+  // the flag would defeat the extended-threshold guarantee for the
+  // wait that follows. The flag persists until endTurn(). Fixes the
+  // non-blocking note from PR2 review (#1125).
   s.lastPokeFiredAt = null
   s.fallbackFired = false
 }
 
 /**
  * Note that the model dispatched a sub-agent (Task tool, @worker, etc).
- * Extends the soft threshold for THIS turn until the next outbound
- * resets state.
+ * Extends the soft threshold for THIS turn. The flag persists until
+ * endTurn() — subsequent outbound messages within the turn keep the
+ * extended threshold, which is the correct shape for the dispatch
+ * narrate → wait → child-result → summarise sequence.
  */
 export function noteSubagentDispatch(key: string): void {
   const s = state.get(key)

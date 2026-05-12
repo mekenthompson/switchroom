@@ -100,6 +100,18 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           cache-from: type=gha,scope=base
           cache-to: type=gha,mode=max,scope=base
+          # CACHE_BUST is paired with the `ARG CACHE_BUST` in
+          # Dockerfile.base immediately before `npm install -g
+          # @anthropic-ai/claude-code@latest`. `github.run_attempt`
+          # increments only on `gh run rerun` (fresh pushes start at
+          # 1), so original commits hit the buildkit cache for fast
+          # builds, while a rerun forces a fresh npm resolve and
+          # picks up the current `@latest` from the registry. This
+          # is the canonical "give me the newest claude" lever:
+          # `gh run rerun <run-id>` → fresh image → `switchroom
+          # update` → fleet bumps.
+          build-args: |
+            CACHE_BUST=${{ github.run_attempt }}
 
   build-dependents:
     needs: build-base

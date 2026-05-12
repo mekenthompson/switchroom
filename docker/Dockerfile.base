@@ -108,7 +108,19 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # want the image build to die here, not produce a base that ships
 # downstream and explodes at agent boot. Previously this had a
 # trailing `|| true` that swallowed any failure.
-RUN npm install -g @anthropic-ai/claude-code@latest \
+#
+# CACHE_BUST is wired through from the workflow as
+# `${{ github.run_attempt }}` — fresh pushes to main (attempt=1) hit
+# the cache for fast turnaround, but a `gh run rerun` (attempt=2+)
+# changes the layer hash and forces a fresh `npm install` that re-
+# resolves `@latest` from the registry. Without this, buildkit's
+# `cache-from: type=gha,scope=base` reuses the prior layer even on
+# rerun and the version stays stuck at whatever first cached it.
+# Default `default` so local `docker build` (no build-arg) still
+# works deterministically.
+ARG CACHE_BUST=default
+RUN echo "cache-bust=${CACHE_BUST}" > /dev/null \
+ && npm install -g @anthropic-ai/claude-code@latest \
  && claude --version >&2
 
 # Phase 1b: install bun. The broker server (src/vault/broker/server.ts)

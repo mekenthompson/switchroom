@@ -63,10 +63,7 @@ import {
   retryWithThreadFallback,
 } from '../retry-api-call.js'
 import { installTgPostLogger, withTgPostTags } from '../shared/bot-runtime.js'
-import { emitCardEvent } from '../card-event-log.js'
 import { buildAttachmentPath, assertInsideInbox } from '../attachment-path.js'
-import { createPinManager } from '../progress-card-pin-manager.js'
-import { createPinWatchdog } from '../progress-card-pin-watchdog.js'
 import { logStreamingEvent } from '../streaming-metrics.js'
 import * as signalTracker from '../turn-signal-tracker.js'
 import {
@@ -78,11 +75,6 @@ import { classifyInbound } from '../inbound-classifier.js'
 import * as silencePoke from '../silence-poke.js'
 import { createAnswerStream, type AnswerStreamHandle } from '../answer-stream.js'
 import { type SessionEvent } from '../session-tail.js'
-import {
-  createProgressDriver,
-  type ApiFailureInfo,
-  type ProgressDriver,
-} from '../progress-card-driver.js'
 import {
   shouldSuppressToolActivity,
 } from '../pty-tail.js'
@@ -182,7 +174,7 @@ import {
   decideTurnFlush,
   isTurnFlushSafetyEnabled,
 } from '../turn-flush-safety.js'
-import { recoverProseFromProgressCard } from '../turn-flush-prose-recovery.js'
+// #1122 PR3: turn-flush-prose-recovery removed with the progress card.
 import {
   resolveAgentDirFromEnv,
   consumeHandoffTopic,
@@ -191,13 +183,6 @@ import {
   writeLastTurnSummary,
   type HandoffFormat,
 } from '../handoff-continuity.js'
-import {
-  readActivePins,
-  addActivePin,
-  removeActivePin,
-  clearActivePins,
-} from '../active-pins.js'
-import { sweepActivePins, sweepBotAuthoredPins } from '../active-pins-sweep.js'
 import {
   addActiveReaction,
   removeActiveReaction,
@@ -2286,10 +2271,20 @@ function postLegacyBanner(
     })
 }
 
-// ─── Progress card + session/PTY tail state ───────────────────────────────
+// ─── Session/PTY tail state ───────────────────────────────────────────────
+// Progress-card-related state has been deleted (#1122 PR3). The variable
+// `progressDriver` is retained as a permanent `null` so the dozens of
+// optional-chained call sites scattered through this file
+// (`progressDriver?.ingest(...)`, etc) remain valid TypeScript and
+// short-circuit to no-ops at runtime. The type is `any` so TS doesn't
+// resolve `progressDriver?.X` to `never` (it would otherwise complain
+// about non-existent properties). Those dead call sites will be swept
+// in a follow-up cleanup PR; until then the runtime is provably
+// equivalent to a no-op driver.
 const streamMode = process.env.SWITCHROOM_TG_STREAM_MODE ?? 'checklist'
 const TURN_FLUSH_SAFETY_ENABLED = isTurnFlushSafetyEnabled()
-let progressDriver: ProgressDriver | null = null
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const progressDriver: any = null
 let unpinProgressCardForChat: ((chatId: string, threadId: number | undefined) => void) | null = null
 // #654: expose pinMgr lookups + completion to the turn-flush block
 // (defined upstream of where pinMgr is constructed). Set inside
@@ -4776,43 +4771,10 @@ function handleSessionEvent(ev: SessionEvent): void {
       const threadId = turn.sessionThreadId
       const ctrl = activeStatusReactions.get(statusKey(chatId, threadId))
 
-      // ── #51: prose-as-step recovery ──────────────────────────────────
-      // The capturedText accumulator gates push on currentSessionChatId,
-      // while progressDriver.ingest uses the IPC envelope's chatHint. When
-      // those views disagree, prose can land in the progress card's
-      // narrative steps while capturedText stays empty — `decideTurnFlush`
-      // then returns `empty-text` and the user sees nothing. Recover from
-      // the card state so the flush path can send what the user already
-      // sees in the step list.
-      if (turn.capturedText.length === 0 && progressDriver != null) {
-        const peek = progressDriver.peek(
-          chatId,
-          threadId != null ? String(threadId) : undefined,
-        )
-        const recovered = recoverProseFromProgressCard(peek)
-        // Issue #81 diagnostic: record both the success and the empty-recover
-        // path so we can correlate "card showed tool-count" with "recovery
-        // had nothing to give either". The narrative count tells us whether
-        // the issue is at capture time (no narratives ever made it into the
-        // state) or at parse time (narratives existed but produced empty
-        // text after trim).
-        const narrativeCount = peek?.narratives.length ?? 0
-        if (recovered.length > 0) {
-          process.stderr.write(
-            `telegram gateway: turn-flush prose-recovery — recovered ${recovered.length} chars from progress-card narratives chat=${chatId} turnKey=${turn.startedAt}\n`,
-          )
-          process.stderr.write(
-            `progress-card.diag: prose-recovery hit chatId=${chatId} turnKey=${turn.startedAt} ` +
-            `narrative_count=${narrativeCount} recovered_len=${recovered.length}\n`,
-          )
-          turn.capturedText.push(recovered)
-        } else {
-          process.stderr.write(
-            `progress-card.diag: prose-recovery miss chatId=${chatId} turnKey=${turn.startedAt} ` +
-            `narrative_count=${narrativeCount} peek_state=${peek == null ? 'null' : 'present'}\n`,
-          )
-        }
-      }
+      // #1122 PR3: #51 prose-as-step recovery removed with the
+      // progress card. Without the card there's no narrative-steps
+      // surface to recover from. The decideTurnFlush 'empty-text'
+      // path now relies on capturedText alone.
 
       const flushDecision = decideTurnFlush({
         chatId: turn.sessionChatId,
@@ -6800,20 +6762,7 @@ function notifyDetachedFailure(
 async function sweepBeforeSelfRestart(): Promise<void> {
   const agentDir = resolveAgentDirFromEnv()
   if (agentDir == null) return
-  try {
-    await sweepActivePins(
-      agentDir,
-      // #1075: wrap unpin so a deleted thread doesn't abort the sweep.
-      (chatId, messageId) =>
-        robustApiCall(
-          () => lockedBot.api.unpinChatMessage(chatId, messageId),
-          { chat_id: chatId, verb: 'pre-restart-sweep.unpin' },
-        ),
-      { log: (msg) => process.stderr.write(`telegram gateway: pre-restart pin sweep — ${msg}\n`) },
-    )
-  } catch (err) {
-    process.stderr.write(`telegram gateway: pre-restart pin sweep threw: ${(err as Error).message}\n`)
-  }
+  // #1122 PR3: pre-restart progress-card pin sweep removed with the card.
   try {
     await sweepActiveReactions(
       agentDir,
@@ -12204,498 +12153,17 @@ process.on('SIGINT', () => void shutdown('SIGINT'))
   }
 }
 
-// ─── Progress card driver ─────────────────────────────────────────────────
-if (streamMode === 'checklist') {
-  const startupAgentDir = resolveAgentDirFromEnv()
-  if (startupAgentDir != null) {
-    // #689: boot-time orphan-pin reaper. Backstop for SIGKILL/OOM/panic
-    // where the SIGTERM handler (PR #690) never ran. For each pin still
-    // recorded in the sidecar, edit the message body to a "Restart
-    // interrupted this work" banner BEFORE unpinning so the user sees
-    // why the card stopped updating instead of a silent disappearance.
-    //
-    // Banner subtitle is sourced from clean-shutdown.json when fresh
-    // (<CLEAN_SHUTDOWN_MAX_AGE_MS) — for an OOM/panic that wrote no
-    // marker, we fall back to a generic "previous process exited
-    // unexpectedly" line. The sweep is bounded by ~5s so a wedged
-    // Telegram API can't block boot.
-    const cleanMarker = readCleanShutdownMarker(GATEWAY_CLEAN_SHUTDOWN_MARKER_PATH)
-    const markerFresh =
-      cleanMarker != null && Date.now() - cleanMarker.ts < CLEAN_SHUTDOWN_MAX_AGE_MS
-    const subtitle =
-      markerFresh && cleanMarker?.reason != null && cleanMarker.reason.length > 0
-        ? `${cleanMarker.signal}: ${cleanMarker.reason}`
-        : markerFresh && cleanMarker != null
-          ? cleanMarker.signal
-          : 'previous process exited unexpectedly'
-    const banner = `⚠️ <b>Restart interrupted this work</b>\n<i>${escapeHtmlForTg(subtitle)}</i>`
-    void sweepActivePins(
-      startupAgentDir,
-      // #1075: wrap unpin so flood-wait + THREAD_NOT_FOUND don't crash sweep.
-      (chatId, messageId) =>
-        robustApiCall(
-          () => lockedBot.api.unpinChatMessage(chatId, messageId),
-          { chat_id: chatId, verb: 'startup-sweep.unpin' },
-        ),
-      {
-        log: (msg) => process.stderr.write(`telegram gateway: startup pin sweep — ${msg}\n`),
-        timeoutMs: 5_000,
-        editBeforeUnpin: async (pin) => {
-          // #1075: pin's message may be in a deleted thread. Wrap to
-          // swallow THREAD_NOT_FOUND so the sweep continues with unpin.
-          await swallowingApiCall(
-            () => lockedBot.api.editMessageText(pin.chatId, pin.messageId, banner, { parse_mode: 'HTML' }),
-            { chat_id: pin.chatId, verb: 'startup-sweep.editBeforeUnpin' },
-          )
-        },
-      },
-    )
-  }
 
-  // Pin lifecycle: extracted to progress-card-pin-manager.ts. The manager
-  // owns the `progressPinnedMsgIds` map, the `unpinnedTurnKeys` dedupe
-  // set, the active-pins sidecar calls, and the pin/unpin API wiring —
-  // previously all inline here.
-  const pinMgr = createPinManager({
-    // #1075: route pin/unpin/delete through robustApiCall so a deleted
-    // forum thread (THREAD_NOT_FOUND) doesn't crash the gateway —
-    // pinChatMessage / unpinChatMessage / deleteMessage all operate on
-    // a message in a thread, so the API rejects them once the thread is
-    // gone. The pin-manager already swallows pin/unpin errors via the
-    // outer log path, so a THREAD_NOT_FOUND throw just stops the
-    // re-pin attempt without further damage.
-    pin: (chatId, messageId, opts) =>
-      robustApiCall(
-        () => lockedBot.api.pinChatMessage(chatId, messageId, opts),
-        { chat_id: chatId, verb: 'pinChatMessage' },
-      ),
-    unpin: (chatId, messageId) =>
-      robustApiCall(
-        () => lockedBot.api.unpinChatMessage(chatId, messageId),
-        { chat_id: chatId, verb: 'unpinChatMessage' },
-      ),
-    deleteMessage: (chatId, messageId) =>
-      robustApiCall(
-        () => lockedBot.api.deleteMessage(chatId, messageId),
-        { chat_id: chatId, verb: 'deleteMessage' },
-      ),
-    addPin: (entry) => {
-      const agentDir = resolveAgentDirFromEnv()
-      if (agentDir != null) addActivePin(agentDir, entry)
-    },
-    removePin: (chatId, messageId) => {
-      const agentDir = resolveAgentDirFromEnv()
-      if (agentDir != null) removeActivePin(agentDir, chatId, messageId)
-    },
-    log: (line) => process.stderr.write(line),
-  })
+// ─── Progress card driver (removed #1122 PR3) ─────────────────────────────
+// The pinned progress card was deleted in favour of conversational
+// pacing + the silence-poke safety net. The module-level helper vars
+// (`unpinProgressCardForChat`, `getPinnedProgressCardMessageId`,
+// `completeProgressCardTurn`, `flushProgressCardsForShutdown`,
+// `progressDriver`) stay declared and `null`, so the dozens of
+// optional-chained call sites scattered through this file remain
+// valid TypeScript and no-op at runtime. Those dead sites are
+// scheduled for a follow-up cleanup PR.
 
-  bot.on('message:pinned_message', async ctx => {
-    const chatId = String(ctx.chat.id)
-    const serviceMessageId = ctx.message.message_id
-    const pinned = ctx.message.pinned_message
-    if (!pinned) return
-    pinMgr.captureServiceMessage({
-      chatId,
-      pinnedMessageId: pinned.message_id,
-      serviceMessageId,
-    })
-  })
-
-  // Watchdog: re-pin if Telegram's current pin drifts away from ours
-  // mid-turn. Probed on heartbeat emits, rate-limited per turnKey.
-  const pinWatchdog = createPinWatchdog({
-    getCurrentPinned: async (chatId) => {
-      const chat = await lockedBot.api.getChat(chatId)
-      // `pinned_message` is present on groups/supergroups when a pin
-      // exists; `message_id` is the pinned message's id. Private-chat
-      // shape is the same — the field is absent when nothing is pinned.
-      const pinnedMessage =
-        'pinned_message' in chat
-          ? (chat as { pinned_message?: { message_id: number } }).pinned_message
-          : undefined
-      return pinnedMessage?.message_id
-    },
-    // #1075: same retry policy as the main pin-manager.
-    pin: (chatId, messageId, opts) =>
-      robustApiCall(
-        () => lockedBot.api.pinChatMessage(chatId, messageId, opts),
-        { chat_id: chatId, verb: 'pinChatMessage' },
-      ),
-    log: (line) => process.stderr.write(line),
-  })
-
-  unpinProgressCardForChat = (chatId: string, threadId: number | undefined): void => {
-    pinMgr.unpinForChat(chatId, threadId)
-  }
-
-  // #654 expose pinMgr to the turn-flush block (which lives upstream of
-  // where pinMgr is constructed). Two narrow callbacks instead of the
-  // whole manager so the contract stays explicit.
-  getPinnedProgressCardMessageId = (turnKey: string, agentId?: string): number | null => {
-    return pinMgr.pinnedMessageId(turnKey, agentId) ?? null
-  }
-  completeProgressCardTurn = (args: { chatId: string; threadId: number | undefined; turnKey: string }): void => {
-    pinMgr.completeTurn({
-      chatId: args.chatId,
-      threadId: args.threadId != null ? String(args.threadId) : undefined,
-      turnKey: args.turnKey,
-    })
-  }
-
-  // #689: flush every pinned progress card with a "Restart interrupted"
-  // banner before shutdown completes. Without this, cards freeze forever
-  // on "Working…" — the gateway re-bootstraps with a fresh turn counter
-  // that can collide with the abandoned turnKey, so the next-boot orphan
-  // sweep can't reliably reattach them either.
-  flushProgressCardsForShutdown = async ({ signal, reason, budgetMs }): Promise<void> => {
-    const entries = pinMgr.pinnedEntries()
-    if (entries.length === 0) return
-    const reasonLine = reason != null && reason.length > 0
-      ? `<i>${escapeHtmlForTg(`${signal}: ${reason}`)}</i>`
-      : `<i>${escapeHtmlForTg(signal)}</i>`
-    const banner = `⚠️ <b>Restart interrupted this work</b>\n${reasonLine}`
-    process.stderr.write(`telegram gateway: shutdown.flush_progress_cards count=${entries.length} signal=${signal}\n`)
-
-    const editOps = entries.map(({ chatId, threadId, turnKey, agentId, messageId }) => {
-      // #1075: pin's message may be in a deleted thread. swallowingApiCall
-      // catches THREAD_NOT_FOUND so a single bad pin doesn't block the
-      // others in the budget window.
-      const tidNum = threadId != null ? Number(threadId) : undefined
-      return swallowingApiCall(
-        () => lockedBot.api.editMessageText(chatId, messageId, banner, { parse_mode: 'HTML' }),
-        {
-          chat_id: chatId,
-          verb: 'shutdown.flush_progress_card_edit',
-          ...(tidNum != null && Number.isFinite(tidNum) ? { threadId: tidNum } : {}),
-        },
-      )
-        .then(() => {
-          process.stderr.write(`telegram gateway: shutdown.flush_progress_card_edit ok turnKey=${turnKey} agentId=${agentId} msgId=${messageId}\n`)
-        })
-        .catch((err: unknown) => {
-          const msg = err instanceof Error ? err.message : String(err)
-          process.stderr.write(`telegram gateway: shutdown.flush_progress_card_edit failed turnKey=${turnKey} agentId=${agentId} msgId=${messageId} err=${msg}\n`)
-        })
-        .finally(() => {
-          // Unpin regardless of whether the edit succeeded — a stale
-          // pinned card with the old "Working…" body is still better
-          // off unpinned than left frozen.
-          const tid = threadId != null ? Number(threadId) : undefined
-          pinMgr.unpinForChat(chatId, tid)
-        })
-    })
-
-    let timedOut = false
-    const budget = new Promise<void>((resolve) => {
-      const t = setTimeout(() => { timedOut = true; resolve() }, budgetMs)
-      // unref so the timer alone can't keep the process alive past exit().
-      ;(t as unknown as { unref?: () => void }).unref?.()
-    })
-    await Promise.race([
-      Promise.allSettled(editOps).then(async () => { await pinMgr.drainInFlight() }),
-      budget,
-    ])
-    if (timedOut) {
-      process.stderr.write(`telegram gateway: shutdown.flush_progress_cards budget_exceeded budgetMs=${budgetMs}\n`)
-    }
-  }
-
-  /**
-   * Classify a Telegram API error for the progress-card failure-escalation
-   * mechanism. Returns an ApiFailureInfo for reportApiFailure(), or a
-   * transient classification for unknown errors.
-   */
-  function classifyProgressCardApiError(err: unknown): ApiFailureInfo {
-    if (err instanceof GrammyError) {
-      const code = err.error_code
-      const desc = err.description ?? ''
-      if (code === 400 && /\bmessage is not modified\b/i.test(desc)) {
-        return { code, description: desc, kind: 'benign' }
-      }
-      // 429 Too Many Requests is explicitly retryable — Telegram includes a
-      // retry_after hint. Must short-circuit BEFORE the generic 4xx branch,
-      // otherwise a rate-limit burst would count toward the permanent threshold
-      // and permanently silence the card.
-      if (code === 429) {
-        return { code, description: desc, kind: 'transient' }
-      }
-      if (code >= 400 && code < 500) {
-        return { code, description: desc, kind: 'permanent_4xx' }
-      }
-      return { code, description: desc, kind: 'transient' }
-    }
-    const msg = err instanceof Error ? err.message : String(err)
-    if (
-      msg.includes('ECONNRESET') ||
-      msg.includes('ETIMEDOUT') ||
-      msg.includes('fetch failed') ||
-      msg.includes('ENOTFOUND')
-    ) {
-      return { code: 0, description: msg, kind: 'transient' }
-    }
-    return { code: 0, description: msg, kind: 'transient' }
-  }
-
-  // #842: progress-card first-render gating. Read the per-agent
-  // overrides from switchroom.yaml; fall back to driver defaults
-  // (45000 ms / 0 ms) when absent, unreadable, or not present in the
-  // cascade (defaults → profile → per-agent).
-  let progressCardDelayMs: number | undefined
-  let progressCardDelayMsBackground: number | undefined
-  try {
-    const swConfig = loadSwitchroomConfig()
-    const agentSlugForCfg = process.env.SWITCHROOM_AGENT_NAME
-    const agentCfg = agentSlugForCfg ? swConfig.agents?.[agentSlugForCfg] : undefined
-    const pc = agentCfg?.channels?.telegram?.progress_card
-    if (pc) {
-      if (typeof pc.delay_ms === 'number') progressCardDelayMs = pc.delay_ms
-      if (typeof pc.delay_ms_background === 'number') progressCardDelayMsBackground = pc.delay_ms_background
-    }
-  } catch {
-    // Best-effort — gateway may run in dirs where loadSwitchroomConfig
-    // fails. Driver defaults apply.
-  }
-
-  progressDriver = createProgressDriver({
-    ...(progressCardDelayMs != null ? { initialDelayMs: progressCardDelayMs } : {}),
-    ...(progressCardDelayMsBackground != null ? { initialDelayMsBackground: progressCardDelayMsBackground } : {}),
-    emit: ({ chatId, threadId, turnKey, html, done, isFirstEmit, replyToMessageId, agentId }) => {
-      // Tag the outbound API calls so `tg-post` log lines carry turnKey
-      // (and cardMessageId when known) — lets us audit days-old session
-      // logs for "did the card render?" / "what edit storms hit it?"
-      // without parsing free-form progress-card traces. (#card-audit-log)
-      const knownCardMessageId = pinMgr.pinnedMessageId(turnKey, agentId)
-      const tgPostTags: Record<string, string | number> = { turnKey }
-      if (knownCardMessageId != null) tgPostTags.cardMessageId = knownCardMessageId
-      const args = {
-        chat_id: chatId, text: html, done, message_thread_id: threadId,
-        lane: 'progress', format: 'html', turnKey,
-        // Pass the source message_id as reply_to on the initial send only
-        // (isFirstEmit=true). handleStreamReply only applies reply_to on
-        // stream creation (first call for a given sKey), so subsequent
-        // edits — which reuse the existing DraftStream — naturally ignore
-        // this. Passing it unconditionally would be harmless, but being
-        // explicit here documents the "first send only" contract.
-        // We also opt out of auto-quote (quote:false) so that if
-        // replyToMessageId is absent the progress card sends bare — it
-        // doesn't want a random "latest inbound" quote attached.
-        quote: false as const,
-        ...(isFirstEmit && replyToMessageId != null
-          ? { reply_to: String(replyToMessageId) }
-          : {}),
-      }
-      // #354 spike: opt-in draft transport for the pinned card body.
-      // The agent's stream_reply tool already uses sendMessageDraft in
-      // DMs (continuous trailing-edge bouncing-dots animation, no edit
-      // budget burn). The progress card's emit doesn't, so the pinned
-      // card never gets the same liveness signal between explicit
-      // tool_use events. Wiring it on here passes `isPrivateChat` +
-      // `sendMessageDraft` into handleStreamReply — the existing draft
-      // transport selection in stream-reply-handler picks it up.
-      //
-      // Default OFF pending operator validation of the spike unknowns
-      // documented in #354:
-      //   1. Can a draft message be PINNED? `pinMgr.considerPin` runs
-      //      after handleStreamReply returns a messageId — if drafts
-      //      can't be pinned, pin would silently fail and the card
-      //      wouldn't pin until materialize on turn_end (UX shift).
-      //   2. What happens if the bot dies mid-draft? Telegram may
-      //      orphan the draft visibly, leaving a half-rendered card.
-      //   3. Group/forum chats fall through to the legacy edit path
-      //      (isPrivateChat=false → resolvedTransport='message' in
-      //      stream-reply-handler.ts). Forum topics in DMs don't exist;
-      //      we still defend against future shape changes by guarding
-      //      on threadId presence.
-      //
-      // To enable: PROGRESS_CARD_DRAFT_TRANSPORT=1. Run for a day on a
-      // single agent, watch journalctl for "progress-card emit failed"
-      // bursts and confirm cards pin correctly. If clean, flip the
-      // default in a follow-up PR.
-      const draftFlagOn = process.env.PROGRESS_CARD_DRAFT_TRANSPORT === '1'
-      const draftEligible = draftFlagOn && isDmChatId(chatId) && threadId == null
-      withTgPostTags(tgPostTags, () => handleStreamReply(args, { activeDraftStreams, activeDraftParseModes, suppressPtyPreview }, {
-        // grammy Bot vs local StreamBotApi — see cast pattern above.
-        bot: lockedBot as never, retry: robustApiCall, markdownToHtml, escapeMarkdownV2, repairEscapedWhitespace,
-        takeHandoffPrefix: () => '', assertAllowedChat, resolveThreadId, disableLinkPreview: true,
-        defaultFormat: 'html', logStreamingEvent, endStatusReaction,
-        historyEnabled: false, recordOutbound: () => {},
-        writeError: (line) => process.stderr.write(line),
-        // #626 idempotency hook: when a previous done=true finalize
-        // deleted the activeDraftStreams entry for this lane+turn,
-        // a subsequent emit would normally create a fresh sendMessage
-        // (= a NEW status message, the user-visible bug). The pin
-        // manager already knows the anchor message id for this turn
-        // (set on the FIRST successful send via considerPin below);
-        // route it back into the handler so the new stream initializes
-        // its messageId and the very next update fires editMessageText
-        // instead of sendMessage. Stale ids fall back gracefully via
-        // the not-found path in draft-stream.
-        lookupExistingMessageId: (key) => {
-          if (key.turnKey == null) return null
-          return pinMgr.pinnedMessageId(key.turnKey, agentId)
-        },
-        ...(draftEligible
-          ? {
-              isPrivateChat: true,
-              ...(sendMessageDraftFn != null ? { sendMessageDraft: sendMessageDraftFn } : {}),
-            }
-          : {}),
-      })).then((result) => {
-        // Successful API call — reset the consecutive-4xx counter.
-        progressDriver?.reportApiSuccess(turnKey)
-        // #203: progress-card edit is a user-visible signal.
-        signalTracker.noteSignal(statusKey(chatId, threadId != null ? Number(threadId) : undefined), Date.now())
-        if (!result?.messageId) return
-        // Per-agent cards (#per-agent-cards): thread `agentId` through to
-        // the pin manager so each sub-agent card pins under its own
-        // composite key. Absent for parent-card emits — the manager
-        // defaults to the parent sentinel.
-        pinMgr.considerPin({
-          chatId,
-          threadId,
-          turnKey,
-          messageId: result.messageId,
-          isFirstEmit,
-          ...(agentId != null ? { agentId } : {}),
-        })
-        // Heartbeat watchdog: after the initial pin has been recorded,
-        // every subsequent (non-final) emit probes Telegram to confirm
-        // our pin is still the one on display. Rate-limited internally.
-        if (!isFirstEmit && !done) {
-          const expectedId = pinMgr.pinnedMessageId(turnKey, agentId)
-          if (expectedId != null) {
-            void pinWatchdog.verify({ chatId, turnKey, expectedMessageId: expectedId })
-          }
-        }
-        // Sub-agent card finalize: when an emit comes through with both
-        // `agentId` and `done`, that's the registry's terminal frame for
-        // this card. Unpin its message; the parent's onTurnComplete
-        // path covers the parent-card case.
-        if (done && agentId != null) {
-          pinMgr.completeTurn({ chatId, threadId, turnKey, agentId })
-        }
-      }).catch((err: unknown) => {
-        const msg = err instanceof Error ? err.message : String(err)
-        process.stderr.write(`telegram gateway: progress-card emit failed: ${msg}\n`)
-        progressDriver?.reportApiFailure(turnKey, classifyProgressCardApiError(err))
-      })
-    },
-    onTurnEnd: (summary) => {
-      const agentDir = resolveAgentDirFromEnv()
-      if (agentDir != null) writeLastTurnSummary(agentDir, summary)
-    },
-    onTurnComplete: ({ chatId, threadId, turnKey, summary }) => {
-      process.stderr.write(`telegram gateway: progress-card: onTurnComplete callback turnKey=${turnKey}\n`)
-      pinMgr.completeTurn({ chatId, threadId, turnKey })
-      pinWatchdog.clear(turnKey)
-      // #412: drop the turn-active marker so the watchdog stops tracking
-      // this turn. Absent file = no in-flight turn = legitimate idle (no
-      // hang to detect).
-      removeTurnActiveMarker(STATE_DIR)
-      // Clean up silent-end-pending.json once the turn delivered for real.
-      // Without this, the file lingers between sessions and the Stop hook
-      // can read a stale `retryCount` from a long-resolved turn. See #289.
-      try {
-        const statePath = join(STATE_DIR, 'silent-end-pending.json')
-        if (existsSync(statePath)) {
-          const prev = JSON.parse(readFileSync(statePath, 'utf8'))
-          if (prev.turnKey === turnKey) {
-            unlinkSync(statePath)
-          }
-        }
-      } catch {
-        // Best-effort: a stale file or vanished mid-read is fine — the
-        // hook will re-create it on the next silent-end if needed.
-      }
-      if (threadId != null) {
-        // #1075: thread-id-bearing — this is the per-turn "Done" line.
-        // Note: we don't pass `message_thread_id` in opts (intentional —
-        // the sendMessage shape here is bare). The thread-route is via the
-        // chatId already being the topic. swallow to avoid crashing the
-        // onTurnComplete callback.
-        const tidNum = Number(threadId)
-        void swallowingApiCall(
-          () => lockedBot.api.sendMessage(chatId, `✅ Done — ${summary}`),
-          {
-            chat_id: chatId,
-            verb: 'turn-complete.done',
-            ...(Number.isFinite(tidNum) ? { threadId: tidNum } : {}),
-          },
-        )
-      }
-      // Phase 3 of #332: update the progress-card pin with the idle footer so
-      // the user can see at a glance when the agent last replied.
-      if (turnsDb != null) {
-        try {
-          const rows = findRecentTurnsForChat(turnsDb, chatId, 1)
-          const turnRows = rows.map(r => ({
-            turnKey: r.turn_key,
-            chatId: r.chat_id,
-            startedAt: r.started_at,
-            endedAt: r.ended_at,
-          }))
-          const footer = formatIdleFooter(turnRows, Date.now())
-          const pinnedMsgId = pinMgr.pinnedMessageId(turnKey)
-          if (pinnedMsgId != null) {
-            // #1075: pinned message's thread may have been deleted —
-            // swallow THREAD_NOT_FOUND so the next turn isn't blocked.
-            const tidNum = threadId != null ? Number(threadId) : undefined
-            void swallowingApiCall(
-              () => lockedBot.api.editMessageText(chatId, pinnedMsgId, footer, { parse_mode: 'HTML' }),
-              {
-                chat_id: chatId,
-                verb: 'idle-footer.edit',
-                ...(tidNum != null && Number.isFinite(tidNum) ? { threadId: tidNum } : {}),
-              },
-            )
-          }
-        } catch (err) {
-          process.stderr.write(`telegram gateway: idle-footer render failed chatId=${chatId}: ${(err as Error).message}\n`)
-        }
-      }
-    },
-    onSilentEnd: ({ chatId, turnKey }) => {
-      // Write a state file so the Stop hook can detect a silent-end and
-      // block the session to re-prompt the agent. The hook increments
-      // retryCount; on the second silent-end (retryCount >= 1) it allows
-      // the stop so this warning card renders.
-      const statePath = join(STATE_DIR, 'silent-end-pending.json')
-      let retryCount = 0
-      try {
-        if (existsSync(statePath)) {
-          const prev = JSON.parse(readFileSync(statePath, 'utf8'))
-          // Only inherit retryCount from a stale file when it belongs to the
-          // SAME turn — otherwise a previous turn's exhausted counter would
-          // suppress the retry on a fresh silent-end.
-          if (prev.turnKey === turnKey) {
-            retryCount = typeof prev.retryCount === 'number' ? prev.retryCount : 0
-          }
-        }
-      } catch {
-        retryCount = 0
-      }
-      const suppressed = retryCount === 0
-      try {
-        writeFileSync(
-          statePath,
-          JSON.stringify({ chatId, turnKey, retryCount, timestamp: Date.now() }),
-          'utf8',
-        )
-        process.stderr.write(
-          `telegram gateway: silent-end: wrote state file turnKey=${turnKey} retryCount=${retryCount} suppressed=${suppressed}\n`,
-        )
-      } catch (err) {
-        process.stderr.write(
-          `telegram gateway: silent-end: failed to write state file: ${(err as Error).message}\n`,
-        )
-      }
-      return { suppressed }
-    },
-    maxIdleMs: 5 * 60_000,
-  })
-  process.stderr.write('telegram gateway: progress-card driver active\n')
-}
 
 // ─── Startup ──────────────────────────────────────────────────────────────
 initHandoffContinuity()
@@ -12989,60 +12457,11 @@ void (async () => {
           for (const id of skippedIds) {
             process.stderr.write(`telegram gateway: startup: skipped chat ${id} (not yet reachable)\n`)
           }
-          if (sweepableIds.length > 0) {
-            // Track chats that fail the boot probe so we can surface a
-            // user-facing notice after the sweep completes.
-            const bootProbeFailures: Array<{ chatId: string; reason: string }> = []
-            void sweepBotAuthoredPins(
-              sweepableIds, me.id,
-              async (chatId) => {
-                try {
-                  const chat = await lockedBot.api.getChat(chatId)
-                  const pinned = (chat as { pinned_message?: { message_id: number; from?: { id: number } } }).pinned_message
-                  if (!pinned) return null
-                  return { messageId: pinned.message_id, fromId: pinned.from?.id ?? null }
-                } catch (err) {
-                  // Catch ALL getChat errors at boot — a single unreachable
-                  // chat must never kill the gateway (issue #166). Log
-                  // structurally so operators can diagnose, then continue.
-                  const reason = err instanceof GrammyError
-                    ? `${err.error_code} ${err.description}`
-                    : (err instanceof Error ? err.message : String(err))
-                  process.stderr.write(
-                    `telegram gateway: boot-probe-failed: chatId=${chatId} reason=${JSON.stringify(reason)}\n`,
-                  )
-                  bootProbeFailures.push({ chatId, reason })
-                  return null
-                }
-              },
-              // #1075: wrap unpin so a stale-thread/transient error doesn't
-              // abort the sweep.
-              (chatId, messageId) =>
-                robustApiCall(
-                  () => lockedBot.api.unpinChatMessage(chatId, messageId),
-                  { chat_id: chatId, verb: 'bot-authored-pin-sweep.unpin' },
-                ),
-              { log: (msg) => process.stderr.write(`telegram gateway: bot-authored pin sweep — ${msg}\n`) },
-            ).then(() => {
-              // After sweep: post a user-facing notice for each failed probe
-              // to the first reachable allowlisted DM chat. Failures here are
-              // non-fatal — we never let notification errors crash boot.
-              if (bootProbeFailures.length === 0) return
-              const notifyChat = bootAccess.allowFrom[0]
-              if (!notifyChat) return
-              for (const { chatId, reason } of bootProbeFailures) {
-                const text = `⚠️ <b>Boot probe failed</b>\nCould not reach chat <code>${chatId}</code> at startup — bot may not be a member.\n<i>${reason}</i>`
-                // #1075: notify chat is a DM (no thread_id), so
-                // THREAD_NOT_FOUND can't fire — but route through
-                // swallowingApiCall so flood-wait and any future thread
-                // additions are covered uniformly.
-                void swallowingApiCall(
-                  () => lockedBot.api.sendMessage(notifyChat, text, { parse_mode: 'HTML' }),
-                  { chat_id: notifyChat, verb: 'boot-probe-notify' },
-                )
-              }
-            }).catch(() => {})
-          }
+          // #1122 PR3: bot-authored progress-card pin sweep at boot
+          // removed with the card. The boot-probe failure notifier
+          // that used to ride along is gone too; reachability checks
+          // for chats now happen lazily when an inbound message lands.
+          void sweepableIds
         } catch {}
 
         // Boot card — always post on every gateway start with the restart reason.
@@ -13389,17 +12808,15 @@ void (async () => {
                     if (row != null) isBackground = row.background === 1
                   } catch { /* best-effort */ }
                 }
+                // #1122 PR3: card-event-log emission removed with the
+                // progress card. Sub-agent completion is now visible
+                // via the agent's own chat narration.
                 const finalOutcome: 'completed' | 'orphan' | 'background' =
                   isBackground ? 'background' : (outcome === 'completed' ? 'completed' : 'orphan')
-                emitCardEvent({
-                  agent: process.env.SWITCHROOM_AGENT_NAME ?? '',
-                  chatId,
-                  turnKey: parentTurnKey,
-                  event: 'finalized',
-                  reason: `sub_agent_finished agentId=${agentId} outcome=${finalOutcome} tools=${toolCount}`,
-                  subagents: [agentId],
-                  durationMs,
-                })
+                void finalOutcome
+                void parentTurnKey
+                void durationMs
+                void toolCount
               },
             })
             process.stderr.write('telegram gateway: subagent-watcher active\n')

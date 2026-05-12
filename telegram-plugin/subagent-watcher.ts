@@ -310,6 +310,23 @@ const DEFAULT_SILENT_SYNTHESIS_STALL_THRESHOLD_MS = 300_000
  * ceiling that closed-out cards used to wait on.
  */
 const DEFAULT_SILENT_STALL_TERMINAL_MS = 300_000
+
+/**
+ * Resolve a threshold-knob env var (e.g.
+ * `SWITCHROOM_SUBAGENT_STALL_TERMINAL_MS`) to a positive integer ms
+ * value. Returns null when unset, empty, or unparseable so the caller
+ * falls through to the compile-time default. Negative/zero/NaN values
+ * are treated as "invalid" rather than "disable" — a real "disable"
+ * needs an explicit config-arg, not an env override (don't let a
+ * stray `=0` silently kill the watcher's stall-detection in prod).
+ */
+function parseEnvMs(varName: string): number | null {
+  const raw = process.env[varName]
+  if (raw == null || raw === '') return null
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n <= 0) return null
+  return n
+}
 const DEFAULT_REAPER_TTL_MS = 60 * 60_000          // 1 hour
 const DEFAULT_REAPER_INTERVAL_MS = 15 * 60_000     // 15 minutes
 /**
@@ -591,11 +608,22 @@ function readSubTail(
 
 export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWatcherHandle {
   const agentDir = config.agentDir
-  const stallThresholdMs = config.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS
+  // Threshold knobs resolve in this order: explicit config arg →
+  // env-var override → compile-time default. Env-vars exist so the
+  // UAT scenario (which times out at 120s) can compress the watcher's
+  // 60s-stall + 300s-synth window down to a few seconds without
+  // having to plumb config through every spinUp() caller. Production
+  // gateways don't set these — the defaults are tuned for live use.
+  const stallThresholdMs =
+    config.stallThresholdMs ?? parseEnvMs('SWITCHROOM_SUBAGENT_STALL_MS') ?? DEFAULT_STALL_THRESHOLD_MS
   const silentSynthesisStallThresholdMs =
-    config.silentSynthesisStallThresholdMs ?? DEFAULT_SILENT_SYNTHESIS_STALL_THRESHOLD_MS
+    config.silentSynthesisStallThresholdMs
+    ?? parseEnvMs('SWITCHROOM_SUBAGENT_SILENT_SYNTH_STALL_MS')
+    ?? DEFAULT_SILENT_SYNTHESIS_STALL_THRESHOLD_MS
   const silentStallTerminalMs =
-    config.silentStallTerminalMs ?? DEFAULT_SILENT_STALL_TERMINAL_MS
+    config.silentStallTerminalMs
+    ?? parseEnvMs('SWITCHROOM_SUBAGENT_STALL_TERMINAL_MS')
+    ?? DEFAULT_SILENT_STALL_TERMINAL_MS
   const reaperTtlMs = config.reaperTtlMs ?? DEFAULT_REAPER_TTL_MS
   const reaperIntervalMs = config.reaperIntervalMs ?? DEFAULT_REAPER_INTERVAL_MS
   const rescanMs = config.rescanMs ?? DEFAULT_RESCAN_MS

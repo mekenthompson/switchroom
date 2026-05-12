@@ -46,6 +46,12 @@ import {
   checkVaultPreflightBulk,
   formatLockedRefusalBulk,
 } from "./agent-vault-preflight.js";
+import {
+  clearQuarantineMarker,
+  hostTelegramStateDir,
+  readQuarantineMarkerForAgent,
+  type QuarantineMarker,
+} from "../agents/quarantine.js";
 
 /**
  * Pre-restart preflight check. Verifies the agent's runtime
@@ -165,6 +171,54 @@ function checkSwitchroomBranch(): string | null {
     // dist, etc) and skip the warning.
     return null;
   }
+}
+
+/**
+ * Render a quarantine-refusal banner. The host-side CLI checks the
+ * marker BEFORE issuing any `docker compose up` so the operator gets a
+ * single clear error and a documented unquarantine path, rather than
+ * watching the gateway re-crash on 401. See `src/agents/quarantine.ts`
+ * for the on-disk contract and #1076 for the originating incident.
+ */
+export function formatQuarantineRefusal(
+  name: string,
+  marker: QuarantineMarker,
+): string {
+  const ageSec = Math.max(0, Math.floor((Date.now() - marker.ts) / 1000));
+  const ageStr =
+    ageSec < 60
+      ? `${ageSec}s ago`
+      : ageSec < 3600
+        ? `${Math.floor(ageSec / 60)}m ago`
+        : ageSec < 86400
+          ? `${Math.floor(ageSec / 3600)}h ago`
+          : `${Math.floor(ageSec / 86400)}d ago`;
+  const reasonLine =
+    marker.reason === "startup.unauthorized"
+      ? "Telegram API rejected the bot token (401 Unauthorized)."
+      : `Quarantine reason: ${marker.reason}.`;
+  return (
+    `${name} is QUARANTINED (${ageStr}).\n` +
+    `      ${reasonLine}\n` +
+    (marker.detail ? `      ${marker.detail}\n` : "") +
+    `      Fix the underlying issue (e.g. rotate the bot token via \`switchroom vault\`), then:\n` +
+    `        switchroom agent unquarantine ${name}\n` +
+    `      That clears the marker; the next start re-checks the credential.`
+  );
+}
+
+/**
+ * If `name` has a quarantine marker, print the refusal banner and return
+ * true (caller should skip / abort). Returns false otherwise.
+ */
+export function checkQuarantineRefusal(
+  agentsDir: string,
+  name: string,
+): boolean {
+  const marker = readQuarantineMarkerForAgent(agentsDir, name);
+  if (!marker) return false;
+  console.error(chalk.red(`\n  ${formatQuarantineRefusal(name, marker)}\n`));
+  return true;
 }
 
 export function preflightCheck(
@@ -889,6 +943,16 @@ export function registerAgentCommand(program: Command): void {
             continue;
           }
 
+          // #1076: refuse to start a quarantined agent. The gateway last
+          // exited with a permanent-config-error (e.g. 401 from Telegram)
+          // and starting it again would just re-hit the same wall and
+          // burn the supervisor restart budget. Operator clears via
+          // `switchroom agent unquarantine <name>`. --force bypasses
+          // (matches the existing --force semantics for preflight).
+          if (!opts.force && checkQuarantineRefusal(agentsDir, n)) {
+            continue;
+          }
+
           if (!opts.force) {
             const agentDir = resolve(agentsDir, n);
             const usesDevChannels =
@@ -1053,6 +1117,18 @@ export function registerAgentCommand(program: Command): void {
               continue;
             }
 
+            // #1076: refuse to restart a quarantined agent. The gateway
+            // hit a permanent-config-error on its last start (e.g. 401
+            // from Telegram on a revoked token); restarting it again
+            // would just re-hit the same wall and burn the supervisor
+            // restart budget. Operator clears the marker explicitly via
+            // `switchroom agent unquarantine <name>` once the underlying
+            // credential is rotated. --force bypasses.
+            if (!opts.force && checkQuarantineRefusal(agentsDir, n)) {
+              sawAbort = true;
+              continue;
+            }
+
             const agentDir = resolve(agentsDir, n);
 
             // Preflight: verify runtime dependencies before restart.
@@ -1191,6 +1267,61 @@ export function registerAgentCommand(program: Command): void {
           }
         }
       )
+    );
+
+  // switchroom agent unquarantine <name>
+  // #1076: clear the quarantine marker so the next start/restart goes
+  // through. Operator-driven — the gateway never clears its own marker
+  // (the whole point is that the *next* boot is naive and re-quarantines
+  // if the underlying credential is still bad). Host-only by design:
+  // a quarantined agent has no Telegram surface, so there's no in-chat
+  // affordance and no admin gating to wire.
+  agent
+    .command("unquarantine <name>")
+    .description(
+      "Clear the quarantine marker so the agent's gateway will start on the next restart"
+    )
+    .action(
+      withConfigError(async (name: string) => {
+        const config = getConfig(program);
+        if (!config.agents[name]) {
+          console.error(
+            chalk.red(`Agent "${name}" is not defined in switchroom.yaml`)
+          );
+          process.exit(1);
+        }
+        const agentsDir = resolveAgentsDir(config);
+        const marker = readQuarantineMarkerForAgent(agentsDir, name);
+        if (!marker) {
+          console.log(
+            chalk.gray(`${name} is not quarantined — no marker to clear.`)
+          );
+          return;
+        }
+        const cleared = clearQuarantineMarker(
+          hostTelegramStateDir(agentsDir, name)
+        );
+        if (cleared) {
+          console.log(
+            chalk.green(
+              `Cleared quarantine marker for ${name} (was: ${marker.reason}).`
+            )
+          );
+          console.log(
+            chalk.gray(
+              `  Run \`switchroom agent restart ${name}\` to bring the gateway back up.\n` +
+                `  If the underlying issue isn't fixed (e.g. bot token still bad), the next start will re-quarantine.`
+            )
+          );
+        } else {
+          console.error(
+            chalk.red(
+              `Failed to clear marker for ${name} — check permissions on ${hostTelegramStateDir(agentsDir, name)}.`
+            )
+          );
+          process.exit(1);
+        }
+      })
     );
 
   // switchroom agent attach <name>

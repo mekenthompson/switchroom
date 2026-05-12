@@ -18,6 +18,7 @@ import { describe, it, expect, vi } from 'vitest'
 import {
   isBootNetworkError,
   gatewayStartupRetry,
+  classifyStartupError,
   STARTUP_RETRY_DELAYS_MS,
 } from '../gateway/startup-network-retry'
 
@@ -73,6 +74,57 @@ describe('isBootNetworkError', () => {
     expect(isBootNetworkError('string error')).toBe(false)
     expect(isBootNetworkError(null)).toBe(false)
     expect(isBootNetworkError(42)).toBe(false)
+  })
+})
+
+// ── classifyStartupError ──────────────────────────────────────────────────────
+
+describe('classifyStartupError', () => {
+  it('classifies grammy 401 (GrammyError, error_code=401) as unauthorized', () => {
+    const err = Object.assign(new Error('Unauthorized'), {
+      name: 'GrammyError',
+      error_code: 401,
+    })
+    expect(classifyStartupError(err)).toBe('unauthorized')
+  })
+
+  it('classifies an Unauthorized-message error as unauthorized — defence in depth', () => {
+    expect(classifyStartupError(new Error('Unauthorized'))).toBe('unauthorized')
+  })
+
+  it('does NOT mis-classify a network error mentioning "401" port as unauthorized', () => {
+    // Hypothetical message that happens to contain "401" but isn't a
+    // 401 status. classifyStartupError matches on the literal token
+    // "Unauthorized" rather than the substring "401" to avoid this.
+    expect(classifyStartupError(new Error('connect ECONNREFUSED 10.0.0.1:401'))).toBe('network')
+  })
+
+  it('classifies HttpError as network', () => {
+    const err = Object.assign(new Error('Network request failed'), {
+      name: 'HttpError',
+    })
+    expect(classifyStartupError(err)).toBe('network')
+  })
+
+  it('classifies ETIMEDOUT as network', () => {
+    expect(classifyStartupError(new Error('connect ETIMEDOUT 1.2.3.4:443'))).toBe('network')
+  })
+
+  it('classifies a bare app error as other', () => {
+    expect(classifyStartupError(new Error('something else'))).toBe('other')
+  })
+
+  it('classifies non-Error values as other', () => {
+    expect(classifyStartupError('string')).toBe('other')
+    expect(classifyStartupError(null)).toBe('other')
+  })
+
+  it('classifies a GrammyError 403 (kicked) as other — surfaces as a fatal rethrow', () => {
+    const err = Object.assign(new Error('Forbidden: bot was kicked'), {
+      name: 'GrammyError',
+      error_code: 403,
+    })
+    expect(classifyStartupError(err)).toBe('other')
   })
 })
 
@@ -160,6 +212,58 @@ describe('gatewayStartupRetry', () => {
     // Verify the schedule is monotonically increasing and ends at 64 s
     expect(STARTUP_RETRY_DELAYS_MS[0]).toBe(1_000)
     expect(STARTUP_RETRY_DELAYS_MS[STARTUP_RETRY_DELAYS_MS.length - 1]).toBe(64_000)
+  })
+
+  it('calls onUnauthorized (not onExhausted, not rethrow) on a 401 — #1076', async () => {
+    // Grammy surfaces 401 via GrammyError with error_code=401.
+    const authErr = Object.assign(new Error('Unauthorized'), {
+      name: 'GrammyError',
+      error_code: 401,
+    })
+    const fn = vi.fn().mockRejectedValue(authErr)
+    const onUnauthorized = vi.fn(() => {
+      throw new Error('__quarantined__')
+    }) as unknown as (err: unknown) => never
+    const onExhausted = vi.fn(() => {
+      throw new Error('__exhausted__')
+    }) as unknown as (err: unknown) => never
+    const sleep = vi.fn().mockResolvedValue(undefined)
+
+    await expect(
+      gatewayStartupRetry(fn, {
+        delaysMs: [100, 200, 400],
+        sleep,
+        onUnauthorized,
+        onExhausted,
+        log: noopLog,
+      }),
+    ).rejects.toThrow('__quarantined__')
+
+    // 401 short-circuits — only one fn() call, no retries, no exhaustion path.
+    expect(fn).toHaveBeenCalledTimes(1)
+    expect(sleep).not.toHaveBeenCalled()
+    expect(onExhausted).not.toHaveBeenCalled()
+    expect(onUnauthorized).toHaveBeenCalledTimes(1)
+    expect(onUnauthorized).toHaveBeenCalledWith(authErr)
+  })
+
+  it('classifies a 401-message-only error (no error_code) as unauthorized — defence in depth', async () => {
+    // Some fetch wrappers / test fixtures surface 401 only in the message.
+    const authErr = new Error('Unauthorized')
+    const fn = vi.fn().mockRejectedValue(authErr)
+    const onUnauthorized = vi.fn(() => {
+      throw new Error('__quarantined__')
+    }) as unknown as (err: unknown) => never
+
+    await expect(
+      gatewayStartupRetry(fn, {
+        delaysMs: [1, 2],
+        sleep: vi.fn(),
+        onUnauthorized,
+        log: noopLog,
+      }),
+    ).rejects.toThrow('__quarantined__')
+    expect(onUnauthorized).toHaveBeenCalledTimes(1)
   })
 
   it('logs retry progress before each sleep', async () => {

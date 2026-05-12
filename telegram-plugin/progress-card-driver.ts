@@ -1839,14 +1839,15 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         // original startedAt + originatingTurnKey snapshot.
         if (cs.fleet.has(event.agentId)) return
         const role = roleFromDispatch(undefined, event.subagentType, event.firstPromptText)
-        // P2: derive background status from the parent dispatch flag.
-        // The reducer at progress-card.ts:706 already correlated the
-        // matching pendingAgentSpawn and wrote parentToolUseId into the
-        // fresh subagent state — read it back here so the fleet reflects
-        // the dispatch's run_in_background flag.
-        const parentToolUseId = cs.state.subAgents.get(event.agentId)?.parentToolUseId ?? null
-        const isBackground =
-          parentToolUseId != null && cs.backgroundParentToolUseIds.has(parentToolUseId)
+        // RFC §Bug 7 fix: read `runInBackground` directly off the
+        // SubAgentState the reducer just populated. Previously this
+        // consulted `cs.backgroundParentToolUseIds` — a parallel Set
+        // bookkept on the driver — and missed in production despite the
+        // reducer correlating parentToolUseId correctly. Reading from the
+        // reducer's own SubAgentState collapses the dual-source-of-truth
+        // problem (Set vs reducer state) into a single source.
+        const sa = cs.state.subAgents.get(event.agentId)
+        const isBackground = sa?.runInBackground === true
         const member = createFleetMember({
           agentId: event.agentId,
           role,
@@ -1908,9 +1909,10 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
         // a stuck condition. `originatingTurnKey` has no legacy
         // counterpart — fall back to the current/active turn.
         const startedAt = sa.startedAt > 0 ? sa.startedAt : now()
-        const isBg =
-          sa.parentToolUseId != null &&
-          cs.backgroundParentToolUseIds.has(sa.parentToolUseId)
+        // RFC §Bug 7: same shift as updateFleetForEvent.sub_agent_started
+        // — derive bg-flag from the reducer's own SubAgentState rather
+        // than the parallel `backgroundParentToolUseIds` Set.
+        const isBg = sa.runInBackground === true
         cs.fleet.set(
           agentId,
           createFleetMember({

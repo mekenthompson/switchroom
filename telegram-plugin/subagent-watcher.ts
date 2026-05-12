@@ -83,8 +83,26 @@ export interface WorkerEntry {
   toolCount: number
   /** True once a stall notification has been sent (suppresses repeat). */
   stallNotified: boolean
+  /**
+   * Wall-clock ms when `stallNotified` flipped true. Null until then.
+   * Used by the post-stall terminal-synthesis path (RFC §Bug 6) to
+   * measure the post-stall window: when `now - stalledAt >=
+   * silentStallTerminalMs` the watcher synthesises a terminal
+   * transition for the entry. Workers whose JSONL never writes an
+   * explicit `sub_agent_turn_end` (e.g. background `Agent` dispatches
+   * in some Claude Code versions) would otherwise sit forever in
+   * `running` despite their real worker process having exited.
+   */
+  stalledAt: number | null
   /** True once a completion notification has been sent. */
   completionNotified: boolean
+  /**
+   * True once the post-stall terminal synthesis has fired so we don't
+   * re-synthesise on every poll tick after the silentStallTerminalMs
+   * window elapses. Paired with `stalledAt` — when synthesis runs it
+   * sets both `state='done'` and this flag.
+   */
+  stallTerminalSynthesised: boolean
   /** Short summary from last completed tool / narrative, for completion message. */
   lastSummaryLine: string
   /**
@@ -137,6 +155,16 @@ export interface SubagentWatcherConfig {
    * Both can be overridden for tests.
    */
   silentSynthesisStallThresholdMs?: number
+  /**
+   * RFC §Bug 6: how long after `stallNotified` fires the watcher waits
+   * before synthesising a terminal `sub_agent_turn_end` for the entry
+   * (ms). Default 300_000 (5 min) — sympathetic to legitimately-paused
+   * workers but tight enough that the progress card releases its
+   * deferred-completion gate well before the 30-min `maxIdleMs`
+   * ceiling. Set to a very large number (e.g. `Infinity`) to disable
+   * synthesis; tests use a tiny value to exercise the path.
+   */
+  silentStallTerminalMs?: number
   /**
    * Reaper TTL (ms): background rows in `status='running'` whose
    * `last_activity_at` (or `started_at` if liveness never wrote) is older
@@ -198,6 +226,21 @@ export interface SubagentWatcherConfig {
    */
   onUnstall?: (agentId: string, description: string) => void
   /**
+   * RFC §Bug 6: fires when the watcher synthesises a terminal transition
+   * for a stalled sub-agent (no explicit `sub_agent_turn_end` line in
+   * the JSONL after `silentStallTerminalMs` past the stall notification).
+   * Wired in gateway.ts to push a synthetic
+   * `{kind:'sub_agent_turn_end', agentId}` event into the progress
+   * driver so the pinned card can release its deferred-completion gate
+   * for the background dispatch.
+   *
+   * Idempotent: each sub-agent triggers this at most once per lifetime
+   * (guarded by `entry.stallTerminalSynthesised`). Fires *before* the
+   * existing `onFinish` callback so the driver-side state mutation
+   * lands first; the audit-log surface then sees a consistent fleet.
+   */
+  onStallTerminal?: (agentId: string, description: string) => void
+  /**
    * Called exactly once per sub-agent when its watcher observes a terminal
    * transition (`done` or `failed`). Mirrors the existing `sub_agent_started`
    * surface (emitted from session-tail) so the audit trail is symmetric.
@@ -257,6 +300,16 @@ const DEFAULT_STALL_THRESHOLD_MS = 60_000
  *  before emitting their first event — the 60s active-loop threshold
  *  misfires on those and freezes the card at ⚠. */
 const DEFAULT_SILENT_SYNTHESIS_STALL_THRESHOLD_MS = 300_000
+/**
+ * RFC §Bug 6 — post-stall terminal-synthesis window. 5min past the
+ * stall notification before the watcher synthesises a
+ * `sub_agent_turn_end` for the entry. Generous enough that a worker
+ * paused on an external dependency (operator unblocking, slow API)
+ * isn't reported done prematurely; tight enough that the pinned card's
+ * deferred-completion gate releases well before the 30-min `maxIdleMs`
+ * ceiling that closed-out cards used to wait on.
+ */
+const DEFAULT_SILENT_STALL_TERMINAL_MS = 300_000
 const DEFAULT_REAPER_TTL_MS = 60 * 60_000          // 1 hour
 const DEFAULT_REAPER_INTERVAL_MS = 15 * 60_000     // 15 minutes
 /**
@@ -458,6 +511,11 @@ function readSubTail(
         // driver to clear its render-time badge.
         if (entry.stallNotified) {
           entry.stallNotified = false
+          // Clear the stall timestamp so a subsequent re-stall starts
+          // the post-stall terminal-synthesis clock from scratch
+          // (RFC §Bug 6). Without this, a stall→resume→stall sequence
+          // could prematurely synthesise terminal on the second stall.
+          entry.stalledAt = null
           if (db != null) {
             try {
               const rowRef = db
@@ -536,6 +594,8 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
   const stallThresholdMs = config.stallThresholdMs ?? DEFAULT_STALL_THRESHOLD_MS
   const silentSynthesisStallThresholdMs =
     config.silentSynthesisStallThresholdMs ?? DEFAULT_SILENT_SYNTHESIS_STALL_THRESHOLD_MS
+  const silentStallTerminalMs =
+    config.silentStallTerminalMs ?? DEFAULT_SILENT_STALL_TERMINAL_MS
   const reaperTtlMs = config.reaperTtlMs ?? DEFAULT_REAPER_TTL_MS
   const reaperIntervalMs = config.reaperIntervalMs ?? DEFAULT_REAPER_INTERVAL_MS
   const rescanMs = config.rescanMs ?? DEFAULT_RESCAN_MS
@@ -620,7 +680,9 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
       lastActivityAt: n,
       toolCount: 0,
       stallNotified: false,
+      stalledAt: null,
       completionNotified: false,
+      stallTerminalSynthesised: false,
       lastSummaryLine: '',
       lastTool: null,
       historical: isHistorical,
@@ -795,6 +857,9 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
 
   function checkStalls(): void {
     const n = nowFn()
+    // Pass 1: stall detection (existing behaviour). A running sub-agent
+    // with no JSONL growth for `threshold` ms transitions to "stalled"
+    // and notifies subscribers (badge on card, DB row update).
     for (const entry of registry.values()) {
       if (entry.state !== 'running') continue
       if (entry.historical) continue
@@ -812,6 +877,7 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
         : stallThresholdMs
       if (idleMs >= threshold) {
         entry.stallNotified = true
+        entry.stalledAt = n
         const desc = escapeHtml(truncate(entry.description, 80))
         const idleSec = Math.floor(idleMs / 1000)
         log?.(`subagent-watcher: stall detected for ${entry.agentId} (idle ${idleSec}s): ${desc}`)
@@ -841,6 +907,63 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
           }
         }
       }
+    }
+
+    // Pass 2 (RFC §Bug 6): post-stall terminal synthesis. Background
+    // `Agent` dispatches in some Claude Code versions write a JSONL
+    // that ends with the worker's last `sub_agent_tool_result` and
+    // never emits an explicit `system + turn_duration` line — so the
+    // canonical `sub_agent_turn_end` event never fires. Without
+    // synthesis the entry stays `running` until the 30-min
+    // `maxIdleMs` ceiling, and the pinned card's deferred-completion
+    // gate never releases.
+    //
+    // Wait `silentStallTerminalMs` past the stall notification before
+    // synthesising: a genuinely-paused worker (e.g. waiting on an
+    // external API the operator has to unblock) shouldn't be reported
+    // done immediately at the stall threshold.
+    for (const entry of registry.values()) {
+      if (entry.state !== 'running') continue
+      if (!entry.stallNotified) continue
+      if (entry.stallTerminalSynthesised) continue
+      if (entry.stalledAt == null) continue
+      if (n - entry.stalledAt < silentStallTerminalMs) continue
+      entry.stallTerminalSynthesised = true
+      entry.state = 'done'
+      const postStallSec = Math.floor((n - entry.stalledAt) / 1000)
+      const totalIdleSec = Math.floor((n - entry.lastActivityAt) / 1000)
+      log?.(`subagent-watcher: silent-stall terminal synthesis for ${entry.agentId} (stalled ${postStallSec}s post-notify, ${totalIdleSec}s total idle) — bg worker JSONL lacks turn_end; synthesising sub_agent_turn_end so deferred-completion gate releases`)
+      // Persist completion to the registry DB so reaper / audit paths
+      // see the same terminal state as the JSONL-driven path.
+      if (db != null) {
+        try {
+          const rowRef = db
+            .prepare('SELECT id FROM subagents WHERE jsonl_agent_id = ?')
+            .get(entry.agentId) as { id: string } | null
+          if (rowRef != null) {
+            recordSubagentEnd(db, {
+              id: rowRef.id,
+              endedAt: n,
+              status: 'completed',
+            })
+          }
+        } catch (dbErr) {
+          log?.(`subagent-watcher: stall-synth DB write error ${entry.agentId}: ${(dbErr as Error).message}`)
+        }
+      }
+      // Push a synthetic sub_agent_turn_end into the progress driver
+      // BEFORE the audit-log surface so the card mutation lands first.
+      if (config.onStallTerminal != null) {
+        try {
+          config.onStallTerminal(entry.agentId, entry.description)
+        } catch (cbErr) {
+          log?.(`subagent-watcher: onStallTerminal callback error ${entry.agentId}: ${(cbErr as Error).message}`)
+        }
+      }
+      // Fire the existing terminal-transition path (onFinish +
+      // deferred cleanup). state==='done' was set above so
+      // maybySendStateTransition flows through its happy path.
+      maybySendStateTransition(entry.agentId)
     }
   }
 

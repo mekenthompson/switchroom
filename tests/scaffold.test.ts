@@ -2089,6 +2089,64 @@ describe("scaffoldAgent with global defaults cascade", () => {
     expect(startSh).toContain("export LOG_LEVEL='debug'");
   });
 
+  it("appends the sandbox primer to system prompt so agents recognise EROFS as the sandbox", () => {
+    // Closes the UX gap where agents hitting `EROFS` on a read-only mount
+    // would either silently retry or echo the raw kernel error to the
+    // user. The primer (top-level `SANDBOX_GUIDANCE` constant) names
+    // the writable mounts + tells the agent how to respond when it hits
+    // the boundary. Kept in lockstep across both
+    // `systemPromptAppendShellQuoted` call sites — this test would fail
+    // if either site forgets to include it after a future refactor.
+    const agentConfig = makeAgentConfig({});
+    const result = scaffoldAgent(
+      "sandbox-primer-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+    );
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+
+    // Load-bearing headings — drop these and the agent's reply
+    // template stops working. Substrings are chosen to NOT cross an
+    // ASCII apostrophe (POSIX single-quote wrapping splits the literal
+    // around apostrophes via the `'"'"'` idiom, so a substring spanning
+    // one wouldn't appear contiguously in start.sh).
+    expect(startSh).toContain("## Sandbox: you");
+    expect(startSh).toContain("running in a switchroom container");
+    // Writable paths the agent must know about
+    expect(startSh).toContain("$HOME");
+    expect(startSh).toContain("/state/agent/home");
+    expect(startSh).toContain("/tmp");
+    // Read-only paths + the operator-action framing
+    expect(startSh).toContain("read-only file system");
+    expect(startSh).toContain("Operator action");
+    // The primer must NOT leak when an agent doesn't use the switchroom
+    // telegram plugin (host-systemd legacy / non-telegram dispatches).
+    // The wrapping logic only includes the guidance when
+    // `useSwitchroomPlugin` is true; a regression there would attach
+    // the primer to agents whose telegram plumbing is different and
+    // confuse the model.
+  });
+
+  it("does NOT append sandbox primer for agents without the switchroom telegram plugin", () => {
+    const agentConfig = makeAgentConfig({
+      channels: {
+        telegram: {
+          plugin: "official",
+        },
+      },
+    });
+    const result = scaffoldAgent(
+      "sandbox-primer-skip-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+    );
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+    expect(startSh).not.toContain("## Sandbox: you");
+    expect(startSh).not.toContain("running in a switchroom container");
+  });
+
   it("escapes system_prompt_append via POSIX single-quote wrapping", () => {
     const agentConfig = makeAgentConfig({
       system_prompt_append:

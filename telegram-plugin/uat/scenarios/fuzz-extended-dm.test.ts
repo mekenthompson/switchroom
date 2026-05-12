@@ -143,6 +143,72 @@ const FUZZ_CASES: readonly FuzzCase[] = [
     prompt: "ok cool",
     timeout: 60_000,
   },
+
+  // ─── Status-ask classifier variants (CC-7 fuzz coverage) ──────
+  //
+  // The conservative regex set in `telegram-plugin/inbound-classifier.ts`
+  // captures 10 standalone "ping" patterns that count toward the
+  // primary lagging KPI `inbound_status_query`. Each fire is a JTBD
+  // failure (`reference/know-what-my-agent-is-doing.md`), so we
+  // want every variant to (a) reach the agent unchanged, (b)
+  // produce a sensible reply (no crash, no loop, no ghosting).
+  // Tracks cause class CC-7 from
+  // `docs/status-ask-cause-classes.md`.
+  //
+  // Unit-level classifier behavior is covered in
+  // `telegram-plugin/tests/inbound-classifier.test.ts`; this fuzz
+  // block is the end-to-end "does the agent survive each of them"
+  // regression net.
+  {
+    name: "status-ask: bare ?",
+    prompt: "?",
+    timeout: 45_000,
+  },
+  {
+    name: "status-ask: status?",
+    prompt: "status?",
+    timeout: 45_000,
+  },
+  {
+    name: "status-ask: update?",
+    prompt: "update?",
+    timeout: 45_000,
+  },
+  {
+    name: "status-ask: any update?",
+    prompt: "any update?",
+    timeout: 45_000,
+  },
+  {
+    name: "status-ask: still there?",
+    prompt: "still there?",
+    timeout: 45_000,
+  },
+  {
+    name: "status-ask: still working?",
+    prompt: "still working?",
+    timeout: 45_000,
+  },
+  {
+    name: "status-ask: are you there?",
+    prompt: "are you there?",
+    timeout: 45_000,
+  },
+  {
+    name: "status-ask: you there?",
+    prompt: "you there?",
+    timeout: 45_000,
+  },
+  {
+    name: "status-ask: hello?",
+    prompt: "hello?",
+    timeout: 45_000,
+  },
+  {
+    name: "status-ask: hey??",
+    prompt: "hey??",
+    timeout: 45_000,
+  },
 ];
 
 const SECRET_PATTERNS = [

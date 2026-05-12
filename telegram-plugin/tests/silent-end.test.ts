@@ -58,10 +58,26 @@ describe('silent-end.ts — gateway state writer', () => {
     expect(state!.retryCount).toBe(0)
   })
 
-  it('writeSilentEndState is a no-op when TELEGRAM_STATE_DIR is unset', () => {
+  it('writeSilentEndState falls back to ~/.claude/channels/telegram when TELEGRAM_STATE_DIR is unset', () => {
+    // Updated 2026-05-13 UAT overnight: discovered the writer used to
+    // silently no-op when the env var was unset, while the Stop hook
+    // (silent-end-interrupt-stop.mjs) and the gateway both fall back
+    // to `~/.claude/channels/telegram`. Mismatch meant the hook
+    // always read a missing file → silent-end recovery never engaged.
+    // The writer now applies the same fallback.
     delete process.env.TELEGRAM_STATE_DIR
-    writeSilentEndState({ chatId: '123', threadId: null, turnKey: '123:_' })
-    expect(existsSync(join(stateDir, 'silent-end-pending.json'))).toBe(false)
+    const fakeHome = mkdtempSync(join(tmpdir(), 'silent-end-fallback-home-'))
+    const origHome = process.env.HOME
+    process.env.HOME = fakeHome
+    try {
+      writeSilentEndState({ chatId: '123', threadId: null, turnKey: '123:_' })
+      const expected = join(fakeHome, '.claude', 'channels', 'telegram', 'silent-end-pending.json')
+      expect(existsSync(expected)).toBe(true)
+    } finally {
+      if (origHome != null) process.env.HOME = origHome
+      else delete process.env.HOME
+      rmSync(fakeHome, { recursive: true, force: true })
+    }
   })
 
   it('clearSilentEndState removes the file when turnKey matches', () => {

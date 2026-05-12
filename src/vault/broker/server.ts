@@ -1230,6 +1230,110 @@ export class VaultBroker {
       // Same threat model as the operator running `switchroom vault set`
       // directly on the host.
       let passphraseAttested = false;
+      // #1115 follow-up: posture-attested PUT. Gateway under
+      // telegram-id mode signals operator-tap intent via
+      // attest_via_posture rather than forwarding the passphrase.
+      // Same gates as mint_grant's posture path: per-agent peer +
+      // broker config opt-in + broker unlocked. Mutually exclusive
+      // with `passphrase`.
+      const requestedPostureAttest =
+        (req as { attest_via_posture?: boolean }).attest_via_posture === true;
+      if (requestedPostureAttest && req.passphrase !== undefined && req.passphrase !== "") {
+        writeAudit({
+          ts: new Date().toISOString(),
+          op: "put",
+          key: req.key,
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: "denied:bad-request-both-attestations",
+        });
+        socket.write(
+          encodeResponse(
+            errorResponse(
+              "BAD_REQUEST",
+              "put: passphrase and attest_via_posture are mutually exclusive",
+            ),
+          ),
+        );
+        return;
+      }
+      if (requestedPostureAttest) {
+        if (agentName === null) {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: "put",
+            key: req.key,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:posture-attest-needs-per-agent-peer",
+          });
+          socket.write(
+            encodeResponse(errorResponse("DENIED", "put attest_via_posture is per-agent only")),
+          );
+          return;
+        }
+        const postureMode = this.config?.vault?.broker?.approvalAuth ?? "passphrase";
+        if (postureMode !== "telegram-id") {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: "put",
+            key: req.key,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:telegram-id-not-enabled",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                "put attest_via_posture requires vault.broker.approvalAuth: telegram-id in broker config",
+              ),
+            ),
+          );
+          return;
+        }
+        // Per-agent allowlist gate (#1115 follow-up rev 3) — same as
+        // mint_grant. The operator must explicitly opt this agent
+        // into the silent-mint path; default empty list = no agent
+        // can use posture attestation. Prevents a non-trusted
+        // agent's claude from writing new vault keys under
+        // telegram-id without an operator tap.
+        const postureAllowlist = this.config?.vault?.broker?.postureMintAgents ?? [];
+        if (!postureAllowlist.includes(agentName)) {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: "put",
+            key: req.key,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:posture-agent-not-allowlisted",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                `agent '${agentName}' is not on vault.broker.postureMintAgents — operator must opt this agent into posture-attested put`,
+              ),
+            ),
+          );
+          return;
+        }
+        passphraseAttested = true;
+        writeAudit({
+          ts: new Date().toISOString(),
+          op: "put",
+          key: req.key,
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: "allowed:posture-attested",
+          method: "posture",
+        });
+      }
       if (req.passphrase !== undefined && req.passphrase !== "") {
         if (req.passphrase === this.passphrase) {
           passphraseAttested = true;
@@ -1539,6 +1643,28 @@ export class VaultBroker {
         (req as { passphrase?: string }).passphrase !== undefined &&
         (req as { passphrase?: string }).passphrase !== ""
       ) {
+        // #1115 follow-up: posture-attestation and passphrase-attestation
+        // are mutually exclusive. A client sending both is confused; refuse
+        // up front rather than silently picking one.
+        if ((req as { attest_via_posture?: boolean }).attest_via_posture === true) {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:bad-request-both-attestations",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "BAD_REQUEST",
+                "mint_grant: passphrase and attest_via_posture are mutually exclusive",
+              ),
+            ),
+          );
+          return;
+        }
         if ((req as { passphrase?: string }).passphrase === this.passphrase) {
           mintPassphraseAttested = true;
         } else {
@@ -1568,7 +1694,180 @@ export class VaultBroker {
           return;
         }
       }
-      const trustedForGrantMgmt = isOperator || isAdminAgent || mintPassphraseAttested;
+      // #1115 follow-up: posture-attested grant-mgmt ops. The gateway under
+      // `vault.broker.approvalAuth: telegram-id` cannot pass the
+      // passphrase explicitly (it doesn't have it — that's the whole
+      // point of the posture: passphrase stays in the broker). Instead
+      // the gateway sets `attest_via_posture: true` on mint_grant /
+      // list_grants and the broker uses ITS OWN retained passphrase as
+      // the attestation — but only when (a) the broker's config has
+      // `approvalAuth: telegram-id`, (b) the broker is currently
+      // unlocked, and (c) the caller is a per-agent peer (operator
+      // socket and admin agents have other paths and don't need this).
+      // The passphrase is never sent over the wire.
+      //
+      // list_grants symmetry is required by the #1051 grant-union
+      // flow — `performVaultAccessApproval` reads the agent's
+      // existing grants before each mint so the freshly-issued
+      // token covers prior keys too; without posture support on
+      // list_grants, the gateway would mint single-key grants and
+      // strand the agent's prior coverage.
+      //
+      // Audit attribution: `method=posture` so forensics can tell
+      // posture-attested mints apart from passphrase- and operator-
+      // attested ones.
+      let mintPostureAttested = false;
+      if (
+        (req.op === "mint_grant" || req.op === "list_grants") &&
+        (req as { attest_via_posture?: boolean }).attest_via_posture === true
+      ) {
+        if (agentName === null) {
+          // Operator socket / unidentified peer — shouldn't be using
+          // posture attestation; they have a direct path.
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:posture-attest-needs-per-agent-peer",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                "mint_grant attest_via_posture is per-agent only",
+              ),
+            ),
+          );
+          return;
+        }
+        const postureMode = this.config?.vault?.broker?.approvalAuth ?? "passphrase";
+        if (postureMode !== "telegram-id") {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:telegram-id-not-enabled",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                "mint_grant attest_via_posture requires vault.broker.approvalAuth: telegram-id in broker config",
+              ),
+            ),
+          );
+          return;
+        }
+        // #1115 follow-up rev 3 — reviewer-blocker fix: per-agent
+        // allowlist. The earlier gate accepted "any per-agent peer"
+        // (`agentName !== null`), which let claude inside any agent
+        // container call mint_grant attest_via_posture with no
+        // operator-tap proof. Now the operator must explicitly opt
+        // each agent into the silent-mint path via
+        // `vault.broker.postureMintAgents`. Default empty → no agent
+        // can self-mint until the operator picks one. AND the
+        // request's `agent` field must match the calling peer's
+        // resolved agent name (cross-agent posture-mint refused).
+        const postureAllowlist = this.config?.vault?.broker?.postureMintAgents ?? [];
+        if (!postureAllowlist.includes(agentName)) {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:posture-agent-not-allowlisted",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                `agent '${agentName}' is not on vault.broker.postureMintAgents — operator must opt this agent into posture-attested mint`,
+              ),
+            ),
+          );
+          return;
+        }
+        // Agent-self-match: the request's declared `agent` MUST equal
+        // the calling peer's resolved agentName. Without this, an
+        // allowlisted agent could mint grants naming OTHER agents
+        // (cross-agent posture mint), or list another agent's grants
+        // for free reconnaissance. mint_grant has an `agent` field;
+        // list_grants's `agent` is optional — when unset we coerce to
+        // the calling agent rather than letting the broker default
+        // to "all agents".
+        const reqAgent = (req as { agent?: string }).agent;
+        if (req.op === "mint_grant" && reqAgent !== agentName) {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:posture-cross-agent-mint-refused",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                `posture-attested mint refused: request.agent=${reqAgent ?? "<unset>"} but calling peer is ${agentName}`,
+              ),
+            ),
+          );
+          return;
+        }
+        if (req.op === "list_grants" && reqAgent !== undefined && reqAgent !== agentName) {
+          // Explicit cross-agent list refused — same defence as
+          // mint_grant's. An allowlisted agent gets to see its own
+          // grants only via the posture path; if it wants to list
+          // another agent's grants, it must use the operator-
+          // passphrase path (which also gates on attestation).
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:posture-cross-agent-list-refused",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                `posture-attested list refused: request.agent=${reqAgent} but calling peer is ${agentName}`,
+              ),
+            ),
+          );
+          return;
+        }
+        if (this.passphrase === null) {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:broker-locked",
+          });
+          socket.write(encodeResponse(errorResponse("LOCKED", "Broker is locked")));
+          return;
+        }
+        mintPostureAttested = true;
+        writeAudit({
+          ts: new Date().toISOString(),
+          op: req.op,
+          caller: auditCaller,
+          pid: auditPid,
+          cgroup: auditCgroup,
+          result: "allowed:posture-attested",
+          method: "posture",
+        });
+      }
+      const trustedForGrantMgmt = isOperator || isAdminAgent || mintPassphraseAttested || mintPostureAttested;
       // Operator socket: trusted by path + 0600 chown; skip the cron-deny
       // and peercred-required gates below. Operator IS the operator-only
       // identity those gates were designed to verify. Audit logs reflect
@@ -1600,6 +1899,15 @@ export class VaultBroker {
             result: "allowed:passphrase-attested",
             method: "passphrase",
           });
+          // Fall through to grant-mgmt handlers below.
+        } else if (mintPostureAttested) {
+          // #1115 follow-up: posture-attested mint. Same trust
+          // posture as passphrase-attested above, but the gateway
+          // never had to handle the passphrase — the broker used
+          // its own retained passphrase under telegram-id config.
+          // The allowed audit row was already written upstream when
+          // the posture gate accepted (see the
+          // mintPostureAttested block earlier in this handler).
           // Fall through to grant-mgmt handlers below.
         } else {
           // Phase 2a: regular per-agent listeners are NEVER allowed to

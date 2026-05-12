@@ -1,17 +1,39 @@
 /**
- * Contract pins for the `vault.broker.approvalAuth` posture toggle.
+ * Contract pins for the `vault.broker.approvalAuth` posture toggle and
+ * its #1115 follow-up — broker-mediated attestation.
  *
- * Behaviour:
+ * Posture summary:
  *   - `passphrase` (default): Approve on a grant card prompts the
- *     operator to type the vault passphrase before minting. Two-factor:
- *     Telegram ID (allowlist) + passphrase.
- *   - `telegram-id` (opt-in): Approve mints immediately using the
- *     auto-unlock-derived passphrase silently held in memory. Single-
- *     factor; the schema rejects this without `autoUnlock: true`.
+ *     operator for the vault passphrase. Two-factor (Telegram ID +
+ *     passphrase). Gateway holds the passphrase only briefly after
+ *     operator typing.
+ *   - `telegram-id` (opt-in): Approve mints immediately. The gateway
+ *     signals operator-tap intent to the broker via
+ *     `attest_via_posture: true` on the mint_grant call; the broker
+ *     uses its OWN retained passphrase internally. Single-factor;
+ *     passphrase never leaves the broker process.
  *
- * The source-text contracts (same shape as the unlock-resume suite next
- * door) guard wiring stays in the gateway file. The negative-path
- * resolver test covers the refuse-to-boot behaviour at runtime.
+ * Load-bearing invariants pinned here:
+ *   1. The resolver returns the posture mode and nothing else — the
+ *      gateway no longer holds the passphrase in memory under
+ *      telegram-id (the #1115 first-cut and #1115-follow-up-v1
+ *      designs did, and the reviewer flagged it as a bypass).
+ *   2. The allowlist check is the FIRST gate in every vault callback
+ *      handler — no posture branching, no mint, no
+ *      `pendingVaultOps.set` runs before it.
+ *   3. handleVaultDeferCallback and handleVaultRequestSaveCallback
+ *      under telegram-id NO LONGER short-circuit on an in-memory
+ *      passphrase — they fall through to the standard
+ *      cached-passphrase path (#1115 follow-up cleanup; the original
+ *      shortcut was the same bypass class as the access-approve
+ *      one).
+ *   4. handleVaultRequestAccessCallback under telegram-id calls
+ *      `performVaultAccessApproval` with `{ kind: 'posture' }` — the
+ *      attestation type that drives `attest_via_posture: true` on
+ *      mint_grant.
+ *   5. `handleVaultGrantCallback` (operator-initiated wizard) NEVER
+ *      references `VAULT_APPROVAL_AUTH_MODE` — flipping posture
+ *      cannot change wizard behaviour.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -24,9 +46,6 @@ const gatewaySrc = readFileSync(
   'utf-8',
 )
 
-// Anchor the approve-branch slice on `handleVaultRequestAccessCallback`
-// so it's robust against future occurrences of `action === 'approve'`
-// elsewhere in the file.
 function sliceAccessApproveBlock(): string {
   const fn =
     gatewaySrc.split('async function handleVaultRequestAccessCallback')[1]?.split('async function')[0] ?? ''
@@ -34,27 +53,31 @@ function sliceAccessApproveBlock(): string {
 }
 
 describe('vault grant approval posture — module-level wiring', () => {
-  it('declares the posture mode and auto-unlock passphrase holders', () => {
+  it('declares the posture mode holder; does NOT hold the passphrase in memory', () => {
     expect(gatewaySrc).toMatch(/let VAULT_APPROVAL_AUTH_MODE:\s*['"]passphrase['"]\s*\|\s*['"]telegram-id['"]/)
-    expect(gatewaySrc).toMatch(/let AUTO_UNLOCK_PASSPHRASE:\s*string\s*\|\s*null/)
+    // Regression guard: post-#1115-follow-up the gateway must NOT
+    // declare AUTO_UNLOCK_PASSPHRASE — the passphrase stays in the
+    // broker. If a future change reintroduces this variable, the
+    // reviewer's "agent can self-mint" bypass returns.
+    expect(gatewaySrc).not.toMatch(/let AUTO_UNLOCK_PASSPHRASE/)
+    expect(gatewaySrc).not.toMatch(/AUTO_UNLOCK_PASSPHRASE\s*=/)
   })
 
   it('initialises posture from switchroom config at startup', () => {
     expect(gatewaySrc).toMatch(/function initVaultApprovalPosture/)
-    // wired into the startup IIFE
     expect(gatewaySrc).toMatch(/initVaultApprovalPosture\(\)/)
-    // delegates to the resolver helper (testable in isolation)
     expect(gatewaySrc).toMatch(/resolveVaultApprovalPosture\(/)
   })
 })
 
 describe('handleVaultRequestAccessCallback — posture branch', () => {
-  it('mints directly without prompting when posture is telegram-id', () => {
+  it('mints via posture attestation (NOT in-memory passphrase) when posture is telegram-id', () => {
     const approveBlock = sliceAccessApproveBlock()
-    // telegram-id branch is present before the passphrase-cache lookup
     expect(approveBlock).toMatch(/VAULT_APPROVAL_AUTH_MODE === ['"]telegram-id['"]/)
-    expect(approveBlock).toMatch(/performVaultAccessApproval\(ctx, pending, stageId, senderId, AUTO_UNLOCK_PASSPHRASE\)/)
-    // body says "Approved by @..." rather than "Reply with your passphrase"
+    // Pinned: the call shape MUST be `{ kind: 'posture' }`. If the
+    // gateway ever reverts to passing a real passphrase here, the
+    // bypass surface returns.
+    expect(approveBlock).toMatch(/performVaultAccessApproval\(ctx, pending, stageId, senderId, \{ kind: ['"]posture['"] \}\)/)
     expect(approveBlock).toMatch(/Approved by @/)
   })
 
@@ -65,77 +88,86 @@ describe('handleVaultRequestAccessCallback — posture branch', () => {
     expect(handlerBlock).toMatch(/Not authorized/)
   })
 
-  it('leaves the passphrase-prompt path intact for the default posture', () => {
+  it('passphrase-mode branch unchanged: cache lookup + prompt still present', () => {
     const approveBlock = sliceAccessApproveBlock()
-    // The "passphrase mode" code path (cache lookup + prompt) MUST still exist.
-    // This is the regression check: passphrase posture is unchanged.
     expect(approveBlock).toMatch(/vaultPassphraseCache\.get\(pending\.chat_id\)/)
     expect(approveBlock).toMatch(/Reply with your passphrase/i)
     expect(approveBlock).toMatch(/passphrase-for-access-approve/)
+    // Pinned: the queued-drain path passes the typed passphrase via
+    // the new attestation shape `{ kind: 'passphrase', passphrase }`.
+    expect(gatewaySrc).toMatch(/performVaultAccessApproval\(ctx, stagedAccess, item\.stageId, item\.senderId, \{ kind: ['"]passphrase['"], passphrase \}\)/)
   })
 })
 
-describe('performVaultAccessApproval — posture-aware card footer', () => {
-  it('annotates the success card with the telegram-id footer when applicable', () => {
+describe('performVaultAccessApproval — broker-mediated attestation', () => {
+  it('builds brokerAuthOpts from the AccessApprovalAttestation discriminator', () => {
     const fnBlock =
       gatewaySrc
         .split('async function performVaultAccessApproval')[1]
         ?.split('async function handleVaultRequestAccessCallback')[0] ?? ''
-    expect(fnBlock).toMatch(/VAULT_APPROVAL_AUTH_MODE === ['"]telegram-id['"]/)
-    expect(fnBlock).toMatch(/Approver verified by Telegram identity/)
-    expect(fnBlock).toMatch(/broker auto-unlocked at startup/)
+    // Pinned: the passphrase variant feeds the broker passphrase
+    // attestation; the posture variant feeds `attest_via_posture:
+    // true`. NOT a free-form union — the discriminator is what
+    // makes the call shapes type-safe.
+    expect(fnBlock).toMatch(/attestation\.kind === ['"]passphrase['"]/)
+    expect(fnBlock).toMatch(/attest_via_posture: true/)
+    expect(fnBlock).toMatch(/passphrase: attestation\.passphrase/)
+    // Pinned: the same brokerAuthOpts threads both
+    // listGrantsViaBroker (for #1051 grant-union) AND
+    // mintGrantViaBroker. If only one is wired, the union path
+    // silently re-strands the prior token under telegram-id.
+    expect(fnBlock).toMatch(/listGrantsViaBroker\(pending\.agent, brokerAuthOpts\)/)
+    expect(fnBlock).toMatch(/\.\.\.brokerAuthOpts/)
   })
 })
 
-describe('handleVaultRequestSaveCallback — silent fallback in telegram-id mode', () => {
-  it('uses AUTO_UNLOCK_PASSPHRASE without prompting when posture is telegram-id', () => {
+describe('handleVaultRequestSaveCallback — telegram-id silent path withdrawn', () => {
+  it('NO LONGER reads an in-memory passphrase for telegram-id; falls through to cached-passphrase path', () => {
     const fnBlock =
       gatewaySrc
         .split('async function handleVaultRequestSaveCallback')[1]
         ?.split('async function handleVaultDeferCallback')[0] ?? ''
-    expect(fnBlock).toMatch(/VAULT_APPROVAL_AUTH_MODE === ['"]telegram-id['"]/)
-    expect(fnBlock).toMatch(/AUTO_UNLOCK_PASSPHRASE/)
+    // Regression guard: the original PR added a
+    // `VAULT_APPROVAL_AUTH_MODE === 'telegram-id'` shortcut that
+    // pulled an in-memory passphrase. That was a bypass surface.
+    // The save handler must NOT branch on the posture for an
+    // in-memory passphrase any more.
+    expect(fnBlock).not.toMatch(/AUTO_UNLOCK_PASSPHRASE/)
+    // Standard cache lookup still present.
+    expect(fnBlock).toMatch(/vaultPassphraseCache\.get\(pending\.chat_id\)/)
   })
 })
 
-// ─────────────────────────────────────────────────────────────────────────
-// Adversarial / load-bearing invariants (#1115 follow-up).
-//
-// The threat the toggle introduces: in `telegram-id` posture the ONLY check
-// between a callback firing and a real vault grant being minted is the
-// allowlist. Anything that runs BEFORE the allowlist check, or any handler
-// that skips it, is a potential bypass.
-//
-// These tests pin the invariants identified by the threat-model review:
-//   - allowlist check is the FIRST gate in every handler (no posture
-//     branch, stage lookup, or side-effect runs before it).
-//   - `handleVaultDeferCallback` honours `telegram-id` posture too (same
-//     silent-mint contract as the access + save handlers).
-//   - `handleVaultGrantCallback` (the operator-initiated wizard) does
-//     NOT reference VAULT_APPROVAL_AUTH_MODE — flipping posture can never
-//     change wizard behaviour, since the wizard requires the operator
-//     to drive every step.
-// ─────────────────────────────────────────────────────────────────────────
+describe('handleVaultDeferCallback — telegram-id silent path withdrawn', () => {
+  it('NO LONGER reads an in-memory passphrase for telegram-id; falls through to cached-passphrase path', () => {
+    const fnBlock =
+      gatewaySrc
+        .split('async function handleVaultDeferCallback')[1]
+        ?.split('\nasync function ')[0] ?? ''
+    expect(fnBlock).not.toMatch(/AUTO_UNLOCK_PASSPHRASE/)
+    // Cached-passphrase path still present.
+    const unlockBranch = fnBlock.split("if (action === 'unlock')")[1] ?? ''
+    expect(unlockBranch).toMatch(/vaultPassphraseCache\.get\(/)
+  })
+})
+
+describe('handleVaultGrantCallback (wizard) — posture cannot affect wizard', () => {
+  it('wizard handler never references VAULT_APPROVAL_AUTH_MODE — posture flips are inert here', () => {
+    const fnBlock =
+      gatewaySrc
+        .split('async function handleVaultGrantCallback')[1]
+        ?.split('\nasync function ')[0] ?? ''
+    expect(fnBlock).not.toMatch(/VAULT_APPROVAL_AUTH_MODE/)
+    expect(fnBlock).not.toMatch(/AUTO_UNLOCK_PASSPHRASE/)
+    expect(fnBlock).not.toMatch(/attest_via_posture/)
+  })
+})
 
 describe('allowlist is the first gate in every vault callback handler', () => {
-  // Slice the body of a handler from its declaration to the next
-  // `async function` boundary.
   function handlerBody(name: string): string {
     const after = gatewaySrc.split(`async function ${name}(`)[1] ?? ''
     return after.split('\nasync function ')[0] ?? ''
   }
-
-  // The first `if (...)` block inside the handler MUST be the allowlist
-  // check — i.e., it must mention `access.allowFrom.includes(senderId)`.
-  // Future refactors that move stage-lookup, posture branching, or
-  // `pending*` map reads above the allowlist would break this contract.
-  function firstGuardOf(body: string): string {
-    const idx = body.indexOf('if (')
-    if (idx < 0) return ''
-    // crude but sufficient: take the line containing the `if (` plus 1 line
-    return body.slice(idx, body.indexOf('\n', body.indexOf('\n', idx) + 1))
-  }
-
   for (const handler of [
     'handleVaultRequestAccessCallback',
     'handleVaultRequestSaveCallback',
@@ -144,26 +176,21 @@ describe('allowlist is the first gate in every vault callback handler', () => {
   ]) {
     it(`${handler}: allowlist check fires before any other branching`, () => {
       const body = handlerBody(handler)
-      expect(body, `expected handler ${handler} to be present`).not.toBe('')
-      const firstGuard = firstGuardOf(body)
-      expect(firstGuard, `first guard in ${handler}`).toMatch(
-        /access\.allowFrom\.includes\(senderId\)/,
-      )
+      expect(body).not.toBe('')
+      const idx = body.indexOf('if (')
+      const firstGuard = body.slice(idx, body.indexOf('\n', body.indexOf('\n', idx) + 1))
+      expect(firstGuard).toMatch(/access\.allowFrom\.includes\(senderId\)/)
     })
 
-    it(`${handler}: no callback side-effect (mint / passphrase prompt / pendingVault* mutation) appears before the allowlist check`, () => {
+    it(`${handler}: no callback side-effect appears before the allowlist check`, () => {
       const body = handlerBody(handler)
       const beforeAllowlist = body.split('access.allowFrom.includes(senderId)')[0] ?? body
-      // Things that MUST NOT appear before the allowlist gate:
-      //   - mintGrantViaBroker (the actual broker mint)
-      //   - performVaultAccessApproval (the wrapper that mints + edits card)
-      //   - pendingVaultOps.set (would let a non-operator queue an op)
-      //   - VAULT_APPROVAL_AUTH_MODE === 'telegram-id' branch
       for (const sentinel of [
         'mintGrantViaBroker',
         'performVaultAccessApproval',
         'pendingVaultOps.set',
         "VAULT_APPROVAL_AUTH_MODE === 'telegram-id'",
+        'attest_via_posture',
       ]) {
         expect(
           beforeAllowlist.includes(sentinel),
@@ -174,102 +201,49 @@ describe('allowlist is the first gate in every vault callback handler', () => {
   }
 })
 
-describe('handleVaultDeferCallback — telegram-id posture also mints silently', () => {
-  it('uses AUTO_UNLOCK_PASSPHRASE and skips the prompt under telegram-id', () => {
-    const fnBlock =
-      gatewaySrc
-        .split('async function handleVaultDeferCallback')[1]
-        ?.split('\nasync function ')[0] ?? ''
-    // The unlock branch must short-circuit with AUTO_UNLOCK_PASSPHRASE
-    // BEFORE the vaultPassphraseCache lookup + pendingVaultOps prompt.
-    const unlockBranch = fnBlock.split("if (action === 'unlock')")[1] ?? ''
-    expect(unlockBranch).toMatch(/VAULT_APPROVAL_AUTH_MODE === ['"]telegram-id['"]/)
-    expect(unlockBranch).toMatch(/AUTO_UNLOCK_PASSPHRASE/)
-    // Ordering: telegram-id branch must precede the cache lookup.
-    const teleIdIdx = unlockBranch.indexOf("VAULT_APPROVAL_AUTH_MODE === 'telegram-id'")
-    const cacheIdx = unlockBranch.indexOf('vaultPassphraseCache.get(')
-    expect(teleIdIdx, 'telegram-id branch must appear').toBeGreaterThanOrEqual(0)
-    expect(cacheIdx, 'cache lookup must still appear (passphrase posture)').toBeGreaterThanOrEqual(0)
-    expect(teleIdIdx).toBeLessThan(cacheIdx)
+describe('resolveVaultApprovalPosture — runtime behaviour', () => {
+  it('passphrase posture when approvalAuth is absent', () => {
+    expect(resolveVaultApprovalPosture(undefined)).toEqual({ mode: 'passphrase' })
+    expect(resolveVaultApprovalPosture({})).toEqual({ mode: 'passphrase' })
   })
-})
 
-describe('handleVaultGrantCallback (wizard) — posture cannot affect the wizard path', () => {
-  it('wizard handler never references VAULT_APPROVAL_AUTH_MODE — posture flips are inert here', () => {
-    const fnBlock =
-      gatewaySrc
-        .split('async function handleVaultGrantCallback')[1]
-        ?.split('\nasync function ')[0] ?? ''
-    expect(fnBlock).not.toMatch(/VAULT_APPROVAL_AUTH_MODE/)
-    // And the wizard MUST NOT silently use AUTO_UNLOCK_PASSPHRASE either.
-    expect(fnBlock).not.toMatch(/AUTO_UNLOCK_PASSPHRASE/)
+  it('passphrase posture when approvalAuth is explicitly passphrase', () => {
+    expect(resolveVaultApprovalPosture({ approvalAuth: 'passphrase' })).toEqual({ mode: 'passphrase' })
   })
-})
 
-describe('resolveVaultApprovalPosture — adversarial / property fuzz', () => {
-  // The contract under test: the resolver MUST NEVER return
-  // `{ mode: 'telegram-id', passphrase: null | '' }`. Either it returns
-  // a non-empty passphrase, or it throws.
-  it('never returns telegram-id mode with a null/empty passphrase, across 200 randomized config + reader pairs', () => {
+  it('telegram-id posture when approvalAuth is telegram-id', () => {
+    expect(resolveVaultApprovalPosture({ approvalAuth: 'telegram-id' })).toEqual({ mode: 'telegram-id' })
+  })
+
+  it('defence-in-depth: unknown approvalAuth values fall back to passphrase (schema rejects them, but trust nothing)', () => {
+    expect(resolveVaultApprovalPosture({ approvalAuth: 'TELEGRAM-ID' })).toEqual({ mode: 'passphrase' })
+    expect(resolveVaultApprovalPosture({ approvalAuth: 'telegram_id' })).toEqual({ mode: 'passphrase' })
+    expect(resolveVaultApprovalPosture({ approvalAuth: '' })).toEqual({ mode: 'passphrase' })
+    expect(resolveVaultApprovalPosture({ approvalAuth: 'nonsense' })).toEqual({ mode: 'passphrase' })
+  })
+
+  it('adversarial fuzz: 200 random inputs never return a non-passphrase, non-telegram-id mode and never throw', () => {
     const rand = mulberry32(0xdeadbeef)
-    const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)]!
-    const approvalChoices = [undefined, 'passphrase', 'telegram-id', 'PASSPHRASE', 'telegram_id', '', 'nonsense', null]
-    const pathChoices: (string | undefined)[] = [
+    const choices: any[] = [
       undefined,
-      '~/.switchroom/vault-auto-unlock',
-      '/tmp/x',
-      '/nonexistent/blob',
-      '~/empty',
-      '~',
+      'passphrase',
+      'telegram-id',
+      'PASSPHRASE',
       '',
-    ]
-    const readerOutcomes = [
-      () => 'unlock-secret',
-      () => '',
-      () => '   ',
-      () => 'x'.repeat(2048),
-      () => { throw new Error('ENOENT: no such file or directory') },
-      () => { throw new Error('EACCES: permission denied') },
-      () => { throw new TypeError('weird non-error') },
+      'nonsense',
+      null,
+      0,
+      false,
+      { nested: 'telegram-id' },
     ]
     for (let i = 0; i < 200; i++) {
-      const broker = {
-        approvalAuth: pick(approvalChoices) as string | undefined,
-        autoUnlockCredentialPath: pick(pathChoices),
-      } as Record<string, unknown>
-      const reader = pick(readerOutcomes)
-      let returned: ResolvedPostureLike | null = null
-      let threw = false
-      try {
-        returned = resolveVaultApprovalPosture(
-          broker as never,
-          reader,
-          { HOME: '/home/test' },
-        ) as ResolvedPostureLike
-      } catch {
-        threw = true
-      }
-      if (threw) continue
-      // If a value came back, it MUST satisfy the safety contract.
-      expect(returned, `iter ${i}: must return a posture`).not.toBeNull()
-      if (returned!.mode === 'telegram-id') {
-        expect(returned!.passphrase, `iter ${i}: telegram-id mode must carry a non-empty passphrase`).toBeTruthy()
-        expect(typeof returned!.passphrase).toBe('string')
-        expect((returned!.passphrase as string).length).toBeGreaterThan(0)
-      } else {
-        // passphrase mode — passphrase field is null by construction.
-        expect(returned!.mode).toBe('passphrase')
-      }
+      const broker = { approvalAuth: choices[Math.floor(rand() * choices.length)] }
+      const result = resolveVaultApprovalPosture(broker as never)
+      expect(result.mode === 'passphrase' || result.mode === 'telegram-id', `iter ${i}: mode must be one of the two literals`).toBe(true)
     }
   })
 })
 
-interface ResolvedPostureLike {
-  mode: 'passphrase' | 'telegram-id'
-  passphrase: string | null
-}
-
-// Deterministic PRNG so the fuzz is reproducible across CI runs.
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0
   return () => {
@@ -280,91 +254,3 @@ function mulberry32(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
 }
-
-describe('resolveVaultApprovalPosture — runtime behaviour', () => {
-  it('returns the passphrase default when approvalAuth is unset', () => {
-    const result = resolveVaultApprovalPosture(undefined, () => {
-      throw new Error('reader must not be called for passphrase posture')
-    })
-    expect(result.mode).toBe('passphrase')
-    expect(result.passphrase).toBeNull()
-  })
-
-  it('returns the passphrase default when approvalAuth is explicitly passphrase', () => {
-    const result = resolveVaultApprovalPosture({ approvalAuth: 'passphrase' }, () => {
-      throw new Error('reader must not be called for passphrase posture')
-    })
-    expect(result.mode).toBe('passphrase')
-    expect(result.passphrase).toBeNull()
-  })
-
-  it('loads the blob and returns telegram-id posture on success', () => {
-    const result = resolveVaultApprovalPosture(
-      { approvalAuth: 'telegram-id', autoUnlockCredentialPath: '/tmp/fake-blob' },
-      (path) => {
-        expect(path).toBe('/tmp/fake-blob')
-        return 'unlock-secret'
-      },
-      { HOME: '/home/test' },
-    )
-    expect(result.mode).toBe('telegram-id')
-    expect(result.passphrase).toBe('unlock-secret')
-    expect(result.credPath).toBe('/tmp/fake-blob')
-  })
-
-  it('expands ~ in the credential path against env.HOME', () => {
-    let seen = ''
-    resolveVaultApprovalPosture(
-      { approvalAuth: 'telegram-id' },
-      (path) => { seen = path; return 'ok' },
-      { HOME: '/home/test' },
-    )
-    expect(seen).toBe('/home/test/.switchroom/vault-auto-unlock')
-  })
-
-  it('THROWS when telegram-id is configured and the auto-unlock blob is empty or whitespace — refuses to silently boot with no passphrase', () => {
-    // Found by the property fuzz above: a *readable but empty* blob is
-    // just as dangerous as a missing one — the gateway would silently
-    // hold "" as the auto-unlock passphrase, and any Approve tap would
-    // invoke the broker with an empty passphrase. Refuse to boot.
-    expect(() =>
-      resolveVaultApprovalPosture(
-        { approvalAuth: 'telegram-id' },
-        () => '',
-        { HOME: '/home/test' },
-      ),
-    ).toThrow(/empty.*whitespace-only|whitespace-only/i)
-    expect(() =>
-      resolveVaultApprovalPosture(
-        { approvalAuth: 'telegram-id' },
-        () => '   \n\t',
-        { HOME: '/home/test' },
-      ),
-    ).toThrow(/Refusing to boot/)
-  })
-
-  it('THROWS when telegram-id is configured but the auto-unlock blob is unreadable — refuses to silently downgrade', () => {
-    expect(() =>
-      resolveVaultApprovalPosture(
-        { approvalAuth: 'telegram-id', autoUnlockCredentialPath: '/nonexistent/blob' },
-        () => { throw new Error('ENOENT: no such file or directory') },
-      ),
-    ).toThrow(/Refusing to boot/)
-
-    // The thrown error must clearly identify the security-posture
-    // mismatch so the operator knows why boot is failing.
-    expect(() =>
-      resolveVaultApprovalPosture(
-        { approvalAuth: 'telegram-id' },
-        () => { throw new Error('EACCES: permission denied') },
-      ),
-    ).toThrow(/approvalAuth=telegram-id but reading/)
-
-    expect(() =>
-      resolveVaultApprovalPosture(
-        { approvalAuth: 'telegram-id' },
-        () => { throw new Error('boom') },
-      ),
-    ).toThrow(/silently falling back to passphrase posture/)
-  })
-})

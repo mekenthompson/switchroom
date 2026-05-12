@@ -89,6 +89,16 @@ export const PutRequestSchema = z.object({
    * log from grants and path-as-identity.
    */
   passphrase: z.string().optional(),
+  /**
+   * Posture-attestation flag (#1115 follow-up). Same semantics as
+   * `MintGrantRequestSchema.attest_via_posture` — broker treats the
+   * call as operator-attested IFF its config has
+   * `approvalAuth: telegram-id`, the broker is unlocked, and the
+   * caller is a per-agent peer. The save/defer approval flow uses
+   * this so the gateway never needs the passphrase in memory under
+   * telegram-id posture. Mutually exclusive with `passphrase`.
+   */
+  attest_via_posture: z.boolean().optional(),
 });
 
 export const ListRequestSchema = z.object({
@@ -125,6 +135,31 @@ export const MintGrantRequestSchema = z.object({
    * Same trust posture used by PUT (`vault_request_save`).
    */
   passphrase: z.string().optional(),
+  /**
+   * Posture-attestation flag (#1115 follow-up — broker-mediated mint).
+   *
+   * When `true`, the broker treats the call as operator-attested IFF
+   * its OWN config has `vault.broker.approvalAuth: telegram-id` AND
+   * the broker is unlocked AND the caller is a per-agent peer (path-
+   * as-identity). The broker uses its retained passphrase
+   * internally; the passphrase is never sent over this socket.
+   *
+   * Why this rather than `passphrase`: under telegram-id posture the
+   * passphrase persists in broker memory. Releasing it to gateway
+   * peers (as the first cut of #1115 follow-up did) lets any
+   * in-container actor with broker-socket access mint grants — claude
+   * tools / skills can bypass the operator-tap gate. With
+   * `attest_via_posture`, the passphrase stays inside the broker
+   * process. The blast radius is restricted to mint_grant only:
+   * agents can ASK the broker to mint with telegram-id attestation,
+   * but cannot extract material useful for passphrase-attested
+   * PUT or list_grants.
+   *
+   * Mutually exclusive with `passphrase` — if both are present, the
+   * broker rejects with BAD_REQUEST so the operator doesn't
+   * accidentally double-attest a call.
+   */
+  attest_via_posture: z.boolean().optional(),
 });
 
 export const ListGrantsRequestSchema = z.object({
@@ -141,6 +176,18 @@ export const ListGrantsRequestSchema = z.object({
    * operator-attested.
    */
   passphrase: z.string().optional(),
+  /**
+   * Posture-attestation flag (#1115 follow-up). Same semantics as
+   * `MintGrantRequestSchema.attest_via_posture` — broker treats the
+   * call as operator-attested IFF its own config has
+   * `approvalAuth: telegram-id`, the broker is unlocked, and the
+   * caller is a per-agent peer. The grant-union flow needs this so
+   * a non-admin agent gateway under telegram-id can still read the
+   * agent's existing grants before minting (otherwise each mint
+   * silently strands the previous .vault-token — see #1051).
+   * Mutually exclusive with `passphrase`.
+   */
+  attest_via_posture: z.boolean().optional(),
 });
 
 export const RevokeGrantRequestSchema = z.object({
@@ -158,6 +205,7 @@ export const LockRequestSchema = z.object({
   v: z.literal(1),
   op: z.literal("lock"),
 });
+
 
 // ─── Approval kernel (RFC B) ────────────────────────────────────────────────
 

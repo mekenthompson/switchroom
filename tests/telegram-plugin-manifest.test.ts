@@ -84,6 +84,7 @@ describe("telegram-plugin manifest (#229)", () => {
     expect(all).toContain("secret-guard-pretool.mjs");
     expect(all).toContain("subagent-tracker-pretool.mjs");
     expect(all).toContain("subagent-tracker-posttool.mjs");
+    expect(all).toContain("sandbox-hint-posttool.mjs");
     expect(all).toContain("secret-scrub-stop.mjs");
     expect(all).toContain("silent-end-interrupt-stop.mjs");
   });

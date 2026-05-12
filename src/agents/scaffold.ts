@@ -1586,6 +1586,16 @@ export const DOCKER_HOOKS_PATH = `${DOCKER_TELEGRAM_PLUGIN_PATH}/hooks`;
  */
 export const DOCKER_BIN_PATH = "/opt/switchroom/bin";
 
+/**
+ * In-container path where compose bind-mounts the operator's
+ * `switchroom.yaml`. Mirror of the volume mount line emitted in
+ * compose generation (`${host}:/state/config/switchroom.yaml:ro`).
+ * Used anywhere scaffold writes a path that will be read inside an
+ * agent container — `.mcp.json` SWITCHROOM_CONFIG env, and the
+ * `--config` flag baked into the handoff hook (#1079).
+ */
+export const DOCKER_CONFIG_PATH = "/state/config/switchroom.yaml";
+
 export function scaffoldAgent(
   name: string,
   agentConfigRaw: AgentConfig,
@@ -1872,7 +1882,7 @@ export function scaffoldAgent(
     // /state/config/switchroom.yaml.
     const pluginDir = DOCKER_TELEGRAM_PLUGIN_PATH;
     const switchroomCliPath = "/usr/local/bin/switchroom";
-    const resolvedConfigPath = "/state/config/switchroom.yaml";
+    const resolvedConfigPath = DOCKER_CONFIG_PATH;
 
     const mcpServers: Record<string, McpServerConfig> = {
       "switchroom-telegram": {
@@ -2435,9 +2445,13 @@ export interface HooksBlockParams {
   /** Whether this agent uses the switchroom telegram plugin */
   useSwitchroomPlugin: boolean;
   /**
-   * Path to switchroom.yaml — when set, the handoff hook includes
-   * `--config <path>` so the handoff command can locate the right config
-   * even when invoked outside the default config search path.
+   * Whether to bake `--config` into the handoff hook command so the
+   * `switchroom handoff` invocation can locate switchroom.yaml even
+   * when its env/cwd doesn't point at it. The path written is always
+   * `DOCKER_CONFIG_PATH` (the in-container bind-mount location) — the
+   * host's resolved path would not exist inside the agent container
+   * (#1079). Pass the host config path as truthy signal; the value
+   * itself is not used.
    */
   configPath?: string;
 }
@@ -2479,8 +2493,13 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
 
   // --- Switchroom-owned Stop hooks ---
   const handoffEnabled = agentConfig.session_continuity?.enabled !== false;
+  // The hook runs *inside* the agent container; bake the in-container
+  // bind-mount path, not the host path the scaffolder happens to know
+  // about. Pre-#1079 this used `resolve(configPath)` which produced a
+  // host path that doesn't exist in the container, so every Stop fired
+  // an issue with "Config file not found".
   const handoffConfigArg = configPath
-    ? ` --config ${shellSingleQuote(resolve(configPath))}`
+    ? ` --config ${shellSingleQuote(DOCKER_CONFIG_PATH)}`
     : "";
   const stopHooks: Array<Record<string, unknown>> = [];
   if (handoffEnabled) {
@@ -3359,7 +3378,7 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
     // Mirror scaffoldAgent: in-image plugin + CLI + bind-mounted config.
     const pluginDir = DOCKER_TELEGRAM_PLUGIN_PATH;
     const switchroomCliPath = "/usr/local/bin/switchroom";
-    const resolvedConfigPath = "/state/config/switchroom.yaml";
+    const resolvedConfigPath = DOCKER_CONFIG_PATH;
 
     const mcpServers: Record<string, McpServerConfig> = {
       "switchroom-telegram": {

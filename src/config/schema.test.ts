@@ -103,7 +103,45 @@ describe("VaultConfigSchema.broker", () => {
       enabled: true,
       autoUnlock: false,
       autoUnlockCredentialPath: "~/.switchroom/vault-auto-unlock",
+      approvalAuth: "passphrase",
     });
+  });
+
+  it("defaults approvalAuth to passphrase", () => {
+    const result = VaultConfigSchema.parse({});
+    expect(result.broker.approvalAuth).toBe("passphrase");
+  });
+
+  it("accepts approvalAuth: telegram-id when autoUnlock is true", () => {
+    const result = VaultConfigSchema.parse({
+      broker: { approvalAuth: "telegram-id", autoUnlock: true },
+    });
+    expect(result.broker.approvalAuth).toBe("telegram-id");
+    expect(result.broker.autoUnlock).toBe(true);
+  });
+
+  it("rejects approvalAuth: telegram-id without autoUnlock: true", () => {
+    expect(() =>
+      VaultConfigSchema.parse({
+        broker: { approvalAuth: "telegram-id" },
+      })
+    ).toThrow(/requires `autoUnlock: true`/);
+  });
+
+  it("rejects approvalAuth: telegram-id with autoUnlock: false", () => {
+    expect(() =>
+      VaultConfigSchema.parse({
+        broker: { approvalAuth: "telegram-id", autoUnlock: false },
+      })
+    ).toThrow(/requires `autoUnlock: true`/);
+  });
+
+  it("rejects an unknown approvalAuth value", () => {
+    expect(() =>
+      VaultConfigSchema.parse({
+        broker: { approvalAuth: "biometric" },
+      })
+    ).toThrow();
   });
 
   it("accepts an explicit broker socket override", () => {

@@ -446,8 +446,35 @@ function checkVault(config: SwitchroomConfig): CheckResult[] {
     ? config.vault.path.replace(/^~/, process.env.HOME ?? "")
     : resolveStatePath("vault.enc");
 
+  // Approval-auth posture surface. Surfaces independently of vault file
+  // existence so operators see the configured posture even when the
+  // vault hasn't been created yet.
+  const broker = config.vault?.broker;
+  const approvalAuth = broker?.approvalAuth ?? "passphrase";
+  const postureResult: CheckResult =
+    approvalAuth === "telegram-id"
+      ? broker?.autoUnlock === true
+        ? {
+            name: "vault approval-auth posture",
+            status: "ok",
+            detail: "Approval auth: telegram-id (single-factor, relies on Telegram account security)",
+          }
+        : {
+            name: "vault approval-auth posture",
+            status: "fail",
+            detail:
+              "approvalAuth: telegram-id configured but autoUnlock is not true — schema invariant violated",
+            fix: "Set vault.broker.autoUnlock: true (and run `switchroom vault broker enable-auto-unlock`) or revert approvalAuth to `passphrase`.",
+          }
+      : {
+          name: "vault approval-auth posture",
+          status: "ok",
+          detail: "Approval auth: passphrase (two-factor)",
+        };
+
   if (!existsSync(vaultPath)) {
     return [
+      postureResult,
       {
         name: "vault file present",
         status: "warn",
@@ -460,6 +487,7 @@ function checkVault(config: SwitchroomConfig): CheckResult[] {
   const passphrase = process.env.SWITCHROOM_VAULT_PASSPHRASE;
   if (!passphrase) {
     return [
+      postureResult,
       {
         name: "vault file present",
         status: "ok",
@@ -477,6 +505,7 @@ function checkVault(config: SwitchroomConfig): CheckResult[] {
   try {
     const keys = listSecrets(passphrase, vaultPath);
     return [
+      postureResult,
       {
         name: "vault unlock",
         status: "ok",
@@ -485,6 +514,7 @@ function checkVault(config: SwitchroomConfig): CheckResult[] {
     ];
   } catch (err) {
     return [
+      postureResult,
       {
         name: "vault unlock",
         status: "fail",

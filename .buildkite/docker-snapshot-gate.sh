@@ -12,10 +12,22 @@
 # afterAll. A crash before afterAll would silently leave drift on the
 # host. This gate catches that case.
 #
-# Filter regex matches `_prod-snapshot.ts:filterPhaseTestContainers` —
-# any `switchroom-phase\d` named container is sibling-phase noise and
-# stripped from both sides before diffing. Production containers do
-# not carry that name prefix.
+# Filter rule mirrors `tests/docker/_prod-snapshot.ts:filterPhaseTestContainers`
+# post-#1102:
+#
+#   1. Any container whose Labels column contains `switchroom.test=` is
+#      test-owned (single-run + compose paths both stamp it via
+#      `_label-helpers.ts:dockerRunLabelsArgv` / `injectLabelsIntoCompose`).
+#      This is the LOAD-BEARING rule — it catches Moby-auto-named
+#      containers from `docker run --rm` callsites that omit `--name`
+#      (e.g. `tests/docker/e2e.test.ts`'s spawnSync calls), which the
+#      name regex alone misses (the recurring `friendly_chatelet`
+#      flake — #1102).
+#   2. Belt-and-braces: any container NAME starting with
+#      `switchroom-phase<digit>` (single-container `docker run` shape)
+#      or `phase<digit><letter>-` (compose-project shape used by
+#      broker-ipc-race / per-agent-isolation). Production containers
+#      do not carry these name prefixes.
 #
 # Exit codes:
 #   0  — no drift, vitest passed
@@ -25,17 +37,18 @@
 set -uo pipefail
 
 snapshot() {
+  # Include {{.Labels}} so the label-based filter below can fire. Mirror
+  # `captureProdSnapshot` in tests/docker/_prod-snapshot.ts.
+  local fmt='{{.Names}}|{{.ID}}|{{.Status}}|{{.Labels}}'
   if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    sudo docker ps --no-trunc --format '{{.Names}}|{{.ID}}|{{.Status}}' 2>/dev/null || true
+    sudo docker ps --no-trunc --format "$fmt" 2>/dev/null || true
   else
-    docker ps --no-trunc --format '{{.Names}}|{{.ID}}|{{.Status}}' 2>/dev/null || true
+    docker ps --no-trunc --format "$fmt" 2>/dev/null || true
   fi
 }
 
-# Filter out switchroom-phase\d ephemerals (sibling-phase noise) and
-# sort for deterministic diffing. Mirrors _prod-snapshot.ts.
 filter_snapshot() {
-  grep -v -E 'switchroom-phase[0-9]' | sort
+  grep -v -E 'switchroom\.test=|^switchroom-phase[0-9]|^phase[0-9][a-z]-' | sort
 }
 
 PRE_FILE="$(mktemp)"

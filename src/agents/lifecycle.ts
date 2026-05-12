@@ -206,7 +206,22 @@ export function stopAgent(name: string): void {
 export function restartAgent(name: string, reason?: string): void {
   // Stamp WHY before killing so the next agent boot can render it in
   // the greeting card. Best-effort — if the dir is missing we swallow.
-  if (reason) writeRestartReasonMarker(name, reason);
+  //
+  // Issue #1118: ALWAYS write a marker (default reason "cli: restart")
+  // even when the caller didn't pass one. Pre-#1118 the seven in-tree
+  // callers that called `restartAgent(name)` bare (auth.ts after token
+  // rotation, agent.ts reconcile paths, web/api.ts, etc.) left the
+  // next boot to read whatever stale marker was on disk from an older
+  // /restart — almost always >5 min stale, so the boot-reason
+  // classifier fell through to 'crash' and posted a misleading
+  // "💥 agent-crashed" card on every legitimate operator action.
+  //
+  // preserveExisting:true keeps the cooperative-race contract intact:
+  // when the gateway /new handler writes "user: /new from chat" then
+  // spawns `switchroom agent restart`, the CLI's default "cli: restart"
+  // must NOT clobber the still-fresh user attribution (see
+  // writeRestartReasonMarker's 30s freshness window).
+  writeRestartReasonMarker(name, reason ?? "cli: restart", { preserveExisting: true });
   try {
     // `up -d --force-recreate --no-deps` not `restart` (#932). All
     // three flags are load-bearing — DO NOT strip any without

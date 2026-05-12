@@ -5421,10 +5421,56 @@ function handlePtyActivity(text: string): void {
 
 // ─── Gate / inbound routing ───────────────────────────────────────────────
 
+/**
+ * Reasons the gate may drop an inbound. Surfaced through the rate-limited
+ * `logGateDeny` so operators can debug allowlist / pairing misconfigs
+ * without crawling the telegram-plugin source. Found while tracking down
+ * a fuzz failure on 2026-05-13 where 23 inbounds were silently dropped —
+ * a single line in the gateway log would have replaced ~30 min of
+ * investigation.
+ */
+type GateDropReason =
+  | 'dm_policy_disabled'
+  | 'no_sender'
+  | 'allowlist_no_match'
+  | 'pairing_resend_exhausted'
+  | 'pairing_capacity'
+  | 'group_unknown'
+  | 'group_allowFrom_no_match'
+  | 'group_mention_required'
+  | 'unknown_chat_type'
+
 type GateResult =
   | { action: 'deliver'; access: Access }
-  | { action: 'drop' }
+  | { action: 'drop'; reason: GateDropReason }
   | { action: 'pair'; code: string; isResend: boolean }
+
+/**
+ * Per-(chat_id, senderId, reason) suppression so a chatty unauthorized
+ * sender doesn't flood the gateway log. First hit always logs; repeats
+ * within {@link GATE_DENY_LOG_WINDOW_MS} are silently swallowed.
+ */
+const gateDenyLastLoggedAt = new Map<string, number>()
+const GATE_DENY_LOG_WINDOW_MS = 60_000
+
+function logGateDeny(ctx: Context, reason: GateDropReason): void {
+  // Defence in depth: never throw from the log helper. A misshapen ctx
+  // (e.g. partial test fixture) would otherwise sink the inbound path.
+  try {
+    const chatId = ctx.chat?.id != null ? String(ctx.chat.id) : '?'
+    const senderId = ctx.from?.id != null ? String(ctx.from.id) : '?'
+    const chatType = ctx.chat?.type ?? '?'
+    const key = `${chatId}:${senderId}:${reason}`
+    const now = Date.now()
+    const prev = gateDenyLastLoggedAt.get(key)
+    if (prev != null && now - prev < GATE_DENY_LOG_WINDOW_MS) return
+    gateDenyLastLoggedAt.set(key, now)
+    process.stderr.write(
+      `telegram gateway: inbound dropped reason=${reason} chat_id=${chatId} ` +
+      `chat_type=${chatType} sender_id=${senderId}\n`,
+    )
+  } catch { /* swallow — best-effort log */ }
+}
 
 /**
  * Wrap `decideDmCommandGate` (pure helper in
@@ -5450,25 +5496,25 @@ function gate(ctx: Context): GateResult {
   const access = loadAccess()
   const pruned = pruneExpired(access)
   if (pruned) saveAccess(access)
-  if (access.dmPolicy === 'disabled') return { action: 'drop' }
+  if (access.dmPolicy === 'disabled') return { action: 'drop', reason: 'dm_policy_disabled' }
   const from = ctx.from
-  if (!from) return { action: 'drop' }
+  if (!from) return { action: 'drop', reason: 'no_sender' }
   const senderId = String(from.id)
   const chatType = ctx.chat?.type
 
   if (chatType === 'private') {
     if (access.allowFrom.includes(senderId)) return { action: 'deliver', access }
-    if (access.dmPolicy === 'allowlist') return { action: 'drop' }
+    if (access.dmPolicy === 'allowlist') return { action: 'drop', reason: 'allowlist_no_match' }
 
     for (const [code, p] of Object.entries(access.pending)) {
       if (p.senderId === senderId) {
-        if ((p.replies ?? 1) >= 2) return { action: 'drop' }
+        if ((p.replies ?? 1) >= 2) return { action: 'drop', reason: 'pairing_resend_exhausted' }
         p.replies = (p.replies ?? 1) + 1
         saveAccess(access)
         return { action: 'pair', code, isResend: true }
       }
     }
-    if (Object.keys(access.pending).length >= 3) return { action: 'drop' }
+    if (Object.keys(access.pending).length >= 3) return { action: 'drop', reason: 'pairing_capacity' }
     const code = randomBytes(3).toString('hex')
     const now = Date.now()
     access.pending[code] = {
@@ -5485,15 +5531,19 @@ function gate(ctx: Context): GateResult {
   if (chatType === 'group' || chatType === 'supergroup') {
     const groupId = String(ctx.chat!.id)
     const policy = access.groups[groupId]
-    if (!policy) return { action: 'drop' }
+    if (!policy) return { action: 'drop', reason: 'group_unknown' }
     const groupAllowFrom = policy.allowFrom ?? []
     const requireMention = policy.requireMention ?? true
-    if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) return { action: 'drop' }
-    if (requireMention && !isMentioned(ctx, access.mentionPatterns)) return { action: 'drop' }
+    if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderId)) {
+      return { action: 'drop', reason: 'group_allowFrom_no_match' }
+    }
+    if (requireMention && !isMentioned(ctx, access.mentionPatterns)) {
+      return { action: 'drop', reason: 'group_mention_required' }
+    }
     return { action: 'deliver', access }
   }
 
-  return { action: 'drop' }
+  return { action: 'drop', reason: 'unknown_chat_type' }
 }
 
 function isMentioned(ctx: Context, extraPatterns?: string[]): boolean {
@@ -5631,7 +5681,10 @@ async function handleInbound(
   }
 
   const result = gate(ctx)
-  if (result.action === 'drop') return
+  if (result.action === 'drop') {
+    logGateDeny(ctx, result.reason)
+    return
+  }
   if (result.action === 'pair') {
     const lead = result.isResend ? 'Still pending' : 'Pairing required'
     await ctx.reply(`${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`)
@@ -11544,7 +11597,10 @@ async function handleAckOnly(
 ): Promise<void> {
   try {
     const result = gate(ctx)
-    if (result.action === 'drop') return
+    if (result.action === 'drop') {
+      logGateDeny(ctx, result.reason)
+      return
+    }
     if (result.action === 'pair') {
       const lead = result.isResend ? 'Still pending' : 'Pairing required'
       await ctx.reply(`${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`).catch(() => {})
@@ -11575,7 +11631,10 @@ async function handleRefusal(
 ): Promise<void> {
   try {
     const result = gate(ctx)
-    if (result.action === 'drop') return
+    if (result.action === 'drop') {
+      logGateDeny(ctx, result.reason)
+      return
+    }
     if (result.action === 'pair') {
       // Pre-pair senders don't get the refusal either — same drop path
       // as any other unauthorized inbound.

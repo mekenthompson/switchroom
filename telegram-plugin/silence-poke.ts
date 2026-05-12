@@ -236,7 +236,7 @@ export function endTurn(key: string): void {
 }
 
 /** Verbatim poke text. Wording is load-bearing — see issue #1122 design. */
-function formatPokeText(level: PokeLevel): string {
+export function formatPokeText(level: PokeLevel): string {
   if (level === 'soft') {
     return (
       "[silence-poke] You've been silent to the user for 75s. If you're "
@@ -252,6 +252,33 @@ function formatPokeText(level: PokeLevel): string {
     + 'unusually long (slow tool, network, waiting on a sub-agent), say so '
     + 'explicitly.'
   )
+}
+
+/**
+ * Verbatim framework-fallback text — the user-visible "still working / still
+ * thinking" message the gateway sends at the 300s threshold when the model
+ * hasn't broken its own silence. Wording is load-bearing (see
+ * `reference/conversational-pacing.md` § Silence-poke ladder). Two principles:
+ *
+ *   1. The parenthetical `(no update from agent in N min)` is honest —
+ *      distinguishes from "the agent said something" so users learn to trust
+ *      real agent messages. `N` is derived from `silenceMs`, never hard-coded.
+ *   2. The verb is `working` by default, `thinking` only when the session
+ *      stream has emitted a `kind: 'thinking'` event in the last 30s. Picked
+ *      by the caller via `fallbackKind`; this helper just formats.
+ *
+ * Extracted from the gateway's `onFrameworkFallback` callback so the wording
+ * can be snapshot-tested in isolation. CC-4 in `docs/status-ask-cause-classes.md`.
+ */
+export function formatFrameworkFallbackText(
+  fallbackKind: 'working' | 'thinking',
+  silenceMs: number,
+): string {
+  const minutes = Math.max(1, Math.round(silenceMs / 60_000))
+  const suffix = `(no update from agent in ${minutes} min)`
+  return fallbackKind === 'thinking'
+    ? `still thinking… ${suffix}`
+    : `still working… ${suffix}`
 }
 
 /**

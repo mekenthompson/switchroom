@@ -75,6 +75,7 @@ import {
 } from '../analytics-posthog.js'
 import { emitRuntimeMetric } from '../runtime-metrics.js'
 import { classifyInbound } from '../inbound-classifier.js'
+import * as silencePoke from '../silence-poke.js'
 import { createAnswerStream, type AnswerStreamHandle } from '../answer-stream.js'
 import { type SessionEvent } from '../session-tail.js'
 import {
@@ -2444,6 +2445,38 @@ function ensureIssuesCard(chatId: string, threadId: number | undefined): void {
   }
 }
 
+// #1122: framework safety-net for "model is silent to the user for >5min."
+// Starts a single setInterval poll that walks active turns and arms
+// soft/firm poke reminders piggybacked on the next tool result. At 300s
+// the framework itself sends a user-visible "still working… / still
+// thinking…" message. Honours SWITCHROOM_DISABLE_SILENCE_POKE=1 kill
+// switch (no-op if set).
+silencePoke.startTimer({
+  emitMetric: (event) => {
+    // Re-emit through the unified runtime-metrics fan-out (PostHog + JSONL).
+    emitRuntimeMetric(event)
+  },
+  onFrameworkFallback: async (ctx) => {
+    const text = ctx.fallbackKind === 'thinking'
+      ? 'still thinking… (no update from agent in 5 min)'
+      : 'still working… (no update from agent in 5 min)'
+    try {
+      await robustApiCall(
+        () => bot.api.sendMessage(ctx.chatId, text, {
+          ...(ctx.threadId != null ? { message_thread_id: ctx.threadId } : {}),
+          // Framework fallback pings — user genuinely needs to know.
+          disable_notification: false,
+        }),
+        { chat_id: ctx.chatId, ...(ctx.threadId != null ? { threadId: ctx.threadId } : {}) },
+      )
+    } catch (err) {
+      process.stderr.write(
+        `silence-poke fallback sendMessage failed chat=${ctx.chatId} thread=${ctx.threadId}: ${err}\n`,
+      )
+    }
+  },
+})
+
 const ipcServer: IpcServer = createIpcServer({
   socketPath: SOCKET_PATH,
 
@@ -2557,6 +2590,25 @@ const ipcServer: IpcServer = createIpcServer({
     process.stderr.write(`telegram gateway: ipc: tool_call tool=${msg.tool} agent=${client.agentName ?? '-'} clientId=${client.id ?? '-'} callId=${msg.id}\n`)
     try {
       const result = await executeToolCall(msg.tool, msg.args)
+      // #1122 silence-poke chokepoint: piggyback any armed poke onto the
+      // tool result's content text. The model sees the [silence-poke]
+      // system-reminder block as part of the next conversational turn.
+      // No-op when nothing is armed (the common case) — cost is one
+      // map iteration over <=N active turns (typically 1).
+      const reminder = silencePoke.consumeArmedPoke()
+      if (reminder != null && result != null && typeof result === 'object') {
+        const r = result as { content?: Array<{ type: string; text: string }> }
+        if (Array.isArray(r.content) && r.content.length > 0 && r.content[0]!.type === 'text') {
+          r.content[0]!.text = `${r.content[0]!.text}\n\n<system-reminder>\n${reminder}\n</system-reminder>`
+        } else {
+          // Tool result didn't carry a text block to wrap — re-shape so
+          // the reminder still reaches the model.
+          r.content = [
+            ...(Array.isArray(r.content) ? r.content : []),
+            { type: 'text', text: `<system-reminder>\n${reminder}\n</system-reminder>` },
+          ]
+        }
+      }
       return { type: 'tool_call_result', id: msg.id, success: true, result }
     } catch (err) {
       return {
@@ -2576,6 +2628,18 @@ const ipcServer: IpcServer = createIpcServer({
     const threadHint = msg.threadId != null ? String(msg.threadId) : undefined
     progressDriver?.ingest(ev, chatHint, threadHint)
     handleSessionEvent(ev)
+    // #1122 silence-poke: surface activity signals from the session
+    // stream so the fallback message wording is honest and so
+    // subagent-dispatch waits don't fire spurious soft pokes.
+    if (currentTurn != null) {
+      const key = statusKey(currentTurn.sessionChatId, currentTurn.sessionThreadId)
+      if (ev.kind === 'thinking') {
+        silencePoke.noteThinking(key, Date.now())
+      } else if (ev.kind === 'tool_use' && (ev.toolName === 'Task' || ev.toolName === 'Agent')) {
+        // Built-in claude sub-agent dispatch — extends soft threshold to 5min.
+        silencePoke.noteSubagentDispatch(key)
+      }
+    }
   },
 
   onPermissionRequest(_client: IpcClient, msg: PermissionRequestForward) {
@@ -2865,6 +2929,11 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
   const disableLinkPreview = args.disable_web_page_preview != null
     ? Boolean(args.disable_web_page_preview)
     : (access.disableLinkPreview ?? true)
+  // #1122 conversational pacing: mid-turn updates pass disable_notification:true
+  // so only the final answer pings the device. Default false (pings) so
+  // existing call-sites and the typical "final answer" reply keep their
+  // current behaviour without an explicit flag.
+  const disableNotification = args.disable_notification === true
 
   // Telegraph publish (#579). When the reply text is long enough AND
   // the agent has telegraph enabled in access.json, publish to
@@ -2994,8 +3063,10 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
     previewMessageId,
   })
   // #1122 KPI: a `reply` always produces a fresh user-visible outbound
-  // message — count it for the outbound-gap / TTFO KPI.
+  // message — count it for the outbound-gap / TTFO KPI AND reset the
+  // silence-poke clock so the next poke is measured from this send.
   signalTracker.noteOutbound(statusKey(chat_id, threadId), Date.now())
+  silencePoke.noteOutbound(statusKey(chat_id, threadId), Date.now())
 
   if (previewMessageId != null && reply_to != null && replyMode !== 'off') {
     await deleteStalePreview(previewMessageId)
@@ -3023,6 +3094,7 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
         ...(disableLinkPreview ? { link_preview_options: { is_disabled: true } } : {}),
         ...(replyMarkup != null && isLastChunk ? { reply_markup: replyMarkup } : {}),
         ...(protectContent ? { protect_content: true } : {}),
+        ...(disableNotification ? { disable_notification: true } : {}),
       }
 
       if (i === 0 && previewMessageId != null) {
@@ -3280,7 +3352,9 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
     const streamThreadId = args.message_thread_id != null ? Number(args.message_thread_id) : undefined
     const sKeyBefore = streamKey(streamChatId, streamThreadId)
     if (!activeDraftStreams.has(sKeyBefore)) {
-      signalTracker.noteOutbound(statusKey(streamChatId, streamThreadId), Date.now())
+      const sKey = statusKey(streamChatId, streamThreadId)
+      signalTracker.noteOutbound(sKey, Date.now())
+      silencePoke.noteOutbound(sKey, Date.now())
     }
   }
 
@@ -3296,6 +3370,7 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
       ...(args.protect_content === true ? { protect_content: true } : {}),
       ...(args.quote_text != null ? { quote_text: args.quote_text as string } : {}),
       ...(streamReplyMarkup != null ? { reply_markup: streamReplyMarkup } : {}),
+      ...(args.disable_notification === true ? { disable_notification: true } : {}),
     },
     { activeDraftStreams, activeDraftParseModes, suppressPtyPreview },
     {
@@ -4825,6 +4900,7 @@ function handleSessionEvent(ev: SessionEvent): void {
             ended_via: 'silent',
           })
           signalTracker.clear(tKey)
+          silencePoke.endTurn(tKey)
         }
         lastPtyPreviewByChat.delete(statusKey(chatId, threadId))
         pendingPtyPartial = null
@@ -5064,6 +5140,7 @@ function handleSessionEvent(ev: SessionEvent): void {
           ended_via: outboundMetrics.outboundCount > 0 ? 'reply' : 'silent',
         })
         signalTracker.clear(tKey)
+        silencePoke.endTurn(tKey)
       }
       lastPtyPreviewByChat.delete(statusKey(chatId, threadId))
       pendingPtyPartial = null
@@ -6088,6 +6165,10 @@ async function handleInbound(
         logStreamingEvent({ kind: 'inbound_ack', chatId: chat_id, messageId: msgId, ackDelayMs: Date.now() - inboundReceivedAt })
         // #203: signal tracker — start tracking silent gaps for this fresh turn.
         signalTracker.reset(statusKey(chat_id, messageThreadId), Date.now())
+        // #1122 silence-poke: start the silence clock for this turn so
+        // the framework can nudge the model if it goes quiet past the
+        // soft / firm thresholds.
+        silencePoke.startTurn(statusKey(chat_id, messageThreadId), Date.now())
         // #1122 KPI: emit turn_started so dashboards can compute funnel
         // start counts + correlate to turn_ended for duration / TTFO.
         emitRuntimeMetric({

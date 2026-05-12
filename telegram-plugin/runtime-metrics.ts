@@ -61,6 +61,43 @@ export type RuntimeMetricEvent =
       longest_silent_gap_ms: number
       ended_via: 'reply' | 'stream_reply_done' | 'silent' | 'forced'
     }
+  /**
+   * Framework safety-net: a silence-poke was armed at 75s (soft) or
+   * 180s (firm). The system-reminder appended to the next tool result
+   * nudges the model to send an update. Doubles as a design-health
+   * signal — if these fire frequently, the conversational-pacing
+   * prompt isn't doing its job.
+   */
+  | {
+      kind: 'silence_poke_fired'
+      key: string
+      level: 'soft' | 'firm'
+      silence_ms: number
+      subagent_wait: boolean
+    }
+  /**
+   * The model sent an outbound message within the success window
+   * (default 15s) after a poke fired. Pair with `silence_poke_fired`
+   * to compute success rate — the design target is >80%.
+   */
+  | {
+      kind: 'silence_poke_succeeded'
+      key: string
+      level: 'soft' | 'firm'
+      latency_ms: number
+    }
+  /**
+   * Last-resort: 5 minutes silent, the framework itself sent a
+   * user-visible "still working… / still thinking…" message. Should
+   * be rare (target <5 per 1000 turns); a high rate means the model
+   * is genuinely stuck or the soft/firm pokes aren't being honoured.
+   */
+  | {
+      kind: 'silence_fallback_sent'
+      key: string
+      fallback_kind: 'working' | 'thinking'
+      silence_ms: number
+    }
 
 /**
  * The JSONL sink lives under the runtime state dir so it's per-agent

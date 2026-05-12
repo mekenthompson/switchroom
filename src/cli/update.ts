@@ -200,8 +200,16 @@ export function planUpdate(opts: UpdateOptions): UpdateStep[] {
       'Write a clean-shutdown marker for every agent (reason="operator: switchroom update") so the post-recreate boot card renders as graceful rather than crash',
     run: () => {
       const reason = "operator: switchroom update";
+      // The default writer prefers `docker exec` for running containers
+      // (correct path under Docker runtime — the bind-mounted state dir
+      // is UID-owned by the agent, not the host operator, so a direct
+      // host-side write fails with EACCES and `writeRestartReasonMarker`'s
+      // best-effort catch silently swallows it). Falls back to the host-
+      // side writer when the container isn't running or the runtime is
+      // systemd (then the gateway runs under the host operator's UID
+      // and the host write succeeds). Tests override via writeMarkerFn.
       const writeMarker = opts.writeMarkerFn ?? ((agent, r) =>
-        writeRestartReasonMarker(agent, r, { preserveExisting: true }));
+        writeMarkerInPreferredLocation(agent, r, runner));
       let agents: readonly string[];
       try {
         agents = opts.agentNamesFn ? opts.agentNamesFn() : Object.keys(loadConfig().agents);
@@ -263,6 +271,67 @@ export function planUpdate(opts: UpdateOptions): UpdateStep[] {
 function defaultRunner(cmd: string, args: string[]): { status: number } {
   const r = spawnSync(cmd, args, { stdio: "inherit" });
   return { status: r.status ?? 1 };
+}
+
+/**
+ * Write the clean-shutdown marker for `agent` with `reason`. Tries
+ * `docker exec switchroom-<agent> ...` first, falling back to the
+ * host-side writer when the container isn't running OR docker isn't
+ * available (systemd-runtime hosts).
+ *
+ * Why two paths?
+ *
+ *   - Under the Docker runtime the per-agent state dir is bind-mounted
+ *     into the container and chowned to the agent's UID. The host
+ *     operator running `switchroom update` is a different UID with no
+ *     write permission, so a direct `writeFileSync` from the host fails
+ *     with EACCES. `writeRestartReasonMarker` already wraps that in a
+ *     best-effort catch — meaning the host CLI looked like it succeeded
+ *     while no marker was actually written, and every operator-initiated
+ *     update therefore booted as `reason=crash` even with the PR #1139
+ *     stamp-step in the plan. The docker-exec path runs *inside* the
+ *     container as the agent UID and writes through to the same
+ *     bind-mounted file, which the post-recreate gateway reads on boot.
+ *
+ *   - Under the systemd runtime the gateway runs under the host
+ *     operator's UID — there's no bind-mount, the host writer is the
+ *     correct path, and docker isn't necessarily installed at all. So
+ *     we fall back transparently.
+ *
+ * Returns silently on success. Throws on failure; the caller's
+ * try/catch logs and continues so a single agent's failure doesn't
+ * block the update for the rest of the fleet.
+ */
+function writeMarkerInPreferredLocation(
+  agent: string,
+  reason: string,
+  runner: (cmd: string, args: string[]) => { status: number },
+): void {
+  const ts = Date.now();
+  const markerJson = JSON.stringify({ ts, signal: "SIGTERM", reason });
+  // `sh -c` lets us redirect inside the container without needing tee or
+  // a here-doc. The path is `/state/agent/telegram/clean-shutdown.json`
+  // — that's the in-container view of the same file the host writer
+  // would target (`~/.switchroom/agents/<name>/telegram/...`), via the
+  // compose bind-mount. Quoting note: JSON.stringify produces a JSON
+  // string with embedded double quotes; we wrap the WHOLE shell argument
+  // in single quotes, which is safe because JSON.stringify won't emit
+  // single quotes (it always escapes characters using \\ + double quotes).
+  const cmd = `printf '%s' '${markerJson}' > /state/agent/telegram/clean-shutdown.json`;
+  const dockerExec = runner("docker", [
+    "exec",
+    `switchroom-${agent}`,
+    "sh",
+    "-c",
+    cmd,
+  ]);
+  if (dockerExec.status === 0) return;
+  // Docker exec failed — the container isn't running, the runtime is
+  // systemd, or docker is unavailable. Fall through to the host-side
+  // writer which works correctly under systemd (and harmlessly no-ops
+  // under Docker once the agent UID inherits the file via the in-
+  // container shutdown handler's own marker rewrite path).
+  writeRestartReasonMarker(agent, reason, { preserveExisting: true });
 }
 
 // ─── --status mode (#927) ────────────────────────────────────────────────

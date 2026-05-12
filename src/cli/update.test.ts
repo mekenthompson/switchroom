@@ -90,6 +90,38 @@ describe("planUpdate", () => {
     }
   });
 
+  it("stamp-restart-marker uses docker exec by default (Docker-runtime fix: host-side write fails with EACCES on UID-owned dirs)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "update-stamp-exec-"));
+    try {
+      const composePath = join(tmp, "docker-compose.yml");
+      writeFileSync(composePath, "services: {}\n");
+      const runner = fakeRunner();
+      const steps = planUpdate({
+        composePath,
+        agentNamesFn: () => ["carrie", "klanker"],
+        runner: runner.fn,
+      });
+      const stamp = steps.find((s) => s.name === "stamp-restart-marker");
+      stamp?.run();
+      expect(runner.calls).toHaveLength(2);
+      // Both calls target docker exec into the named container.
+      expect(runner.calls[0]?.cmd).toBe("docker");
+      expect(runner.calls[0]?.args[0]).toBe("exec");
+      expect(runner.calls[0]?.args[1]).toBe("switchroom-carrie");
+      expect(runner.calls[0]?.args[2]).toBe("sh");
+      expect(runner.calls[0]?.args[3]).toBe("-c");
+      // The command writes a JSON marker with the canonical reason text
+      // to the in-container path (which is the same file the host sees
+      // via the compose bind-mount).
+      expect(runner.calls[0]?.args[4]).toMatch(/printf/);
+      expect(runner.calls[0]?.args[4]).toMatch(/"reason":"operator: switchroom update"/);
+      expect(runner.calls[0]?.args[4]).toMatch(/\/state\/agent\/telegram\/clean-shutdown\.json/);
+      expect(runner.calls[1]?.args[1]).toBe("switchroom-klanker");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("stamp-restart-marker tolerates per-agent write failures without aborting", () => {
     const tmp = mkdtempSync(join(tmpdir(), "update-stamp-err-"));
     try {
@@ -297,28 +329,41 @@ describe("runUpdate", () => {
         stdout: (s) => out.push(s),
         stderr: (s) => out.push(s),
         runner: runner.fn,
+        // Stamp-marker step fans out to `docker exec` per agent; pin the
+        // agent set deterministically here so the assertions don't read
+        // the host's real switchroom.yaml.
+        agentNamesFn: () => ["a", "b"],
       });
       expect(code).toBe(0);
-      // 4 calls: pull, apply, up, doctor. Identify each by its
-      // signature args (cmd + first non-script arg).
-      expect(runner.calls).toHaveLength(4);
-      // [0] docker compose ... pull
+      // 6 calls total:
+      //   [0] docker compose pull
+      //   [1] <execPath> apply --non-interactive --no-doctor
+      //   [2] docker exec switchroom-a sh -c '…'  ← stamp-restart-marker
+      //   [3] docker exec switchroom-b sh -c '…'  ← stamp-restart-marker
+      //   [4] docker compose up -d --remove-orphans
+      //   [5] <execPath> doctor
+      expect(runner.calls).toHaveLength(6);
       expect(runner.calls[0]?.cmd).toBe("docker");
       expect(runner.calls[0]?.args).toContain("pull");
-      // [1] <execPath> <scriptPath> apply --non-interactive --no-doctor
-      // (--no-doctor: update has its own doctor step at position 5;
-      // suppressing the apply-side sweep #929 avoids double-printing)
       expect(runner.calls[1]?.cmd).toBe(process.execPath);
       expect(runner.calls[1]?.args).toContain("apply");
       expect(runner.calls[1]?.args).toContain("--non-interactive");
       expect(runner.calls[1]?.args).toContain("--no-doctor");
-      // [2] docker compose ... up -d --remove-orphans
+      // Marker writes: one docker exec per agent, targeting the
+      // in-container clean-shutdown.json path.
       expect(runner.calls[2]?.cmd).toBe("docker");
-      expect(runner.calls[2]?.args).toContain("up");
-      expect(runner.calls[2]?.args).toContain("--remove-orphans");
-      // [3] <execPath> <scriptPath> doctor
-      expect(runner.calls[3]?.cmd).toBe(process.execPath);
-      expect(runner.calls[3]?.args).toContain("doctor");
+      expect(runner.calls[2]?.args.slice(0, 3)).toEqual(["exec", "switchroom-a", "sh"]);
+      expect(runner.calls[2]?.args.at(-1)).toMatch(/operator: switchroom update/);
+      expect(runner.calls[2]?.args.at(-1)).toMatch(/\/state\/agent\/telegram\/clean-shutdown\.json/);
+      expect(runner.calls[3]?.cmd).toBe("docker");
+      expect(runner.calls[3]?.args.slice(0, 3)).toEqual(["exec", "switchroom-b", "sh"]);
+      // [4] docker compose up -d --remove-orphans
+      expect(runner.calls[4]?.cmd).toBe("docker");
+      expect(runner.calls[4]?.args).toContain("up");
+      expect(runner.calls[4]?.args).toContain("--remove-orphans");
+      // [5] <execPath> doctor
+      expect(runner.calls[5]?.cmd).toBe(process.execPath);
+      expect(runner.calls[5]?.args).toContain("doctor");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

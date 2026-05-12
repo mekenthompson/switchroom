@@ -24,6 +24,7 @@ import { registerDriveCommand } from "./drive.js";
 import { registerUpCommand } from "./deprecated.js";
 import { registerApplyCommand } from "./apply.js";
 import { registerSecretDetectCommand } from "./secret-detect.js";
+import { registerStatusAskCommand } from "./status-ask.js";
 import { captureEvent, installGlobalErrorHandlers } from "../analytics/posthog.js";
 
 installGlobalErrorHandlers();
@@ -72,3 +73,4 @@ registerDriveCommand(program);
 registerUpCommand(program);
 registerApplyCommand(program);
 registerSecretDetectCommand(program);
+registerStatusAskCommand(program);

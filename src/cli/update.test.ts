@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planUpdate, runUpdate, isGitCheckout } from "./update.js";
@@ -118,6 +118,52 @@ describe("planUpdate", () => {
       expect(runner.calls[0]?.args[4]).toMatch(/\/state\/agent\/telegram\/clean-shutdown\.json/);
       expect(runner.calls[1]?.args[1]).toBe("switchroom-klanker");
     } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("stamp-restart-marker falls back to host-writer when docker exec fails (systemd-runtime / no-container path)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "update-stamp-fallback-"));
+    const prevAgentsDir = process.env.SWITCHROOM_AGENTS_DIR;
+    try {
+      const composePath = join(tmp, "docker-compose.yml");
+      writeFileSync(composePath, "services: {}\n");
+      // Point the host writer at our tmp dir so we can observe what
+      // would normally land in ~/.switchroom/agents/<name>/telegram/.
+      process.env.SWITCHROOM_AGENTS_DIR = tmp;
+      mkdirSync(join(tmp, "carrie", "telegram"), { recursive: true });
+      const runner = fakeRunner();
+      // Force every docker exec to fail (status 127 == "sh not found"
+      // / no such container in practice).
+      runner.setNextStatus(127);
+      const steps = planUpdate({
+        composePath,
+        agentNamesFn: () => ["carrie"],
+        runner: runner.fn,
+      });
+      const stamp = steps.find((s) => s.name === "stamp-restart-marker");
+      stamp?.run();
+      // Exactly one docker exec attempt, then fallback fires.
+      expect(runner.calls).toHaveLength(1);
+      expect(runner.calls[0]?.args[0]).toBe("exec");
+      // Host writer must have produced the marker file at the
+      // bind-mount location — that's the regression-catch: if the
+      // fallback ever gets accidentally removed (e.g. someone inverts
+      // the status check), this assertion fails.
+      const markerPath = join(tmp, "carrie", "telegram", "clean-shutdown.json");
+      expect(existsSync(markerPath)).toBe(true);
+      const parsed = JSON.parse(readFileSync(markerPath, "utf-8")) as {
+        reason?: string;
+        signal?: string;
+      };
+      expect(parsed.reason).toBe("operator: switchroom update");
+      expect(parsed.signal).toBe("SIGTERM");
+    } finally {
+      if (prevAgentsDir === undefined) {
+        delete process.env.SWITCHROOM_AGENTS_DIR;
+      } else {
+        process.env.SWITCHROOM_AGENTS_DIR = prevAgentsDir;
+      }
       rmSync(tmp, { recursive: true, force: true });
     }
   });

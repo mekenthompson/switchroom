@@ -191,9 +191,17 @@ export function planUpdate(opts: UpdateOptions): UpdateStep[] {
   // `/reset` verbs do via stampUserRestartReason. Reason text uses an
   // `operator:` prefix so the boot card can silence the notification
   // for this class of restart (boot-card.ts handles the disable_
-  // notification path). preserveExisting: true matches the restart.ts
-  // semantics — if a marker was written <30s ago by another flow we
-  // don't clobber it.
+  // notification path).
+  //
+  // Clobber semantics (#1141 review item C): the docker-exec path
+  // writes unconditionally — it does NOT honour the 30s preserve-
+  // existing window that `writeRestartReasonMarker` enforces from the
+  // host. Intentional: `switchroom update` is the more recent and more
+  // aggressive operator intent, and the recreate is going to subsume
+  // any in-flight `/restart` anyway. The boot-card silence then
+  // correctly attributes the planned redeploy to the operator. The
+  // host-side fallback below DOES use preserveExisting: true so
+  // systemd-runtime hosts retain the original /restart-race guard.
   steps.push({
     name: "stamp-restart-marker",
     description:
@@ -309,15 +317,24 @@ function writeMarkerInPreferredLocation(
 ): void {
   const ts = Date.now();
   const markerJson = JSON.stringify({ ts, signal: "SIGTERM", reason });
-  // `sh -c` lets us redirect inside the container without needing tee or
-  // a here-doc. The path is `/state/agent/telegram/clean-shutdown.json`
-  // — that's the in-container view of the same file the host writer
-  // would target (`~/.switchroom/agents/<name>/telegram/...`), via the
-  // compose bind-mount. Quoting note: JSON.stringify produces a JSON
-  // string with embedded double quotes; we wrap the WHOLE shell argument
-  // in single quotes, which is safe because JSON.stringify won't emit
-  // single quotes (it always escapes characters using \\ + double quotes).
-  const cmd = `printf '%s' '${markerJson}' > /state/agent/telegram/clean-shutdown.json`;
+  // `sh -c` lets us redirect inside the container without needing tee
+  // or a here-doc. The path is `/state/agent/telegram/clean-shutdown.
+  // json` — the in-container view of the same file the host writer
+  // would target (`~/.switchroom/agents/<name>/telegram/...`) via the
+  // compose bind-mount.
+  //
+  // Quoting: we wrap the JSON payload in single quotes for the shell.
+  // JSON's grammar escapes `"`, `\`, and control chars, but `'`
+  // (U+0027) passes through literally. Today's marker fields are all
+  // hardcoded primitives (numeric `ts`, the literal "SIGTERM" signal,
+  // the literal "operator: switchroom update" reason) so there's no
+  // apostrophe risk in this PR. Even so, we POSIX-escape the payload
+  // (`'` → `'\''`) defensively — if a future caller routes user-
+  // derived text through the reason field, the escape keeps the shell
+  // wrapping safe instead of silently breaking the redirect. (#1141
+  // review.)
+  const shellSafeJson = markerJson.replace(/'/g, "'\\''");
+  const cmd = `printf '%s' '${shellSafeJson}' > /state/agent/telegram/clean-shutdown.json`;
   const dockerExec = runner("docker", [
     "exec",
     `switchroom-${agent}`,
@@ -327,10 +344,18 @@ function writeMarkerInPreferredLocation(
   ]);
   if (dockerExec.status === 0) return;
   // Docker exec failed — the container isn't running, the runtime is
-  // systemd, or docker is unavailable. Fall through to the host-side
-  // writer which works correctly under systemd (and harmlessly no-ops
-  // under Docker once the agent UID inherits the file via the in-
-  // container shutdown handler's own marker rewrite path).
+  // systemd, docker is unavailable, OR the container is running but
+  // its rootfs lacks `sh` / `/state/agent/telegram/` doesn't exist yet
+  // (brand-new agent pre-first-boot). Logged so operators have a
+  // breadcrumb when the boot card still reads `crash` after an update.
+  // Fall through to the host-side writer which works correctly under
+  // systemd (and harmlessly no-ops under Docker via the EACCES catch
+  // in writeRestartReasonMarker — same behaviour as pre-#1139). (#1141
+  // review item B/E.)
+  process.stderr.write(
+    `switchroom update: stamp-restart-marker — ${agent}: docker exec failed ` +
+    `(status=${dockerExec.status}); falling back to host writer\n`,
+  );
   writeRestartReasonMarker(agent, reason, { preserveExisting: true });
 }
 

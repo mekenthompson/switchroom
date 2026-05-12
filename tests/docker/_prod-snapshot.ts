@@ -24,11 +24,11 @@ import { execSync } from "node:child_process";
 import { expect } from "vitest";
 
 /**
- * Filter regex for switchroom phase-test containers (any phase).
+ * Filter regex for switchroom phase-test container NAMES (any phase).
  *
  * Two shapes are matched:
  *   - `switchroom-phase<digit>...` — the per-container `docker run`
- *     pattern used by single-container tests (e.g. e2e.test.ts).
+ *     pattern used by single-container tests with explicit `--name`.
  *   - `phase<digit><letter>-<slug>-...` — the compose-project pattern
  *     used by fleet tests like broker-ipc-race.test.ts (project
  *     prefix `phase1c-race-${pid}`) and per-agent-isolation.test.ts
@@ -43,8 +43,36 @@ import { expect } from "vitest";
  * its afterAll teardown) would pollute the next docker test's
  * before/after snapshot comparison, cascading the failure into
  * unrelated tests (phase2b-kernel-ipc, phase2c-vault-integration).
+ *
+ * Belt to braces — the LABEL filter `switchroom.test=` below is the
+ * load-bearing rule (covers Moby-auto-named transient containers from
+ * `docker run --rm` callsites that omit `--name` — e.g. e2e.test.ts's
+ * spawnSync calls). The name regex is the fallback when a future test
+ * neglects to apply the canonical labelArgv().
  */
 const PHASE_TEST_NAME = /^switchroom-phase\d|^phase\d[a-z]-/;
+
+/**
+ * Substring match against the `{{.Labels}}` column from `docker ps`.
+ *
+ * The full docker test suite stamps every container (single-run and
+ * compose-emitted alike) with `switchroom.test=phase<digit><letter>`
+ * via `tests/docker/_label-helpers.ts:dockerRunLabelsArgv` and the
+ * `injectLabelsIntoCompose` post-processor. So a single substring
+ * check against the labels column reliably tags a row as test-owned
+ * regardless of what name docker assigned it.
+ *
+ * Pre-fix (this file at HEAD before #1079 fleet flake fix), the prod-
+ * snapshot only looked at NAMES. Concurrent vitest forks running
+ * `e2e.test.ts` issue `docker run --rm ...` (no `--name`), letting
+ * docker assign Moby names like `friendly_chatelet` that the name
+ * regex misses; the container was alive for less than a second but
+ * straddled `phase2c-vault-integration`'s afterAll snapshot, flaking
+ * every other docker-e2e run on main. Switching to a labels-first
+ * filter fixes that without weakening genuine drift detection
+ * (production containers do not carry `switchroom.test=` labels).
+ */
+const PHASE_TEST_LABEL_MARKER = "switchroom.test=";
 
 /**
  * A snapshot of the host's container list at one moment in time.
@@ -61,13 +89,17 @@ export interface ProdSnapshot {
  * `docker ps`, and returns an empty snapshot if neither works (e.g. CI
  * without docker).
  *
- * Uses `--no-trunc` so IDs are stable for diffing.
+ * Uses `--no-trunc` so IDs are stable for diffing. Includes
+ * `{{.Labels}}` so the labels-first filter in `filterPhaseTestContainers`
+ * can reliably classify rows as test-owned even when docker auto-
+ * assigned a Moby name (rather than the test passing `--name`).
  */
+const PS_FORMAT = "{{.Names}}|{{.ID}}|{{.Status}}|{{.Labels}}";
 export function captureProdSnapshot(): ProdSnapshot {
   try {
     return {
       raw: execSync(
-        "sudo docker ps --no-trunc --format '{{.Names}}|{{.ID}}|{{.Status}}'",
+        `sudo docker ps --no-trunc --format '${PS_FORMAT}'`,
         { stdio: ["ignore", "pipe", "pipe"] },
       ).toString(),
     };
@@ -75,7 +107,7 @@ export function captureProdSnapshot(): ProdSnapshot {
     try {
       return {
         raw: execSync(
-          "docker ps --no-trunc --format '{{.Names}}|{{.ID}}|{{.Status}}'",
+          `docker ps --no-trunc --format '${PS_FORMAT}'`,
           { stdio: ["ignore", "pipe", "pipe"] },
         ).toString(),
       };
@@ -109,10 +141,15 @@ export function expectNoProdDrift(
   );
 }
 
-function filterPhaseTestContainers(raw: string): string {
+export function filterPhaseTestContainers(raw: string): string {
   return raw
     .split("\n")
-    .filter((l) => l && !PHASE_TEST_NAME.test(l))
+    .filter((l) => {
+      if (!l) return false;
+      if (l.includes(PHASE_TEST_LABEL_MARKER)) return false;
+      if (PHASE_TEST_NAME.test(l)) return false;
+      return true;
+    })
     .sort()
     .join("\n");
 }

@@ -30,7 +30,7 @@ import {
 } from "../../src/agents/compose.js";
 import type { SwitchroomConfig } from "../../src/config/schema.js";
 
-function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Record<string, unknown>; admin?: boolean }>): SwitchroomConfig {
+function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Record<string, unknown>; admin?: boolean; env?: Record<string, string> }>): SwitchroomConfig {
   return {
     switchroom: { version: 1, agents_dir: "~/.switchroom/agents", skills_dir: "~/.switchroom/skills" },
     telegram: { bot_token: "x" },
@@ -43,6 +43,7 @@ function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Re
           extends: cfg.extends,
           settings_raw: cfg.settings_raw,
           admin: cfg.admin,
+          env: cfg.env,
           schedule: [],
           tools: { allow: [], deny: [] },
           hooks: undefined,
@@ -1015,6 +1016,67 @@ describe("generateCompose — buildMode (pull vs local)", () => {
     });
     expect(out).toContain("image: ghcr.io/switchroom/switchroom-broker:v0.7.3");
     expect(out).toContain("image: ghcr.io/switchroom/switchroom-agent:v0.7.3");
+  });
+});
+
+describe("agent service env — user-declared env propagation", () => {
+  // Operator-declared env vars (the `env:` block in switchroom.yaml)
+  // must land in the compose `environment:` block, not just in
+  // start.sh's later `export` lines. The gateway sidecar is forked
+  // BEFORE start.sh exports user env (start.sh.hbs:88) — without
+  // compose-level propagation the gateway never sees these vars,
+  // silently breaking knobs like SWITCHROOM_SUBAGENT_STALL_TERMINAL_MS
+  // (the UAT enablement knobs from #1110). Surfaced 2026-05-12 when
+  // a live-edit was the only way to feed env vars into the gateway.
+  function envBlockFor(yml: string, agent: string): string {
+    const re = new RegExp(
+      `  agent-${agent}:[\\s\\S]*?    environment:([\\s\\S]*?)\\n    volumes:`,
+    );
+    return re.exec(yml)?.[1] ?? "";
+  }
+
+  it("emits operator-declared env vars in the compose environment block", () => {
+    const out = generateCompose({
+      config: makeConfig({
+        alice: {
+          env: {
+            SWITCHROOM_SUBAGENT_STALL_TERMINAL_MS: "10000",
+            CUSTOM_KNOB: "hello",
+          },
+        },
+      }),
+    });
+    const env = envBlockFor(out, "alice");
+    expect(env).toMatch(/SWITCHROOM_SUBAGENT_STALL_TERMINAL_MS:\s*"10000"/);
+    expect(env).toMatch(/CUSTOM_KNOB:\s*"hello"/);
+  });
+
+  it("system-managed keys (HOME, SWITCHROOM_RUNTIME) win on collision with user env", () => {
+    // An operator can't override the runtime contract from yaml —
+    // the compose-level defaults stay authoritative. Without this
+    // guard a yaml typo could silently re-target HOME away from
+    // /state/agent/home and break the agent's writable mounts.
+    const out = generateCompose({
+      config: makeConfig({
+        bob: {
+          env: {
+            HOME: "/tmp/operator-takeover",
+            SWITCHROOM_RUNTIME: "host",
+          },
+        },
+      }),
+    });
+    const env = envBlockFor(out, "bob");
+    expect(env).toMatch(/HOME:\s*"\/state\/agent\/home"/);
+    expect(env).toMatch(/SWITCHROOM_RUNTIME:\s*"docker"/);
+    expect(env).not.toMatch(/HOME:\s*"\/tmp\/operator-takeover"/);
+  });
+
+  it("agents without env: declared still emit the standard system env", () => {
+    const out = generateCompose({ config: makeConfig({ charlie: {} }) });
+    const env = envBlockFor(out, "charlie");
+    expect(env).toMatch(/SWITCHROOM_RUNTIME:\s*"docker"/);
+    expect(env).toMatch(/HOME:\s*"\/state\/agent\/home"/);
   });
 });
 

@@ -73,6 +73,7 @@ import {
 import { emitRuntimeMetric } from '../runtime-metrics.js'
 import { classifyInbound } from '../inbound-classifier.js'
 import * as silencePoke from '../silence-poke.js'
+import { writeSilentEndState, clearSilentEndState } from '../silent-end.js'
 import { createAnswerStream, type AnswerStreamHandle } from '../answer-stream.js'
 import { type SessionEvent } from '../session-tail.js'
 import {
@@ -3053,8 +3054,12 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
   // #1122 KPI: a `reply` always produces a fresh user-visible outbound
   // message — count it for the outbound-gap / TTFO KPI AND reset the
   // silence-poke clock so the next poke is measured from this send.
+  // Also clear any silent-end state file so the Stop hook doesn't fire
+  // a stale block when the session ends (deterministic restore of the
+  // detection PR3 inadvertently removed).
   signalTracker.noteOutbound(statusKey(chat_id, threadId), Date.now())
   silencePoke.noteOutbound(statusKey(chat_id, threadId), Date.now())
+  clearSilentEndState(statusKey(chat_id, threadId))
 
   if (previewMessageId != null && reply_to != null && replyMode !== 'off') {
     await deleteStalePreview(previewMessageId)
@@ -3343,6 +3348,7 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
       const sKey = statusKey(streamChatId, streamThreadId)
       signalTracker.noteOutbound(sKey, Date.now())
       silencePoke.noteOutbound(sKey, Date.now())
+      clearSilentEndState(sKey)
     }
   }
 
@@ -4854,6 +4860,26 @@ function handleSessionEvent(ev: SessionEvent): void {
             longest_silent_gap_ms: outboundMetrics.longestOutboundGapMs,
             ended_via: 'silent',
           })
+          // #1122 PR4 fix: deterministic silent-end detection for the
+          // Stop hook. PR3 deleted the writer with the progress card;
+          // this restores it. If the user-message turn ended without
+          // any outbound, write the state file so silent-end-interrupt
+          // -stop.mjs blocks the stop and re-prompts the agent.
+          if (outboundMetrics.outboundCount === 0) {
+            writeSilentEndState({
+              chatId,
+              threadId: threadId ?? null,
+              turnKey: tKey,
+            })
+          }
+          // #1122 PR4 fix: PR3 removed the progressDriver.onTurnComplete
+          // callback that cleared the turn-active marker on silent-marker
+          // turns. The main turn-end path at ~line 5180 has its own
+          // cleanup (#550 defence-in-depth) but the silent-marker path
+          // relied solely on the driver callback. Without this the
+          // bridge-watchdog (#412) reads a stale marker and could
+          // false-positive wedge-detection across silent turns.
+          try { removeTurnActiveMarker(STATE_DIR) } catch { /* best-effort */ }
           signalTracker.clear(tKey)
           silencePoke.endTurn(tKey)
         }
@@ -5094,6 +5120,17 @@ function handleSessionEvent(ev: SessionEvent): void {
           longest_silent_gap_ms: outboundMetrics.longestOutboundGapMs,
           ended_via: outboundMetrics.outboundCount > 0 ? 'reply' : 'silent',
         })
+        // #1122 PR4 fix: deterministic silent-end detection (see the
+        // silent-marker path above for the rationale). The Stop hook
+        // reads the file we write here and blocks the session-end so
+        // the agent can be re-prompted to call reply.
+        if (outboundMetrics.outboundCount === 0) {
+          writeSilentEndState({
+            chatId,
+            threadId: threadId ?? null,
+            turnKey: tKey,
+          })
+        }
         signalTracker.clear(tKey)
         silencePoke.endTurn(tKey)
       }

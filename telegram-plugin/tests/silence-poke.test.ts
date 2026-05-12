@@ -257,6 +257,60 @@ describe('silence-poke — subagent dispatch extension', () => {
   })
 })
 
+// Pin the contract the gateway must uphold for ABNORMAL turn-ends:
+// every code path that abandons a turn before turn_end (context-
+// exhaust bail, gateway-side wedge timeout, silent-end recovery)
+// MUST call `endTurn(key)`. If it doesn't, the silence-poke state
+// lingers in the Map and the 300s framework fallback fires later
+// for a turn the gateway already considers dead — sending the user
+// a "still working… (no update from agent in 5 min)" message that
+// contradicts the gateway's earlier "⚠️ Context window full" / etc.
+//
+// Surfaced during CC-5 investigation (`docs/status-ask-cause-classes.md`).
+// The fix lives in the gateway (context-exhaust path adds the
+// endTurn call); these tests pin the invariant at the silence-poke
+// level so the contract is verifiable in isolation of the gateway.
+describe('silence-poke — abnormal turn-end invariants (CC-5 follow-up)', () => {
+  it('endTurn before the 300s fallback threshold prevents the fallback from firing', () => {
+    const fx = setupDeps()
+    startTurn('k', 0)
+    // Soft + firm pokes arm; turn is alive and the model could still
+    // recover.
+    __tickForTests(75_000)
+    __tickForTests(180_000)
+    // Gateway aborts the turn at t=250s (context exhaust, wedge,
+    // crash teardown — any abnormal bail). The contract: endTurn
+    // gets called BEFORE the 300s threshold.
+    endTurn('k')
+    // Five minutes total elapse from the original turn start. If
+    // endTurn left the state in the Map, the framework fallback
+    // would fire here. The contract is: it MUST NOT.
+    __tickForTests(300_000)
+    expect(fx.fallbacks).toHaveLength(0)
+    expect(
+      fx.emitted.filter((e) => e.kind === 'silence_fallback_sent'),
+    ).toHaveLength(0)
+  })
+
+  it('endTurn after a soft poke fired does not later emit a stale fallback', () => {
+    const fx = setupDeps()
+    startTurn('k', 0)
+    __tickForTests(75_000) // soft fires
+    expect(
+      fx.emitted.filter((e) => e.kind === 'silence_poke_fired'),
+    ).toHaveLength(1)
+    // Turn aborts well before firm/fallback thresholds.
+    endTurn('k')
+    __tickForTests(180_000)
+    __tickForTests(300_000)
+    // No firm, no fallback after the turn-abort.
+    expect(
+      fx.emitted.filter((e) => e.kind === 'silence_poke_fired'),
+    ).toHaveLength(1) // unchanged: only the original soft
+    expect(fx.fallbacks).toHaveLength(0)
+  })
+})
+
 describe('silence-poke — consumeArmedPoke draining', () => {
   it('drains the armed flag so the next call returns null', () => {
     setupDeps()

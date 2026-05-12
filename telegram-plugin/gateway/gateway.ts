@@ -4849,9 +4849,21 @@ function handleSessionEvent(ev: SessionEvent): void {
             ...(threadId != null ? { threadId } : {}),
           },
         )
-        const ctrl = activeStatusReactions.get(statusKey(chatId, threadId))
+        const ceKey = statusKey(chatId, threadId)
+        const ctrl = activeStatusReactions.get(ceKey)
         if (ctrl) ctrl.setError()
-        purgeReactionTracking(statusKey(chatId, threadId))
+        purgeReactionTracking(ceKey)
+        // Surfaced during CC-5 investigation (`docs/status-ask-cause-classes.md`):
+        // the context-exhaust bail path teardown was missing
+        // `silencePoke.endTurn(key)`. Without it, the silence-poke state for
+        // this turn lingers in the Map. Once 300s of clock-time passes from
+        // the turn's original start, the framework fallback fires and the
+        // gateway sends a user-visible "still working… (no update from agent
+        // in 5 min)" message — for a turn the gateway internally considers
+        // dead and has already told the user is over (the ⚠️ Context window
+        // full message above). Match the pattern used at the regular
+        // turn-end path (line ~5039) and the wedged-turn path (~5290).
+        silencePoke.endTurn(ceKey)
         // Issue #195: tear down the answer-lane stream on context-exhaustion
         // bail-out. The user is being told the session needs /restart, so any
         // partially-streamed answer would be misleading.

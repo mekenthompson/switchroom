@@ -1,0 +1,152 @@
+"""Tests for the pending-retains persistent queue (#1071)."""
+
+import json
+import os
+import sys
+import time
+import unittest
+from unittest.mock import patch
+
+SCRIPTS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts"))
+if SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, SCRIPTS_DIR)
+
+import lib.pending as pending_mod  # noqa: E402
+
+
+class PendingQueueTest(unittest.TestCase):
+    def setUp(self):
+        # Use a temp dir scoped per-test so concurrent runs don't
+        # collide. The module reads HINDSIGHT_PENDING_DIR on every call,
+        # not at import time — no reload needed.
+        import tempfile
+
+        self._tmp = tempfile.mkdtemp(prefix="hindsight-pending-test-")
+        self._dir = os.path.join(self._tmp, "pending-retains")
+        os.environ["HINDSIGHT_PENDING_DIR"] = self._dir
+
+    def tearDown(self):
+        import shutil
+
+        shutil.rmtree(self._tmp, ignore_errors=True)
+        os.environ.pop("HINDSIGHT_PENDING_DIR", None)
+
+    def _sample_payload(self, document_id: str = "doc-1") -> dict:
+        return {
+            "api_url": "http://fake:9077",
+            "api_token": None,
+            "bank_id": "test-bank",
+            "content": "user: hello\nassistant: hi",
+            "document_id": document_id,
+            "context": "claude-code",
+            "metadata": {"session_id": "sess-1"},
+            "tags": None,
+        }
+
+    def test_enqueue_creates_dir_with_mode_0700(self):
+        self.assertFalse(os.path.isdir(self._dir))
+        pending_mod.enqueue(self._sample_payload(), RuntimeError("boom"))
+        self.assertTrue(os.path.isdir(self._dir))
+        mode = os.stat(self._dir).st_mode & 0o777
+        self.assertEqual(mode, 0o700)
+
+    def test_enqueue_writes_payload_and_error_metadata(self):
+        path = pending_mod.enqueue(self._sample_payload(), ValueError("nope"))
+        self.assertIsNotNone(path)
+        self.assertTrue(os.path.isfile(path))
+        with open(path) as f:
+            entry = json.load(f)
+        self.assertEqual(entry["bank_id"], "test-bank")
+        self.assertEqual(entry["content"], "user: hello\nassistant: hi")
+        self.assertEqual(entry["document_id"], "doc-1")
+        self.assertEqual(entry["error_class"], "ValueError")
+        self.assertEqual(entry["error_message"], "nope")
+        self.assertEqual(entry["attempt_count"], 1)
+        self.assertIn("failed_at", entry)
+        self.assertEqual(entry["schema"], pending_mod.SCHEMA)
+
+    def test_enqueue_filename_is_unix_ms_uuid(self):
+        path = pending_mod.enqueue(self._sample_payload(), RuntimeError("boom"))
+        name = os.path.basename(path)
+        self.assertTrue(name.endswith(".json"))
+        head = name[: -len(".json")]
+        ts_part, uuid_part = head.split("-", 1)
+        self.assertTrue(ts_part.isdigit())
+        # Filename ts should be within 10 s of now
+        now_ms = int(time.time() * 1000)
+        self.assertLess(abs(now_ms - int(ts_part)), 10_000)
+        self.assertEqual(len(uuid_part), 12)
+
+    def test_enqueue_atomic_no_tmp_left_behind(self):
+        pending_mod.enqueue(self._sample_payload(), RuntimeError("boom"))
+        names = sorted(os.listdir(self._dir))
+        self.assertEqual(len(names), 1)
+        self.assertFalse(any(n.endswith(".tmp") for n in names))
+
+    def test_enqueue_returns_none_when_full(self):
+        # Pre-populate with MAX_ENTRIES dummy files.
+        os.makedirs(self._dir, mode=0o700)
+        for i in range(pending_mod.MAX_ENTRIES):
+            with open(os.path.join(self._dir, f"{i:013d}-aaaaaaaaaaaa.json"), "w") as f:
+                json.dump({"placeholder": True}, f)
+        result = pending_mod.enqueue(self._sample_payload(), RuntimeError("boom"))
+        self.assertIsNone(result)
+        # Count unchanged
+        self.assertEqual(pending_mod.count(), pending_mod.MAX_ENTRIES)
+
+    def test_iter_entries_ordered_oldest_first(self):
+        p1 = pending_mod.enqueue(self._sample_payload("doc-1"), RuntimeError("e1"))
+        time.sleep(0.005)
+        p2 = pending_mod.enqueue(self._sample_payload("doc-2"), RuntimeError("e2"))
+        time.sleep(0.005)
+        p3 = pending_mod.enqueue(self._sample_payload("doc-3"), RuntimeError("e3"))
+        entries = pending_mod.iter_entries()
+        paths = [e[0] for e in entries]
+        self.assertEqual(paths, [p1, p2, p3])
+
+    def test_iter_entries_skips_malformed(self):
+        os.makedirs(self._dir, mode=0o700)
+        # Good
+        good = pending_mod.enqueue(self._sample_payload(), RuntimeError("ok"))
+        # Bad (not JSON)
+        with open(os.path.join(self._dir, f"{int(time.time() * 1000) + 1}-bad.json"), "w") as f:
+            f.write("not json")
+        entries = pending_mod.iter_entries()
+        paths = [e[0] for e in entries]
+        self.assertIn(good, paths)
+        # The bad file is skipped, not raised
+        self.assertEqual(len(entries), 1)
+
+    def test_update_attempt_bumps_count_atomically(self):
+        path = pending_mod.enqueue(self._sample_payload(), RuntimeError("first"))
+        entries = pending_mod.iter_entries()
+        _, entry = entries[0]
+        self.assertEqual(entry["attempt_count"], 1)
+        ok = pending_mod.update_attempt(path, entry, RuntimeError("second"))
+        self.assertTrue(ok)
+        with open(path) as f:
+            reread = json.load(f)
+        self.assertEqual(reread["attempt_count"], 2)
+        self.assertEqual(reread["error_message"], "second")
+        self.assertIn("last_attempt_at", reread)
+
+    def test_mark_dead_renames_to_dot_dead(self):
+        path = pending_mod.enqueue(self._sample_payload(), RuntimeError("boom"))
+        entries = pending_mod.iter_entries()
+        _, entry = entries[0]
+        dead = pending_mod.mark_dead(path, entry)
+        self.assertTrue(dead.endswith(".dead"))
+        self.assertFalse(os.path.exists(path))
+        self.assertTrue(os.path.isfile(dead))
+        with open(dead) as f:
+            reread = json.load(f)
+        self.assertIn("dead_at", reread)
+        # iter_entries no longer surfaces .dead files
+        self.assertEqual(pending_mod.iter_entries(), [])
+
+    def test_count_safe_when_dir_missing(self):
+        self.assertEqual(pending_mod.count(), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

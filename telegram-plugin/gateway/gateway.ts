@@ -10088,8 +10088,14 @@ async function handleVaultGrantCallback(ctx: Context, data: string): Promise<voi
       pendingVaultOps.set(chatId, { ...state, awaitingCustomDuration: true })
       const msg = ctx.callbackQuery?.message
       if (msg && 'text' in msg && msg.text) {
+        // Escape source text before re-rendering with HTML parse mode.
+        // `msg.text` returns entities-stripped plain UTF-8; a raw
+        // `<`/`>`/`&` in the wizard's prior-step body (e.g. a future
+        // key or label) would crash the HTML re-parse and the bare
+        // `.catch(() => {})` would swallow the failure silently — same
+        // hazard PR #1158 caught on the operator-event card.
         await ctx.editMessageText(
-          msg.text + '\n\n<i>Send a duration like <code>30d</code> or <code>12h</code>:</i>',
+          escapeHtmlForTg(msg.text) + '\n\n<i>Send a duration like <code>30d</code> or <code>12h</code>:</i>',
           { parse_mode: 'HTML', reply_markup: buildGrantDurationKeyboard() },
         ).catch(() => {})
       }
@@ -11329,12 +11335,21 @@ bot.on('callback_query:data', async ctx => {
     // Edit the question in place to remove the buttons + show the
     // chosen option as a checkmarked line. Makes the chat surface
     // self-documenting — no orphaned-buttons graveyard.
+    //
+    // Escape `sourceMsg.text` before re-rendering with HTML parse
+    // mode. `msg.text` returns entities-stripped plain UTF-8; an
+    // agent-supplied `ask_user` question containing raw `<`/`>`/`&`
+    // (common in code-related questions like "Run `<command>`?")
+    // would crash the HTML re-parse, the try/catch would swallow,
+    // and the button keyboard would stay tappable — the exact bug
+    // PR #1158 caught on the operator-event card.
     const sourceMsg = ctx.callbackQuery?.message
     if (sourceMsg && 'text' in sourceMsg && sourceMsg.text != null) {
       try {
-        await ctx.editMessageText(`${sourceMsg.text}\n\n✅ <b>${escapeHtmlForTg(choice)}</b>`, {
-          parse_mode: 'HTML',
-        })
+        await ctx.editMessageText(
+          `${escapeHtmlForTg(sourceMsg.text)}\n\n✅ <b>${escapeHtmlForTg(choice)}</b>`,
+          { parse_mode: 'HTML' },
+        )
       } catch {
         /* edit-failed is fine — the answer-callback below still acks */
       }

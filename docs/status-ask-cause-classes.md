@@ -142,7 +142,8 @@ Fuzz extensions land as a single follow-up PR (PR 4) once 1–3 are green.
 - **2026-05-13** — PR #1144 merged: CC-6 (delete stale `progress-card-dm.test.ts`) + CC-1 (real L1 reaction lifecycle UAT in `reactions-dm.test.ts`).
 - **2026-05-13** — PR #1146 merged: CC-3 (silence-poke wire-path UAT in `silence-poke-soft-dm.test.ts` — forces 90s silent tool churn, asserts first reply lands in [70s, 200s] window).
 - **2026-05-13** — PR #1147 merged: CC-2 (mid-turn `disable_notification` UAT in `midturn-silent-dm.test.ts` + `ObservedMessage.silent` exposure on the harness type).
-- **2026-05-13** — this PR: catalog doc lands on `main` for future agents to reference; classifier-variants fuzz block adds to `fuzz-extended-dm.test.ts` covering CC-7 at the fuzz level.
+- **2026-05-13** — PR #1148 merged: catalog doc lands on `main` for future agents to reference; classifier-variants fuzz block adds to `fuzz-extended-dm.test.ts` covering CC-7 at the fuzz level.
+- **2026-05-13** — this PR (Goal #2 — fuzzy UAT breadth): `fuzz-status-ask-dm.test.ts` adds breadth probes across CC-1 (5 reaction-lifecycle variants), CC-2 (4 mid-turn pacing variants), CC-3 (2 silence-poke-ladder variants — 80s soft, 200s firm), CC-7 negatives (8 near-miss prompts). Each cause class now has one dedicated regression-locked scenario + a fuzz block exercising the same invariant across many prompt shapes.
 
 ## Final report (2026-05-13)
 

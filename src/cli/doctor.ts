@@ -18,6 +18,7 @@ import { resolveAgentsDir, resolvePath } from "../config/loader.js";
 import { resolveStatePath } from "../config/paths.js";
 import { getConfig, getConfigPath, withConfigError } from "./helpers.js";
 import { getAllAgentStatuses } from "../agents/lifecycle.js";
+import { readQuarantineMarkerForAgent } from "../agents/quarantine.js";
 import { getAllAuthStatuses } from "../auth/manager.js";
 import { getSlotInfos, type SlotInfo } from "../auth/accounts.js";
 import type { SwitchroomConfig } from "../config/schema.js";
@@ -1021,6 +1022,39 @@ export function checkAgents(config: SwitchroomConfig, configPath: string): Check
         fix: `Run \`switchroom agent create ${name}\``,
       });
       continue;
+    }
+
+    // 1a. Quarantine marker (#1076). When the gateway exits via the
+    // EX_CONFIG path (revoked / wrong-typed bot token, today), it
+    // writes <agentDir>/telegram/quarantine.json and the supervisor
+    // stops respawning. This check surfaces the state to the operator
+    // so a silently-dead gateway can't hide behind a green doctor.
+    // Reported as `fail` because the agent is non-functional until
+    // the operator rotates the underlying credential and runs
+    // `switchroom agent unquarantine <name>`.
+    const quarantine = readQuarantineMarkerForAgent(agentsDir, name);
+    if (quarantine != null) {
+      const ageSec = Math.max(0, Math.floor((Date.now() - quarantine.ts) / 1000));
+      const ageStr =
+        ageSec < 60
+          ? `${ageSec}s`
+          : ageSec < 3600
+            ? `${Math.floor(ageSec / 60)}m`
+            : ageSec < 86400
+              ? `${Math.floor(ageSec / 3600)}h`
+              : `${Math.floor(ageSec / 86400)}d`;
+      const reasonText =
+        quarantine.reason === "startup.unauthorized"
+          ? "bot token rejected by Telegram (401) at gateway startup"
+          : quarantine.reason;
+      results.push({
+        name: `${name}: quarantine`,
+        status: "fail",
+        detail: `${reasonText} (${ageStr} ago)`,
+        fix:
+          `Rotate the bot token (e.g. via \`switchroom vault\`), then run ` +
+          `\`switchroom agent unquarantine ${name}\` and \`switchroom agent restart ${name}\``,
+      });
     }
 
     // 1b. start.sh has the post-Phase-4 scheduler supervisor block

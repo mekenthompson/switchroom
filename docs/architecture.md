@@ -31,7 +31,6 @@ The container's entrypoint is the agent's `start.sh`, run as PID 1's child under
 
 ```bash
 exec claude \
-  --continue \
   --dangerously-load-development-channels server:switchroom-telegram \
   --plugin-dir ~/.switchroom/agents/<agent>/plugins \
   --model claude-opus-4-7 \
@@ -40,17 +39,29 @@ exec claude \
 
 Key flags:
 
-- `--continue` — passed conditionally. Under `session_continuity.resume_mode: auto` (default), it's set only when the transcript exists, is under the configured size cap (default 2 MB), and is under 7 days old — so long-running agents pick up where they left off, but stale or oversized transcripts start fresh. Under `resume_mode: continue` it's always set; under `handoff` or `none` it's never set (the agent starts cold, optionally with a handoff briefing). See `profiles/_base/start.sh.hbs` for the exact logic.
+- `--continue` — **omitted by default.** As of switchroom #362, `session_continuity.resume_mode` defaults to `handoff`: every restart starts a fresh `claude` session and the prior session's context is reconstituted via a handoff briefing injected into `--append-system-prompt` (see "Session continuity model" below). Under `resume_mode: continue` `--continue` is always passed; under `auto` it's passed only when the latest JSONL transcript exists, is under the configured size cap (default 2 MB), and is under 7 days old; under `none` it's never passed and no handoff briefing is assembled. See `profiles/_base/start.sh.hbs` for the exact logic.
 - `--dangerously-load-development-channels server:switchroom-telegram` — loads the switchroom Telegram MCP as a development channel.
 - `--plugin-dir` — points at the agent's local plugin directory.
-- `--append-system-prompt` — injects the stable workspace bootstrap block (SOUL.md, AGENTS.md, TOOLS.md, etc.) at session start.
+- `--append-system-prompt` — injects the stable workspace bootstrap block (SOUL.md, AGENTS.md, TOOLS.md, etc.) plus, in `handoff` / `auto` mode, the assembled handoff briefing.
 
 Environment variables set before exec:
 
 - `CLAUDE_CONFIG_DIR` — pinned to `/agent/.claude/` (the agent's per-container config dir, host-mounted from `~/.switchroom/agents/<agent>/.claude/`). Fully isolates each agent's auth, settings, transcripts, and MCP config from every other agent and from the user's personal Claude setup.
 - `CLAUDE_CODE_OAUTH_TOKEN` — populated from the active slot or shared Anthropic account.
 
-This is an **interactive REPL**, not `claude -p`. The session is persistent and long-lived, conditionally resumed across container restarts via `--continue`.
+This is an **interactive REPL**, not `claude -p`. The session is persistent and long-lived; continuity across container restarts is provided by the switchroom layer (handoff briefing + Hindsight recall + Telegram history buffer), not by `--continue` (which is off by default).
+
+### Session continuity model
+
+Default mode is `handoff`. On a clean shutdown, the Stop hook runs `switchroom handoff <agent>` which summarizes the most recent session JSONL into `<agentDir>/.handoff.md`. On next boot, start.sh reads that file, plus a live briefing assembled by `handoff-briefing.sh` from recent Telegram messages / Hindsight recall / today's daily memory file (`<agentDir>/.handoff-briefing.md`), and merges both into `--append-system-prompt`. The fresh `claude` session wakes up already knowing what was going on without the cost or fragility of replaying a multi-MB transcript.
+
+Other state survives a restart through dedicated channels:
+
+- **`SWITCHROOM_PENDING_TURN`** — if the previous session was killed mid-turn (watchdog / SIGTERM / timeout), the gateway writes `<agentDir>/.pending-turn.env` and start.sh sources it into the new process. The agent reads it from CLAUDE.md and decides whether to acknowledge the interruption or silently continue.
+- **`.wake-audit-pending`** sentinel under `TELEGRAM_STATE_DIR` — dropped on every boot. The agent's first turn runs a three-signal check (owed reply / orphan sub-agents / open todos), surfaces findings, then `rm -f`s the sentinel.
+- **`SWITCHROOM_SESSION_MODE`** env (`continue` / `handoff` / `fresh` / `cold`) — exported for the SessionStart hook so the session-greeting card can render the correct "Session" row.
+
+The `/reset` and `/new` Telegram commands write a `.force-fresh-session` marker that start.sh consumes once to force a cold boot regardless of `resume_mode`.
 
 ### The gateway
 
@@ -93,14 +104,14 @@ The MCP child never makes direct HTTP calls to Telegram — all Telegram API cal
 ## Why two processes inside the container
 
 - **Survival across Claude restarts.** The gateway must stay alive when Claude exits (OOM, crash, scheduled compaction restart). If polling lived inside claude, every restart would drop the Telegram connection and lose in-flight messages.
-- **Message buffering.** The gateway's SQLite buffer holds inbound messages while claude is down. When claude restarts via `--continue`, the MCP child drains the buffer.
+- **Message buffering.** The gateway's SQLite buffer holds inbound messages while claude is down. When claude restarts (whether the new session is fresh-with-handoff or a `--continue` resume), the MCP child drains the buffer.
 - **Separation of concerns.** The gateway handles all Telegram I/O. Claude handles all inference. Neither needs to know the internals of the other.
 
 ---
 
 ## Where `claude -p` is (and isn't) used
 
-The main agent loop does **not** use `claude -p`. Agents run interactive (`--continue`).
+The main agent loop does **not** use `claude -p`. Agents run interactive — by default a fresh session per restart with handoff continuity (`--continue` is gated by `session_continuity.resume_mode`, which defaults to `handoff`).
 
 `claude -p` is used in exactly one place, short-lived and headless:
 

@@ -1571,19 +1571,27 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
     // turn that completed in under initialDelayMs.
     const effectiveDelayMs = chatState.effectiveInitialDelayMs
     if (chatState.isFirstEmit && effectiveDelayMs > 0 && chatState.deferredFirstEmitTimer !== DELAY_ELAPSED) {
-      if (forceDone || chatState.state.stage === 'done') {
-        // Turn ended before the card was ever shown — suppress it.
+      if (forceDone || chatState.state.stage === 'done' || chatState.replyToolCalled) {
+        // Turn ended (or final reply already sent) before the card was ever
+        // shown — suppress it. The `replyToolCalled` guard handles the race
+        // where `reply`/`stream_reply` fires before the initial-delay timer
+        // expires: posting a progress card *after* the reply would land below
+        // it in the chat (Telegram orders strictly by send-time), confusing
+        // the user.
         if (chatState.deferredFirstEmitTimer != null) {
           clearT(chatState.deferredFirstEmitTimer)
           chatState.deferredFirstEmitTimer = null
         }
-        process.stderr.write(`telegram gateway: progress-card: fast-turn suppression turnKey=${chatState.turnKey} (turn ended before initialDelayMs=${effectiveDelayMs}ms)\n`)
+        const reason = chatState.replyToolCalled && chatState.state.stage !== 'done' && !forceDone
+          ? `reply-already-sent: final reply delivered before initialDelayMs=${effectiveDelayMs}ms`
+          : `fast-turn: ended before initialDelayMs=${effectiveDelayMs}ms`
+        process.stderr.write(`telegram gateway: progress-card: fast-turn suppression turnKey=${chatState.turnKey} (${reason})\n`)
         emitCardEvent({
           agent: process.env.SWITCHROOM_AGENT_NAME ?? '',
           chatId: chatState.chatId ?? '',
           turnKey: chatState.turnKey,
           event: 'suppressed',
-          reason: `fast-turn: ended before initialDelayMs=${effectiveDelayMs}`,
+          reason,
         })
         return
       }
@@ -1606,6 +1614,20 @@ export function createProgressDriver(config: ProgressDriverConfig): ProgressDriv
           if (!chats.has(capturedTurnKey)) return
           chatState.deferredFirstEmitTimer = DELAY_ELAPSED
           process.stderr.write(`telegram gateway: progress-card: initial-delay timer fired turnKey=${capturedTurnKey}\n`)
+          // Suppress the card if the final reply was already delivered
+          // before the timer fired — posting it now would place it below
+          // the reply in Telegram's message order (send-time ordering).
+          if (chatState.replyToolCalled) {
+            process.stderr.write(`telegram gateway: progress-card: post-reply suppression turnKey=${capturedTurnKey} (reply already sent when initial-delay timer fired)\n`)
+            emitCardEvent({
+              agent: process.env.SWITCHROOM_AGENT_NAME ?? '',
+              chatId: chatState.chatId ?? '',
+              turnKey: capturedTurnKey,
+              event: 'suppressed',
+              reason: 'reply-already-sent: final reply delivered before initial-delay timer fired',
+            })
+            return
+          }
           flush(chatState, false)
         }, remaining)
       }

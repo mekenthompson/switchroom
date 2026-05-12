@@ -242,4 +242,71 @@ The cleaner shape is the new phase. `detectPhase` in `assertions.ts` would gain 
 
 Without the UAT scenarios as regression gates, the next refactor to `progress-card-driver.ts` will silently re-introduce one of these failures. The 2026-05-05 occurrence specifically post-dated PR #720 (which claimed to close #709). The fix without the regression test is a 50/50 bet.
 
+## Progress log
+
+### 2026-05-12 — Phase 3 wave: Bugs 1–5 shipped, Bugs 6–7 surfaced
+
+The TDD scenario from Phase 2 (`bg-sub-agent-dispatch-dm.test.ts`) ran end-to-end and exposed a cascade of issues:
+
+| # | Title | PR | Status |
+|---|---|---|---|
+| 1 | `turn_end` reducer wipes bg pending spawns wholesale | #1057 | ✅ merged |
+| 2 | `subagent-tracker-*.mjs` hooks consult wrong env (no `TELEGRAM_STATE_DIR`) | #1059 | ✅ merged |
+| 3 | Hooks not COPYed into `Dockerfile.agent`; scaffold writes host paths into container settings.json | #1060 | ✅ merged |
+| 4 | CLI socket-resolution ignores `SWITCHROOM_VAULT_BROKER_SOCK` because Zod default makes config look "set" | #1063 | ✅ merged |
+| 5 | `tool_result` reducer wipes bg pending spawns before `sub_agent_started` arrives | #1066 | ✅ merged |
+| 6 | bg sub-agent's `sub_agent_turn_end` never fires → defer-gate never releases → card stuck on 🌀 Background until 30-min heartbeat ceiling | — | **open** |
+| 7 | Driver-side `cs.backgroundParentToolUseIds.has(parentToolUseId)` returns false at `sub_agent_started` time despite tool_use adding it earlier in the same turn → fleet member stays `status: 'running'` instead of `'background'` | — | **open** |
+
+After Bugs 1–5 merged + the agent image rebuilt + apply re-run, **five of six assertions pass** in the UAT scenario:
+
+- ✅ AC-1: card stays pinned past parent reply.
+- ✅ AC-2 negative: header is 🌀 Background (not ✅ Done) while bg runs.
+- ✅ AC-3: card body changes within 6s heartbeat tick.
+- ✅ Correlation: log shows `correlated=yes parentToolUseId=…` instead of pre-fix `correlated=orphan pendingSpawns=0`.
+- ❌ AC-2 positive: card never reaches ✅ Done within 120 s of bg finishing.
+- ⚠ Side-finding: `correlated=1 orphans=0 background=0` — fleet member registered correlated but NOT as background.
+
+### Bug 6 diagnosis
+
+`subagent-watcher` traces in the live run after PR #1060:
+
+```
+subagent-watcher: registering agent a2883d0da9533c3a6
+subagent-watcher: backfill linked a2883d0da9533c3a6 → toolu_013CyQq3Dk6L3EWeopw2F54G
+subagent-watcher: stall detected for a2883d0da9533c3a6 (idle 60s): sub-agent
+```
+
+The watcher saw the bg worker's JSONL, backfilled the DB-row link (Bug 2's fix working), and then *stalled* it at 60 s of idle — NEVER fired `sub_agent_turn_end`. Subsequent log searches confirm no `sub_agent_turn_end` event was ever emitted for this agentId, despite the parent agent reporting "Worker finished" upstream.
+
+The hypothesis: Claude Code's bg `Agent` dispatches write a JSONL that doesn't end with a `sub_agent_turn_end` line — the worker's last line is just the final `sub_agent_tool_result` (or analogous), then the file stops growing. The watcher's terminal-detection logic in `telegram-plugin/subagent-watcher.ts:498` only flips state to `'done'` when it sees an explicit `sub_agent_turn_end` event in the JSONL. With no such line, the worker is forever "running" from the gateway's view; only the 30-min `maxIdleMs` heartbeat ceiling eventually force-closes the card.
+
+Phase 6 fix candidates:
+
+1. **Watcher infers `sub_agent_turn_end` from stall + JSONL-not-growing.** Simplest. After the stall escalation already fires at 60 s, add a follow-up timer (e.g. 30 s post-stall) that synthesises a `sub_agent_turn_end` event for the gateway. Risk: false-positive completion if Claude Code's bg dispatch was genuinely paused and not done.
+2. **Watcher reads the bg dispatch's terminal record from a sibling file** (e.g. `<agentId>.result.json` if Claude Code writes one). Need to verify the on-disk shape Claude Code uses for bg completion.
+3. **Have the parent agent's PostToolUse hook synthesise a `sub_agent_turn_end` event** when an `Agent` tool_use with `run_in_background:true` returns. Different shape; the `tool_result` *is* the dispatch confirmation, and the worker keeps running, so this is wrong — the parent doesn't know when the worker actually finished. Skip.
+
+Recommended: option 1 with a longer post-stall window (e.g. 5 min) so genuinely-paused workers aren't misreported. Tracker issue should reference this RFC section.
+
+### Bug 7 diagnosis
+
+The driver-side `cs.backgroundParentToolUseIds.add(event.toolUseId)` at `progress-card-driver.ts:1833` fires during the `tool_use` event for `Agent(run_in_background:true)`. The check at `:1849` in the `sub_agent_started` case then reads `cs.backgroundParentToolUseIds.has(parentToolUseId)` — and returns FALSE despite the reducer having correctly correlated `parentToolUseId` via Bug 1+5's fixes.
+
+Reading the code paths carefully, the Set should retain entries — there's no `.clear()` or `.delete()`. Both events should route to the same `chatState` via `currentTurnKey`. But the empirical result is that the Set lookup misses. The leading hypotheses:
+
+- The chatState containing the populated Set is being replaced by a fresh one between the tool_use and the late `sub_agent_started` events. Possibly via cross-turn carry-over (`#334`) or zombie-close + new enqueue.
+- `event.input.run_in_background` is a different shape (string vs boolean) than the strict `=== true` check expects — the reducer's matching check fires (log shows `bg=true`) but the driver's identical check might trip on a re-serialized event variant.
+
+Phase 7 fix path: add temporary stderr diagnostic to `updateFleetForEvent` (the patch was prepared mid-session but the live hot-swap was blocked by the auto-mode classifier — operator can deploy it manually). Once the diagnostic prints what the Set contains at `sub_agent_started` time, the right fix should be obvious. Diagnostic patch lives at `git show diag/bg-fleet-flag` (branch was deleted post-session but the commit content is the literal stderr writes around `progress-card-driver.ts:1833` and `:1849`).
+
+Alternative quick fix: derive `isBackgroundDispatch` from the *reducer's* state (e.g. read `pendingAgentSpawn.runInBackground` before the `sub_agent_started` reduce consumes it). That decouples the driver-side Set from the fleet flag entirely.
+
+## Where to pick up next session
+
+1. Reproduce: `bun test telegram-plugin/uat/scenarios/bg-sub-agent-dispatch-dm.test.ts` (after `sed -i 's/describe.skip(/describe(/' …` on the file). Verifies 5/6 still passing.
+2. Bug 6: read a recent bg worker's terminal JSONL; confirm no `sub_agent_turn_end` line is written. Implement option 1 (post-stall terminal synthesis).
+3. Bug 7: deploy the diagnostic stderr patch, capture one bg-dispatch run, read the trace. Pick fix based on what the Set actually contains. Most likely: derive bg-flag from `pendingAgentSpawn.runInBackground` so the driver doesn't need its own Set at all.
+4. When AC-2-positive goes green: drop the `.skip` in the UAT scenario, close #709 / #776 / #782 / #788 with a link to the now-passing test.
+
 TDD inverts that: red test → minimum diff to green → test locks the contract. The 2026-05-07 incident is the test we never wrote.

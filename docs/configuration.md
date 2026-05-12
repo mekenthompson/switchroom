@@ -261,6 +261,30 @@ The broker runs as a `docker compose` singleton service alongside the agent cont
 
 For interactive use — `switchroom vault get key`, `switchroom vault set key`, etc. — the CLI does **not** go through the broker. It reads the vault file directly with your passphrase. The broker's ACL would deny an interactive caller anyway (the bind-time path-as-identity ACL only grants the per-agent UID), and the user already has the passphrase.
 
+#### Approval posture (`vault.broker.approvalAuth`)
+
+When an agent requests vault access via Telegram, the operator gets an inline card with **Approve** / **Deny** buttons. The factor an Approve tap relies on is configurable via `vault.broker.approvalAuth`:
+
+```yaml
+vault:
+  broker:
+    autoUnlock: true
+    approvalAuth: telegram-id   # default: passphrase
+```
+
+| `approvalAuth` | `autoUnlock` | Approve tap result |
+|---|---|---|
+| `passphrase` (default) | either | Prompts for the vault passphrase before minting the grant. **Two-factor**: Telegram identity + passphrase. |
+| `telegram-id` | `true` (required) | Mints immediately with no passphrase prompt. **Single-factor**: Telegram identity only. |
+| `telegram-id` | `false` | Config error at startup — the schema rejects this combination. |
+
+**Threat model.**
+
+- `passphrase` (default): an attacker who compromises the operator's Telegram account still needs the vault passphrase to mint grants. The passphrase never leaves the operator's device → broker → vault path.
+- `telegram-id`: the broker is auto-unlocked at boot and silently holds the passphrase in memory; the only check on an Approve tap is the sender's Telegram user ID matching the allowlist. **An attacker with Telegram account access can mint grants.** Acceptable when (a) the operator has Telegram 2FA enabled, (b) the host is not multi-tenant, and (c) the convenience of zero-friction approvals outweighs the lost factor.
+
+`telegram-id` is fully opt-in — the default behaviour is unchanged, and `switchroom doctor` surfaces the active posture so it's obvious which mode the host is running.
+
 ### Per-skill dependency caches
 
 Skills that need a Python venv or a Node `node_modules` tree get a lazy, hash-stamped cache per skill — no system-level installs, no per-agent duplication.

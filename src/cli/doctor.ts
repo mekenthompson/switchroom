@@ -580,7 +580,98 @@ async function checkHindsight(config: SwitchroomConfig): Promise<CheckResult[]> 
     }
   }
 
+  // Pending-retains queue (#1071). When session_end's final retain
+  // fails it stashes the payload in ~/.hindsight/pending-retains/ so
+  // the next SessionStart can drain it. A non-empty queue is normal in
+  // flight, but persistent backlog (or any .dead markers) means
+  // operator attention.
+  results.push(checkPendingRetainsQueue());
+
   return results;
+}
+
+/**
+ * Probe ``~/.hindsight/pending-retains/`` and report:
+ *   ok    — directory missing or empty
+ *   warn  — entries present but none marked dead (will retry on next session)
+ *   fail  — at least one ``.dead`` marker (gave up after MAX_ATTEMPTS) OR
+ *           queue at/over the bounded cap (chronic backlog)
+ *
+ * Exported for unit testing.
+ * @internal
+ */
+export function checkPendingRetainsQueue(
+  dir?: string,
+): CheckResult {
+  // Same default as lib/pending.py: $HOME/.hindsight/pending-retains/.
+  const home = process.env.HOME ?? "";
+  const pendingDir =
+    dir
+    ?? process.env.HINDSIGHT_PENDING_DIR
+    ?? join(home, ".hindsight", "pending-retains");
+
+  if (!existsSync(pendingDir)) {
+    return {
+      name: "pending-retains queue",
+      status: "ok",
+      detail: "empty (no failed retains)",
+    };
+  }
+
+  let names: string[];
+  try {
+    names = readdirSync(pendingDir);
+  } catch (err) {
+    return {
+      name: "pending-retains queue",
+      status: "warn",
+      detail: `unreadable: ${(err as Error).message}`,
+    };
+  }
+
+  const pending = names.filter((n) => n.endsWith(".json"));
+  const dead = names.filter((n) => n.endsWith(".json.dead"));
+
+  // Keep in sync with MAX_ENTRIES in lib/pending.py.
+  const MAX_ENTRIES = 1000;
+
+  if (dead.length > 0) {
+    return {
+      name: "pending-retains queue",
+      status: "fail",
+      detail:
+        `${dead.length} dead entries (gave up after retries), ${pending.length} still queued`,
+      fix:
+        `Hindsight has been unreachable long enough that retries gave up. `
+        + `Inspect ~/.hindsight/pending-retains/*.json.dead, fix the upstream, `
+        + `then re-enqueue manually (rename .dead → .json) or discard.`,
+    };
+  }
+
+  if (pending.length >= MAX_ENTRIES) {
+    return {
+      name: "pending-retains queue",
+      status: "fail",
+      detail: `${pending.length} entries (queue at cap of ${MAX_ENTRIES}, dropping new failures)`,
+      fix:
+        `Chronic retain failures. Bring Hindsight up, run `
+        + `\`python3 ~/.claude/plugins/.../scripts/drain_pending.py\`, then re-check.`,
+    };
+  }
+
+  if (pending.length > 0) {
+    return {
+      name: "pending-retains queue",
+      status: "warn",
+      detail: `${pending.length} queued (will retry on next SessionStart)`,
+    };
+  }
+
+  return {
+    name: "pending-retains queue",
+    status: "ok",
+    detail: "empty (no failed retains)",
+  };
 }
 
 /**

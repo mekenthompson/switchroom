@@ -1,10 +1,29 @@
 #!/usr/bin/env python3
-"""SessionEnd hook: daemon cleanup.
+"""SessionEnd hook: final retain + daemon cleanup.
 
-Fires once when a Claude Code session terminates. If the plugin
-auto-started a hindsight-embed daemon, this is where we stop it.
+Fires once when a Claude Code session terminates. Two jobs:
 
-Port of: Openclaw's service.stop() in index.js
+1. **Final retain.** Forces a retain pass so short sessions (fewer
+   turns than ``retainEveryNTurns``) still land on disk.
+2. **Daemon stop.** Tears down the auto-started hindsight-embed
+   daemon, if any.
+
+Silent data-loss guard (#1071)
+------------------------------
+Before this change the final retain would print its error to stderr
+and exit 0 — the operator sees nothing in journald (already noisy),
+the agent thinks the turn was saved, the *next* session can't recall
+the turn. Silent memory loss.
+
+Now: on retain failure we serialize the full retain payload to
+``~/.hindsight/pending-retains/<unix-ms>-<uuid>.json`` (see
+``lib/pending.py``) and exit non-zero so ``bin/run-hook.sh`` routes
+the failure through the ``switchroom issues`` sink (#424). The next
+SessionStart drains the queue (see ``drain_pending.py``).
+
+Pairs with #1070 (recall.py exit-code fix) — same threat class.
+
+Port of: Openclaw's service.stop() in index.js.
 """
 
 import json
@@ -15,9 +34,19 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from lib.config import debug_log, load_config
 from lib.daemon import stop_daemon
+from lib.pending import MAX_ENTRIES, count as pending_count, enqueue as pending_enqueue
 
 
-def main():
+# Exit codes:
+#   0 — success (or retain skipped for benign reasons)
+#   1 — retain failed AND was queued to pending-retains (recoverable)
+#   2 — retain failed AND the queue rejected it (chronic backlog)
+EXIT_OK = 0
+EXIT_QUEUED = 1
+EXIT_DROPPED = 2
+
+
+def main() -> int:
     config = load_config()
 
     # Consume stdin
@@ -28,25 +57,66 @@ def main():
 
     debug_log(config, f"SessionEnd hook, reason: {hook_input.get('reason', 'unknown')}")
 
+    exit_code = EXIT_OK
+
     # Force a final retain before stopping the daemon — guarantees short sessions
     # (fewer turns than retainEveryNTurns) still land on disk.
     if config.get("autoRetain") and hook_input.get("transcript_path"):
         try:
             from retain import run_retain
-            run_retain(hook_input, force=True)
-        except Exception as e:
-            print(f"[Hindsight] SessionEnd final retain error: {e}", file=sys.stderr)
 
-    # Stop daemon if we started it
+            result = run_retain(hook_input, force=True) or {}
+        except Exception as e:
+            # Belt-and-braces — run_retain itself shouldn't raise, but
+            # if it does we treat it the same as a failed POST: queue
+            # what we can (nothing, since we have no payload) and exit
+            # non-zero so the issue sink picks it up.
+            print(f"[Hindsight] SessionEnd final retain error: {e}", file=sys.stderr)
+            result = {"status": "failed", "error": e, "payload": None}
+
+        if result.get("status") == "failed":
+            payload = result.get("payload")
+            err = result.get("error") or RuntimeError("unknown retain failure")
+            if payload:
+                queued = pending_enqueue(payload, err)
+                if queued is None:
+                    print(
+                        f"[Hindsight] pending-retains queue full ({MAX_ENTRIES} entries); "
+                        f"dropping this retain. Operator: drain manually, then run "
+                        f"`switchroom doctor`.",
+                        file=sys.stderr,
+                    )
+                    exit_code = EXIT_DROPPED
+                else:
+                    debug_log(config, f"SessionEnd retain queued to {queued} (pending={pending_count()})")
+                    print(
+                        f"[Hindsight] SessionEnd retain failed: queued to pending-retains "
+                        f"(error: {type(err).__name__}: {err}). Will retry on next "
+                        f"SessionStart.",
+                        file=sys.stderr,
+                    )
+                    exit_code = EXIT_QUEUED
+            else:
+                # No payload to queue — the failure happened before we
+                # finished building one (e.g. URL resolution).
+                exit_code = EXIT_QUEUED
+
+    # Stop daemon if we started it. Always runs, even on retain failure,
+    # so we don't leak a daemon process.
     def _dbg(*a):
         debug_log(config, *a)
 
     stop_daemon(config, debug_fn=_dbg)
+    return exit_code
 
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except Exception as e:
         print(f"[Hindsight] SessionEnd error: {e}", file=sys.stderr)
-        sys.exit(0)
+        # Surface the unexpected failure to the issue sink rather than
+        # swallowing it (per #424). Stays non-zero in both debug and
+        # non-debug paths so the recall.py-style silent-failure trap
+        # (#1070) doesn't recur here.
+        sys.exit(2)

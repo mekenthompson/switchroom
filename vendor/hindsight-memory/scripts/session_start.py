@@ -46,10 +46,26 @@ def main():
         debug_log(config, f"Hindsight server reachable at {api_url}")
     except (RuntimeError, ValueError) as e:
         # Server not running — kick off background pre-start so it's ready
-        # by the time the first recall or retain hook fires.
+        # by the time the first recall or retain hook fires. Skip the
+        # drain here: with no server to talk to, every retry would just
+        # bump attempt counters and burn the SessionStart budget.
         debug_log(config, f"Hindsight not running, initiating background pre-start: {e}")
         prestart_daemon_background(config, debug_fn=_dbg)
         return
+
+    # Drain any retains that session_end.py queued on failure (#1071).
+    # Bounded by HINDSIGHT_DRAIN_BUDGET_S so a slow upstream can't pin
+    # the SessionStart hook. The drain is best-effort — failures stay
+    # queued for the next session, dead entries surface via
+    # `switchroom doctor`.
+    try:
+        from drain_pending import drain as drain_pending_retains
+
+        drain_pending_retains(config)
+    except Exception as e:
+        # Never let the drain break session start. Issue sink picks
+        # this up via run-hook.sh — see exit-code path in __main__.
+        debug_log(config, f"drain_pending unexpected error (ignored): {e}")
 
 
 if __name__ == "__main__":

@@ -21,6 +21,70 @@ import type { AgentConfig, QuotaConfig, SwitchroomConfig, TelegramConfig } from 
 
 // Repo root for referencing bin/ scripts in hooks
 const REPO_ROOT = resolve(import.meta.dirname, "../..");
+
+/**
+ * Primer the agent reads on every session boot so it knows it's running
+ * in a switchroom container with `read_only: true` rootfs and a fixed
+ * set of writable mounts. When the agent later hits an EROFS or
+ * "Read-only file system" error, this primer is what lets it produce a
+ * clear "I tried X, that's read-only because of <reason>; operator
+ * action needed" reply instead of either silently retrying or echoing
+ * the raw kernel error to the user.
+ *
+ * Kept in lockstep across the two `systemPromptAppendShellQuoted`
+ * call sites in this file — extracting to a top-level constant
+ * prevents drift the way the prior duplication of telegramGuidance +
+ * memoryGuidance did not.
+ *
+ * Why this string lives here and not in profiles/_base/*.hbs:
+ *   - The .hbs files are written to disk per-agent and operator-
+ *     editable; the sandbox primer is non-negotiable runtime context
+ *     and shouldn't get accidentally diverged per agent.
+ *   - Append-system-prompt is cache-friendly: same content every
+ *     session boot means the model's KV cache hits warm.
+ */
+const SANDBOX_GUIDANCE = `## Sandbox: you're running in a switchroom container
+
+Your container has \`read_only: true\` rootfs. Most paths are read-only.
+
+### Writable
+- \`/tmp\` — 256 MB tmpfs, ephemeral (gone on restart).
+- \`$HOME\` (\`/state/agent/home\`) — persistent across restarts. \`npm\`,
+  \`pip\`, \`git config --global\`, shell history, ssh keys all already
+  configured to write here (\`NPM_CONFIG_PREFIX\`, \`PIP_USER=1\`, etc).
+- \`/state/agent/**\` — your persistent agent dir.
+- \`/var/log/switchroom\` — your log dir.
+
+### Read-only (and why)
+- \`/\`, \`/opt\`, \`/usr\`, \`/etc\`, \`/bin\`, \`/lib\` — rootfs hardening.
+- \`~/.switchroom/skills/**\` — shared skill files; operator-owned.
+- \`~/.switchroom/credentials/**\` — secrets; immutable from your view.
+- \`/state/config/switchroom.yaml\` — fleet config; operator-owned.
+
+### When you hit "read-only file system" / EROFS
+
+This is **the sandbox working as intended**, not a bug. Don't retry the
+same write. Don't apologise vaguely. Instead:
+
+1. Recognise the signal: \`EROFS\`, "Read-only file system", "permission
+   denied" on a path under \`/opt\`, \`/usr\`, \`/etc\`, or
+   \`~/.switchroom/{skills,credentials}\`.
+2. Tell the user in plain language what you tried and why the sandbox
+   blocked it.
+3. Suggest the right path: a writable alternative if your goal is
+   reachable that way, or explicit operator action otherwise.
+
+Example response shapes:
+
+- "I tried to edit \`~/.switchroom/skills/foo/script.sh\` — that's
+  mounted read-only from my view. **Operator action**: edit it on the
+  host, then \`switchroom apply\` to re-scaffold."
+- "I wanted to \`apt install <pkg>\`. My container's rootfs is read-only
+  and I'm not root. **Operator action**: add the package to
+  \`docker/Dockerfile.agent\` and rebuild the agent image."
+- "I tried to clone into \`/workspace\` — that path doesn't exist in my
+  sandbox. Cloning into \`$HOME/workspace\` instead."`;
+
 import { DEFAULT_PROFILE } from "../config/schema.js";
 import {
   resolveAgentConfig,
@@ -1510,7 +1574,7 @@ When the user asks "what do you know about X / me", "what do you remember about 
 Don't wait for a slash command. Don't ask permission. Memory work is table stakes, like a colleague who takes notes and remembers.`;
 
       if (useSwitchroomPlugin) {
-        const parts = [baseAppend, telegramGuidance, memoryGuidance].filter(s => s.length > 0);
+        const parts = [baseAppend, telegramGuidance, memoryGuidance, SANDBOX_GUIDANCE].filter(s => s.length > 0);
         const combined = parts.join('\n\n---\n\n');
         return shellSingleQuote(combined);
       }
@@ -3019,7 +3083,7 @@ When the user asks "what do you know about X / me", "what do you remember about 
 
 Don't wait for a slash command. Don't ask permission. Memory work is table stakes, like a colleague who takes notes and remembers.`;
         if (useSwitchroomPlugin) {
-          const parts = [baseAppend, telegramGuidance, memoryGuidance].filter(s => s.length > 0);
+          const parts = [baseAppend, telegramGuidance, memoryGuidance, SANDBOX_GUIDANCE].filter(s => s.length > 0);
           const combined = parts.join('\n\n---\n\n');
           return shellSingleQuote(combined);
         }

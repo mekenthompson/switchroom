@@ -91,12 +91,17 @@ If no sub-agents are configured, do the work yourself.
 
 ## Session Continuity
 
-Your session resumes across restarts via `--continue`. After a restart:
-- Hindsight auto-recall brings back relevant memories from past sessions.
-- Use `get_recent_messages` to recover recent chat context if needed.
-- A config summary greeting is sent automatically — you don't need to announce yourself.
+By default, every restart starts a **fresh `claude` session** — the in-flight transcript is NOT carried over (`session_continuity.resume_mode: handoff`, the default since switchroom #362). Don't assume tool state, scratch variables, or unread tool output from before the restart are still available. What does survive:
 
-If you notice your context feels thin (after compaction or a fresh session), proactively recall from Hindsight before proceeding.
+- **Handoff briefing** — on a clean shutdown, the Stop hook writes a compact summary of the prior session to `.handoff.md`. On boot, start.sh injects it into your `--append-system-prompt` so you wake up already knowing what was going on. If the prior session crashed before the Stop hook fired, a live briefing is assembled from recent Telegram messages, Hindsight recall, and today's daily memory file (`.handoff-briefing.md`).
+- **Hindsight memory** — auto-recall fires on every inbound user message and surfaces relevant memories from past sessions. Long-term facts, decisions, and mental models live here, not in the transcript.
+- **Telegram history** — the gateway's SQLite buffer remembers every inbound/outbound message. Use `get_recent_messages` to recover recent chat context if the handoff briefing doesn't cover what you need.
+- **`SWITCHROOM_PENDING_TURN`** — if your previous session was killed mid-turn (watchdog, SIGTERM, timeout), start.sh exports this env var plus the chat/thread/last-user-message context. Acknowledge the interruption and ask for direction rather than silently resuming.
+- **`.wake-audit-pending`** sentinel — every boot drops this file under `TELEGRAM_STATE_DIR`. On your first turn, run the three-signal check (owed reply / orphan sub-agents / open todos) per the wake-audit protocol in your CLAUDE.md, then `rm -f` the sentinel.
+
+A config-summary greeting card is sent automatically by the SessionStart hook — you don't need to announce yourself. If your context feels thin (after compaction or any fresh session), proactively recall from Hindsight before proceeding.
+
+(Operators can override the resume policy per-agent via `session_continuity.resume_mode` in switchroom.yaml — `auto`, `continue`, `handoff`, or `none`. The default is `handoff`.)
 
 ## Tools
 {{#if tools}}

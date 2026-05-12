@@ -701,7 +701,98 @@ async function checkHindsight(config: SwitchroomConfig): Promise<CheckResult[]> 
     }
   }
 
+  // Pending-retains queue (#1071). When session_end's final retain
+  // fails it stashes the payload in ~/.hindsight/pending-retains/ so
+  // the next SessionStart can drain it. A non-empty queue is normal in
+  // flight, but persistent backlog (or any .dead markers) means
+  // operator attention.
+  results.push(checkPendingRetainsQueue());
+
   return results;
+}
+
+/**
+ * Probe ``~/.hindsight/pending-retains/`` and report:
+ *   ok    — directory missing or empty
+ *   warn  — entries present but none marked dead (will retry on next session)
+ *   fail  — at least one ``.dead`` marker (gave up after MAX_ATTEMPTS) OR
+ *           queue at/over the bounded cap (chronic backlog)
+ *
+ * Exported for unit testing.
+ * @internal
+ */
+export function checkPendingRetainsQueue(
+  dir?: string,
+): CheckResult {
+  // Same default as lib/pending.py: $HOME/.hindsight/pending-retains/.
+  const home = process.env.HOME ?? "";
+  const pendingDir =
+    dir
+    ?? process.env.HINDSIGHT_PENDING_DIR
+    ?? join(home, ".hindsight", "pending-retains");
+
+  if (!existsSync(pendingDir)) {
+    return {
+      name: "pending-retains queue",
+      status: "ok",
+      detail: "empty (no failed retains)",
+    };
+  }
+
+  let names: string[];
+  try {
+    names = readdirSync(pendingDir);
+  } catch (err) {
+    return {
+      name: "pending-retains queue",
+      status: "warn",
+      detail: `unreadable: ${(err as Error).message}`,
+    };
+  }
+
+  const pending = names.filter((n) => n.endsWith(".json"));
+  const dead = names.filter((n) => n.endsWith(".json.dead"));
+
+  // Keep in sync with MAX_ENTRIES in lib/pending.py.
+  const MAX_ENTRIES = 1000;
+
+  if (dead.length > 0) {
+    return {
+      name: "pending-retains queue",
+      status: "fail",
+      detail:
+        `${dead.length} dead entries (gave up after retries), ${pending.length} still queued`,
+      fix:
+        `Hindsight has been unreachable long enough that retries gave up. `
+        + `Inspect ~/.hindsight/pending-retains/*.json.dead, fix the upstream, `
+        + `then re-enqueue manually (rename .dead → .json) or discard.`,
+    };
+  }
+
+  if (pending.length >= MAX_ENTRIES) {
+    return {
+      name: "pending-retains queue",
+      status: "fail",
+      detail: `${pending.length} entries (queue at cap of ${MAX_ENTRIES}, dropping new failures)`,
+      fix:
+        `Chronic retain failures. Bring Hindsight up, run `
+        + `\`python3 ~/.claude/plugins/.../scripts/drain_pending.py\`, then re-check.`,
+    };
+  }
+
+  if (pending.length > 0) {
+    return {
+      name: "pending-retains queue",
+      status: "warn",
+      detail: `${pending.length} queued (will retry on next SessionStart)`,
+    };
+  }
+
+  return {
+    name: "pending-retains queue",
+    status: "ok",
+    detail: "empty (no failed retains)",
+  };
 }
 
 /**
@@ -1031,6 +1122,119 @@ export function checkLeakedHomeSwitchroom(
       `      The symlink target ($HOME/.switchroom → host's ~/.switchroom) ` +
       `regenerates on next start.sh exec.`,
   };
+}
+
+/**
+ * Hygiene probe for the switchroom git checkout itself (#1072).
+ *
+ * The original OpenClaw export bundle (`clerk-export/`) and its tarball
+ * carry real secrets. They're gitignored, so they can't reach a commit,
+ * but they sit on disk in the repo root and are exposed to any tool that
+ * scans the working tree (backups, grep, "send my repo to X" workflows).
+ *
+ * The proper fix is to migrate the bundle into the vault and delete the
+ * on-disk copies (see `scripts/migrate-clerk-export-to-vault.sh`). This
+ * check surfaces the residual on-disk state so an operator who skipped
+ * the migration script — or restored an old worktree — sees a clear
+ * warning.
+ *
+ * Scope: only meaningful when doctor runs from inside a switchroom
+ * checkout. The caller is expected to skip this section if `repoRoot`
+ * isn't a switchroom repo.
+ */
+export function checkRepoHygiene(repoRoot: string): CheckResult[] {
+  const results: CheckResult[] = [];
+
+  // 1. Directory: `clerk-export/`
+  const exportDir = join(repoRoot, "clerk-export");
+  if (existsSync(exportDir)) {
+    results.push({
+      name: "repo hygiene: clerk-export/ on disk (#1072)",
+      status: "warn",
+      detail:
+        `${exportDir} contains real secrets exported from OpenClaw. ` +
+        `Gitignored, so it can't be committed, but it's still readable ` +
+        `by any tool that scans the working tree.`,
+      fix:
+        `Run scripts/migrate-clerk-export-to-vault.sh to move the bundle ` +
+        `into the vault, then delete the on-disk copy.`,
+    });
+  }
+
+  // 2. Tarball: known name + glob for any *-with-secrets*.tar.gz at repo root
+  const knownTarball = join(repoRoot, "clerk-export-with-secrets.tar.gz");
+  if (existsSync(knownTarball)) {
+    results.push({
+      name: "repo hygiene: clerk-export-with-secrets.tar.gz on disk (#1072)",
+      status: "warn",
+      detail:
+        `${knownTarball} is a sealed copy of the OpenClaw secret bundle. ` +
+        `Gitignored, but persists on disk.`,
+      fix:
+        `Run scripts/migrate-clerk-export-to-vault.sh (handles the tarball ` +
+        `too) then 'trash' or 'rm' the file.`,
+    });
+  }
+
+  // 3. Glob: any *-with-secrets*.tar.gz at repo root that wasn't the known one
+  try {
+    const entries = readdirSync(repoRoot);
+    for (const name of entries) {
+      if (name === "clerk-export-with-secrets.tar.gz") continue; // already reported
+      // `[^/]*` rather than `.*` — `readdirSync` always returns
+      // basenames (no path separators) so the two are functionally
+      // equivalent today, but pinning out `/` makes the intent
+      // obvious and forecloses the false-positive shape (`weird-
+      // with-secrets/anything.tar.gz` as a single readdir entry)
+      // if this regex ever migrates to a non-`readdirSync` caller.
+      if (/-with-secrets[^/]*\.tar\.gz$/i.test(name)) {
+        results.push({
+          name: `repo hygiene: ${name} on disk (#1072)`,
+          status: "warn",
+          detail:
+            `${join(repoRoot, name)} matches the *-with-secrets*.tar.gz ` +
+            `pattern. Likely contains real credentials.`,
+          fix:
+            `Inspect, migrate any secrets into the vault, then delete the ` +
+            `archive.`,
+        });
+      }
+    }
+  } catch {
+    // Unreadable repo root — surface as a warning rather than crash.
+    results.push({
+      name: "repo hygiene: scan failed (#1072)",
+      status: "warn",
+      detail: `could not enumerate ${repoRoot} for *-with-secrets*.tar.gz`,
+    });
+  }
+
+  if (results.length === 0) {
+    results.push({
+      name: "repo hygiene: clerk-export bundle (#1072)",
+      status: "ok",
+      detail: "no clerk-export/ or *-with-secrets*.tar.gz at repo root",
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Heuristic: does this directory look like a switchroom git checkout?
+ * Used to gate `checkRepoHygiene` so doctor running from a random cwd
+ * on a non-developer host doesn't emit a noisy "ok" line.
+ */
+export function isSwitchroomCheckout(dir: string): boolean {
+  try {
+    if (!existsSync(join(dir, ".git"))) return false;
+    const pkgPath = join(dir, "package.json");
+    if (!existsSync(pkgPath)) return false;
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { name?: string };
+    return pkg.name === "switchroom";
+  } catch {
+    return false;
+  }
 }
 
 export function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[] {
@@ -1859,6 +2063,17 @@ export function registerDoctorCommand(program: Command): void {
           { title: "Docker (Phase 1a)", results: runDockerSection(config) },
           { title: "MFF Skill", results: await checkMff(passphrase, vaultPath) },
         ];
+
+        // Repo Hygiene (#1072): only when doctor runs from a switchroom
+        // checkout. On a consumer host this section is silent — the
+        // probe is for the developer/operator who has the source tree.
+        const cwd = process.cwd();
+        if (isSwitchroomCheckout(cwd)) {
+          sections.push({
+            title: "Repo Hygiene",
+            results: checkRepoHygiene(cwd),
+          });
+        }
 
         if (opts.json) {
           console.log(

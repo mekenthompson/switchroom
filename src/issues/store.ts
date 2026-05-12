@@ -51,6 +51,7 @@ import {
   type IssueSeverity,
 } from "./types.js";
 import { computeFingerprint } from "./fingerprint.js";
+import { redact } from "../secret-detect/redact.js";
 
 export const ISSUES_FILE = "issues.jsonl";
 export const ISSUES_LOCK = "issues.lock";
@@ -455,14 +456,33 @@ function sleepSync(ms: number): void {
 }
 
 function capSummary(s: string): string {
-  if (s.length <= SUMMARY_MAX_CHARS) return s;
-  return s.slice(0, SUMMARY_MAX_CHARS - 1) + "…";
+  // Run the redactor on summary too (defense-in-depth for future
+  // programmatic callers — #1069 review feedback). The canonical
+  // hook-side caller (`bin/run-hook.sh:record_failure`) constructs
+  // summary as `"<source>: <code> exited <status>"` from bash-
+  // controlled variables, so this is a no-op on that path. But the
+  // store API doesn't promise that, and a gateway-side caller that
+  // synthesizes a summary from a user-bearing string would otherwise
+  // leak via the same surface.
+  const safe = redact(s);
+  if (safe.length <= SUMMARY_MAX_CHARS) return safe;
+  return safe.slice(0, SUMMARY_MAX_CHARS - 1) + "…";
 }
 
 function capDetail(s: string | undefined): string | undefined {
   if (s == null) return undefined;
-  const buf = Buffer.from(s, "utf-8");
-  if (buf.byteLength <= DETAIL_MAX_BYTES) return s;
+  // Defense-in-depth: run the redactor before any other transform.
+  // `bin/run-hook.sh` already pipes hook stderr through
+  // `switchroom secret-detect redact --stdin` before sending it here
+  // (#1069), but a future caller — e.g. a programmatic `record()` from
+  // the gateway, an internal cron path, a third-party script — might
+  // forget. The redactor is idempotent and cheap, so the second pass
+  // is harmless on already-redacted text and load-bearing for the
+  // bypass case. This is the single chokepoint that protects the
+  // issues.jsonl → Telegram surface.
+  const safe = redact(s);
+  const buf = Buffer.from(safe, "utf-8");
+  if (buf.byteLength <= DETAIL_MAX_BYTES) return safe;
   // Truncate to byte budget and decode, dropping any partial multi-byte
   // codepoint at the boundary.
   return buf.subarray(0, DETAIL_MAX_BYTES).toString("utf-8") + "…";

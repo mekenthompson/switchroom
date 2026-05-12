@@ -16,24 +16,31 @@ Every turn includes fixed-cost components:
 
 Switchroom agents have three mechanisms that survive restarts and compaction:
 
-1. **Claude Code session** — `--continue` resumes the full conversation. Configurable freshness via `session.max_idle` and `session.max_turns` in switchroom.yaml.
+1. **Handoff briefing** — the default since switchroom #362. Every restart starts a **fresh** `claude` session; a compact summary of the prior session (written to `<agentDir>/.handoff.md` by the Stop hook) plus a live briefing assembled from recent Telegram messages, Hindsight recall, and today's daily memory file (`<agentDir>/.handoff-briefing.md`) is merged into `--append-system-prompt` so the new session wakes up oriented. The full transcript is *not* replayed.
 
-2. **Hindsight memory** — auto-retain fires every 10 turns, saving the full transcript to a semantic bank. Auto-recall fires every turn, bringing back relevant memories. Important facts survive compaction because they're stored externally.
+   To opt into transcript-replay continuity instead, set `session_continuity.resume_mode` per agent in switchroom.yaml:
 
-3. **Telegram history** — SQLite buffer of every inbound/outbound message. `get_recent_messages` lets the agent recover chat context after a restart.
+   - `handoff` — default. Fresh session every restart, briefing injected.
+   - `auto` — pass `--continue` only when the JSONL transcript exists, is under the size cap (`session_continuity.resume_max_bytes`, default 2 MB), and is fresher than `session.max_idle` (default 7 days).
+   - `continue` — always pass `--continue`. Flaky on large transcripts; only use if you know your sessions stay small.
+   - `none` — fresh every time, no briefing.
+
+2. **Hindsight memory** — auto-retain fires every 10 turns, saving the full transcript to a semantic bank. Auto-recall fires every turn, bringing back relevant memories. Important facts survive compaction and restart because they're stored externally.
+
+3. **Telegram history** — SQLite buffer of every inbound/outbound message. `get_recent_messages` lets the agent recover recent chat context after a restart, regardless of resume mode.
 
 ## Session Freshness Policy
 
-Configure automatic fresh-session boundaries in switchroom.yaml:
+`session.max_idle` and `session.max_turns` are the freshness knobs in switchroom.yaml:
 
 ```yaml
 defaults:
   session:
-    max_idle: 2h      # fresh session after 2h of inactivity
-    max_turns: 50     # fresh session after 50 user turns
+    max_idle: 2h      # under resume_mode: auto, force fresh after 2h of inactivity
+    max_turns: 50     # rotate to a fresh session after 50 user turns
 ```
 
-At startup, the agent checks the previous session's last-modified time and turn count. If either threshold is exceeded, it starts a fresh session instead of resuming. Hindsight auto-recall brings back relevant context automatically.
+In `auto` mode the boot check inspects the previous session's last-modified time and turn count and decides whether to pass `--continue`. In `handoff` mode (the default) every restart is fresh by construction; `session.max_idle` does not gate `--continue` because `--continue` is never passed. Hindsight auto-recall brings back relevant context regardless of mode.
 
 ## Sub-Agent Cost Optimization
 

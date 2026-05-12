@@ -69,12 +69,27 @@ def read_transcript(transcript_path: str) -> list:
     return messages
 
 
-def run_retain(hook_input: dict, force: bool = False) -> None:
+def run_retain(hook_input: dict, force: bool = False) -> dict:
+    """Run the auto-retain flow.
+
+    Returns a status dict::
+
+        {"status": "ok" | "skipped" | "failed",
+         "payload": {...},   # only when status == "failed"
+         "error":   Exception}  # only when status == "failed"
+
+    The ``payload`` field carries the exact arguments that were going to
+    be sent to ``client.retain()`` plus the resolved ``api_url`` /
+    ``api_token`` — sufficient to retry the call from a different
+    process (the SessionStart drainer, see ``drain_pending.py`` and
+    ``lib/pending.py``). ``status="skipped"`` is the normal early-exit
+    cases (auto-retain disabled, empty transcript, throttled chunk).
+    """
     config = load_config()
 
     if not config.get("autoRetain"):
         debug_log(config, "Auto-retain disabled, exiting")
-        return
+        return {"status": "skipped", "reason": "autoRetain disabled"}
 
     debug_log(config, f"Retain hook_input keys: {list(hook_input.keys())} force={force}")
 
@@ -85,7 +100,7 @@ def run_retain(hook_input: dict, force: bool = False) -> None:
     all_messages = read_transcript(transcript_path)
     if not all_messages:
         debug_log(config, "No messages in transcript, skipping retain")
-        return
+        return {"status": "skipped", "reason": "empty transcript"}
 
     debug_log(config, f"Read {len(all_messages)} messages from transcript")
 
@@ -101,7 +116,7 @@ def run_retain(hook_input: dict, force: bool = False) -> None:
         if turn_count % retain_every_n != 0:
             next_at = ((turn_count // retain_every_n) + 1) * retain_every_n
             debug_log(config, f"Turn {turn_count}/{retain_every_n}, skipping retain (next at turn {next_at})")
-            return
+            return {"status": "skipped", "reason": "throttled"}
 
     if retain_mode == "chunked" and retain_every_n > 1:
         # Sliding window: N turns + configured overlap
@@ -127,7 +142,7 @@ def run_retain(hook_input: dict, force: bool = False) -> None:
 
     if not transcript:
         debug_log(config, "Empty transcript after formatting, skipping retain")
-        return
+        return {"status": "skipped", "reason": "empty transcript after formatting"}
 
     # Resolve API URL
     def _dbg(*a):
@@ -137,14 +152,14 @@ def run_retain(hook_input: dict, force: bool = False) -> None:
         api_url = get_api_url(config, debug_fn=_dbg, allow_daemon_start=True)
     except RuntimeError as e:
         print(f"[Hindsight] {e}", file=sys.stderr)
-        return
+        return {"status": "failed", "error": e, "payload": None}
 
     api_token = config.get("hindsightApiToken")
     try:
         client = HindsightClient(api_url, api_token)
     except ValueError as e:
         print(f"[Hindsight] Invalid API URL: {e}", file=sys.stderr)
-        return
+        return {"status": "failed", "error": e, "payload": None}
 
     # Derive bank ID and ensure mission
     bank_id = derive_bank_id(hook_input, config)
@@ -216,20 +231,37 @@ def run_retain(hook_input: dict, force: bool = False) -> None:
     if tags:
         debug_log(config, f"Tags: {tags}")
 
+    # Build the full payload up-front so we can hand it to the pending-
+    # retains queue verbatim if the POST fails. The payload mirrors the
+    # client.retain() kwargs plus connection info (api_url, api_token)
+    # so the drainer can reconstruct the call from a different process.
+    payload = {
+        "api_url": api_url,
+        "api_token": api_token,
+        "bank_id": bank_id,
+        "content": transcript,
+        "document_id": document_id,
+        "context": config.get("retainContext", "claude-code"),
+        "metadata": metadata,
+        "tags": tags,
+    }
+
     # POST to Hindsight retain API
     try:
         response = client.retain(
             bank_id=bank_id,
             content=transcript,
             document_id=document_id,
-            context=config.get("retainContext", "claude-code"),
+            context=payload["context"],
             metadata=metadata,
             tags=tags,
             timeout=15,
         )
         debug_log(config, f"Retain response: {json.dumps(response)[:200]}")
+        return {"status": "ok", "response": response}
     except Exception as e:
         print(f"[Hindsight] Retain failed: {e}", file=sys.stderr)
+        return {"status": "failed", "error": e, "payload": payload}
 
 
 def main():

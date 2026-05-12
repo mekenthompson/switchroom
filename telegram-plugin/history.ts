@@ -195,6 +195,69 @@ export function _resetForTests(): void {
   }
 }
 
+/**
+ * Issue a WAL checkpoint on the history DB, releasing `*.db-wal` pages
+ * back to the main DB and truncating the WAL file. Called by the
+ * gateway's periodic reaper so the WAL doesn't grow unbounded in
+ * long-running agent sessions (issue #1073).
+ *
+ * Wrapped in try/catch — `PRAGMA wal_checkpoint(TRUNCATE)` can return
+ * SQLITE_BUSY under reader pressure, which bun:sqlite raises as a thrown
+ * error. That's non-fatal; the next reaper tick retries. Returns true
+ * on success, false on a swallowed error.
+ *
+ * No-op (returns false) if `initHistory` was never called.
+ */
+export function checkpointWal(): boolean {
+  if (db == null) return false
+  try {
+    db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').run()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Prune `messages` rows older than `retentionDays`. Used by the periodic
+ * reaper (#1073) to catch the case where the gateway runs for weeks or
+ * months — the init-time prune only fires once at boot.
+ *
+ * Returns the number of rows deleted (sum across all batches). No-op
+ * if `retentionDays <= 0` or if `initHistory` was never called.
+ *
+ * Batched to keep transactions short; otherwise a years-old DB on first
+ * boot after an upgrade would lock the inbound write path for the duration
+ * of a single multi-million-row DELETE. Uses the rowid-subselect form
+ * because bun:sqlite is built without SQLITE_ENABLE_UPDATE_DELETE_LIMIT
+ * (same constraint as reaper.ts).
+ */
+export function pruneMessagesOlderThanDays(
+  retentionDays: number,
+  nowSec?: number,
+  batchLimit = 5000,
+): number {
+  if (db == null) return 0
+  if (retentionDays <= 0) return 0
+  const cutoffSec = (nowSec ?? Math.floor(Date.now() / 1000)) - retentionDays * 86400
+  const stmt = db.prepare(`
+    DELETE FROM messages
+    WHERE rowid IN (
+      SELECT rowid FROM messages WHERE ts < ? LIMIT ?
+    )
+  `)
+  let total = 0
+  // Same defence-in-depth ceiling as reaper.ts — caps a single call at
+  // 5M rows at the default batch size, more than any healthy fleet.
+  for (let i = 0; i < 1000; i++) {
+    const result = stmt.run(cutoffSec, batchLimit) as { changes: number }
+    const n = result.changes ?? 0
+    total += n
+    if (n === 0) break
+  }
+  return total
+}
+
 function requireDb(): SqliteDatabase {
   if (db == null) {
     throw new Error('history: initHistory() must be called before any record/query operation')

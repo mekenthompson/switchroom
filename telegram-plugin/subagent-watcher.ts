@@ -40,7 +40,7 @@ import {
 } from 'fs'
 import { basename, join } from 'path'
 import { homedir } from 'os'
-import { projectSubagentLine } from './session-tail.js'
+import { projectSubagentLine, sanitizeCwdToProjectName } from './session-tail.js'
 import { sanitiseToolArg } from './fleet-state.js'
 import { escapeHtml, truncate } from './card-format.js'
 import { bumpSubagentActivity, recordSubagentStall, recordSubagentResume, recordSubagentEnd, reapStuckRunningRows } from './registry/subagents-schema.js'
@@ -127,6 +127,16 @@ export interface SubagentWatcherConfig {
    * Used to derive `.claude/projects/<cwd>/` dirs to watch.
    */
   agentDir: string
+  /**
+   * Agent's working directory — used to compute the project-dir slug the
+   * watcher should restrict its enumeration to (Claude Code keys project
+   * dirs off the cwd at first launch via `sanitizeCwdToProjectName`).
+   * When omitted, the watcher walks every subdir of
+   * `<agentDir>/.claude/projects/` (legacy behaviour; see issue #1116
+   * for why this is unsafe — a foreign agent's stale project dir under
+   * an agent's home pollutes the watcher with phantom registrations).
+   */
+  agentCwd?: string
   /**
    * Send a fresh (non-edit) Telegram message. For stall / completion
    * state-transition notifications.
@@ -608,6 +618,20 @@ function readSubTail(
 
 export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWatcherHandle {
   const agentDir = config.agentDir
+  // Issue #1116: when agentCwd is supplied, restrict project-dir
+  // enumeration to the slug Claude Code would mint for that cwd.
+  // Foreign-slug shadow dirs (a sibling agent's stale project tree
+  // left over from a wayward CLAUDE_PROJECT_DIR or a past boot) are
+  // skipped — pre-#1116 they caused ENOENT log spam and false stalls.
+  // When agentCwd is null/undefined, fall back to the legacy walk-
+  // every-subdir behaviour (preserves tests that don't care about
+  // multi-slug isolation).
+  const expectedProjectSlug = config.agentCwd != null
+    ? sanitizeCwdToProjectName(config.agentCwd)
+    : null
+  // One-shot logging: warn the first time a foreign slug is observed
+  // so silent regressions are visible without re-running with debug.
+  const warnedForeignSlugs = new Set<string>()
   // Threshold knobs resolve in this order: explicit config arg →
   // env-var override → compile-time default. Env-vars exist so the
   // UAT scenario (which times out at 120s) can compress the watcher's
@@ -683,6 +707,20 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
    * when they eventually report done — that transition is meaningful.
    */
   const historicalFiles = new Set<string>()
+  /**
+   * AgentIds that have transitioned to a terminal state and been swept
+   * out of `registry` by `cleanupTerminalAgent`. Issue #1116 (Bug B):
+   * the JSONL file outlives the registry entry — Claude Code leaves
+   * the file on disk after the sub-agent finishes. Without this guard,
+   * the next `rescanSubagentDirs` poll re-discovered the file, called
+   * `registerAgent`, the fresh entry read the terminal `turn_duration`
+   * line, and `maybySendStateTransition` fired a duplicate "Worker done"
+   * notification — looping forever every grace-window.
+   *
+   * `scanSubagentsDir` consults this set and treats re-discovered
+   * terminal JSONLs as a no-op.
+   */
+  const terminatedAgentIds = new Set<string>()
   /**
    * True while the initial boot scan is running. During this window every
    * newly discovered file is added to historicalFiles.
@@ -878,6 +916,10 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
       knownFiles.delete(entry.filePath)
     }
     registry.delete(agentId)
+    // Issue #1116 (Bug B): record that this agent has been fully
+    // processed so a rescan that rediscovers the still-present JSONL
+    // doesn't re-register and re-notify.
+    terminatedAgentIds.add(agentId)
     log?.(`subagent-watcher: cleaned up terminal agent ${agentId}`)
   }
 
@@ -1016,6 +1058,16 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
     } catch { return }
 
     for (const pDir of projectDirs) {
+      // Issue #1116: filter to the agent's own slug. Skip foreign
+      // project dirs so their stale subagent JSONLs (which Claude
+      // Code reaps mid-session) don't pollute the watcher's registry.
+      if (expectedProjectSlug != null && pDir !== expectedProjectSlug) {
+        if (!warnedForeignSlugs.has(pDir)) {
+          warnedForeignSlugs.add(pDir)
+          log?.(`subagent-watcher: skipping foreign project dir ${pDir} (expected ${expectedProjectSlug})`)
+        }
+        continue
+      }
       const projectPath = join(projectsRoot, pDir)
       let sessionDirs: string[]
       try {
@@ -1061,6 +1113,12 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
       if (!e.startsWith('agent-') || !e.endsWith('.jsonl')) continue
       const filePath = join(subagentsPath, e)
       if (knownFiles.has(filePath)) continue
+      const agentId = e.slice('agent-'.length, -'.jsonl'.length)
+      // Issue #1116 (Bug B): skip JSONLs whose agent already completed
+      // and was swept by cleanupTerminalAgent. Re-adding to knownFiles
+      // here would let a subsequent rescan re-register, fire a duplicate
+      // "Worker done", and loop forever every grace-window.
+      if (terminatedAgentIds.has(agentId)) continue
       knownFiles.add(filePath)
       // During the initial boot scan, mark every discovered file as
       // historical so stall-detection and completion notifications are
@@ -1069,7 +1127,6 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
       if (bootScanInProgress) {
         historicalFiles.add(filePath)
       }
-      const agentId = e.slice('agent-'.length, -'.jsonl'.length)
       registerAgent(filePath, agentId)
     }
   }
@@ -1154,6 +1211,7 @@ export function startSubagentWatcher(config: SubagentWatcherConfig): SubagentWat
       tails.clear()
       registry.clear()
       knownFiles.clear()
+      terminatedAgentIds.clear()
     },
 
     getRegistry(): ReadonlyMap<string, WorkerEntry> {

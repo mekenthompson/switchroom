@@ -34,7 +34,12 @@ import {
 } from 'fs'
 import { homedir } from 'os'
 import { basename, join } from 'path'
-import { isMultiAgentEnabled } from './progress-card.js'
+// #1122 PR3: inlined from the deleted progress-card.ts. Kill switch
+// for the sub-agent transcript watcher (PROGRESS_CARD_MULTI_AGENT=0
+// disables it). Name retained for back-compat with operator configs.
+function isMultiAgentEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.PROGRESS_CARD_MULTI_AGENT !== '0'
+}
 import { classifyClaudeError, type OperatorEventKind } from './operator-events.js'
 import { createToolLabelSidecar, type ToolLabelSidecar } from './tool-label-sidecar.js'
 

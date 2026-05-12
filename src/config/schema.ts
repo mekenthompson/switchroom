@@ -471,41 +471,11 @@ export const TelegramChannelSchema = z
         "Increase if your gateway frequently bumps the Telegram edit-rate ceiling " +
         "with many parallel sub-agents; decrease for a more conservative buffer."
       ),
-    progress_card: z
-      .object({
-        delay_ms: z
-          .number()
-          .int()
-          .nonnegative()
-          .optional()
-          .describe(
-            "First-render delay (ms) for the pinned progress card (#842). The " +
-            "driver buffers SessionEvents for this long after the turn starts; " +
-            "if the turn ends before the threshold trips, no card is ever " +
-            "posted. When the threshold trips, the card renders the full " +
-            "buffered event stream and the live-update loop takes over. " +
-            "Default 45000 (45 s). Set to 0 for the legacy immediate-render " +
-            "behaviour."
-          ),
-        delay_ms_background: z
-          .number()
-          .int()
-          .nonnegative()
-          .optional()
-          .describe(
-            "First-render delay (ms) override for explicit background " +
-            "sub-agent dispatches (#842). When the agent calls " +
-            "`Agent({ run_in_background: true })`, the card is promoted out " +
-            "of the suppression window using this delay instead of " +
-            "`delay_ms`. Default 0 (immediate render — backgrounded work " +
-            "should be visible right away)."
-          ),
-      })
-      .optional()
-      .describe(
-        "Progress-card first-render gating (#842). Defers the card until the " +
-        "turn looks meaningful — short turns never flash a card at all."
-      ),
+    // progress_card block removed in #1122 PR3 (the pinned progress card
+    // was replaced by conversational pacing + silence-poke). Existing
+    // YAML files with a stale progress_card key will be silently
+    // ignored by Zod's strict-passthrough; intentional — operators
+    // don't need to clean their YAML for the upgrade to apply.
     stickers: z
       .record(z.string(), z.string())
       .optional()

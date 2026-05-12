@@ -10263,9 +10263,24 @@ async function handleOperatorEventCallback(ctx: Context, data: string): Promise<
   // and `restart` stripped the keyboard but kept the original card body
   // verbatim — operator scrolling back couldn't see what they'd decided.
   // `reauth` didn't strip the keyboard at all → re-tappable mid-flow.
+  //
+  // HTML-escape the extracted text before concatenation. Telegram returns
+  // `msg.text` as plain UTF-8 with entities stripped — any raw `<`, `>`,
+  // or `&` characters in the original `detail` (operator-events.ts
+  // `unknown-4xx`/`unknown-5xx` cards routinely carry API error bodies
+  // with `<`/`>` in them) would be re-parsed as HTML tags when the
+  // finalizeCallback edit fires with `parseMode: 'HTML'`. Telegram
+  // rejects the edit, finalizeCallback's catch swallows it, the
+  // keyboard never strips, and the operator re-taps → exact bug this
+  // PR is meant to fix re-introduced. Escape once here so every branch
+  // gets a safe-to-reparse value. We lose the original bold/italic
+  // styling on the source body — acceptable, that styling was already
+  // gone the moment `msg.text` was read instead of `msg.entities`.
+  // (PR #1158 round 2 — review item F.)
   const sourceMsgText = (() => {
     const msg = ctx.callbackQuery?.message
-    return msg && 'text' in msg && msg.text ? msg.text : ''
+    if (!msg || !('text' in msg) || !msg.text) return ''
+    return escapeHtmlForTg(msg.text)
   })()
 
   switch (action) {

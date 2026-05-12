@@ -317,7 +317,6 @@ import {
   approvalConsume,
   approvalRecord,
 } from '../../src/vault/approvals/client.js'
-import { readAutoUnlockFile } from '../../src/vault/auto-unlock.js'
 import { resolveVaultApprovalPosture } from '../vault-approval-posture.js'
 import {
   openTurnsDb,
@@ -1597,7 +1596,6 @@ const VAULT_PASSPHRASE_TTL_MS = 30 * 60 * 1000
  * startup IIFE near the bottom of this file.
  */
 let VAULT_APPROVAL_AUTH_MODE: 'passphrase' | 'telegram-id' = 'passphrase'
-let AUTO_UNLOCK_PASSPHRASE: string | null = null
 
 export function initVaultApprovalPosture(): void {
   let cfg: ReturnType<typeof loadSwitchroomConfig>
@@ -1612,16 +1610,23 @@ export function initVaultApprovalPosture(): void {
     )
     return
   }
-  // Posture-load failures (below) propagate — they are intentional
-  // hard-fails. The schema guarantees telegram-id implies autoUnlock:true,
-  // so a missing/corrupt blob at runtime is a refuse-to-boot condition.
-  const resolved = resolveVaultApprovalPosture(cfg.vault?.broker, readAutoUnlockFile)
+  // #1115 follow-up: the gateway no longer holds the passphrase in
+  // memory under telegram-id mode. The broker keeps it; the gateway
+  // signals operator-tap intent via `attest_via_posture: true` on
+  // mint_grant / list_grants calls. So this init is purely
+  // configuration-reading — no IPC / file read / passphrase fetch.
+  //
+  // The schema guarantees telegram-id implies autoUnlock:true. If the
+  // broker actually fails to auto-unlock at boot, the gateway's first
+  // mint_grant will be rejected with BROKER-LOCKED at run-time. We
+  // don't probe here because boot failures elsewhere (broker
+  // singleton crash, slow start) shouldn't deadlock every agent.
+  const resolved = resolveVaultApprovalPosture(cfg.vault?.broker)
   VAULT_APPROVAL_AUTH_MODE = resolved.mode
-  AUTO_UNLOCK_PASSPHRASE = resolved.passphrase
   if (resolved.mode === 'telegram-id') {
     process.stderr.write(
       `telegram gateway: vault approval posture = telegram-id ` +
-        `(single-factor; auto-unlock blob loaded from ${resolved.credPath})\n`,
+        `(single-factor — broker mediates attestation via attest_via_posture)\n`,
     )
   }
 }
@@ -6001,7 +6006,7 @@ async function handleInbound(
               .catch(() => {})
             continue
           }
-          await performVaultAccessApproval(ctx, stagedAccess, item.stageId, item.senderId, passphrase)
+          await performVaultAccessApproval(ctx, stagedAccess, item.stageId, item.senderId, { kind: 'passphrase', passphrase })
         }
       } else if (pendingVault.kind === 'grant-wizard' && pendingVault.awaitingCustomDuration) {
         // Issue #227: custom duration text reply for grant wizard
@@ -8930,13 +8935,29 @@ async function handleVaultRecentDenialCallback(ctx: Context, data: string): Prom
  * via text-message intercept after tap-on-locked) drive identical
  * minting behaviour. #1012 Phase 2 + follow-up.
  */
+/**
+ * #1115 follow-up: caller-supplied attestation. Either a real operator
+ * passphrase (when the operator typed it in chat) or a posture flag
+ * that tells the broker to use its own retained passphrase under
+ * `vault.broker.approvalAuth: telegram-id`. The passphrase variant
+ * never crosses into telegram-id callsites; the posture variant
+ * never crosses into passphrase-mode callsites.
+ */
+type AccessApprovalAttestation =
+  | { kind: 'passphrase'; passphrase: string }
+  | { kind: 'posture' }
+
 async function performVaultAccessApproval(
   ctx: Context,
   pending: PendingVaultRequestAccess,
   stageId: string,
   senderId: string,
-  passphrase: string,
+  attestation: AccessApprovalAttestation,
 ): Promise<void> {
+  const brokerAuthOpts =
+    attestation.kind === 'passphrase'
+      ? { passphrase: attestation.passphrase }
+      : { attest_via_posture: true as const }
   // #1051: union the new key with the agent's existing active grant
   // before minting. Without this, each fresh Approve OVERWRITES the
   // agent's `.vault-token` file with a single-key grant — the
@@ -8954,7 +8975,7 @@ async function performVaultAccessApproval(
   let existingReadKeys: string[] = [];
   let existingWriteKeys: string[] = [];
   if (pending.scope === 'read' || pending.scope === 'write') {
-    const list = await listGrantsViaBroker(pending.agent, { passphrase });
+    const list = await listGrantsViaBroker(pending.agent, brokerAuthOpts);
     if (list.kind === 'ok') {
       const now = Math.floor(Date.now() / 1000);
       // Prefer the MOST RECENT non-revoked, non-expired grant. The
@@ -9002,7 +9023,7 @@ async function performVaultAccessApproval(
         : ``) +
       `)`,
     ...(writeKeys.size > 0 ? { write_keys: Array.from(writeKeys) } : {}),
-    passphrase,
+    ...brokerAuthOpts,
   }
   const result = await mintGrantViaBroker(mintArgs)
   if (result.kind === 'unreachable') {
@@ -9163,7 +9184,7 @@ async function handleVaultRequestAccessCallback(ctx: Context, data: string): Pro
     // auto-unlocked and we silently hold the passphrase in memory; skip
     // the passphrase-cache lookup + prompt entirely and mint directly.
     // Allowlist check above already attested the operator's Telegram ID.
-    if (VAULT_APPROVAL_AUTH_MODE === 'telegram-id' && AUTO_UNLOCK_PASSPHRASE) {
+    if (VAULT_APPROVAL_AUTH_MODE === 'telegram-id') {
       const username = ctx.from?.username ?? ctx.from?.first_name ?? `id=${senderId}`
       if (pending.card_message_id != null) {
         await ctx.api
@@ -9176,7 +9197,7 @@ async function handleVaultRequestAccessCallback(ctx: Context, data: string): Pro
           .catch(() => {})
       }
       await ctx.answerCallbackQuery({ text: '⏳ Minting grant…' }).catch(() => {})
-      await performVaultAccessApproval(ctx, pending, stageId, senderId, AUTO_UNLOCK_PASSPHRASE)
+      await performVaultAccessApproval(ctx, pending, stageId, senderId, { kind: 'posture' })
       return
     }
 
@@ -9237,7 +9258,7 @@ async function handleVaultRequestAccessCallback(ctx: Context, data: string): Pro
     }
 
     await ctx.answerCallbackQuery({ text: '⏳ Minting grant…' }).catch(() => {})
-    await performVaultAccessApproval(ctx, pending, stageId, senderId, cached.passphrase)
+    await performVaultAccessApproval(ctx, pending, stageId, senderId, { kind: 'passphrase', passphrase: cached.passphrase })
     return
   }
 
@@ -9309,21 +9330,26 @@ async function handleVaultRequestSaveCallback(ctx: Context, data: string): Promi
     // stale "spinning" state on the button while we run the write.
     await ctx.answerCallbackQuery({ text: '⏳ Saving…' }).catch(() => {})
 
-    // Posture: telegram-id (opt-in single-factor). Broker auto-unlocked
-    // at startup; reuse the in-memory passphrase directly so the save
-    // mirrors the access-approve flow's silent fallback.
-    let effectivePassphrase: string | null = null
-    if (VAULT_APPROVAL_AUTH_MODE === 'telegram-id' && AUTO_UNLOCK_PASSPHRASE) {
-      effectivePassphrase = AUTO_UNLOCK_PASSPHRASE
-    }
+    // #1115 follow-up: telegram-id mode silent-save was withdrawn. The
+    // original PR shortcut routed the save through an in-memory
+    // passphrase the gateway held under telegram-id; the reviewer
+    // flagged that as a bypass surface (claude in the same container
+    // could exfiltrate the passphrase). The access-approve flow now
+    // attests via the broker (`attest_via_posture: true` on
+    // mint_grant) so the passphrase never leaves the broker. The
+    // save-approve flow uses `defaultVaultWrite` which shells to the
+    // CLI — routing it through broker-IPC attest_via_posture is a
+    // tracked follow-up. Until then, vault_request_save under
+    // telegram-id falls through to the standard passphrase-cache
+    // path: the operator must have unlocked the vault in this chat
+    // (`/vault unlock` or any /vault command) so the cache is
+    // populated. Same UX as passphrase mode.
 
     // Fetch the cached passphrase for this chat. If the gateway hasn't
     // seen the user unlock the vault yet, we can't attest the write —
     // surface the unlock card via the same path the deferred-secret
     // flow uses (issue #44).
-    const cached = effectivePassphrase
-      ? { passphrase: effectivePassphrase, expiresAt: Date.now() + VAULT_PASSPHRASE_TTL_MS }
-      : vaultPassphraseCache.get(pending.chat_id)
+    const cached = vaultPassphraseCache.get(pending.chat_id)
     if (!cached || cached.expiresAt <= Date.now()) {
       if (pending.card_message_id != null) {
         await ctx.api
@@ -9452,13 +9478,12 @@ async function handleVaultDeferCallback(ctx: Context, data: string): Promise<voi
       ctx.from?.id ?? 0,
       access.allowFrom,
     )
-    // Posture: telegram-id (single-factor). Auto-unlock passphrase is
-    // already in memory — skip the prompt and write immediately.
-    if (VAULT_APPROVAL_AUTH_MODE === 'telegram-id' && AUTO_UNLOCK_PASSPHRASE) {
-      await ctx.answerCallbackQuery({ text: 'Saving…' }).catch(() => {})
-      await executeDeferredSecretSave(ctx, deferKey, AUTO_UNLOCK_PASSPHRASE, cardMessageId)
-      return
-    }
+    // #1115 follow-up: telegram-id mode silent-defer-save was withdrawn
+    // (same reason as the save-callback above — the in-memory
+    // passphrase short-circuit became a bypass surface). The
+    // deferred-secret save falls through to the cached-passphrase
+    // path under all postures. Routing executeDeferredSecretSave
+    // through broker-IPC attest_via_posture is a tracked follow-up.
 
     // If a passphrase is already cached we can skip straight to the write.
     // Covers the case where the user had unlocked separately between

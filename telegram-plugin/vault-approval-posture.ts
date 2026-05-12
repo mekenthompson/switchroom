@@ -1,74 +1,42 @@
 /**
- * Pure resolver for the vault grant-card approval posture.
+ * Resolve the vault grant-card approval posture from switchroom config.
  *
- * Extracted from gateway.ts so unit tests can exercise the negative
- * path (telegram-id with unreadable auto-unlock blob) without dragging
- * the gateway's top-level startup IIFE under the vitest runner.
+ * Pre-#1115-follow-up this module also loaded the auto-unlock blob
+ * (file-based on legacy installs, broker-IPC `get_unlock_passphrase`
+ * on Docker) and surfaced the plaintext passphrase to the gateway so
+ * it could attest mint_grant calls. The reviewer flagged that as a
+ * bypass surface (claude in the same agent container could exfiltrate
+ * the passphrase via /proc or broker socket). Pivoted to broker-
+ * mediated attestation: the passphrase NEVER leaves the broker
+ * process; the gateway just signals operator-tap intent via
+ * `attest_via_posture: true` on mint_grant / list_grants.
  *
- * Behaviour pinned by `tests/vault-approval-posture.test.ts`:
- *  - `approvalAuth` absent / `passphrase` → returns passphrase posture
- *    with no passphrase loaded.
- *  - `approvalAuth: telegram-id` + readable blob → returns telegram-id
- *    posture with the blob contents.
- *  - `approvalAuth: telegram-id` + unreadable blob → THROWS. The
- *    gateway propagates this and refuses to boot. We never silently
- *    downgrade the operator's declared posture.
+ * What this module does NOW: read `vault.broker.approvalAuth` from
+ * the operator's switchroom.yaml and tell the gateway whether to
+ * branch into the silent-mint code path. Nothing else.
+ *
+ * Behaviour:
+ *  - `approvalAuth` absent / `passphrase` → passphrase posture.
+ *  - `approvalAuth: telegram-id` → telegram-id posture (gateway will
+ *    use attest_via_posture on broker calls).
+ *  - `approvalAuth` set to anything else → passphrase posture (the
+ *    schema rejects unknown values at startup; this is defence in
+ *    depth in case the schema is bypassed).
  */
 
 export interface VaultBrokerPostureConfig {
   approvalAuth?: string
-  autoUnlockCredentialPath?: string
 }
 
 export interface ResolvedPosture {
   mode: 'passphrase' | 'telegram-id'
-  passphrase: string | null
-  credPath?: string
 }
 
 export function resolveVaultApprovalPosture(
   broker: VaultBrokerPostureConfig | undefined,
-  reader: (path: string) => string,
-  // Accept the wider `NodeJS.ProcessEnv` shape so callers can pass
-  // `process.env` directly. The narrow `{ HOME?: string }` shape this
-  // had before tripped tsc (TS2559 — no overlap with ProcessEnv) under
-  // the strict plugin-references lint check.
-  env: NodeJS.ProcessEnv | { HOME?: string } = process.env,
 ): ResolvedPosture {
-  if (broker?.approvalAuth !== 'telegram-id') {
-    return { mode: 'passphrase', passphrase: null }
+  if (broker?.approvalAuth === 'telegram-id') {
+    return { mode: 'telegram-id' }
   }
-  const credPathRaw = broker.autoUnlockCredentialPath ?? '~/.switchroom/vault-auto-unlock'
-  const credPath = credPathRaw.replace(/^~/, env.HOME ?? '')
-  let loaded: string
-  try {
-    loaded = reader(credPath)
-  } catch (err) {
-    throw new Error(
-      `telegram gateway: vault.broker.approvalAuth=telegram-id but reading ` +
-        `auto-unlock blob at ${credPath} failed: ${(err as Error).message}. ` +
-        `Refusing to boot — silently falling back to passphrase posture ` +
-        `would invert the operator's declared security posture. ` +
-        `Either repair the auto-unlock blob (rerun \`switchroom setup\` / ` +
-        `\`switchroom vault auto-unlock\`) or remove ` +
-        `vault.broker.approvalAuth from switchroom.yaml.`,
-    )
-  }
-  // An empty / whitespace-only blob is just as dangerous as a missing one
-  // under telegram-id posture: the gateway would hold "" as the auto-
-  // unlock passphrase, and any Approve tap would invoke the broker with
-  // an empty passphrase. The broker rejects that, but the operator
-  // discovers it only by tapping Approve on a real grant card. Refuse
-  // to boot instead — same security stance as the read-error path.
-  if (loaded.trim().length === 0) {
-    throw new Error(
-      `telegram gateway: vault.broker.approvalAuth=telegram-id but the ` +
-        `auto-unlock blob at ${credPath} is empty / whitespace-only. ` +
-        `Refusing to boot — an empty passphrase would silently invert the ` +
-        `operator's declared security posture. Rerun \`switchroom vault ` +
-        `broker enable-auto-unlock\` to repair the blob, or remove ` +
-        `vault.broker.approvalAuth from switchroom.yaml.`,
-    )
-  }
-  return { mode: 'telegram-id', passphrase: loaded, credPath }
+  return { mode: 'passphrase' }
 }

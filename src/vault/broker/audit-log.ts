@@ -56,7 +56,7 @@ export interface AuditEntry {
    * passphrase was forwarded as attestation (issue #969 P1a). Omitted
    * for ops that don't involve secret access (lock, unlock, status).
    */
-  method?: "peercred" | "grant" | "passphrase";
+  method?: "peercred" | "grant" | "passphrase" | "posture";
   /**
    * Grant ID (e.g. "vg_a1b2c3") when method === "grant". Never contains
    * the secret half — only the ID prefix is logged.

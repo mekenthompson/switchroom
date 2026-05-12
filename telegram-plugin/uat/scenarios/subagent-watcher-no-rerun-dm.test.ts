@@ -27,9 +27,10 @@
  * and the test-harness override `progress_card.delay_ms: 1000` so a
  * short DM turn actually pins a card (SETUP.md §5).
  *
- * Time budget: the bg sub-agent does three ~20s sleeps (~60s total)
+ * Time budget: the bg sub-agent does two ~10s sleeps (~20s total)
  * + we listen for an extra 75s post-completion (>30s grace +
- * generous rescan slack) to catch a rerun. Sum to ~240s plus settle.
+ * generous rescan slack) to catch a rerun. Plus parent-turn ack
+ * latency and Telegram-edit settle. Outer cap 240s.
  */
 
 import { describe, expect, it } from "vitest";

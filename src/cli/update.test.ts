@@ -26,7 +26,7 @@ function fakeRunner() {
 }
 
 describe("planUpdate", () => {
-  it("produces 4 steps in default mode (no --rebuild)", () => {
+  it("produces 5 steps in default mode (no --rebuild)", () => {
     const tmp = mkdtempSync(join(tmpdir(), "update-plan-"));
     try {
       const composePath = join(tmp, "docker-compose.yml");
@@ -35,6 +35,7 @@ describe("planUpdate", () => {
       expect(steps.map((s) => s.name)).toEqual([
         "pull-images",
         "apply-config",
+        "stamp-restart-marker",
         "recreate-containers",
         "doctor",
       ]);
@@ -53,9 +54,60 @@ describe("planUpdate", () => {
         "pull-images",
         "rebuild-source",
         "apply-config",
+        "stamp-restart-marker",
         "recreate-containers",
         "doctor",
       ]);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("stamp-restart-marker runs before recreate-containers and writes a marker per agent", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "update-stamp-"));
+    try {
+      const composePath = join(tmp, "docker-compose.yml");
+      writeFileSync(composePath, "services: {}\n");
+      const writes: Array<{ agent: string; reason: string }> = [];
+      const steps = planUpdate({
+        composePath,
+        agentNamesFn: () => ["clerk", "klanker", "test-harness"],
+        writeMarkerFn: (agent, reason) => { writes.push({ agent, reason }); },
+      });
+      const stampIdx = steps.findIndex((s) => s.name === "stamp-restart-marker");
+      const recreateIdx = steps.findIndex((s) => s.name === "recreate-containers");
+      expect(stampIdx).toBeGreaterThan(-1);
+      expect(stampIdx).toBeLessThan(recreateIdx);
+      // Execute the stamp step in isolation.
+      steps[stampIdx]?.run();
+      expect(writes).toEqual([
+        { agent: "clerk", reason: "operator: switchroom update" },
+        { agent: "klanker", reason: "operator: switchroom update" },
+        { agent: "test-harness", reason: "operator: switchroom update" },
+      ]);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("stamp-restart-marker tolerates per-agent write failures without aborting", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "update-stamp-err-"));
+    try {
+      const composePath = join(tmp, "docker-compose.yml");
+      writeFileSync(composePath, "services: {}\n");
+      const writes: string[] = [];
+      const steps = planUpdate({
+        composePath,
+        agentNamesFn: () => ["a", "b", "c"],
+        writeMarkerFn: (agent) => {
+          if (agent === "b") throw new Error("simulated EACCES");
+          writes.push(agent);
+        },
+      });
+      const stamp = steps.find((s) => s.name === "stamp-restart-marker");
+      // Should NOT throw — failures are best-effort.
+      expect(() => stamp?.run()).not.toThrow();
+      expect(writes).toEqual(["a", "c"]);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

@@ -38,6 +38,8 @@ import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { loadConfig } from "../config/loader.js";
+import { writeRestartReasonMarker } from "../agents/lifecycle.js";
 
 interface UpdateOptions {
   check?: boolean;
@@ -60,6 +62,11 @@ interface UpdateOptions {
   runner?: (cmd: string, args: string[]) => { status: number };
   /** Test seam — replace docker inspect / package.json reads. */
   statusProbe?: (composePath: string) => StatusReport;
+  /** Test seam — supply the agent name list for the stamp-restart-marker
+   *  step instead of reading from switchroom.yaml. */
+  agentNamesFn?: () => readonly string[];
+  /** Test seam — replace the marker writer used by stamp-restart-marker. */
+  writeMarkerFn?: (agent: string, reason: string) => void;
 }
 
 interface UpdateStep {
@@ -170,6 +177,53 @@ export function planUpdate(opts: UpdateOptions): UpdateStep[] {
         "--no-doctor",
       ]);
       if (r.status !== 0) throw new Error("switchroom apply failed");
+    },
+  });
+
+  // Stamp a clean-shutdown marker for every agent BEFORE the compose
+  // recreate. Without this, the gateway boots after the recreate, finds
+  // no marker, falls through `determineRestartReason()` to the
+  // gateway-session.json branch, and reads `'crash'` — every operator
+  // update is then rendered as `boot card reason=crash` + an
+  // `agent-crashed` operator-events broadcast, even though the restart
+  // was planned. Mirrors what `switchroom restart` already does at
+  // src/cli/restart.ts:93 and what the in-gateway `/restart` / `/new` /
+  // `/reset` verbs do via stampUserRestartReason. Reason text uses an
+  // `operator:` prefix so the boot card can silence the notification
+  // for this class of restart (boot-card.ts handles the disable_
+  // notification path). preserveExisting: true matches the restart.ts
+  // semantics — if a marker was written <30s ago by another flow we
+  // don't clobber it.
+  steps.push({
+    name: "stamp-restart-marker",
+    description:
+      'Write a clean-shutdown marker for every agent (reason="operator: switchroom update") so the post-recreate boot card renders as graceful rather than crash',
+    run: () => {
+      const reason = "operator: switchroom update";
+      const writeMarker = opts.writeMarkerFn ?? ((agent, r) =>
+        writeRestartReasonMarker(agent, r, { preserveExisting: true }));
+      let agents: readonly string[];
+      try {
+        agents = opts.agentNamesFn ? opts.agentNamesFn() : Object.keys(loadConfig().agents);
+      } catch (err) {
+        // Best-effort: if config can't be loaded we don't want to fail
+        // the whole update. The recreate will still proceed and the
+        // boot card will fall back to `crash` — same behaviour as
+        // before this step existed.
+        process.stderr.write(
+          `switchroom update: stamp-restart-marker — could not load agent list (${(err as Error).message}); skipping\n`,
+        );
+        return;
+      }
+      for (const agent of agents) {
+        try {
+          writeMarker(agent, reason);
+        } catch (err) {
+          process.stderr.write(
+            `switchroom update: stamp-restart-marker — ${agent}: ${(err as Error).message}\n`,
+          );
+        }
+      }
     },
   });
 

@@ -439,6 +439,15 @@ export interface RunProbesOpts {
   restartReason?: RestartReason
   /** Age of the restart marker in ms — shown in the crash row. */
   restartAgeMs?: number
+  /** Free-form reason text from `clean-shutdown.json` (e.g.
+   *  `"operator: switchroom update"`, `"user: /restart from chat"`).
+   *  Used to silence the boot-card notification for operator-initiated
+   *  redeploys: routine fleet updates shouldn't ping every user every
+   *  time. `user:` reasons (and crash / fresh) still notify normally —
+   *  the user asked for that restart, so the boot card should
+   *  announce. The text is also passed through unchanged so future
+   *  surfaces can render it. */
+  restartReasonDetail?: string
   /** Override fetch for tests. */
   fetchImpl?: typeof fetch
   /** Override settle window for tests; production uses SETTLE_WINDOW_MS. */
@@ -547,6 +556,18 @@ export async function startBootCard(
     restartAgeMs: opts.restartAgeMs,
   })
 
+  // Silence the notification for operator-initiated redeploys. A
+  // routine `switchroom update` should land in the chat as a record
+  // but not buzz every user's phone — every agent posts a card, so
+  // a fleet update with N agents produces N notifications otherwise.
+  // We key on the reason-text prefix `operator:` (today only
+  // `operator: switchroom update` writes this) so user-initiated
+  // restarts (`user: /restart from chat`, `cli: switchroom restart`)
+  // and unplanned events (crash, fresh, planned-marker) keep their
+  // normal notification behaviour — the user explicitly asked for
+  // those, or they need to know something went wrong.
+  const silentBootCard = opts.restartReasonDetail?.startsWith('operator:') === true
+
   let messageId: number
   try {
     const sent = await bot.sendMessage(chatId, ackText, {
@@ -554,9 +575,10 @@ export async function startBootCard(
       link_preview_options: { is_disabled: true },
       ...(threadId != null ? { message_thread_id: threadId } : {}),
       ...(ackMessageId != null ? { reply_parameters: { message_id: ackMessageId } } : {}),
+      ...(silentBootCard ? { disable_notification: true } : {}),
     })
     messageId = sent.message_id
-    logger(`telegram gateway: boot-card: posted msgId=${messageId} chatId=${chatId} reason=${opts.restartReason ?? '-'}\n`)
+    logger(`telegram gateway: boot-card: posted msgId=${messageId} chatId=${chatId} reason=${opts.restartReason ?? '-'} reason_detail=${opts.restartReasonDetail ?? '-'} silent=${silentBootCard}\n`)
   } catch (err: unknown) {
     logger(`telegram gateway: boot-card: failed to post ack: ${(err as Error)?.message ?? String(err)}\n`)
     return { messageId: -1, complete: () => {} }

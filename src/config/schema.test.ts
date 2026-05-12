@@ -104,7 +104,36 @@ describe("VaultConfigSchema.broker", () => {
       autoUnlock: false,
       autoUnlockCredentialPath: "~/.switchroom/vault-auto-unlock",
       approvalAuth: "passphrase",
+      postureMintAgents: [],
     });
+  });
+
+  it("defaults postureMintAgents to [] (no agent can self-mint via posture)", () => {
+    const result = VaultConfigSchema.parse({});
+    expect(result.broker.postureMintAgents).toEqual([]);
+  });
+
+  it("accepts postureMintAgents: [agent-slug] for opt-in", () => {
+    const result = VaultConfigSchema.parse({
+      broker: {
+        approvalAuth: "telegram-id",
+        autoUnlock: true,
+        postureMintAgents: ["test-harness", "clerk"],
+      },
+    });
+    expect(result.broker.postureMintAgents).toEqual(["test-harness", "clerk"]);
+  });
+
+  it("rejects postureMintAgents entries that are non-strings or empty", () => {
+    expect(() =>
+      VaultConfigSchema.parse({
+        broker: {
+          approvalAuth: "telegram-id",
+          autoUnlock: true,
+          postureMintAgents: [""],
+        },
+      })
+    ).toThrow();
   });
 
   it("defaults approvalAuth to passphrase", () => {

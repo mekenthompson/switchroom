@@ -523,7 +523,7 @@ export type PutResult =
 export async function putViaBroker(
   key: string,
   entry: { kind: "string"; value: string } | { kind: "binary"; value: string },
-  opts?: BrokerClientOpts & { token?: string; passphrase?: string },
+  opts?: BrokerClientOpts & { token?: string; passphrase?: string; attest_via_posture?: boolean },
 ): Promise<PutResult> {
   // Include the token in the wire payload only when present. The broker
   // checks it via validateGrantForWrite (issue #969 P1b) — if the grant
@@ -536,6 +536,7 @@ export async function putViaBroker(
   // user-approved saves of new keys.
   const token = opts?.token;
   const passphrase = opts?.passphrase;
+  const attestViaPosture = opts?.attest_via_posture === true;
   const result = await rpc(
     {
       v: 1,
@@ -544,6 +545,7 @@ export async function putViaBroker(
       entry,
       ...(token ? { token } : {}),
       ...(passphrase ? { passphrase } : {}),
+      ...(attestViaPosture ? { attest_via_posture: true } : {}),
     },
     opts,
   );
@@ -701,6 +703,21 @@ export interface MintGrantOpts extends BrokerClientOpts {
    * Same trust posture used by PUT (`vault_request_save`).
    */
   passphrase?: string;
+  /**
+   * Posture-attestation flag (#1115 follow-up — broker-mediated mint).
+   *
+   * When `true`, the broker treats the call as operator-attested IFF
+   * its OWN config has `vault.broker.approvalAuth: telegram-id` AND
+   * the broker is unlocked AND the caller is a per-agent peer. The
+   * broker uses its retained passphrase internally — never sent over
+   * the wire. Mutually exclusive with `passphrase`.
+   *
+   * This is the path the Telegram gateway takes when an operator taps
+   * Approve under telegram-id posture on Docker, where the gateway has
+   * no path to the auto-unlock blob and therefore cannot pass a
+   * `passphrase` attestation directly.
+   */
+  attest_via_posture?: boolean;
 }
 
 export type MintGrantResult =
@@ -724,6 +741,7 @@ export async function mintGrantViaBroker(
       description: opts.description,
       ...(opts.write_keys !== undefined ? { write_keys: opts.write_keys } : {}),
       ...(opts.passphrase !== undefined ? { passphrase: opts.passphrase } : {}),
+      ...(opts.attest_via_posture === true ? { attest_via_posture: true } : {}),
     },
     opts,
   );
@@ -755,15 +773,17 @@ export type ListGrantsResult =
  */
 export async function listGrantsViaBroker(
   agent: string | undefined,
-  opts?: BrokerClientOpts & { passphrase?: string },
+  opts?: BrokerClientOpts & { passphrase?: string; attest_via_posture?: boolean },
 ): Promise<ListGrantsResult> {
   const passphrase = opts?.passphrase;
+  const attestViaPosture = opts?.attest_via_posture === true;
   const result = await rpc(
     {
       v: 1,
       op: "list_grants",
       agent,
       ...(passphrase ? { passphrase } : {}),
+      ...(attestViaPosture ? { attest_via_posture: true } : {}),
     },
     opts,
   );

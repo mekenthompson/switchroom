@@ -51,15 +51,18 @@ describe("performVaultAccessApproval unions keys with the agent's existing grant
     expect(listIdx, "list MUST happen BEFORE mint").toBeLessThan(mintIdx);
   });
 
-  it("forwards the operator passphrase to listGrantsViaBroker (attestation)", () => {
-    // The non-admin agent socket needs operator-passphrase attestation
-    // to call list_grants (#1051's broker-side gate widening). Without
-    // forwarding the passphrase, the list call gets DENIED and the
-    // gateway falls back to single-key mint — silent regression to
-    // the pre-fix behavior.
+  it("forwards an attestation to listGrantsViaBroker (#1115 follow-up: passphrase OR posture)", () => {
+    // The non-admin agent socket needs operator-attestation to call
+    // list_grants (#1051's broker-side gate widening). Pre-#1115-
+    // follow-up this had to be the operator passphrase. Post-fix the
+    // gateway threads either `{ passphrase }` or
+    // `{ attest_via_posture: true }` via `brokerAuthOpts`, depending
+    // on whether the operator typed the passphrase or the host is
+    // running telegram-id posture. The call must forward the auth
+    // opts object intact.
     const listMatch = block.match(/listGrantsViaBroker\([^)]+\)/);
     expect(listMatch, "listGrantsViaBroker call shape").not.toBeNull();
-    expect(listMatch![0], "passphrase MUST be forwarded for attestation").toMatch(/passphrase/);
+    expect(listMatch![0], "attestation MUST be forwarded (brokerAuthOpts)").toMatch(/brokerAuthOpts/);
   });
 
   it("unions existing key_allow with the new key before minting", () => {

@@ -270,18 +270,24 @@ vault:
   broker:
     autoUnlock: true
     approvalAuth: telegram-id   # default: passphrase
+    postureMintAgents:           # required when approvalAuth is telegram-id;
+      - test-harness             # otherwise no agent can self-mint via posture.
 ```
 
 | `approvalAuth` | `autoUnlock` | Approve tap result |
 |---|---|---|
 | `passphrase` (default) | either | Prompts for the vault passphrase before minting the grant. **Two-factor**: Telegram identity + passphrase. |
-| `telegram-id` | `true` (required) | Mints immediately with no passphrase prompt. **Single-factor**: Telegram identity only. |
+| `telegram-id` | `true` (required) | Mints immediately with no passphrase prompt. **Single-factor**: Telegram identity only. Agent must also be in `postureMintAgents`. |
 | `telegram-id` | `false` | Config error at startup — the schema rejects this combination. |
 
 **Threat model.**
 
 - `passphrase` (default): an attacker who compromises the operator's Telegram account still needs the vault passphrase to mint grants. The passphrase never leaves the operator's device → broker → vault path.
-- `telegram-id`: the broker is auto-unlocked at boot and silently holds the passphrase in memory; the only check on an Approve tap is the sender's Telegram user ID matching the allowlist. **An attacker with Telegram account access can mint grants.** Acceptable when (a) the operator has Telegram 2FA enabled, (b) the host is not multi-tenant, and (c) the convenience of zero-friction approvals outweighs the lost factor.
+- `telegram-id`: the broker is auto-unlocked at boot and holds the passphrase in memory. The gateway never holds the passphrase — it signals operator-tap intent to the broker via `attest_via_posture: true` on the mint call; the broker uses its retained passphrase internally and never sends it over the wire (#1115 follow-up rev 3). The on-callback gate is the sender's Telegram user ID matching the allowlist; the broker's gate adds (a) `approvalAuth: telegram-id` configured, (b) broker unlocked, (c) calling agent's name is in `postureMintAgents`, (d) request's `agent` field equals the calling agent (no cross-agent posture mint). **An attacker with Telegram account access can mint grants on opted-in agents.** Acceptable when (a) the operator has Telegram 2FA enabled, (b) the host is not multi-tenant, (c) the convenience of zero-friction approvals outweighs the lost factor.
+
+**`postureMintAgents` (per-agent opt-in).** Under `approvalAuth: telegram-id`, only agents on this list can mint grants without a passphrase. **Default `[]`** — even with `telegram-id` enabled, no agent self-mints until you explicitly add its slug. This blocks the in-container threat: claude inside an agent container shares socket access with the gateway, so without this list a tool or skill could call the broker directly and mint without an operator tap. With the list, only the agents you trust at the "broker-auto-unlock-equivalent" level can use the silent-mint path. Suggested rollout: start with `test-harness` only; never add a production agent without thinking explicitly about the trust expansion.
+
+**Architectural residual risk** (telegram-id, allowlisted agents only): an allowlisted agent's claude can theoretically call `mint_grant attest_via_posture` for keys it already has read access to via the existing broker ACL — without an operator tap. This is the documented trade-off of single-factor mode on the current Docker runtime (gateway + claude share UID inside the agent container). To close this gap fully requires a gateway-UID-split (separate UID for gateway vs claude inside each agent) — tracked as a future hardening; not in scope for this feature. Operators who require "every grant requires an explicit tap" should stay on `passphrase` mode.
 
 `telegram-id` is fully opt-in — the default behaviour is unchanged, and `switchroom doctor` surfaces the active posture so it's obvious which mode the host is running.
 

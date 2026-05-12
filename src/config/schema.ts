@@ -1447,6 +1447,21 @@ export const VaultConfigSchema = z.object({
           "`autoUnlock: true` so the broker already holds the passphrase. " +
           "Trades a factor of security for smoother UX; opt-in only."
         ),
+      postureMintAgents: z
+        .array(z.string().min(1))
+        .default([])
+        .describe(
+          "Per-agent opt-in for posture-attested broker calls (`mint_grant` / " +
+          "`list_grants` / `put` with `attest_via_posture: true`). Only agents " +
+          "whose names are in this list can use the silent-mint path under " +
+          "`approvalAuth: telegram-id`. Default `[]` — no agent can self-mint " +
+          "until the operator explicitly opts it in. The request's `agent` " +
+          "field must also equal the calling peer's resolved agent name " +
+          "(broker rejects cross-agent posture mints). When `approvalAuth` is " +
+          "`passphrase` this list is ignored — passphrase attestation still " +
+          "works as before. Each entry is an agent slug exactly as it appears " +
+          "under `agents:` in this config."
+        ),
     })
     .default({})
     .superRefine((broker, ctx) => {

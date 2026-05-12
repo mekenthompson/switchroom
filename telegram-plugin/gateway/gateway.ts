@@ -956,36 +956,69 @@ const progressUpdateTurnCount = new Map<string, number>()
 // recall.py's update_placeholder IPC calls now no-op cleanly because
 // the gateway no longer registers an onUpdatePlaceholder handler.
 
-let currentSessionChatId: string | null = null
-let currentTurnStartedAt = 0
-let currentSessionThreadId: number | undefined = undefined
-let currentTurnReplyCalled = false
-let currentTurnCapturedText: string[] = []
-let orphanedReplyTimeoutId: ReturnType<typeof setTimeout> | null = null
-// Stage 3b: per-turn registry-key (chat:thread:startTs). Set on enqueue,
-// cleared after recordTurnEnd. Used by turn_end / SIGTERM / schedule_restart
-// paths to stamp the right row.
-let currentTurnRegistryKey: string | null = null
-// Last assistant outbound message id for the current turn — populated on
-// reply / stream_reply emit, captured into recordTurnEnd. Stage 4 reads
-// this on resume to thread-jump back to the in-flight conversation.
-let currentTurnLastAssistantMsgId: string | null = null
-// Whether the current turn produced a stream_reply with done=true. The
-// resume protocol uses this to decide "did the previous turn actually
-// finish a reply, or was it interrupted before commit?".
-let currentTurnLastAssistantDone = false
-// Phase 1 of #332: count of tool_use events in the current turn, for the
-// tool_call_count column in the turns registry.
-let currentTurnToolCallCount = 0
+/**
+ * Per-turn singletons consolidated into one atom (#1067).
+ *
+ * Pre-#1067, this was 13 module-level `let`s (currentSessionChatId,
+ * currentTurnStartedAt, currentSessionThreadId, currentTurnReplyCalled,
+ * currentTurnCapturedText, orphanedReplyTimeoutId, currentTurnRegistryKey,
+ * currentTurnLastAssistantMsgId, currentTurnLastAssistantDone,
+ * currentTurnToolCallCount, activeAnswerStream, currentTurnIsDm,
+ * currentTurnGatewayReceiveAt). Every async session-event handler read
+ * those singletons directly — so a handler that captured a value,
+ * awaited, and resumed could see the next turn's state instead of its
+ * own. Concretely: tool_use for chat A could route its visible effect
+ * (status reaction, progress card mutation, answer-stream update) to
+ * chat B if an `enqueue` for B landed during the handler's await.
+ *
+ * The fix: a single mutable atom that `enqueue` swaps wholesale and
+ * `turn_end` nulls. Every handler captures `const turn = currentTurn`
+ * at entry — closures and async continuations use that snapshot for
+ * the rest of the handler, so a mid-handler enqueue can't reattribute.
+ *
+ * Field-name mapping (old → new):
+ *   currentSessionChatId            → turn.sessionChatId
+ *   currentSessionThreadId          → turn.sessionThreadId
+ *   currentTurnStartedAt            → turn.startedAt
+ *   currentTurnGatewayReceiveAt     → turn.gatewayReceiveAt
+ *   currentTurnReplyCalled          → turn.replyCalled
+ *   currentTurnCapturedText         → turn.capturedText
+ *   orphanedReplyTimeoutId          → turn.orphanedReplyTimeoutId
+ *   currentTurnRegistryKey          → turn.registryKey
+ *   currentTurnLastAssistantMsgId   → turn.lastAssistantMsgId
+ *   currentTurnLastAssistantDone    → turn.lastAssistantDone
+ *   currentTurnToolCallCount        → turn.toolCallCount
+ *   activeAnswerStream              → turn.answerStream
+ *   currentTurnIsDm                 → turn.isDm
+ */
+type CurrentTurn = {
+  sessionChatId: string
+  sessionThreadId: number | undefined
+  startedAt: number
+  gatewayReceiveAt: number
+  replyCalled: boolean
+  capturedText: string[]
+  orphanedReplyTimeoutId: ReturnType<typeof setTimeout> | null
+  registryKey: string | null
+  // Last assistant outbound message id for the current turn — populated
+  // on reply / stream_reply emit, captured into recordTurnEnd. Stage 4
+  // reads this on resume to thread-jump back to the in-flight conversation.
+  lastAssistantMsgId: string | null
+  // Whether the current turn produced a stream_reply with done=true. The
+  // resume protocol uses this to decide "did the previous turn actually
+  // finish a reply, or was it interrupted before commit?".
+  lastAssistantDone: boolean
+  // Phase 1 of #332: count of tool_use events in the current turn, for
+  // the tool_call_count column in the turns registry.
+  toolCallCount: number
+  // Issue #195 — answer-lane streaming. Lazily created on the first text
+  // event of a turn (once enough text has accumulated, the stream itself
+  // gates on minInitialChars). Materialized and cleared at turn_end.
+  answerStream: AnswerStreamHandle | null
+  isDm: boolean
+}
 
-// Issue #195 — answer-lane streaming.
-// Lazily created on the first text event of a turn (once enough text has
-// accumulated, the stream itself gates on minInitialChars). Materialized
-// and cleared at turn_end. One per active turn; supersession protection
-// on the answer-stream handle covers race with rapid steers/queues.
-let activeAnswerStream: AnswerStreamHandle | null = null
-let currentTurnIsDm = false
-let currentTurnGatewayReceiveAt = 0
+let currentTurn: CurrentTurn | null = null
 
 // #549 fix — preamble suppression for the answer-stream path.
 //
@@ -1002,7 +1035,12 @@ let currentTurnGatewayReceiveAt = 0
 // stream with the cumulative answer-only payload (excluding preamble).
 const preambleSuppressor = new PreambleSuppressor({
   emitAnswer: (cumulative) => {
-    if (activeAnswerStream != null) activeAnswerStream.update(cumulative)
+    // Re-reads currentTurn at call time on purpose: the suppressor is
+    // long-lived and flushes can occur outside any session-event
+    // handler's scope. If the turn has been cleared, the update is
+    // dropped (no chat to send to, no stream to mutate).
+    const stream = currentTurn?.answerStream ?? null
+    if (stream != null) stream.update(cumulative)
   },
 })
 
@@ -1779,14 +1817,14 @@ const pendingStateReaper = setInterval(() => {
   // is the audit trail.
   try {
     sweepStaleTurnActiveMarker(STATE_DIR, {
-      turnInFlight: currentTurnRegistryKey != null,
+      turnInFlight: currentTurn?.registryKey != null,
       idleSweepMs: 60_000,
       hardTtlMs: 10 * 60_000,
       now,
       onRemove: ({ ageMs, reason, payload }) => {
         const agent = getMyAgentName()
         const ageSec = Math.round(ageMs / 1000)
-        const turnInFlight = currentTurnRegistryKey != null
+        const turnInFlight = currentTurn?.registryKey != null
         const summary = summariseMarkerPayload(payload)
         process.stderr.write(
           `telegram gateway: [markersweep] removed agent=${agent} age=${ageSec}s reason=${reason} turn_in_flight=${turnInFlight} ${summary}\n`,
@@ -3927,22 +3965,30 @@ async function executeGetRecentMessages(args: Record<string, unknown>): Promise<
 // ─── Session event handling ───────────────────────────────────────────────
 
 function resetOrphanedReplyTimeout(): void {
-  if (orphanedReplyTimeoutId != null) {
-    clearTimeout(orphanedReplyTimeoutId)
-    orphanedReplyTimeoutId = null
+  const turn = currentTurn
+  if (turn?.orphanedReplyTimeoutId != null) {
+    clearTimeout(turn.orphanedReplyTimeoutId)
+    turn.orphanedReplyTimeoutId = null
   }
+  if (turn == null) return
   if (shouldArmOrphanedReplyTimeout({
-    currentSessionChatId,
-    capturedTextCount: currentTurnCapturedText.length,
-    replyCalled: currentTurnReplyCalled,
+    currentSessionChatId: turn.sessionChatId,
+    capturedTextCount: turn.capturedText.length,
+    replyCalled: turn.replyCalled,
     progressCardActive: progressDriver != null,
   })) {
-    orphanedReplyTimeoutId = setTimeout(() => {
-      orphanedReplyTimeoutId = null
+    turn.orphanedReplyTimeoutId = setTimeout(() => {
+      // The timer fires asynchronously; re-read currentTurn so we
+      // don't operate on a captured-but-superseded turn. If a new
+      // turn (or no turn) is in flight, the original turn's backstop
+      // is no longer ours to fire.
+      const t = currentTurn
+      if (t == null || t !== turn) return
+      t.orphanedReplyTimeoutId = null
       if (shouldArmOrphanedReplyTimeout({
-        currentSessionChatId,
-        capturedTextCount: currentTurnCapturedText.length,
-        replyCalled: currentTurnReplyCalled,
+        currentSessionChatId: t.sessionChatId,
+        capturedTextCount: t.capturedText.length,
+        replyCalled: t.replyCalled,
         progressCardActive: progressDriver != null,
       })) {
         process.stderr.write(
@@ -3989,19 +4035,32 @@ function handleSessionEvent(ev: SessionEvent): void {
         // edits don't mutate the new turn's message. Materialize is best-effort
         // — we don't await here because turn_end on the prior turn should
         // have already done it; this is a defensive supersession guard.
-        if (activeAnswerStream != null) {
-          activeAnswerStream.forceNewMessage()
-          activeAnswerStream.stop()
-          activeAnswerStream = null
+        const prior = currentTurn
+        if (prior?.answerStream != null) {
+          prior.answerStream.forceNewMessage()
+          prior.answerStream.stop()
+          prior.answerStream = null
         }
-        currentSessionChatId = ev.chatId
-        currentSessionThreadId = ev.threadId != null ? Number(ev.threadId) : undefined
-        currentTurnReplyCalled = false
-        currentTurnCapturedText = []
-        currentTurnStartedAt = Date.now()
-        currentTurnLastAssistantMsgId = null
-        currentTurnLastAssistantDone = false
-        currentTurnToolCallCount = 0
+        // #1067: swap the entire turn atom in one assignment. Every
+        // handler captures `const turn = currentTurn` at entry, so a
+        // captured-then-awaited read can't reattribute to the new turn.
+        const startedAt = Date.now()
+        const next: CurrentTurn = {
+          sessionChatId: ev.chatId,
+          sessionThreadId: ev.threadId != null ? Number(ev.threadId) : undefined,
+          startedAt,
+          gatewayReceiveAt: startedAt,
+          replyCalled: false,
+          capturedText: [],
+          orphanedReplyTimeoutId: null,
+          registryKey: null,
+          lastAssistantMsgId: null,
+          lastAssistantDone: false,
+          toolCallCount: 0,
+          answerStream: null,
+          isDm: isDmChatId(ev.chatId),
+        }
+        currentTurn = next
         // #549 fix — fresh turn, reset preamble-suppression state.
         preambleSuppressor.reset()
         // Stage 3b: stamp turn-start in the registry. turn_key is
@@ -4009,8 +4068,8 @@ function handleSessionEvent(ev: SessionEvent): void {
         // progress-card-driver's per-chat sequence number (these are two
         // independent identifier schemes and don't need to align).
         if (turnsDb != null) {
-          const turnKey = `${ev.chatId}:${ev.threadId ?? '_'}:${currentTurnStartedAt}`
-          currentTurnRegistryKey = turnKey
+          const turnKey = `${ev.chatId}:${ev.threadId ?? '_'}:${startedAt}`
+          next.registryKey = turnKey
           // Phase 1 of #332: capture first ~200 chars of the user's message.
           const userPromptPreview = extractUserPromptPreview(ev.rawContent)
           // Closes #472 finding #11. Pre-fix: this write was scheduled
@@ -4042,14 +4101,9 @@ function handleSessionEvent(ev: SessionEvent): void {
             turnKey,
             chatId: String(ev.chatId),
             threadId: ev.threadId != null ? String(ev.threadId) : null,
-            startedAt: currentTurnStartedAt,
+            startedAt,
           })
         }
-        // Issue #195: capture transport selection + time-to-ack baseline
-        // up-front so the per-turn answer-stream config is determined before
-        // the first text event arrives.
-        currentTurnIsDm = isDmChatId(ev.chatId)
-        currentTurnGatewayReceiveAt = currentTurnStartedAt
         if (pendingPtyPartial != null) {
           const pending = pendingPtyPartial
           pendingPtyPartial = null
@@ -4060,15 +4114,20 @@ function handleSessionEvent(ev: SessionEvent): void {
     }
     case 'dequeue': return
     case 'thinking': {
-      if (currentSessionChatId == null) return
-      const ctrl = activeStatusReactions.get(statusKey(currentSessionChatId, currentSessionThreadId))
+      // #1067: snapshot the turn atom at handler entry. Even though this
+      // handler is sync, the principle is uniform across all event arms
+      // — read `turn` once, don't re-read currentTurn after any await.
+      const turn = currentTurn
+      if (turn == null) return
+      const ctrl = activeStatusReactions.get(statusKey(turn.sessionChatId, turn.sessionThreadId))
       if (ctrl) ctrl.setThinking()
       return
     }
     case 'tool_use': {
-      if (currentSessionChatId == null) return
+      const turn = currentTurn
+      if (turn == null) return
       // Phase 1 of #332: count every tool_use in the current turn.
-      currentTurnToolCallCount++
+      turn.toolCallCount++
       // #412: bump turn-active marker mtime so the watchdog sees this
       // turn is making forward progress. Stop-hook deadlocks (the
       // failure mode #116 originally tracked) emit no more tool_use
@@ -4083,36 +4142,40 @@ function handleSessionEvent(ev: SessionEvent): void {
       // of dropping. The answer-stream's own dedup handles overlap
       // with the reply tool's payload.
       preambleSuppressor.onTool({ isReplyTool: isTelegramSurfaceTool(ev.toolName) })
-      const ctrl = activeStatusReactions.get(statusKey(currentSessionChatId, currentSessionThreadId))
+      const ctrl = activeStatusReactions.get(statusKey(turn.sessionChatId, turn.sessionThreadId))
       const name = ev.toolName
       // Phase tracking removed in #553 PR 5 — phases only fed the
       // placeholder-heartbeat label, which has been retired.
       if (isTelegramReplyTool(name)) {
-        currentTurnReplyCalled = true
-        if (orphanedReplyTimeoutId != null) {
-          clearTimeout(orphanedReplyTimeoutId)
-          orphanedReplyTimeoutId = null
+        turn.replyCalled = true
+        if (turn.orphanedReplyTimeoutId != null) {
+          clearTimeout(turn.orphanedReplyTimeoutId)
+          turn.orphanedReplyTimeoutId = null
         }
       }
       if (!ctrl) return
       if (isTelegramSurfaceTool(name)) return
       ctrl.setTool(name)
       if (ev.toolUseId) {
-        typingWrapper.onToolUse(ev.toolUseId, currentSessionChatId, name)
+        typingWrapper.onToolUse(ev.toolUseId, turn.sessionChatId, name)
       }
       return
     }
     case 'text': {
-      if (currentSessionChatId != null) {
-        currentTurnCapturedText.push(ev.text)
+      // #1067: snapshot at entry. The answer-stream creation closures
+      // below also read `turn` instead of currentTurn so they pin to
+      // this turn's chat for the stream's lifetime.
+      const turn = currentTurn
+      if (turn != null) {
+        turn.capturedText.push(ev.text)
         // Issue #195: feed the answer-lane stream. The stream itself
         // gates on minInitialChars and throttles edits — short replies
         // stay below the threshold and never spawn a message.
-        if (activeAnswerStream == null) {
-          activeAnswerStream = createAnswerStream({
-            chatId: currentSessionChatId,
-            isPrivateChat: currentTurnIsDm,
-            threadId: currentSessionThreadId,
+        if (turn.answerStream == null) {
+          turn.answerStream = createAnswerStream({
+            chatId: turn.sessionChatId,
+            isPrivateChat: turn.isDm,
+            threadId: turn.sessionThreadId,
             sendMessageDraft: sendMessageDraftFn,
             sendMessage: async (chatId, text, params) => {
               const msg = await bot.api.sendMessage(chatId, text, {
@@ -4147,41 +4210,40 @@ function handleSessionEvent(ev: SessionEvent): void {
             // metrics sink. Each successful update/edit/draft and the final
             // materialize emit one event. Also tick the silent-gap tracker
             // so answer-lane activity doesn't count as silent.
-            onMetric: (ev) => {
-              logStreamingEvent(ev)
-              if (currentSessionChatId != null) {
+            //
+            // #1067: the closure captures `turn` so the signal tracker
+            // ticks against THIS turn's chat key. If a new turn took over,
+            // the captured `turn` no longer matches `currentTurn` and we
+            // skip the tick (the new turn has its own answer stream).
+            onMetric: (metricEv) => {
+              logStreamingEvent(metricEv)
+              if (currentTurn === turn) {
                 signalTracker.noteSignal(
-                  statusKey(currentSessionChatId, currentSessionThreadId),
+                  statusKey(turn.sessionChatId, turn.sessionThreadId),
                   Date.now(),
                 )
               }
             },
             // #646 — wire the shared outboundDedup into the answer-stream
             // materialize path so it participates in the same dedup window
-            // as turn-flush and reply/stream_reply. The closured chatId /
-            // threadId are snapshotted at stream-creation time and are
-            // stable for the lifetime of the turn.
+            // as turn-flush and reply/stream_reply. Closured chatId /
+            // threadId come from the captured `turn` snapshot, stable for
+            // the lifetime of the stream.
             checkDedup: (text: string) => {
-              const cid = currentSessionChatId
-              if (cid == null) return false
-              return outboundDedup.check(cid, currentSessionThreadId, text, Date.now()) != null
+              return outboundDedup.check(turn.sessionChatId, turn.sessionThreadId, text, Date.now()) != null
             },
             recordDedup: (text: string) => {
-              const cid = currentSessionChatId
-              if (cid == null) return
-              outboundDedup.record(cid, currentSessionThreadId, text, Date.now())
+              outboundDedup.record(turn.sessionChatId, turn.sessionThreadId, text, Date.now())
             },
             // #648 — write answer-stream materializations into the SQLite
             // history buffer so get_recent_messages can surface them. Guard
             // with HISTORY_ENABLED, matching the turn-flush pattern at ~3783.
             recordOutbound: ({ messageId, text }: { messageId: number; text: string }) => {
               if (!HISTORY_ENABLED) return
-              const cid = currentSessionChatId
-              if (cid == null) return
               try {
                 recordOutbound({
-                  chat_id: cid,
-                  thread_id: currentSessionThreadId ?? null,
+                  chat_id: turn.sessionChatId,
+                  thread_id: turn.sessionThreadId ?? null,
                   message_ids: [messageId],
                   texts: [text],
                 })
@@ -4193,15 +4255,15 @@ function handleSessionEvent(ev: SessionEvent): void {
         // instead of immediately updating the answer stream. If a
         // tool_use arrives within the buffer window, the suppressor
         // drops the chunk (the card owns it). Otherwise it flushes as
-        // answer text. `currentTurnCapturedText` is unchanged — it
-        // remains the safety-net source for turn-flush prose recovery.
+        // answer text. `turn.capturedText` is unchanged — it remains
+        // the safety-net source for turn-flush prose recovery.
         preambleSuppressor.onText(ev.text)
       }
       resetOrphanedReplyTimeout()
 
-      if (isContextExhaustionText(ev.text) && currentSessionChatId != null) {
-        const chatId = currentSessionChatId
-        const threadId = currentSessionThreadId
+      if (isContextExhaustionText(ev.text) && turn != null) {
+        const chatId = turn.sessionChatId
+        const threadId = turn.sessionThreadId
         const now = Date.now()
         if (now - lastContextExhaustionWarningAt < CONTEXT_EXHAUSTION_COOLDOWN_MS) return
         lastContextExhaustionWarningAt = now
@@ -4221,14 +4283,12 @@ function handleSessionEvent(ev: SessionEvent): void {
         // Issue #195: tear down the answer-lane stream on context-exhaustion
         // bail-out. The user is being told the session needs /restart, so any
         // partially-streamed answer would be misleading.
-        if (activeAnswerStream != null) {
-          activeAnswerStream.stop()
-          activeAnswerStream = null
+        if (turn.answerStream != null) {
+          turn.answerStream.stop()
+          turn.answerStream = null
         }
-        currentSessionChatId = null
-        currentSessionThreadId = undefined
-        currentTurnReplyCalled = false
-        currentTurnCapturedText = []
+        // Null the atom — this turn is being abandoned.
+        if (currentTurn === turn) currentTurn = null
         // #549 fix — context-exhaustion teardown also resets preamble state.
         preambleSuppressor.reset()
       }
@@ -4239,9 +4299,10 @@ function handleSessionEvent(ev: SessionEvent): void {
       return
     }
     case 'sub_agent_tool_use': {
-      if (currentSessionChatId == null) return
+      const turn = currentTurn
+      if (turn == null) return
       if (!ev.toolUseId) return
-      typingWrapper.onToolUse(ev.toolUseId, currentSessionChatId, ev.toolName)
+      typingWrapper.onToolUse(ev.toolUseId, turn.sessionChatId, ev.toolName)
       return
     }
     case 'sub_agent_tool_result': {
@@ -4255,11 +4316,17 @@ function handleSessionEvent(ev: SessionEvent): void {
       // Forum-topic placeholder cleanup removed in #553 PR 5 — the
       // forum-topic placeholder send is also gone, so there is
       // nothing to clear at turn_end.
-      if (orphanedReplyTimeoutId != null) {
-        clearTimeout(orphanedReplyTimeoutId)
-        orphanedReplyTimeoutId = null
+      //
+      // #1067: capture the turn atom at handler entry. The IIFE that
+      // runs turn-flush below is async, so every read after the first
+      // await would be subject to the reattribution race we're fixing.
+      // All downstream code reads `turn.*` or its captured locals.
+      const turn = currentTurn
+      if (turn?.orphanedReplyTimeoutId != null) {
+        clearTimeout(turn.orphanedReplyTimeoutId)
+        turn.orphanedReplyTimeoutId = null
       }
-      // #549 fix — flush any pending preamble BEFORE activeAnswerStream is
+      // #549 fix — flush any pending preamble BEFORE the answer stream is
       // nulled below. Text emitted immediately before turn_end (no tool
       // followed) is the answer; the suppressor's emitAnswer callback
       // would no-op against a nulled stream, silently dropping the text
@@ -4270,9 +4337,9 @@ function handleSessionEvent(ev: SessionEvent): void {
       // (gateway.ts ~3475) is the sole canonical emitter for no-reply turns —
       // it runs markdownToHtml and records to outboundDedup. Materializing
       // here would race turn-flush and post raw model text (no HTML conv).
-      if (activeAnswerStream != null) {
-        const stream = activeAnswerStream
-        activeAnswerStream = null
+      if (turn?.answerStream != null) {
+        const stream = turn.answerStream
+        turn.answerStream = null
         void stream.retract().catch((err) => {
           process.stderr.write(
             `telegram gateway: answer-stream retract failed: ${
@@ -4281,9 +4348,9 @@ function handleSessionEvent(ev: SessionEvent): void {
           )
         })
       }
-      if (currentSessionChatId == null) return
-      const chatId = currentSessionChatId
-      const threadId = currentSessionThreadId
+      if (turn == null) return
+      const chatId = turn.sessionChatId
+      const threadId = turn.sessionThreadId
       const ctrl = activeStatusReactions.get(statusKey(chatId, threadId))
 
       // ── #51: prose-as-step recovery ──────────────────────────────────
@@ -4294,7 +4361,7 @@ function handleSessionEvent(ev: SessionEvent): void {
       // then returns `empty-text` and the user sees nothing. Recover from
       // the card state so the flush path can send what the user already
       // sees in the step list.
-      if (currentTurnCapturedText.length === 0 && progressDriver != null) {
+      if (turn.capturedText.length === 0 && progressDriver != null) {
         const peek = progressDriver.peek(
           chatId,
           threadId != null ? String(threadId) : undefined,
@@ -4309,25 +4376,25 @@ function handleSessionEvent(ev: SessionEvent): void {
         const narrativeCount = peek?.narratives.length ?? 0
         if (recovered.length > 0) {
           process.stderr.write(
-            `telegram gateway: turn-flush prose-recovery — recovered ${recovered.length} chars from progress-card narratives chat=${chatId} turnKey=${currentTurnStartedAt}\n`,
+            `telegram gateway: turn-flush prose-recovery — recovered ${recovered.length} chars from progress-card narratives chat=${chatId} turnKey=${turn.startedAt}\n`,
           )
           process.stderr.write(
-            `progress-card.diag: prose-recovery hit chatId=${chatId} turnKey=${currentTurnStartedAt} ` +
+            `progress-card.diag: prose-recovery hit chatId=${chatId} turnKey=${turn.startedAt} ` +
             `narrative_count=${narrativeCount} recovered_len=${recovered.length}\n`,
           )
-          currentTurnCapturedText.push(recovered)
+          turn.capturedText.push(recovered)
         } else {
           process.stderr.write(
-            `progress-card.diag: prose-recovery miss chatId=${chatId} turnKey=${currentTurnStartedAt} ` +
+            `progress-card.diag: prose-recovery miss chatId=${chatId} turnKey=${turn.startedAt} ` +
             `narrative_count=${narrativeCount} peek_state=${peek == null ? 'null' : 'present'}\n`,
           )
         }
       }
 
       const flushDecision = decideTurnFlush({
-        chatId: currentSessionChatId,
-        replyCalled: currentTurnReplyCalled,
-        capturedText: currentTurnCapturedText,
+        chatId: turn.sessionChatId,
+        replyCalled: turn.replyCalled,
+        capturedText: turn.capturedText,
         flushEnabled: TURN_FLUSH_SAFETY_ENABLED,
       })
       if (flushDecision.kind === 'skip' && flushDecision.reason !== 'reply-called') {
@@ -4341,12 +4408,11 @@ function handleSessionEvent(ev: SessionEvent): void {
         // so this silent-drop pattern is immediately visible in the logs.
         if (
           flushDecision.reason === 'empty-text' &&
-          !currentTurnReplyCalled &&
-          currentSessionChatId != null
+          !turn.replyCalled
         ) {
           process.stderr.write(
             `telegram gateway: WARN ghost-reply detected — turn ended with zero outbound messages` +
-            ` chat=${chatId} turnStartedAt=${currentTurnStartedAt} replyCalled=false capturedText=empty` +
+            ` chat=${chatId} turnStartedAt=${turn.startedAt} replyCalled=false capturedText=empty` +
             ` — the progress card steps were the only thing the user saw (#45)\n`,
           )
         }
@@ -4364,7 +4430,7 @@ function handleSessionEvent(ev: SessionEvent): void {
         // and case variants, so a strict equality check would print the wrong
         // reason. The flushDecision.reason is the source of truth.
         process.stderr.write(
-          `telegram gateway: silent-turn-suppression: chat=${chatId} turnKey=${currentTurnStartedAt} reason=silent-marker\n`,
+          `telegram gateway: silent-turn-suppression: chat=${chatId} turnKey=${turn.startedAt} reason=silent-marker\n`,
         )
         // Drop progress-card streams without finalising — the normal
         // closeProgressLane call below would call stream.finalize() which
@@ -4386,7 +4452,7 @@ function handleSessionEvent(ev: SessionEvent): void {
         // still appear in turn-duration graphs.
         {
           const sKey = streamKey(chatId, threadId)
-          const turnDurationMs = currentTurnStartedAt > 0 ? Date.now() - currentTurnStartedAt : 0
+          const turnDurationMs = turn.startedAt > 0 ? Date.now() - turn.startedAt : 0
           logStreamingEvent({
             kind: 'turn_end',
             chatId,
@@ -4403,10 +4469,11 @@ function handleSessionEvent(ev: SessionEvent): void {
         pendingPtyPartial = null
         closeActivityLane(chatId, threadId)
         // NOTE: closeProgressLane intentionally skipped — streams already dropped above.
-        currentSessionChatId = null
-        currentSessionThreadId = undefined
-        currentTurnReplyCalled = false
-        currentTurnCapturedText = []
+        // #1067: null the atom so any late-arriving event for THIS turn
+        // returns early at handler entry. A new `enqueue` swaps in a
+        // fresh atom; the silent-turn teardown doesn't need to preserve
+        // any of the prior turn's state.
+        if (currentTurn === turn) currentTurn = null
         // #549 fix — silent-marker teardown drops any pending preamble.
         preambleSuppressor.dropNow()
         return
@@ -4435,13 +4502,15 @@ function handleSessionEvent(ev: SessionEvent): void {
             : null
         const backstopCardTurnKey = cardTakeover.turnKey
 
-        currentSessionChatId = null
-        currentSessionThreadId = undefined
-        currentTurnReplyCalled = false
-        currentTurnCapturedText = []
+        // #1067: null the atom BEFORE the async IIFE starts. Any event
+        // that arrives during the 500ms-suppression window or the
+        // sendMessage await for this turn will see currentTurn == null
+        // and bail; a new enqueue will swap in a fresh atom. The
+        // `backstop*` locals above hold everything the IIFE needs.
+        if (currentTurn === turn) currentTurn = null
         // #549 fix — turn-flush takes ownership of the captured-text
         // backup; reset the preamble buffer (its content is already in
-        // currentTurnCapturedText, which turn-flush is about to send).
+        // the captured `capturedText`, which turn-flush is about to send).
         preambleSuppressor.dropNow()
 
         void (async () => {
@@ -4570,7 +4639,7 @@ function handleSessionEvent(ev: SessionEvent): void {
       purgeReactionTracking(statusKey(chatId, threadId))
       {
         const sKey = streamKey(chatId, threadId)
-        const turnDurationMs = currentTurnStartedAt > 0 ? Date.now() - currentTurnStartedAt : 0
+        const turnDurationMs = turn.startedAt > 0 ? Date.now() - turn.startedAt : 0
         logStreamingEvent({
           kind: 'turn_end',
           chatId,
@@ -4593,9 +4662,9 @@ function handleSessionEvent(ev: SessionEvent): void {
       // Stage 3b: stamp turn-end in the registry as endedVia='stop' (clean
       // turn_end emit). The kill paths (schedule_restart / SIGTERM) handle
       // the 'restart' / 'sigterm' cases separately in 3c.
-      if (turnsDb != null && currentTurnRegistryKey != null) {
+      if (turnsDb != null && turn.registryKey != null) {
         // Phase 1 of #332: capture first ~200 chars of the assistant's reply.
-        const capturedJoined = currentTurnCapturedText.join('')
+        const capturedJoined = turn.capturedText.join('')
         const assistantReplyPreview = capturedJoined
           ? capturedJoined.slice(0, TURN_PREVIEW_MAX)
           : null
@@ -4605,15 +4674,15 @@ function handleSessionEvent(ev: SessionEvent): void {
         // SIGTERM between turn_end and the microtask losing the end row
         // (turn appears in DB as still-running, then 3c relabels it as
         // 'sigterm' on shutdown — false negative for clean completion).
-        const _turnKey = currentTurnRegistryKey
+        const _turnKey = turn.registryKey
         try {
           recordTurnEnd(turnsDb, {
             turnKey: _turnKey,
             endedVia: 'stop' as const,
-            lastAssistantMsgId: currentTurnLastAssistantMsgId,
-            lastAssistantDone: currentTurnLastAssistantDone,
+            lastAssistantMsgId: turn.lastAssistantMsgId,
+            lastAssistantDone: turn.lastAssistantDone,
             assistantReplyPreview,
-            toolCallCount: currentTurnToolCallCount,
+            toolCallCount: turn.toolCallCount,
           })
         } catch (err) {
           process.stderr.write(`telegram gateway: recordTurnEnd(stop) failed turnKey=${_turnKey}: ${(err as Error).message}\n`)
@@ -4628,16 +4697,12 @@ function handleSessionEvent(ev: SessionEvent): void {
       // in-depth (both paths are idempotent — unlinkSync swallows
       // ENOENT).
       removeTurnActiveMarker(STATE_DIR)
-      currentTurnRegistryKey = null
-      currentSessionChatId = null
-      currentSessionThreadId = undefined
-      currentTurnReplyCalled = false
-      currentTurnCapturedText = []
-      currentTurnLastAssistantMsgId = null
-      currentTurnLastAssistantDone = false
-      currentTurnToolCallCount = 0
+      // #1067: null the atom in one assignment, replacing the seven
+      // field clears the pre-refactor version did. Any late-arriving
+      // event for this turn will see currentTurn == null and bail.
+      if (currentTurn === turn) currentTurn = null
       // #549 fix — preamble flush already happened at the TOP of this
-      // turn_end handler (before activeAnswerStream is nulled). See
+      // turn_end handler (before turn.answerStream is nulled). See
       // comment near line 3431.
       return
     }
@@ -4646,9 +4711,14 @@ function handleSessionEvent(ev: SessionEvent): void {
 
 // ─── PTY partial handler ─────────────────────────────────────────────────
 function handlePtyPartial(text: string): void {
+  // #1067: build the PtyHandlerState from a snapshot of currentTurn.
+  // The pty-partial-handler module keeps its own state-shape contract
+  // (currentSessionChatId / currentSessionThreadId) because it's
+  // independently tested; we adapt the names at this boundary.
+  const turn = currentTurn
   const state: PtyHandlerState = {
-    currentSessionChatId,
-    currentSessionThreadId,
+    currentSessionChatId: turn?.sessionChatId ?? null,
+    currentSessionThreadId: turn?.sessionThreadId,
     pendingPtyPartial: pendingPtyPartial != null ? { text: pendingPtyPartial } : null,
     activeDraftStreams,
     activeDraftParseModes,
@@ -4677,10 +4747,14 @@ function handlePtyPartial(text: string): void {
 }
 
 function handlePtyActivity(text: string): void {
-  if (currentSessionChatId == null) return
+  // #1067: snapshot at entry. handleStreamReply is async and runs in
+  // the background via void; the closure already captures `chatId` /
+  // `threadId` locals, so the supersession is correctly scoped.
+  const turn = currentTurn
+  if (turn == null) return
   if (shouldSuppressToolActivity(text)) return
-  const chatId = currentSessionChatId
-  const threadId = currentSessionThreadId
+  const chatId = turn.sessionChatId
+  const threadId = turn.sessionThreadId
   const access = loadAccess()
   void handleStreamReply(
     {
@@ -10882,24 +10956,27 @@ async function shutdown(signal: string): Promise<void> {
   // for the schedule_restart-initiated case where pendingRestarts is set).
   // Best-effort — SIGKILL / OOM skip this path entirely and the next-boot
   // reaper catches them as endedVia='restart'.
-  if (turnsDb != null && currentTurnRegistryKey != null) {
+  // #1067: snapshot at entry. The shutdown handler is async; reading
+  // currentTurn fresh after each await would tangle with a late event.
+  const shutdownTurn = currentTurn
+  if (turnsDb != null && shutdownTurn?.registryKey != null) {
     const wasScheduledRestart = pendingRestarts.size > 0
     const endedVia = wasScheduledRestart ? 'restart' : 'sigterm'
     try {
       recordTurnEnd(turnsDb, {
-        turnKey: currentTurnRegistryKey,
+        turnKey: shutdownTurn.registryKey,
         endedVia,
-        lastAssistantMsgId: currentTurnLastAssistantMsgId,
-        lastAssistantDone: currentTurnLastAssistantDone,
+        lastAssistantMsgId: shutdownTurn.lastAssistantMsgId,
+        lastAssistantDone: shutdownTurn.lastAssistantDone,
         // Phase 1 of #332: record how many tools fired before the kill.
         // No assistant_reply_preview here — the reply was never committed.
-        toolCallCount: currentTurnToolCallCount,
+        toolCallCount: shutdownTurn.toolCallCount,
       })
-      process.stderr.write(`telegram gateway: shutdown.turn_stamped turnKey=${currentTurnRegistryKey} endedVia=${endedVia}\n`)
+      process.stderr.write(`telegram gateway: shutdown.turn_stamped turnKey=${shutdownTurn.registryKey} endedVia=${endedVia}\n`)
     } catch (err) {
-      process.stderr.write(`telegram gateway: shutdown.turn_stamp_failed turnKey=${currentTurnRegistryKey} err=${(err as Error).message}\n`)
+      process.stderr.write(`telegram gateway: shutdown.turn_stamp_failed turnKey=${shutdownTurn.registryKey} err=${(err as Error).message}\n`)
     }
-    currentTurnRegistryKey = null
+    shutdownTurn.registryKey = null
   }
 
   // #689: flush every pinned progress card with a "Restart interrupted"
@@ -10962,9 +11039,10 @@ async function shutdown(signal: string): Promise<void> {
   clearInterval(pendingStateReaper)
   vaultPassphraseCache.clear()
 
-  if (orphanedReplyTimeoutId != null) {
-    clearTimeout(orphanedReplyTimeoutId)
-    orphanedReplyTimeoutId = null
+  // #1067: orphaned-reply timeout now lives on the per-turn atom.
+  if (currentTurn?.orphanedReplyTimeoutId != null) {
+    clearTimeout(currentTurn.orphanedReplyTimeoutId)
+    currentTurn.orphanedReplyTimeoutId = null
   }
 
   // Pre-allocated draft shutdown cleanup removed in #553 PR 5 — the

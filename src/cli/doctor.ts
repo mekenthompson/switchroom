@@ -969,7 +969,13 @@ export function checkRepoHygiene(repoRoot: string): CheckResult[] {
     const entries = readdirSync(repoRoot);
     for (const name of entries) {
       if (name === "clerk-export-with-secrets.tar.gz") continue; // already reported
-      if (/-with-secrets.*\.tar\.gz$/i.test(name)) {
+      // `[^/]*` rather than `.*` — `readdirSync` always returns
+      // basenames (no path separators) so the two are functionally
+      // equivalent today, but pinning out `/` makes the intent
+      // obvious and forecloses the false-positive shape (`weird-
+      // with-secrets/anything.tar.gz` as a single readdir entry)
+      // if this regex ever migrates to a non-`readdirSync` caller.
+      if (/-with-secrets[^/]*\.tar\.gz$/i.test(name)) {
         results.push({
           name: `repo hygiene: ${name} on disk (#1072)`,
           status: "warn",

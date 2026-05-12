@@ -64,6 +64,39 @@ describe("checkRepoHygiene (#1072)", () => {
     expect(generic?.status).toBe("warn");
   });
 
+  // Regression: the pre-fix regex was `/-with-secrets.*\.tar\.gz$/i` with
+  // an unescaped `.` (matches ANY single char). The tightened pattern is
+  // `[^/]*` instead of `.*`. These cases lock the intended boundary so a
+  // future "simplify" pass can't loosen it without a test failure.
+  it("matches the canonical false-positive shapes that motivated the regex", () => {
+    // The shapes that SHOULD match — all real candidates for an
+    // operator-leaked archive.
+    const matchers = [
+      "anything-with-secrets.tar.gz", // bare boundary
+      "x-with-secrets.tar.gz",
+      "weird-with-secretsZ.tar.gz", // single non-separator after the suffix
+      "Aaa-with-secrets-2026-q4.tar.gz",
+    ];
+    for (const name of matchers) {
+      writeFileSync(join(tempDir, name), "fake");
+    }
+    const results = checkRepoHygiene(tempDir);
+    for (const name of matchers) {
+      const hit = results.find((r) => r.name.includes(name));
+      expect(hit, `expected warning for ${name}`).toBeDefined();
+      expect(hit?.status).toBe("warn");
+    }
+  });
+
+  it("ignores filenames that don't end with .tar.gz even when they contain '-with-secrets'", () => {
+    writeFileSync(join(tempDir, "notes-with-secrets.txt"), "x");
+    writeFileSync(join(tempDir, "with-secrets.zip"), "x");
+    writeFileSync(join(tempDir, "x-with-secrets.tar"), "x"); // missing .gz
+    const results = checkRepoHygiene(tempDir);
+    expect(results).toHaveLength(1);
+    expect(results[0].status).toBe("ok");
+  });
+
   it("does not double-report the known tarball under the glob rule", () => {
     writeFileSync(join(tempDir, "clerk-export-with-secrets.tar.gz"), "fake");
     const results = checkRepoHygiene(tempDir);

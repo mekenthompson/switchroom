@@ -5457,6 +5457,18 @@ function logGateDeny(ctx: Context, reason: GateDropReason): void {
   // Defence in depth: never throw from the log helper. A misshapen ctx
   // (e.g. partial test fixture) would otherwise sink the inbound path.
   try {
+    // `group_mention_required` is routine traffic in any active group
+    // chat — every non-mentioning message from an allowlisted member
+    // hits this reason. With per-(chat,sender) rate-limiting that's
+    // still up to N log lines per minute per active group, which is
+    // noise rather than signal: `requireMention=true` is doing exactly
+    // what it's configured to do. Gate behind a debug env var so
+    // operators can opt into it when they're explicitly debugging a
+    // group-mention configuration. The other 8 reasons are all
+    // genuine misconfig / unauthorized signals and stay loud.
+    if (reason === 'group_mention_required' && process.env.SWITCHROOM_GATEWAY_DEBUG_DENY !== '1') {
+      return
+    }
     const chatId = ctx.chat?.id != null ? String(ctx.chat.id) : '?'
     const senderId = ctx.from?.id != null ? String(ctx.from.id) : '?'
     const chatType = ctx.chat?.type ?? '?'

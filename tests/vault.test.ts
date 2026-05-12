@@ -815,4 +815,29 @@ describe("broker-denied error message format", () => {
     ) as string;
     expect(src).toContain("VAULT-FORMAT-MISMATCH");
   });
+
+  it("deny-hint points agents at vault_request_access, not --no-broker (#gymbro-fallback)", () => {
+    // Pre-fix: stderr on VAULT-BROKER-DENIED told the agent to retry
+    // with `--no-broker`, which can never work from inside a sandbox
+    // (the vault file isn't mounted). The agent then gave up
+    // ("I'm sandboxed") instead of calling the MCP tool that exists
+    // for exactly this case. Post-fix: stderr branches on
+    // isSandboxContext() and names vault_request_access.
+    const src = require("node:fs").readFileSync(
+      require("node:path").join(
+        require("node:url").fileURLToPath(new URL("../src/cli/vault.ts", import.meta.url))
+      ),
+      "utf8"
+    ) as string;
+    // The sandbox-aware helper exists.
+    expect(src).toMatch(/function recoveryHint/);
+    // It names the MCP tool.
+    expect(src).toContain("vault_request_access");
+    // It explicitly warns agents off --no-broker.
+    expect(src).toMatch(/Do NOT retry with --no-broker/);
+    // The three deny paths still use the helper (one call per path).
+    const helperCalls = (src.match(/recoveryHint\(/g) ?? []).length;
+    // 1 definition + 3 call sites = 4 occurrences in source.
+    expect(helperCalls).toBeGreaterThanOrEqual(4);
+  });
 });

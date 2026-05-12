@@ -114,9 +114,17 @@ describe("scaffoldAgent — persona (Phase 2)", () => {
     // lifecycle additions in #557 (wake-audit + restart-visibility);
     // raised again 24000 → 26000 for the phone-first-UX epic #572
     // (`!` interrupt marker, voice transcripts, sticker/GIF persona
-    // guidance, Telegraph long-reply auto-publish). Each block is
-    // load-bearing — the agent needs them to use the new MCP tools
-    // correctly. Future bumps should justify themselves similarly.
-    expect(claudeMd.length).toBeLessThan(26000); // generous cap; target is lean but not 3KB
+    // guidance, Telegraph long-reply auto-publish); cap had already
+    // drifted to ~27.3KB on upstream/main from incremental persona /
+    // skill / handoff edits before the bump below. Raised again
+    // 26000 → 32000 for the unconditional vault-protocol fragment
+    // appended to every agent's CLAUDE.md (~2.9KB; teaches the agent
+    // when to call vault_request_access, when to degrade gracefully
+    // in cron context, and why --no-broker / env-file fallbacks can't
+    // work from inside a sandbox — RCA: gymbro silently fell back to
+    // estimates on VAULT-BROKER-DENIED instead of requesting a grant).
+    // Each block is load-bearing. Future bumps should justify themselves
+    // similarly.
+    expect(claudeMd.length).toBeLessThan(32000); // generous cap; target is lean but not 3KB
   });
 });

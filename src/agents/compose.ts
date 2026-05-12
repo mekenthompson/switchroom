@@ -24,7 +24,8 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { SwitchroomConfig, AgentConfig } from "../config/schema.js";
 import { resolveAgentConfig } from "../config/merge.js";
 import { isReservedAgentName } from "../vault/broker/peercred.js";
@@ -335,6 +336,36 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // home. Falls back to process.env.HOME when no homeDir is passed.
   const hostHomeForChecks = opts.homeDir ?? process.env.HOME ?? "";
   const switchroomConfigPath = opts.switchroomConfigPath;
+
+  // Resolve the host's analytics distinct ID once per generator call. The
+  // CLI persists this at ~/.switchroom/analytics-id (see
+  // src/analytics/posthog.ts:getDistinctId). Threading it through to the
+  // agent container means runtime events merge with the same user's CLI
+  // events in PostHog (same distinctId, different `source` property).
+  //
+  // If the file doesn't exist (fresh install before any CLI invocation
+  // wrote it), we skip emitting the env var — the gateway's
+  // analytics-posthog.ts falls back to a per-agent UUID at
+  // /state/agent/analytics-id. Determinism: if the file is present, its
+  // contents are stable across runs by design.
+  let resolvedAnalyticsId: string | null = null;
+  if (hostHomeForChecks !== "") {
+    const idPath = join(hostHomeForChecks, ".switchroom", "analytics-id");
+    if (existsSync(idPath)) {
+      try {
+        const raw = readFileSync(idPath, "utf-8").trim();
+        if (raw !== "") resolvedAnalyticsId = raw;
+      } catch {
+        // Non-fatal — gateway will fall back.
+      }
+    }
+  }
+  // Operator opt-out — surfaced from the host env so a single
+  // SWITCHROOM_TELEMETRY_DISABLED=1 in the operator's shell propagates
+  // fleet-wide.
+  const telemetryDisabled = process.env.SWITCHROOM_TELEMETRY_DISABLED;
+  const posthogKeyOverride = process.env.SWITCHROOM_POSTHOG_KEY;
+  const posthogHostOverride = process.env.SWITCHROOM_POSTHOG_HOST;
   if (buildMode === "local" && !buildContext) {
     throw new Error(
       `compose: buildMode="local" requires buildContext (the absolute path to the switchroom checkout)`,
@@ -595,7 +626,23 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
     if (a.strippedCaps.length > 0) {
       warn(`compose: stripping cap_add ${JSON.stringify(a.strippedCaps)} from agent "${a.name}" (Docker mode forbids capability extras; see RFC §security)`);
     }
-    emitAgentService(lines, a, imageTag, buildMode, buildContext, homePrefix, hostHomeForChecks, switchroomConfigPath, containerNamePrefix);
+    emitAgentService(
+      lines,
+      a,
+      imageTag,
+      buildMode,
+      buildContext,
+      homePrefix,
+      hostHomeForChecks,
+      switchroomConfigPath,
+      containerNamePrefix,
+      {
+        analyticsId: resolvedAnalyticsId,
+        telemetryDisabled,
+        posthogKeyOverride,
+        posthogHostOverride,
+      },
+    );
   }
 
   // ── volumes ────────────────────────────────────────────────────────
@@ -609,6 +656,20 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   return lines.join("\n");
 }
 
+interface PosthogRuntimeEnv {
+  /** Host-resolved distinct ID from ~/.switchroom/analytics-id, or null
+   *  if the file is missing/empty — gateway falls back to a per-agent UUID. */
+  analyticsId: string | null;
+  /** Verbatim value of process.env.SWITCHROOM_TELEMETRY_DISABLED on the
+   *  host. Normalised to "1" before emission so the gateway's truthy check
+   *  doesn't depend on operator casing. */
+  telemetryDisabled: string | undefined;
+  /** Optional PostHog key override (host env). */
+  posthogKeyOverride: string | undefined;
+  /** Optional PostHog host override (host env). */
+  posthogHostOverride: string | undefined;
+}
+
 function emitAgentService(
   lines: string[],
   a: AgentServiceData,
@@ -619,6 +680,7 @@ function emitAgentService(
   hostHomeForChecks: string,
   switchroomConfigPath: string | undefined,
   containerNamePrefix: string,
+  posthog: PosthogRuntimeEnv,
 ): void {
   lines.push(`  agent-${a.name}:`);
   emitImageOrBuild(lines, "agent", imageTag, buildMode, buildContext);
@@ -747,6 +809,24 @@ function emitAgentService(
     SWITCHROOM_KERNEL_SOCKET: `/run/switchroom/kernel/sock`,
     SWITCHROOM_RUNTIME: "docker",
   };
+  // PostHog runtime telemetry — opt-out honoured, distinct-ID propagated
+  // from the host CLI so CLI + runtime events merge under the same user.
+  // See docs/posthog.md (Switchroom Runtime dashboard section).
+  if (posthog.analyticsId != null) {
+    env.SWITCHROOM_ANALYTICS_ID = posthog.analyticsId;
+  }
+  if (
+    posthog.telemetryDisabled === "1"
+    || posthog.telemetryDisabled === "true"
+  ) {
+    env.SWITCHROOM_TELEMETRY_DISABLED = "1";
+  }
+  if (posthog.posthogKeyOverride && posthog.posthogKeyOverride !== "") {
+    env.SWITCHROOM_POSTHOG_KEY = posthog.posthogKeyOverride;
+  }
+  if (posthog.posthogHostOverride && posthog.posthogHostOverride !== "") {
+    env.SWITCHROOM_POSTHOG_HOST = posthog.posthogHostOverride;
+  }
   // SWITCHROOM_CONFIG: the in-container telegram-plugin gateway daemon
   // (forked as a sidecar by start.sh's docker preamble) shells out to
   // the switchroom CLI for handoff / vault / topic operations and

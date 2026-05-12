@@ -49,6 +49,7 @@
         "@secretlint/types": "^12.2.0",
         "@xterm/headless": "^6.0.0",
         "grammy": "^1.21.0",
+        "posthog-node": "^5.29.2",
       },
     },
   },

@@ -44,7 +44,13 @@ to merge the anonymous ID into the real one. We don't do that today.
 
 ## Event catalogue
 
-Event names use `snake_case` verbs — `<noun>_<past_tense_verb>`.
+Event names use `snake_case` verbs — `<noun>_<past_tense_verb>`. Every event
+emitted from the in-container gateway auto-stamps `source: "gateway"` (CLI
+events are unmarked, equivalent to `source: "cli"`), so dashboards can slice
+by surface without each call-site repeating the property. Gateway events
+also auto-stamp `agent` (the agent name) and `switchroom_version`.
+
+### CLI events
 
 | Event                   | Source                          | Key properties                                     |
 |-------------------------|---------------------------------|----------------------------------------------------|
@@ -56,6 +62,41 @@ Event names use `snake_case` verbs — `<noun>_<past_tense_verb>`.
 | `agent_stopped`         | [src/web/api.ts](../src/web/api.ts)                      | `agent`, `source`                                  |
 | `agent_restarted`       | [src/web/api.ts](../src/web/api.ts)                      | `agent`, `source`                                  |
 | `integration_verified`  | [scripts/posthog-smoke-test.mjs](../scripts/posthog-smoke-test.mjs) | smoke-test only                        |
+
+### Gateway / runtime events (#1122)
+
+These power the **Switchroom Runtime** dashboard and the
+conversational-turn-UX KPIs (see `reference/know-what-my-agent-is-doing.md`).
+Emitted from inside each agent container by the telegram-plugin gateway.
+
+| Event                    | Source                                                                                  | Key properties                                                                                                              |
+|--------------------------|-----------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| `inbound_status_query`   | [telegram-plugin/inbound-classifier.ts](../telegram-plugin/inbound-classifier.ts)        | `chat_id`, `message_id`, `thread_id`, `text_length`, `prior_turn_in_flight`, `seconds_since_turn_start`                     |
+| `turn_started`           | [telegram-plugin/gateway/gateway.ts](../telegram-plugin/gateway/gateway.ts) (fresh-turn) | `chat_id`, `message_id`, `thread_id`, `inbound_classified_as_status_query`                                                  |
+| `turn_ended`             | [telegram-plugin/gateway/gateway.ts](../telegram-plugin/gateway/gateway.ts) (turn_end)   | `chat_id`, `thread_id`, `duration_ms`, `ttfo_ms`, `outbound_count`, `longest_silent_gap_ms`, `ended_via`                    |
+
+**Local JSONL mirror.** Every gateway event is ALSO appended to
+`/state/agent/runtime-metrics.jsonl` inside the agent container (one JSON
+line per event, with a `ts` epoch-ms stamp). This is the local-debug
+side-channel — operators can `tail -f` it or an agent can read its own
+past behaviour without round-tripping to PostHog. Disabled via
+`SWITCHROOM_RUNTIME_METRICS_JSONL_DISABLED=1` if disk pressure is a
+concern; PostHog continues to receive events.
+
+**Distinct ID flow.** `~/.switchroom/analytics-id` on the host is read by
+`src/agents/compose.ts` and baked into each agent container as
+`SWITCHROOM_ANALYTICS_ID`. The gateway uses that as the PostHog distinctId,
+so a user's CLI + every runtime turn merge under the same identity. The
+fallback (file missing) is a per-agent UUID at
+`/state/agent/analytics-id`.
+
+### KPIs powered by gateway events
+
+| KPI                              | Source events                          | Definition                                                                                       |
+|----------------------------------|----------------------------------------|--------------------------------------------------------------------------------------------------|
+| Status-query rate (lagging)      | `inbound_status_query`                 | Count of status-query inbound / count of all inbound. Target <0.5%.                              |
+| Outbound silence p95 (leading)   | `turn_ended.longest_silent_gap_ms`     | p95 of `longest_silent_gap_ms` across `turn_ended` events with `duration_ms > 30000`. Target <120s. |
+| TTFO p95                         | `turn_ended.ttfo_ms`                   | p95 of `ttfo_ms` across `turn_ended` events with `outbound_count > 0`. Target <30s.              |
 
 ### Adding a new event
 
@@ -85,6 +126,10 @@ Current boundaries:
 - `src/cli/setup.ts` — setup wizard catch-all (`action: "setup"`)
 - `src/cli/init.ts` — init catch-all (`action: "init"`)
 - `src/web/api.ts` — agent start/stop/restart handlers
+- `telegram-plugin/gateway/gateway.ts` — gateway top-level (`source: "gateway"`,
+  installed via `analytics-posthog.installGlobalErrorHandlers()`). Uncaught
+  exceptions and unhandled rejections inside the long-lived gateway land in
+  the same Switchroom Errors dashboard as CLI errors.
 
 ### Adding a new boundary
 

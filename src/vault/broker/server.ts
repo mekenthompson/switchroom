@@ -1295,6 +1295,33 @@ export class VaultBroker {
           );
           return;
         }
+        // Per-agent allowlist gate (#1115 follow-up rev 3) — same as
+        // mint_grant. The operator must explicitly opt this agent
+        // into the silent-mint path; default empty list = no agent
+        // can use posture attestation. Prevents a non-trusted
+        // agent's claude from writing new vault keys under
+        // telegram-id without an operator tap.
+        const postureAllowlist = this.config?.vault?.broker?.postureMintAgents ?? [];
+        if (!postureAllowlist.includes(agentName)) {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: "put",
+            key: req.key,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:posture-agent-not-allowlisted",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                `agent '${agentName}' is not on vault.broker.postureMintAgents — operator must opt this agent into posture-attested put`,
+              ),
+            ),
+          );
+          return;
+        }
         passphraseAttested = true;
         writeAudit({
           ts: new Date().toISOString(),
@@ -1730,6 +1757,61 @@ export class VaultBroker {
               errorResponse(
                 "DENIED",
                 "mint_grant attest_via_posture requires vault.broker.approvalAuth: telegram-id in broker config",
+              ),
+            ),
+          );
+          return;
+        }
+        // #1115 follow-up rev 3 — reviewer-blocker fix: per-agent
+        // allowlist. The earlier gate accepted "any per-agent peer"
+        // (`agentName !== null`), which let claude inside any agent
+        // container call mint_grant attest_via_posture with no
+        // operator-tap proof. Now the operator must explicitly opt
+        // each agent into the silent-mint path via
+        // `vault.broker.postureMintAgents`. Default empty → no agent
+        // can self-mint until the operator picks one. AND the
+        // request's `agent` field must match the calling peer's
+        // resolved agent name (cross-agent posture-mint refused).
+        const postureAllowlist = this.config?.vault?.broker?.postureMintAgents ?? [];
+        if (!postureAllowlist.includes(agentName)) {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:posture-agent-not-allowlisted",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                `agent '${agentName}' is not on vault.broker.postureMintAgents — operator must opt this agent into posture-attested mint`,
+              ),
+            ),
+          );
+          return;
+        }
+        // Agent-self-match: the request's declared `agent` MUST equal
+        // the calling peer's resolved agentName. Without this, an
+        // allowlisted agent could mint grants naming OTHER agents
+        // (cross-agent posture mint). mint_grant has an `agent`
+        // field per the protocol; list_grants's is optional.
+        const reqAgent = (req as { agent?: string }).agent;
+        if (req.op === "mint_grant" && reqAgent !== agentName) {
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:posture-cross-agent-mint-refused",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                `posture-attested mint refused: request.agent=${reqAgent ?? "<unset>"} but calling peer is ${agentName}`,
               ),
             ),
           );

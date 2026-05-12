@@ -47,7 +47,7 @@ function cloneSecrets(): Record<string, VaultEntry> {
   return JSON.parse(JSON.stringify(SECRETS));
 }
 
-function makeTelegramIdConfig() {
+function makeTelegramIdConfig(opts?: { postureMintAgents?: string[] }) {
   return {
     switchroom: { version: 1 },
     telegram: { bot_token: "test", forum_chat_id: "123" },
@@ -58,6 +58,7 @@ function makeTelegramIdConfig() {
         enabled: true,
         autoUnlock: true,
         approvalAuth: "telegram-id" as const,
+        postureMintAgents: opts?.postureMintAgents ?? ["uat-agent"],
       },
     },
     agents: {},
@@ -331,6 +332,90 @@ describe("broker mint_grant attest_via_posture", () => {
     }
     const denied = audit.find((e) => e.op === "put" && /denied:/.test(e.result));
     expect(denied, "must not write a denial row for a posture-attested put under valid config").toBeUndefined();
+  });
+
+  // ── Per-agent allowlist (#1115 follow-up rev 3) ────────────────────────
+
+  it("agent NOT on postureMintAgents: DENIED posture-agent-not-allowlisted (default empty)", async () => {
+    broker = makeBroker({
+      // Default-empty allowlist (no postureMintAgents key): no agent can self-mint.
+      config: {
+        switchroom: { version: 1 },
+        telegram: { bot_token: "t", forum_chat_id: "1" },
+        vault: {
+          path: "~/.switchroom/vault.enc",
+          broker: {
+            socket: "~/.switchroom/vault-broker.sock",
+            enabled: true,
+            autoUnlock: true,
+            approvalAuth: "telegram-id" as const,
+            postureMintAgents: [],
+          },
+        },
+        agents: {},
+      } as any,
+      passphrase: "broker-pass",
+      agentName: "uat-agent",
+    });
+    await broker.start(socketPath, undefined, undefined);
+    const resp = await rpc(socketPath, {
+      v: 1,
+      op: "mint_grant",
+      agent: "uat-agent",
+      keys: ["k1"],
+      ttl_seconds: 3600,
+      attest_via_posture: true,
+    });
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.code).toBe("DENIED");
+    const denied = audit.find(
+      (e) => e.op === "mint_grant" && /denied:posture-agent-not-allowlisted/.test(e.result),
+    );
+    expect(denied).toBeDefined();
+  });
+
+  it("cross-agent posture mint refused: req.agent !== agentName", async () => {
+    // Allowlisted agent attempts to mint a grant naming a DIFFERENT agent.
+    broker = makeBroker({
+      config: makeTelegramIdConfig({ postureMintAgents: ["uat-agent"] }),
+      passphrase: "broker-pass",
+      agentName: "uat-agent",
+    });
+    await broker.start(socketPath, undefined, undefined);
+    const resp = await rpc(socketPath, {
+      v: 1,
+      op: "mint_grant",
+      agent: "victim-agent", // ← different from agentName
+      keys: ["k1"],
+      ttl_seconds: 3600,
+      attest_via_posture: true,
+    });
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.code).toBe("DENIED");
+    const denied = audit.find(
+      (e) => e.op === "mint_grant" && /denied:posture-cross-agent-mint-refused/.test(e.result),
+    );
+    expect(denied).toBeDefined();
+  });
+
+  it("put attest_via_posture: respects postureMintAgents allowlist", async () => {
+    broker = makeBroker({
+      config: makeTelegramIdConfig({ postureMintAgents: [] }),
+      passphrase: "broker-pass",
+      agentName: "uat-agent",
+    });
+    await broker.start(socketPath, undefined, undefined);
+    const resp = await rpc(socketPath, {
+      v: 1,
+      op: "put",
+      key: "uat/posture-write-test",
+      entry: { kind: "string", value: "hello" },
+      attest_via_posture: true,
+    });
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.code).toBe("DENIED");
+    const denied = audit.find((e) => e.op === "put" && /denied:posture-agent-not-allowlisted/.test(e.result));
+    expect(denied).toBeDefined();
   });
 
   it("put attest_via_posture refused when broker is passphrase mode", async () => {

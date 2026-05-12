@@ -99,6 +99,7 @@ import {
   renderTemplate,
   copyProfileSkills,
   renderProfileClaudeTemplate,
+  renderVaultProtocolFragment,
 } from "./profiles.js";
 import { getHindsightSettingsEntry, getBuiltinDefaultMcpEntries } from "../memory/scaffold-integration.js";
 import { reconcileAgentDefaultSkills } from "./reconcile-default-skills.js";
@@ -1993,6 +1994,17 @@ export function scaffoldAgent(
         join(agentDir, dest),
         () => {
           let rendered = renderTemplate(srcPath, context);
+          // Append the switchroom-managed vault protocol section. Every
+          // agent gets it regardless of profile — it's load-bearing
+          // safety guidance (how to handle VAULT-BROKER-DENIED, when to
+          // call vault_request_access, why --no-broker can't work from
+          // inside the sandbox). Reconcile re-applies it on every run.
+          if (dest === "CLAUDE.md") {
+            const vaultProtocol = renderVaultProtocolFragment(context);
+            if (vaultProtocol) {
+              rendered = rendered.trimEnd() + "\n\n" + vaultProtocol + "\n";
+            }
+          }
           // Phase 5: append claude_md_raw escape hatch on initial
           // scaffold. CLAUDE.md is user-protected afterwards so the
           // hatch is one-shot — users who edit CLAUDE.md after scaffold
@@ -3172,8 +3184,15 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
         useSwitchroomPlugin: usesSwitchroomTelegramPlugin(agentConfig),
       };
 
-      // Render template + compose with sidecar
-      const rendered = renderTemplate(claudeMdSrc, claudeContext);
+      // Render template, then append the switchroom-managed vault
+      // protocol section (every agent gets it; reconcile re-applies on
+      // every run so updates to the fragment propagate without touching
+      // per-profile templates), then compose with the user sidecar.
+      let rendered = renderTemplate(claudeMdSrc, claudeContext);
+      const vaultProtocol = renderVaultProtocolFragment(claudeContext);
+      if (vaultProtocol) {
+        rendered = rendered.trimEnd() + "\n\n" + vaultProtocol + "\n";
+      }
       let composed = composeWithSidecar(rendered, claudeCustomPath);
 
       // Legacy claude_md_raw still appends after sidecar (one-shot escape hatch)

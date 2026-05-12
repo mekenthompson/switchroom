@@ -10258,25 +10258,61 @@ async function handleOperatorEventCallback(ctx: Context, data: string): Promise<
     return
   }
 
+  // #1150 audit P1: extract the source card text once so every branch
+  // below can append a status line via finalizeCallback. Pre-fix `dismiss`
+  // and `restart` stripped the keyboard but kept the original card body
+  // verbatim — operator scrolling back couldn't see what they'd decided.
+  // `reauth` didn't strip the keyboard at all → re-tappable mid-flow.
+  //
+  // HTML-escape the extracted text before concatenation. Telegram returns
+  // `msg.text` as plain UTF-8 with entities stripped — any raw `<`, `>`,
+  // or `&` characters in the original `detail` (operator-events.ts
+  // `unknown-4xx`/`unknown-5xx` cards routinely carry API error bodies
+  // with `<`/`>` in them) would be re-parsed as HTML tags when the
+  // finalizeCallback edit fires with `parseMode: 'HTML'`. Telegram
+  // rejects the edit, finalizeCallback's catch swallows it, the
+  // keyboard never strips, and the operator re-taps → exact bug this
+  // PR is meant to fix re-introduced. Escape once here so every branch
+  // gets a safe-to-reparse value. We lose the original bold/italic
+  // styling on the source body — acceptable, that styling was already
+  // gone the moment `msg.text` was read instead of `msg.entities`.
+  // (PR #1158 round 2 — review item F.)
+  const sourceMsgText = (() => {
+    const msg = ctx.callbackQuery?.message
+    if (!msg || !('text' in msg) || !msg.text) return ''
+    return escapeHtmlForTg(msg.text)
+  })()
+
   switch (action) {
     case 'dismiss': {
-      await ctx.answerCallbackQuery({ text: 'Dismissed' }).catch(() => {})
-      await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {})
+      // #1150 audit P1: was strip-only. Now appends a status line so
+      // scrollback shows the dismissal.
+      const status = `\n\n✗ <i>Dismissed by operator.</i>`
+      await finalizeCallback(ctx, {
+        ackText: 'Dismissed',
+        newText: sourceMsgText ? `${sourceMsgText}${status}` : status,
+        parseMode: 'HTML',
+        // No synthInbound — dismiss is operator-only, no model in loop.
+      })
       return
     }
     case 'restart': {
-      await ctx.answerCallbackQuery({ text: `Restarting ${agent}…` }).catch(() => {})
       const ok = triggerSelfRestart(agent, 'inline-button-restart')
       if (ok) {
-        await ctx.reply(`<b>${agent}</b> restart requested.`, { parse_mode: 'HTML' })
-        await ctx.editMessageReplyMarkup({ reply_markup: { inline_keyboard: [] } }).catch(() => {})
+        // #1150 audit P1: was reply + editMessageReplyMarkup (two
+        // separate edits). Atomic via finalizeCallback now — the
+        // status line is the announcement, no separate reply needed.
+        const status = `\n\n🔄 <i><b>${escapeHtmlForTg(agent)}</b> restart requested by operator.</i>`
+        await finalizeCallback(ctx, {
+          ackText: `Restarting ${agent}…`,
+          newText: sourceMsgText ? `${sourceMsgText}${status}` : status,
+          parseMode: 'HTML',
+        })
       } else {
-        // Under docker the helper refuses cross-agent restart; surface
-        // a clear message instead of a silent no-op. Service name in
-        // the generated compose is `agent-<name>` (compose.ts:408);
-        // container_name is `switchroom-<name>` (compose.ts:410).
-        // `docker compose restart` takes a SERVICE name, so we point
-        // the operator at the service.
+        // Failure-path: leave the keyboard tappable so the operator
+        // can retry once they've followed the manual instructions
+        // below. ack toast still fires.
+        await ctx.answerCallbackQuery({ text: `Restart failed for ${agent}` }).catch(() => {})
         const isDocker = process.env.SWITCHROOM_RUNTIME === 'docker'
         const detail = isDocker
           ? `cross-agent restart is not supported under docker. ` +
@@ -10289,9 +10325,22 @@ async function handleOperatorEventCallback(ctx: Context, data: string): Promise<
       return
     }
     case 'reauth': {
-      await ctx.answerCallbackQuery({ text: `Starting reauth for ${agent}…` }).catch(() => {})
-      await runSwitchroomAuthCommand(ctx, ['auth', 'reauth', agent], `auth reauth ${agent}`)
-      pendingReauthFlows.set(String(ctx.chat!.id), { agent, startedAt: Date.now() })
+      // #1150 audit P1: pre-fix the operator-event card's [Reauth] button
+      // stayed tappable after the reauth flow started → operator could
+      // re-tap and spawn a second concurrent flow that fights the first
+      // for the login URL state. Strip the keyboard and append a status
+      // line; the new reauth-flow's own messages appear below the
+      // collapsed card.
+      const status = `\n\n🔐 <i>Reauth started for <b>${escapeHtmlForTg(agent)}</b> — follow the login URL below.</i>`
+      await finalizeCallback(ctx, {
+        ackText: `Starting reauth for ${agent}…`,
+        newText: sourceMsgText ? `${sourceMsgText}${status}` : status,
+        parseMode: 'HTML',
+        synthInbound: async () => {
+          await runSwitchroomAuthCommand(ctx, ['auth', 'reauth', agent], `auth reauth ${agent}`)
+          pendingReauthFlows.set(String(ctx.chat!.id), { agent, startedAt: Date.now() })
+        },
+      })
       return
     }
     case 'logs': {

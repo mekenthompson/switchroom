@@ -59,7 +59,7 @@ Your container has \`read_only: true\` rootfs. Most paths are read-only.
 - \`/\`, \`/opt\`, \`/usr\`, \`/etc\`, \`/bin\`, \`/lib\` — rootfs hardening.
 - \`~/.switchroom/skills/**\` — shared skill files; operator-owned.
 - \`~/.switchroom/credentials/**\` — secrets; immutable from your view.
-- \`~/.switchroom/switchroom.yaml\` — fleet config; operator-owned.
+- \`/state/config/switchroom.yaml\` — fleet config; operator-owned.
 
 ### When you hit "read-only file system" / EROFS
 

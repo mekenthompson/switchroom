@@ -1014,9 +1014,7 @@ function buildHumanizerEnvVars(
 const SWITCHROOM_OWNED_SETTINGS_KEYS = new Set<string>([
   "permissions",
   "mcpServers",
-  "enabledPlugins",
   "autoMemoryEnabled",
-  "skipDangerousModePermissionPrompt",
   "hooks",
   "model",
 ]);
@@ -1487,7 +1485,6 @@ function buildWorkspaceContext(args: BuildWorkspaceContextArgs): Record<string, 
     botToken: resolvedBotToken ?? rawBotToken,
     forumChatId: telegramConfig.forum_chat_id,
     dangerousMode: agentConfig.dangerous_mode === true,
-    skipPermissionPrompt: agentConfig.skip_permission_prompt === true,
     useSwitchroomPlugin: usesSwitchroomTelegramPlugin(agentConfig),
     useHotReloadStable: agentConfig.channels?.telegram?.hotReloadStable === true,
     hindsightEnabled: hindsightAutoRecallEnabled,
@@ -3320,6 +3317,15 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
       }
     }
     delete settings[META_KEY];
+
+    // --- One-shot migration: retract dead settings keys that prior switchroom
+    // versions emitted from the hbs template. They were never tracked in
+    // _switchroomManagedRawKeys (template-emitted, not settings_raw-injected),
+    // so the loop above doesn't catch them on existing agents. Delete them
+    // explicitly. Safe to remove this block after a few releases.
+    // See settings.json.hbs header for why these keys are no-ops at project scope.
+    delete settings.enabledPlugins;
+    delete settings.skipDangerousModePermissionPrompt;
 
     // --- Phase 2: reconcile user hooks (replace, don't merge) ---
     //

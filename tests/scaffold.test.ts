@@ -527,24 +527,30 @@ describe("scaffoldAgent", () => {
     expect(startSh).not.toContain("--dangerously-skip-permissions");
   });
 
-  it("includes skipDangerousModePermissionPrompt when skip_permission_prompt is true", () => {
-    const config = makeAgentConfig({ skip_permission_prompt: true });
-    const result = scaffoldAgent("skip-prompt-agent", config, tmpDir, telegramConfig);
-    const settings = JSON.parse(
-      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
-    );
-
-    expect(settings.skipDangerousModePermissionPrompt).toBe(true);
+  it("never emits skipDangerousModePermissionPrompt — Claude Code ignores it at project scope", () => {
+    // Regression guard: this key was emitted historically but Claude Code only
+    // honors it at user/local scope, never project. autoaccept handles the prompt.
+    for (const skip of [true, false, undefined]) {
+      const config = makeAgentConfig(skip === undefined ? {} : { skip_permission_prompt: skip });
+      const result = scaffoldAgent(`skip-${String(skip)}`, config, tmpDir, telegramConfig);
+      const settings = JSON.parse(
+        readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+      );
+      expect(settings.skipDangerousModePermissionPrompt).toBeUndefined();
+      expect(settings.permissions?.skipDangerousModePermissionPrompt).toBeUndefined();
+    }
   });
 
-  it("does not include skipDangerousModePermissionPrompt by default", () => {
+  it("never emits enabledPlugins — redundant with start.sh CLI flag pathway", () => {
+    // Regression guard: plugin selection is driven by --channels / --plugin-dir
+    // in profiles/_base/start.sh.hbs. The settings.json block would work but
+    // duplicate state with the CLI flag and risk drift.
     const config = makeAgentConfig();
-    const result = scaffoldAgent("default-prompt-agent", config, tmpDir, telegramConfig);
+    const result = scaffoldAgent("no-enabled-plugins", config, tmpDir, telegramConfig);
     const settings = JSON.parse(
       readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
     );
-
-    expect(settings.skipDangerousModePermissionPrompt).toBeUndefined();
+    expect(settings.enabledPlugins).toBeUndefined();
   });
 
   it("does not include switchroom-telegram MCP server in settings.json (it lives in .mcp.json)", () => {
@@ -1162,6 +1168,27 @@ describe("reconcileAgent", () => {
     expect(settings.permissions.allow).not.toContain("Bash");
     expect(settings.permissions.allow).not.toContain("Edit");
     expect(settings.permissions.allow).not.toContain("Write");
+  });
+
+  it("retracts stale enabledPlugins / skipDangerousModePermissionPrompt on reconcile (one-shot migration)", () => {
+    // Pre-PR switchroom emitted both keys from settings.json.hbs to every
+    // scaffolded agent. They were never tracked in _switchroomManagedRawKeys
+    // (template-emitted, not settings_raw-injected), so the standard Phase-5
+    // retraction loop doesn't catch them. The one-shot migration in
+    // reconcileAgent must explicitly delete them.
+    const agentConfig = makeAgentConfig();
+    const scaffolded = scaffoldAgent("stale", agentConfig, tmpDir, telegramConfig);
+    const settingsPath = join(scaffolded.agentDir, ".claude", "settings.json");
+    const settings = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    // Simulate a pre-PR agent: hand-inject both stale keys.
+    settings.enabledPlugins = { "telegram@claude-plugins-official": true };
+    settings.skipDangerousModePermissionPrompt = true;
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2), "utf-8");
+
+    reconcileAgent("stale", agentConfig, tmpDir, telegramConfig, buildSwitchroomConfig(agentConfig));
+    const reconciled = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    expect(reconciled.enabledPlugins).toBeUndefined();
+    expect(reconciled.skipDangerousModePermissionPrompt).toBeUndefined();
   });
 
   it("re-seeds workspace bootstrap files on reconcile (covers profile template additions)", () => {

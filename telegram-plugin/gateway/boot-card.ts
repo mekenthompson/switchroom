@@ -243,6 +243,10 @@ const REASON_LABEL: Record<RestartReason, string> = {
 
 export interface RenderBootCardOpts {
   agentName: string
+  /** Lowercase slug used for systemd unit names. Falls back to
+   *  `agentName` when omitted — matches the same fallback used by
+   *  `runAllProbes` for systemd targets. */
+  agentSlug?: string
   /** Pre-formatted version string, e.g. "v0.3.0+44" or "v0.3.0 · #143 · 2h ago". */
   version: string
   /** Probe results (only present after the settle window). When absent or
@@ -279,8 +283,25 @@ export interface RenderBootCardOpts {
  * user only needs to know the agent came back up. Anything red catches
  * the eye; everything else stays out of the way.
  */
+/**
+ * Render a probe's `nextStep` hint as Telegram HTML. The hint is
+ * authored as plain text with backtick-quoted commands (one shell idiom
+ * across the codebase — search "Run `switchroom"). We translate those
+ * to <code> spans and escape everything else, so commands stay tap-to-
+ * copy on mobile without bleeding raw HTML through.
+ */
+function renderNextStep(text: string): string {
+  const parts = text.split('`')
+  // Odd-count backticks means an unterminated <code> span — fall back to
+  // plain-escaped text rather than rendering the trailing tail inside a
+  // code block. Author error, not user-input, but defensive is cheap.
+  if (parts.length % 2 === 0) return escapeHtml(text)
+  return parts.map((p, i) => (i % 2 === 0 ? escapeHtml(p) : `<code>${escapeHtml(p)}</code>`)).join('')
+}
+
 export function renderBootCard(opts: RenderBootCardOpts): string {
   const { agentName, version, probes, restartReason, restartAgeMs } = opts
+  const agentSlug = opts.agentSlug ?? agentName
   const ackEmoji = restartReason ? REASON_EMOJI[restartReason] : '✅'
   const ack = `${ackEmoji} <b>${escapeHtml(agentName)}</b> back up · ${escapeHtml(version)}`
 
@@ -295,10 +316,16 @@ export function renderBootCard(opts: RenderBootCardOpts): string {
       ? ` · ${(restartAgeMs / 1000).toFixed(1)}s ago`
       : ''
     degradedRows.push(`⚠️ <b>Restart</b>  ${escapeHtml(REASON_LABEL.crash)}${ageStr}`)
+    // Principle 1: every failure carries its next step. The crash row
+    // tells the user how to inspect why.
+    degradedRows.push(`    ↳ Tail logs: <code>journalctl --user -u switchroom-${escapeHtml(agentSlug)} -n 100</code>`)
   }
 
   // Probe rows — only those that surfaced as degraded/fail. Healthy
-  // (`ok`) probes don't render at all.
+  // (`ok`) probes don't render at all. When a probe carries a nextStep,
+  // it renders as an indented continuation line beneath the row — see
+  // `reference/principles.md` principle 1 ("If they need the docs, we've
+  // failed"): every failure surface tells the user what to run.
   if (probes) {
     for (const key of PROBE_KEYS) {
       const r = probes[key]
@@ -306,6 +333,9 @@ export function renderBootCard(opts: RenderBootCardOpts): string {
       if (r.status === 'ok') continue
       const dot = DOT[r.status] ?? DOT.fail
       degradedRows.push(`${dot} <b>${PROBE_LABELS[key]}</b>  ${escapeHtml(r.detail)}`)
+      if (r.nextStep) {
+        degradedRows.push(`    ↳ ${renderNextStep(r.nextStep)}`)
+      }
     }
   }
 
@@ -424,7 +454,7 @@ export async function runAllProbes(opts: RunProbesOpts): Promise<ProbeMap> {
   const slug = opts.agentSlug ?? opts.agentName
 
   await Promise.allSettled([
-    probeAccount(opts.agentDir).then(r => { probes.account = r }),
+    probeAccount(opts.agentDir, { agentName: opts.agentSlug ?? opts.agentName }).then(r => { probes.account = r }),
     probeAgentProcess(slug, { execFileImpl: opts.probeExecFileImpl, tmuxSupervisor: opts.tmuxSupervisor, dockerMode: opts.dockerMode }).then(r => { probes.agent = r }),
     probeGateway(opts.gatewayInfo).then(r => { probes.gateway = r }),
     probeQuota(claudeDir, opts.agentDir, opts.fetchImpl).then(r => { probes.quota = r }),
@@ -432,7 +462,7 @@ export async function runAllProbes(opts: RunProbesOpts): Promise<ProbeMap> {
     probeScheduler(slug, { dockerMode: opts.dockerMode }).then(r => { probes.scheduler = r }),
     probeBroker(undefined, { dockerMode: opts.dockerMode }).then(r => { probes.broker = r }),
     probeKernel(undefined, { dockerMode: opts.dockerMode }).then(r => { probes.kernel = r }),
-    probeSkills(opts.agentDir).then(r => { probes.skills = r }),
+    probeSkills(opts.agentDir, { agentName: opts.agentSlug ?? opts.agentName }).then(r => { probes.skills = r }),
   ])
 
   return probes
@@ -461,6 +491,7 @@ export async function startBootCard(
   // confirmation that the agent is back without waiting on probes.
   const ackText = renderBootCard({
     agentName: opts.agentName,
+    agentSlug: opts.agentSlug,
     version: opts.version,
     restartReason: opts.restartReason,
     restartAgeMs: opts.restartAgeMs,
@@ -517,6 +548,7 @@ export async function startBootCard(
         // Render with current probe state and edit if anything changed.
         let currentText = renderBootCard({
           agentName: opts.agentName,
+          agentSlug: opts.agentSlug,
           version: opts.version,
           probes,
           restartReason: opts.restartReason,
@@ -563,6 +595,7 @@ export async function startBootCard(
           const updatedProbes: ProbeMap = { ...probes, agent: agentResult }
           const updatedText = renderBootCard({
             agentName: opts.agentName,
+            agentSlug: opts.agentSlug,
             version: opts.version,
             probes: updatedProbes,
             restartReason: opts.restartReason,

@@ -135,6 +135,95 @@ describe('renderBootCard — degraded conditions', () => {
     expect(out).toContain('🟡 <b>Account</b>  expiring')
   })
 
+  it('renders nextStep as an indented continuation line beneath a degraded row', () => {
+    // Principle 1 ("If they need the docs, we've failed"): every degraded
+    // probe should surface its remediation inline. Plain backticks in the
+    // nextStep get translated to <code> spans so the command stays tap-to-
+    // copy on mobile.
+    const out = renderBootCard({
+      agentName: 'lawgpt',
+      version: 'v0.7.16',
+      probes: {
+        skills: {
+          status: 'degraded',
+          label: 'Skills',
+          detail: '10/10 dangling: a, b, c +7 more',
+          nextStep: 'Run `switchroom agent reconcile lawgpt` to rebuild symlinks',
+        },
+      },
+    })
+    expect(out).toContain('🟡 <b>Skills</b>  10/10 dangling')
+    expect(out).toContain('    ↳ Run <code>switchroom agent reconcile lawgpt</code> to rebuild symlinks')
+  })
+
+  it('crash row carries a tail-logs next-step', () => {
+    const out = renderBootCard({
+      agentName: 'lawgpt',
+      version: 'v0.7.16',
+      restartReason: 'crash',
+      restartAgeMs: 6_100,
+    })
+    expect(out).toContain('⚠️ <b>Restart</b>  crash recovery · 6.1s ago')
+    expect(out).toContain('↳ Tail logs: <code>journalctl --user -u switchroom-lawgpt -n 100</code>')
+  })
+
+  it('crash row uses agentSlug for the systemd unit when provided', () => {
+    const out = renderBootCard({
+      agentName: 'LawGPT',
+      agentSlug: 'lawgpt',
+      version: 'v1',
+      restartReason: 'crash',
+    })
+    expect(out).toContain('switchroom-lawgpt')
+    expect(out).not.toContain('switchroom-LawGPT')
+  })
+
+  it('renderNextStep escapes HTML inside backtick-quoted commands', () => {
+    const out = renderBootCard({
+      agentName: 'a',
+      version: 'v',
+      probes: {
+        account: {
+          status: 'fail',
+          label: 'Account',
+          detail: 'expired',
+          nextStep: 'Run `foo <bar> & baz` to fix',
+        },
+      },
+    })
+    expect(out).toContain('<code>foo &lt;bar&gt; &amp; baz</code>')
+    expect(out).not.toContain('<bar>')
+  })
+
+  it('unpaired backticks in nextStep fall back to plain escaped text', () => {
+    const out = renderBootCard({
+      agentName: 'a',
+      version: 'v',
+      probes: {
+        account: {
+          status: 'fail',
+          label: 'Account',
+          detail: 'expired',
+          nextStep: 'Run `switchroom foo to fix',
+        },
+      },
+    })
+    expect(out).toContain('↳ Run `switchroom foo to fix')
+    expect(out).not.toContain('<code>')
+  })
+
+  it('degraded rows without nextStep render unchanged (backwards compat)', () => {
+    const out = renderBootCard({
+      agentName: 'a',
+      version: 'v',
+      probes: {
+        quota: { status: 'fail', label: 'Quota', detail: 'rate limited' },
+      },
+    })
+    expect(out).toContain('🔴 <b>Quota</b>  rate limited')
+    expect(out).not.toContain('↳')
+  })
+
   it('null probe entries are skipped (defensive against partial probe maps)', () => {
     const out = renderBootCard({
       agentName: 'a',

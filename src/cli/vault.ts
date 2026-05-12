@@ -78,6 +78,58 @@ function refuseSandboxDirectAccess(verbHint: string): never {
   process.exit(VAULT_EXIT_SANDBOX_CONTEXT);
 }
 
+/**
+ * Sandbox-aware recovery hint for the three broker failure modes
+ * (denied / locked / unreachable). The same `--no-broker` hint that
+ * works for an operator on the host is actively misleading inside an
+ * agent: the vault file isn't mounted, so `--no-broker` would just
+ * fall into `refuseSandboxDirectAccess`. Worse, the agent reads this
+ * hint as instruction and gives up ("I'm sandboxed") instead of
+ * calling the `vault_request_access` MCP tool that actually exists
+ * to recover.
+ *
+ * In sandbox context, point at the tool that can recover the
+ * situation. On the host, keep the historical `--no-broker` hint.
+ */
+function recoveryHint(
+  situation: "denied" | "locked" | "unreachable",
+  key?: string,
+): string {
+  if (!isSandboxContext()) {
+    const keyArg = key ? ` ${key}` : "";
+    return `Hint: run 'switchroom vault get --no-broker${keyArg}' for interactive (non-cron) access.`;
+  }
+  // Inside an agent. The vault.enc file isn't mounted; `--no-broker`
+  // can't work. Tell the agent what *can* work.
+  switch (situation) {
+    case "denied":
+      return (
+        `Hint: this agent has no grant for ${key ? `'${key}'` : "this key"}. ` +
+        `Call the \`vault_request_access\` MCP tool ` +
+        `(key=${key ? `'${key}'` : "'<key>'"}, scope='read') ` +
+        `to ask the operator for access via a Telegram approval card. ` +
+        `Do NOT retry with --no-broker — the vault file is not mounted ` +
+        `into agent containers.`
+      );
+    case "locked":
+      return (
+        `Hint: the broker is locked. Ask the operator to unlock it ` +
+        `(\`/vault unlock\` in this chat, or ` +
+        `\`switchroom vault broker unlock\` on the host). ` +
+        `Do NOT retry with --no-broker — the vault file is not mounted ` +
+        `into agent containers.`
+      );
+    case "unreachable":
+      return (
+        `Hint: the broker is unreachable. Ask the operator to check it ` +
+        `(\`switchroom vault broker status\` on the host; if wedged, ` +
+        `\`docker compose -p switchroom restart vault-broker\`). ` +
+        `Do NOT retry with --no-broker — the vault file is not mounted ` +
+        `into agent containers.`
+      );
+  }
+}
+
 function getVaultPath(configPath?: string): string {
   try {
     const config = loadConfig(configPath);
@@ -724,8 +776,8 @@ export function registerVaultCommand(program: Command): void {
               // Non-TTY + broker locked: write a clearly-prefixed error to
               // stderr so agents/scripts surfacing captured output can grep it.
               process.stderr.write(
-                `VAULT-BROKER-DENIED: broker locked and stdin is not a TTY; ` +
-                `use 'switchroom vault get --no-broker' for interactive access\n`
+                `VAULT-BROKER-DENIED: broker locked and stdin is not a TTY.\n` +
+                `${recoveryHint("locked", key)}\n`
               );
               process.exit(3);
             }
@@ -785,7 +837,7 @@ export function registerVaultCommand(program: Command): void {
               // message isn't surfaced in their UI.
               process.stderr.write(
                 `VAULT-BROKER-DENIED [${result.code}]: ${result.msg}\n` +
-                `Hint: run 'switchroom vault get --no-broker ${key}' for interactive (non-cron) access.\n`
+                `${recoveryHint("denied", key)}\n`
               );
               process.exit(2);
             }
@@ -807,8 +859,8 @@ export function registerVaultCommand(program: Command): void {
         // Broker not reachable
         if (!process.stdin.isTTY && !process.env.SWITCHROOM_VAULT_PASSPHRASE) {
           process.stderr.write(
-            `VAULT-BROKER-DENIED: broker not running and stdin is not a TTY; ` +
-            `use 'switchroom vault get --no-broker ${key}' for interactive access\n`
+            `VAULT-BROKER-DENIED: broker not running and stdin is not a TTY.\n` +
+            `${recoveryHint("unreachable", key)}\n`
           );
           process.exit(1);
         }

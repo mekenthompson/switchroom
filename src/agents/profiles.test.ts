@@ -3,7 +3,12 @@ import { sep as pathSep, resolve } from "node:path";
 import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { getProfilePath, listAvailableProfiles, renderProfileClaudeTemplate } from "./profiles.js";
+import {
+  getProfilePath,
+  listAvailableProfiles,
+  renderProfileClaudeTemplate,
+  renderVaultProtocolFragment,
+} from "./profiles.js";
 
 describe("getProfilePath", () => {
   it("resolves a real profile that exists on disk", () => {
@@ -200,5 +205,60 @@ describe("telegram-style partial — status? RCA-offer guidance (#162)", () => {
     // immediately on every "status?".
     expect(partial.toLowerCase()).toContain("auto-file");
     expect(partial.toLowerCase()).toContain("offer-then-confirm");
+  });
+});
+
+describe("vault-protocol partial — agent vault discovery (#gymbro-fallback)", () => {
+  // Background: gymbro hit VAULT-BROKER-DENIED on fatsecret/* and
+  // silently fell back to estimates because it didn't know
+  // `vault_request_access` existed. Every agent must inherit this
+  // protocol deterministically — the partial is what teaches it.
+
+  it("tells the agent to call vault_request_access on broker denial", () => {
+    const fragment = renderVaultProtocolFragment();
+    expect(fragment).toContain("vault_request_access");
+    expect(fragment).toContain("VAULT-BROKER-DENIED");
+  });
+
+  it("branches on interactive vs cron context (don't spam approval cards)", () => {
+    // The whole reason the rule isn't "always request" is the cron
+    // case: a 3am fire shouldn't surface an approval card to a
+    // sleeping operator. The fragment must explicitly call this out.
+    const fragment = renderVaultProtocolFragment();
+    expect(fragment.toLowerCase()).toMatch(/interactive/);
+    expect(fragment.toLowerCase()).toMatch(/cron|non-interactive/);
+    expect(fragment.toLowerCase()).toMatch(/degrade|skip/);
+  });
+
+  it("forbids the --no-broker fallback (which can't work from a sandbox)", () => {
+    // The historical CLI hint pointed agents at `--no-broker`. That
+    // hint was wrong for an agent — the vault file isn't mounted, so
+    // --no-broker just hits VAULT-SANDBOX-CONTEXT. The fragment must
+    // explicitly tell the agent not to retry that way.
+    const fragment = renderVaultProtocolFragment();
+    expect(fragment).toContain("--no-broker");
+    expect(fragment.toLowerCase()).toMatch(/(do not|never|don't)[^.]*--no-broker|--no-broker[^.]*(does not|doesn't|can't|never)/);
+  });
+
+  it("forbids env-file fallbacks for secrets", () => {
+    // Pre-fix gymbro's food-log skill had a `~/.switchroom/credentials/
+    // fatsecret.env` fallback, justified by "main agent has no broker
+    // socket" — false in the per-agent socket model. The fragment
+    // forbids this anti-pattern.
+    const fragment = renderVaultProtocolFragment();
+    expect(fragment.toLowerCase()).toMatch(/env file|credentials.*\.env|env-file/);
+  });
+
+  it("forbids asking the operator to paste secrets into Telegram", () => {
+    // Mid-conversation "send me the API key" defeats the whole vault
+    // model and leaks the secret into chat history (even with
+    // secret-scrub hooks running).
+    const fragment = renderVaultProtocolFragment();
+    expect(fragment.toLowerCase()).toMatch(/paste|chat history|telegram/);
+  });
+
+  it("is non-empty (file present and rendered)", () => {
+    const fragment = renderVaultProtocolFragment();
+    expect(fragment.length).toBeGreaterThan(200);
   });
 });

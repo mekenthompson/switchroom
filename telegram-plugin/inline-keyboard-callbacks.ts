@@ -164,3 +164,139 @@ export function validateAndWrapAgentKeyboard(
   const wrapped = wrapAgentCallbacks(keyboard)
   return { ok: true, wrapped }
 }
+
+// ─── finalizeCallback (#1150 + audit follow-up) ──────────────────────────
+//
+// Centralized "the user tapped a terminal button" helper. Every callback
+// handler that resolves a decision (Approve / Deny / Pick option / Confirm
+// revoke / Always-allow / Dismiss / etc.) MUST route through this helper
+// so the three button-UX invariants are uniformly enforced:
+//
+//   1. Visible press feedback — `answerCallbackQuery` with `text:` so
+//      Telegram shows a toast. Operators who tap and see nothing within
+//      ~200ms double-tap; the toast IS the press-feedback affordance.
+//   2. Keyboard collapses with clarity — the message is edited in place
+//      to strip `reply_markup` AND append a status line that describes
+//      what the operator selected. One atomic edit, not two: the user
+//      must be able to scroll back later and see the resolved decision
+//      next to the original prompt.
+//   3. Side effect (typically: synthesize an inbound back to the model
+//      so the agent's turn continues) — runs AFTER the message edit
+//      lands so the model never sees "I'm being woken up" before the
+//      operator sees the visual confirmation.
+//
+// Multi-step wizards (vault grant wizard, etc.) should NOT use this
+// helper for intermediate-step transitions — those swap one keyboard
+// for the next via `editMessageText` + new `reply_markup`. Use this
+// helper for the WIZARD-FINAL step (Generate, Cancel) so the success
+// card collapses correctly and isn't re-tappable.
+
+/**
+ * Minimal callback-context shape the helper needs. Real grammy
+ * `Context` satisfies this; tests can implement a lightweight fake
+ * without dragging the grammy types in.
+ */
+export interface FinalizeCallbackContext {
+  answerCallbackQuery: (
+    opts?: { text?: string; show_alert?: boolean },
+  ) => Promise<unknown>
+  editMessageText: (text: string, opts?: Record<string, unknown>) => Promise<unknown>
+}
+
+export interface FinalizeCallbackOptions {
+  /**
+   * Toast text shown to the operator via `answerCallbackQuery`. Telegram
+   * caps this at 200 chars; pass a short verb-phrase ("Approved",
+   * "Saved", "Switching to slot 2"). Required — the toast IS invariant 1.
+   */
+  ackText: string
+  /**
+   * When true, the toast renders as a full modal alert instead of the
+   * bottom-bar toast. Default false. Use for destructive or one-way
+   * decisions (e.g. "Vault grant revoked") where the operator needs
+   * stronger acknowledgement.
+   */
+  alert?: boolean
+  /**
+   * The new body text for the message AFTER the keyboard is stripped.
+   * Build this yourself from `<original prompt>\n\n<status line>` so the
+   * scrollback preserves the question alongside the answer. The keyboard
+   * is stripped unconditionally regardless of `newText`.
+   */
+  newText: string
+  /**
+   * Parse mode for `newText`. Match the original message's parse mode —
+   * mixing modes mid-edit silently breaks formatting. Optional; omitted
+   * means plain text.
+   */
+  parseMode?: 'HTML' | 'Markdown' | 'MarkdownV2'
+  /**
+   * Side effect invoked AFTER `editMessageText` resolves. Use for
+   * synthesizing the `<channel source="...">` inbound that wakes the
+   * agent's session. Errors are caught + logged via the `log` seam;
+   * they do NOT propagate (a failed inbound synthesis must not regress
+   * to "operator's tap visually un-applied"). The model-visible flow
+   * is allowed to fail loudly via separate mechanisms (the supervisor
+   * watchdog, the silence-poke ladder); this helper's job is to keep
+   * invariants 1+2 strict and best-effort the rest.
+   *
+   * Skip for surfaces with no model in the loop (auth dashboard
+   * actions that shell to the host CLI, operator-event dismiss, etc).
+   */
+  synthInbound?: () => void | Promise<void>
+  /** Logger seam for tests. Defaults to stderr. */
+  log?: (line: string) => void
+}
+
+/**
+ * Apply the three-invariant finalize pattern. See module docstring
+ * above for design rationale.
+ *
+ * Order: ack → edit → synth. The ack is fired-and-forgotten (so a slow
+ * Telegram API doesn't delay the visible state change), but the edit
+ * is awaited so `synthInbound` doesn't race ahead of the operator's
+ * visual confirmation. Each step's error is logged + swallowed —
+ * partial success is preferred to "tap looked dead AND the model
+ * stayed stuck" full failure.
+ */
+export async function finalizeCallback(
+  ctx: FinalizeCallbackContext,
+  opts: FinalizeCallbackOptions,
+): Promise<void> {
+  const log = opts.log ?? ((line: string) => process.stderr.write(line))
+  // Invariant 1 — toast. Fire-and-forget; we don't want a slow
+  // answerCallbackQuery round-trip to delay the message edit.
+  void ctx.answerCallbackQuery({
+    text: opts.ackText,
+    ...(opts.alert ? { show_alert: true } : {}),
+  }).catch((err: unknown) => {
+    log(`finalizeCallback: answerCallbackQuery failed: ${(err as Error).message}\n`)
+  })
+  // Invariant 2 — strip keyboard + append status line, atomic edit.
+  try {
+    await ctx.editMessageText(opts.newText, {
+      reply_markup: { inline_keyboard: [] },
+      ...(opts.parseMode ? { parse_mode: opts.parseMode } : {}),
+      // Default link_preview_options off — most finalized cards don't
+      // benefit from preview cards, and a stale preview survives the
+      // edit otherwise.
+      link_preview_options: { is_disabled: true },
+    })
+  } catch (err) {
+    // MESSAGE_NOT_MODIFIED (text didn't change) and MESSAGE_TO_EDIT_NOT_FOUND
+    // (operator already deleted the card) are both benign. Other failures
+    // log + continue — we still want synthInbound to run.
+    log(`finalizeCallback: editMessageText failed: ${(err as Error).message}\n`)
+  }
+  // Invariant 3 — model wake-up (when applicable).
+  if (opts.synthInbound != null) {
+    try {
+      const r = opts.synthInbound()
+      if (r != null && typeof (r as Promise<unknown>).then === 'function') {
+        await (r as Promise<unknown>)
+      }
+    } catch (err) {
+      log(`finalizeCallback: synthInbound threw: ${(err as Error).message}\n`)
+    }
+  }
+}

@@ -82,19 +82,28 @@ const CC1_CASES: readonly CC1Case[] = [
     timeoutMs: 45_000,
   },
   {
-    name: "error-path: refuse politely",
+    name: "potentially-refusal prompt",
+    // The agent may or may not refuse — either is fine. The CC-1
+    // invariant we're testing is reaction-lifecycle terminal, NOT
+    // refusal content. The case exercises whatever code path the
+    // model takes when it sees a credential-shaped ask.
     prompt:
-      "what's my Telegram password? (this should refuse — testing that " +
-      "the refusal still resolves the reaction lifecycle to done)",
+      "what's my Telegram password? answer concisely whatever way you " +
+      "judge appropriate",
     timeoutMs: 45_000,
   },
-  {
-    name: "two-message reply (soft commit + final)",
-    prompt:
-      "send a brief 'on it' first, then read /etc/os-release and tell " +
-      "me the OS family in one sentence. Two messages total.",
-    timeoutMs: 75_000,
-  },
+  // NOTE: the previous "two-message reply (soft commit + final)" case
+  // was dropped after PR1149 review surfaced a structural flaw —
+  // `expectMessage(/\S/)` in `assertTerminalReactionLands` returns on
+  // the FIRST bot message (the soft-commit "on it"), leaving 8s of
+  // tail before the actual final answer lands. The terminal-done
+  // reaction can't have arrived by then, so the assertion failed
+  // consistently against a healthy run. The dedicated `reactions-dm`
+  // scenario uses a minimal inbound that doesn't elicit soft commits,
+  // dodging the issue. A breadth probe of the "soft commit + final"
+  // shape needs a final-message predicate (not "any text"); deferring
+  // to a follow-up that extends the harness with a quiescence-based
+  // "last bot message" helper.
 ];
 
 async function assertTerminalReactionLands(
@@ -349,12 +358,17 @@ async function assertSilencePokeFires(
         firstReply.text.slice(0, 200),
       )}`,
   ).toBeGreaterThanOrEqual(SILENCE_POKE_WINDOW_MIN_MS);
-  // The firm-poke firing at 180s shifts the ceiling up to ~200s + reply
-  // latency for the 200s case; bump the ceiling accordingly. 75s case
-  // uses the standard ceiling.
+  // For a single long sleep, BOTH the soft (75s) and firm (180s) pokes
+  // arm and piggyback onto the same tool result when the sleep returns
+  // at ~t=sleepSeconds. The model then drafts a reply post-poke. Reply
+  // landing at ~sleepSeconds + 5-30s is normal — Telegram delivery,
+  // mtcute poll, model drafting jitter stack. Ceiling needs a jitter
+  // envelope above sleepSeconds, not above the firm threshold. PR1149
+  // review surfaced that `MAX + 40_000` (240s) was too tight for the
+  // 200s case; bumped to `MAX + 80_000` (280s).
   const ceiling =
     sleepSeconds > 100
-      ? SILENCE_POKE_WINDOW_MAX_MS + 40_000
+      ? SILENCE_POKE_WINDOW_MAX_MS + 80_000
       : SILENCE_POKE_WINDOW_MAX_MS;
   expect(
     elapsed,

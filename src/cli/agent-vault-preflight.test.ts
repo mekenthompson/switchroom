@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { SwitchroomConfig } from "../config/schema.js";
 import type { BrokerStatus } from "../vault/broker/protocol.js";
 import {
@@ -7,6 +7,7 @@ import {
   effectiveBotToken,
   formatLockedRefusal,
   formatLockedRefusalBulk,
+  resolvePreflightSocket,
 } from "./agent-vault-preflight.js";
 
 function mkConfig(opts: {
@@ -147,5 +148,57 @@ describe("formatLockedRefusalBulk", () => {
     expect(m).toContain("foo");
     expect(m).toContain("bar");
     expect(m).toContain("--force-locked");
+  });
+});
+
+describe("resolvePreflightSocket — env > config > default (#1062 Bug 4)", () => {
+  const prev = process.env.SWITCHROOM_VAULT_BROKER_SOCK;
+  afterEach(() => {
+    if (prev === undefined) delete process.env.SWITCHROOM_VAULT_BROKER_SOCK;
+    else process.env.SWITCHROOM_VAULT_BROKER_SOCK = prev;
+  });
+
+  function withSocket(socket?: string): SwitchroomConfig {
+    const base = mkConfig({ agents: { foo: { bot_token: "vault:foo" } } });
+    if (socket === undefined) return base;
+    return {
+      ...base,
+      vault: {
+        path: "~/.switchroom/vault.enc",
+        broker: { enabled: true, socket },
+      },
+    } as SwitchroomConfig;
+  }
+
+  it("env var wins over explicit config value", () => {
+    process.env.SWITCHROOM_VAULT_BROKER_SOCK = "/tmp/from-env.sock";
+    const got = resolvePreflightSocket(withSocket("/tmp/from-config.sock"));
+    expect(got).toBe("/tmp/from-env.sock");
+  });
+
+  it("explicit config value used when env unset", () => {
+    delete process.env.SWITCHROOM_VAULT_BROKER_SOCK;
+    const got = resolvePreflightSocket(withSocket("/tmp/from-config.sock"));
+    expect(got).toBe("/tmp/from-config.sock");
+  });
+
+  it("Zod schema default in config does NOT count as explicit (returns undefined → fall through)", () => {
+    // This is the load-bearing case. Before the fix, the schema's
+    // default of "~/.switchroom/vault-broker.sock" appeared identical
+    // to an operator override, masking the env var and routing the
+    // preflight at a legacy socket nobody was listening on. Returning
+    // undefined here lets statusViaBroker pick the runtime default
+    // (operator socket under docker).
+    delete process.env.SWITCHROOM_VAULT_BROKER_SOCK;
+    const got = resolvePreflightSocket(
+      withSocket("~/.switchroom/vault-broker.sock"),
+    );
+    expect(got).toBeUndefined();
+  });
+
+  it("config without vault.broker.socket field → undefined", () => {
+    delete process.env.SWITCHROOM_VAULT_BROKER_SOCK;
+    const got = resolvePreflightSocket(withSocket(undefined));
+    expect(got).toBeUndefined();
   });
 });

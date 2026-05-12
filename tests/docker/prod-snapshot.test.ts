@@ -33,6 +33,7 @@ import { execSync } from "node:child_process";
 import {
   productionFleetIsLive,
   assertNoProductionFleet,
+  filterPhaseTestContainers,
 } from "./_prod-snapshot.js";
 
 const mockExec = vi.mocked(execSync);
@@ -92,6 +93,47 @@ describe("productionFleetIsLive", () => {
     // still run the suite. The destructive op will fail loudly later
     // if docker is genuinely needed.
     expect(productionFleetIsLive()).toBe(false);
+  });
+});
+
+describe("filterPhaseTestContainers", () => {
+  // Format emitted by captureProdSnapshot:
+  //   {{.Names}}|{{.ID}}|{{.Status}}|{{.Labels}}
+  // Labels arrive as a comma-separated list like
+  //   foo=bar,switchroom.test=phase1b,switchroom.test.run=abc...
+  const PROD_ROW = "coolify-postgres|abcd1234|Up 3 hours|com.docker.compose.project=coolify";
+  const MOBY_TEST_ROW = "friendly_chatelet|3af1b7|Up Less than a second|switchroom.test=phase1b,switchroom.test.run=uuid-here";
+  const NAMED_PHASE_ROW = "switchroom-phase2c-broker-12345-deadbeef|9999|Up 2s|switchroom.test=phase2c";
+  const COMPOSE_PHASE_ROW = "phase1c-iso-9876-alice-1|1111|Up 5s|com.docker.compose.project=phase1c-iso-9876";
+
+  it("drops Moby-auto-named containers when they carry switchroom.test label (regression: #1079 flake follow-up)", () => {
+    // Pre-fix: e2e.test.ts's `docker run --rm ...` (no --name) produced
+    // names like `friendly_chatelet` that the name regex missed, causing
+    // phase2c-vault-integration's afterAll snapshot to flake on every
+    // docker-e2e run on main. The label-marker filter catches them.
+    const raw = `${PROD_ROW}\n${MOBY_TEST_ROW}\n`;
+    expect(filterPhaseTestContainers(raw)).toBe(PROD_ROW);
+  });
+
+  it("drops named phase test containers (the legacy name-regex case still works)", () => {
+    const raw = `${PROD_ROW}\n${NAMED_PHASE_ROW}\n`;
+    expect(filterPhaseTestContainers(raw)).toBe(PROD_ROW);
+  });
+
+  it("drops compose-project phase test containers", () => {
+    const raw = `${PROD_ROW}\n${COMPOSE_PHASE_ROW}\n`;
+    // Note: COMPOSE_PHASE_ROW has no switchroom.test label here (only
+    // compose.project) — must still match via the name regex fallback.
+    expect(filterPhaseTestContainers(raw)).toBe(PROD_ROW);
+  });
+
+  it("keeps a row that genuinely looks like production (no test label, no phase name)", () => {
+    expect(filterPhaseTestContainers(PROD_ROW)).toBe(PROD_ROW);
+  });
+
+  it("preserves empty input", () => {
+    expect(filterPhaseTestContainers("")).toBe("");
+    expect(filterPhaseTestContainers("\n\n")).toBe("");
   });
 });
 

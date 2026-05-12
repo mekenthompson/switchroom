@@ -87,7 +87,7 @@ ALLOWLIST=(
   "telegram-plugin/gateway/gateway.ts:3125-3160:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
-  "telegram-plugin/gateway/gateway.ts:8020-8055:credit-watch notify; no thread_id"
+  "telegram-plugin/gateway/gateway.ts:8020-8070:credit-watch notify; no thread_id"
 
   # gateway.ts:9260-9490 — ctx.api.editMessageText for vault grant wizard
   # cards. Every callsite has `.catch(() => {})` — a THREAD_NOT_FOUND

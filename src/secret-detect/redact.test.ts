@@ -71,11 +71,44 @@ describe("redact()", () => {
     expect(out).toContain("recall.py");
   });
 
-  it("is idempotent — running on already-redacted text is a no-op", () => {
+  it("is idempotent on Bearer-style detections (whole-span replacement)", () => {
     const input = `Authorization: Bearer ${GITHUB_PAT} leaked here`;
     const once = redact(input);
     const twice = redact(once);
     expect(twice).toBe(once);
+  });
+
+  // The structural detectors (cli_flag, json_secret_field) leave the
+  // *key* in place and only redact the value. On a second pass the
+  // marker itself can match the value class — bytes stay redacted but
+  // the tag rewrites (e.g. `[REDACTED:openai_api_key]` →
+  // `[REDACTED:cli_flag]`). The load-bearing property is "no
+  // secret bytes survive ANY number of passes", not byte-identical
+  // idempotence. These tests pin that property.
+  it("never leaks token bytes across two redact passes (--api-key style)", () => {
+    const input = `command failed: server --api-key ${GITHUB_PAT}`;
+    const once = redact(input);
+    const twice = redact(once);
+    expect(once).not.toContain(GITHUB_PAT);
+    expect(twice).not.toContain(GITHUB_PAT);
+    // Marker still flags that something was scrubbed.
+    expect(twice).toContain("[REDACTED");
+  });
+
+  it("never leaks token bytes across two redact passes (password=)", () => {
+    const input = `DB_PASSWORD=${GITHUB_PAT} in env dump`;
+    const once = redact(input);
+    const twice = redact(once);
+    expect(once).not.toContain(GITHUB_PAT);
+    expect(twice).not.toContain(GITHUB_PAT);
+  });
+
+  it("never leaks token bytes across two redact passes (JSON field)", () => {
+    const input = `response body: {"api_key":"${GITHUB_PAT}","other":1}`;
+    const once = redact(input);
+    const twice = redact(once);
+    expect(once).not.toContain(GITHUB_PAT);
+    expect(twice).not.toContain(GITHUB_PAT);
   });
 
   it("exports the canonical REDACTED_MARKER", () => {

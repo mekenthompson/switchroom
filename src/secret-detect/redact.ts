@@ -2,13 +2,18 @@
  * `redact(text)` — sanitize text by replacing detected secrets and
  * credential-bearing URL parts with `[REDACTED]` markers.
  *
- * This is the single backstop used by:
- *   - `bin/run-hook.sh` (pipes hook stderr through before sending to
- *     `issues record`)
- *   - `switchroom issues record` (defense-in-depth: redacts `--detail`
- *     and `--detail-stdin` on the receiving side too, in case a future
- *     caller forgets to pipe through)
- *   - `switchroom secret-detect redact --stdin` (bash-callable shim)
+ * This is the chokepoint used by:
+ *   - `switchroom issues record` — every code path that writes to
+ *     `issues.jsonl` flows through `src/issues/store.ts:capDetail`,
+ *     which calls `redact()` before truncating to `DETAIL_MAX_BYTES`.
+ *     `bin/run-hook.sh` is the canonical caller; programmatic callers
+ *     elsewhere in the codebase get the scrub for free.
+ *   - `switchroom secret-detect redact --stdin` — bash-callable shim
+ *     for ad-hoc operator use and tests. (Not on the hook hot path;
+ *     each `bun` CLI fork costs ~785ms cold-start, so chaining
+ *     `... | secret-detect redact | issues record` would double per-
+ *     failure latency for no additional security beyond the server-
+ *     side chokepoint above.)
  *
  * Threat model: any token a failing hook prints on its error path (a 401
  * echoing the bearer, a `git clone` failure showing a PAT URL, a recall.py
@@ -21,10 +26,14 @@
  * suppressor behavior, same secretlint integration as the outbound
  * Telegram redaction path. We do NOT re-invent regexes here.
  *
- * Idempotence: replacing matched bytes with `[REDACTED]` produces text
- * that the detector won't re-match (the marker is short, has no high-
- * entropy run, doesn't look like a token or URL credential). Running
- * `redact(redact(x)) === redact(x)` for all `x`.
+ * Idempotence: for token-shape detections the marker doesn't re-match
+ * (no high-entropy run, no provider prefix). For *structural* detectors
+ * — `cli_flag` (`--api-key <value>`), `json_secret_field` (`"key":
+ * "value"`) — a second pass over already-redacted text will replace
+ * `[REDACTED:openai_api_key]` with `[REDACTED:cli_flag]`. The bytes
+ * remain redacted in either case, so this is a tag-rewrite, not a
+ * leak. Don't rely on `redact(redact(x)) === redact(x)` for every `x`;
+ * do rely on "no detected secret bytes survive any number of passes".
  */
 
 import {

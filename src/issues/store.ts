@@ -456,8 +456,17 @@ function sleepSync(ms: number): void {
 }
 
 function capSummary(s: string): string {
-  if (s.length <= SUMMARY_MAX_CHARS) return s;
-  return s.slice(0, SUMMARY_MAX_CHARS - 1) + "…";
+  // Run the redactor on summary too (defense-in-depth for future
+  // programmatic callers — #1069 review feedback). The canonical
+  // hook-side caller (`bin/run-hook.sh:record_failure`) constructs
+  // summary as `"<source>: <code> exited <status>"` from bash-
+  // controlled variables, so this is a no-op on that path. But the
+  // store API doesn't promise that, and a gateway-side caller that
+  // synthesizes a summary from a user-bearing string would otherwise
+  // leak via the same surface.
+  const safe = redact(s);
+  if (safe.length <= SUMMARY_MAX_CHARS) return safe;
+  return safe.slice(0, SUMMARY_MAX_CHARS - 1) + "…";
 }
 
 function capDetail(s: string | undefined): string | undefined {

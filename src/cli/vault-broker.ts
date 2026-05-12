@@ -46,17 +46,32 @@ const DEFAULT_PID_FILE = "~/.switchroom/vault-broker.pid";
 const LEGACY_SOCKET_PATH = "~/.switchroom/vault-broker.sock";
 
 function getSocketPath(configPath?: string): string {
-  // Use the canonical resolver — honors `SWITCHROOM_VAULT_BROKER_SOCK`
-  // env first, then `vault.broker.socket` config, then the legacy
-  // `~/.switchroom/vault-broker.sock` fallback. Same fix as the other
-  // vault CLI files: pre-fix this skipped the env entirely so
-  // `switchroom vault broker status` from inside an agent container
-  // saw the dangling-symlink fallback and reported the broker as
-  // unreachable even when it was fine on the canonical path.
+  // Canonical resolution order (#1062 / RFC Bug 4):
+  //   1. SWITCHROOM_VAULT_BROKER_SOCK env var — always wins.
+  //   2. `vault.broker.socket` from yaml — BUT only when the operator
+  //      actually set it. The Zod schema defaults this to
+  //      `~/.switchroom/vault-broker.sock`, so a bare
+  //      `if (config.vault?.broker?.socket !== undefined)` check was
+  //      always true even on hosts with no explicit override, masking
+  //      the env var and routing connections to the legacy socket that
+  //      has no listener in docker mode. We detect "operator set this
+  //      explicitly" by comparing against the schema's default string.
+  //   3. Runtime-aware default — operator socket under Docker, legacy
+  //      under v0.6 systemd. Delegated to `resolveBrokerSocketPath`.
+  //
+  // The pre-fix shape pointed `switchroom vault broker status` (and the
+  // restart preflight) at the legacy host path even when a docker-mode
+  // operator had `SWITCHROOM_VAULT_BROKER_SOCK` exported — false
+  // "broker unreachable" reports were the symptom. See
+  // reference/sub-agent-visibility-rfc.md §Bug 4 for the full trace.
+  const env = process.env.SWITCHROOM_VAULT_BROKER_SOCK;
+  if (env) return resolvePath(env);
+
   try {
     const config = loadConfig(configPath);
-    if (config.vault?.broker?.socket !== undefined) {
-      return resolvePath(config.vault.broker.socket);
+    const raw = config.vault?.broker?.socket;
+    if (typeof raw === "string" && raw !== SCHEMA_DEFAULT_SOCKET) {
+      return resolvePath(raw);
     }
   } catch {
     // Config load failure — defer to the resolver below.
@@ -66,6 +81,15 @@ function getSocketPath(configPath?: string): string {
   // installs keep getting the legacy socket. See client.ts.
   return resolveBrokerSocketPath();
 }
+
+/**
+ * Must mirror the default declared in `src/config/schema.ts` for the
+ * `vault.broker.socket` field. The Zod schema applies this default
+ * whenever the operator's yaml omits the field, so we use it to
+ * distinguish "operator set this explicitly" from "schema filled
+ * this in for us." If the schema default changes, change this too.
+ */
+const SCHEMA_DEFAULT_SOCKET = "~/.switchroom/vault-broker.sock";
 
 function getConfigPath(configPath?: string): string | undefined {
   return configPath;

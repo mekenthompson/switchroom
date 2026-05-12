@@ -70,7 +70,7 @@ ALLOWLIST=(
   # Range bumped 2026-05 for #1122 PR1 telemetry insertions that shifted
   # lines down. Use generous windows so further small shifts don't
   # cascade through this allowlist.
-  "telegram-plugin/gateway/gateway.ts:990-1020:Paired! sendMessage to DM senderId; no thread_id"
+  "telegram-plugin/gateway/gateway.ts:980-1010:Paired! sendMessage to DM senderId; no thread_id"
 
   # operator-event broadcast. The loop's `opts` is built without
   # `message_thread_id` (parse_mode + reply_markup only).
@@ -87,7 +87,7 @@ ALLOWLIST=(
   "telegram-plugin/gateway/gateway.ts:3125-3160:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
-  "telegram-plugin/gateway/gateway.ts:8070-8110:credit-watch notify; no thread_id"
+  "telegram-plugin/gateway/gateway.ts:8020-8055:credit-watch notify; no thread_id"
 
   # gateway.ts:9260-9490 — ctx.api.editMessageText for vault grant wizard
   # cards. Every callsite has `.catch(() => {})` — a THREAD_NOT_FOUND

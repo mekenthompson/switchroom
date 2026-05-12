@@ -36,15 +36,6 @@ export interface FirstPaintBotApi {
   ): Promise<unknown>
 }
 
-export interface FirstPaintProgressDriver {
-  startTurn(args: {
-    chatId: string
-    threadId?: string
-    userText: string
-    replyToMessageId?: number
-  }): void
-}
-
 export interface FirstPaintAccess {
   /** When false, all status-reaction posting is suppressed. */
   statusReactions?: boolean
@@ -65,7 +56,6 @@ export interface FirstPaintCtx {
 
 export interface FirstPaintDeps {
   bot: { api: FirstPaintBotApi }
-  progressDriver: FirstPaintProgressDriver | undefined
   activeStatusReactions: Map<string, StatusReactionController>
   activeReactionMsgIds: Map<string, { chatId: string; messageId: number }>
   activeTurnStartedAt: Map<string, number>
@@ -227,20 +217,9 @@ export async function firstPaintTurn(
     }
   }
 
-  // Start a new progress card only for fresh turns (no prior turn in flight).
-  if (!isSteering && priorTurnStartedAt == null) {
-    try {
-      deps.progressDriver?.startTurn({
-        chatId,
-        threadId: messageThreadId != null ? String(messageThreadId) : undefined,
-        userText: effectiveText,
-        replyToMessageId: msgId != null ? msgId : undefined,
-      })
-    } catch (err) {
-      const log = deps.logError ?? ((m: string) => process.stderr.write(m))
-      log(`telegram gateway: progress-card startTurn failed: ${(err as Error).message}\n`)
-    }
-  }
+  // #1122 PR3: progress-card startTurn removed with the card.
+  // The status reaction (👀 above) is now the sole first-paint signal;
+  // conversational pacing + silence-poke own the rest of the turn.
 
   return { isSteering, priorTurnStartedAt }
 }

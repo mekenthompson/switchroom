@@ -19,6 +19,35 @@ import { isVaultReference } from "../vault/resolver.js";
 import { statusViaBroker } from "../vault/broker/client.js";
 import type { BrokerStatus } from "../vault/broker/protocol.js";
 import { isDockerRuntime } from "../runtime-mode.js";
+import { resolvePath } from "../config/loader.js";
+
+/**
+ * Must mirror `src/config/schema.ts:vault.broker.socket` default.
+ * See `src/cli/vault-broker.ts:SCHEMA_DEFAULT_SOCKET` for the same
+ * sentinel — keep them in sync if the schema default ever changes.
+ */
+const SCHEMA_DEFAULT_SOCKET = "~/.switchroom/vault-broker.sock";
+
+/**
+ * Pick the broker socket the preflight should consult. Mirrors
+ * `src/cli/vault-broker.ts:getSocketPath` precedence: env var first,
+ * config `vault.broker.socket` only when explicitly set (not the
+ * schema default), runtime-aware default last. Pre-fix the preflight
+ * always used `statusViaBroker()` with no socket argument — its
+ * default resolution on the host ignores config AND ignores the env
+ * var in some shapes, so a docker-mode operator with an unlocked
+ * broker hit a phantom "broker unreachable" refusal on every restart.
+ * See RFC §Bug 4.
+ */
+export function resolvePreflightSocket(config: SwitchroomConfig): string | undefined {
+  const env = process.env.SWITCHROOM_VAULT_BROKER_SOCK;
+  if (env) return resolvePath(env);
+  const raw = config.vault?.broker?.socket;
+  if (typeof raw === "string" && raw !== SCHEMA_DEFAULT_SOCKET) {
+    return resolvePath(raw);
+  }
+  return undefined; // let statusViaBroker fall back to its runtime default
+}
 
 export type VaultPreflightVerdict =
   | { kind: "ok" }
@@ -57,7 +86,8 @@ export async function checkVaultPreflight(
   if (!token) return { kind: "skip", reason: "no-token" };
   if (!isVaultReference(token)) return { kind: "skip", reason: "plaintext-token" };
 
-  const fetch = deps.status ?? (() => statusViaBroker());
+  const socket = resolvePreflightSocket(config);
+  const fetch = deps.status ?? (() => statusViaBroker(socket ? { socket } : undefined));
   const status = await fetch();
   if (status === null) {
     // Broker unreachable. We can't verify; treat as locked.
@@ -93,7 +123,8 @@ export async function checkVaultPreflightBulk(
     return { blocked: [], reachable: true };
   }
 
-  const fetch = deps.status ?? (() => statusViaBroker());
+  const socket = resolvePreflightSocket(config);
+  const fetch = deps.status ?? (() => statusViaBroker(socket ? { socket } : undefined));
   const status = await fetch();
   if (status === null) {
     return {

@@ -487,7 +487,16 @@ describe("scaffoldAgent", () => {
     expect(existsSync(join(result.agentDir, ".mcp.json"))).toBe(false);
   });
 
-  it("is idempotent — running twice does not overwrite existing files", () => {
+  it("is idempotent — running twice with unchanged config + template = no-op", () => {
+    // #1122: idempotency means "same inputs → same final state on
+    // subsequent runs," NOT "user hand-edits are frozen forever." The
+    // previous form of this test pinned the latter, which masked the
+    // bug where profile-template changes (e.g. the conversational-
+    // pacing prompt rewrite) silently bypassed every running agent
+    // because CLAUDE.md was written with writeIfMissing. The fingerprint
+    // -aware re-render replaces that contract; operator hand-edits are
+    // backed up to `.before-rerender.<ts>` instead of being preserved
+    // in-place (see scaffold.rerender-claude-md.test.ts).
     const config = makeAgentConfig({
       soul: { name: "Coach", style: "direct" },
     });
@@ -497,18 +506,17 @@ describe("scaffoldAgent", () => {
     expect(result1.created.length).toBeGreaterThan(0);
     expect(result1.skipped.length).toBe(0);
 
-    // Modify a file to verify it won't be overwritten
+    // Snapshot the rendered CLAUDE.md.
     const claudePath = join(result1.agentDir, "CLAUDE.md");
-    writeFileSync(claudePath, "# Custom content\n", "utf-8");
+    const renderedContent = readFileSync(claudePath, "utf-8");
 
-    // Second scaffold
+    // Second scaffold with the SAME config — should be a clean no-op.
     const result2 = scaffoldAgent("idem-agent", config, tmpDir, telegramConfig);
     expect(result2.created.length).toBe(0);
     expect(result2.skipped.length).toBeGreaterThan(0);
 
-    // Verify file was not overwritten
-    const content = readFileSync(claudePath, "utf-8");
-    expect(content).toBe("# Custom content\n");
+    // CLAUDE.md is unchanged.
+    expect(readFileSync(claudePath, "utf-8")).toBe(renderedContent);
   });
 
   it("includes --dangerously-skip-permissions when dangerous_mode is true", () => {

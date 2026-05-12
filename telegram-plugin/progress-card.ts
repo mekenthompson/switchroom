@@ -697,9 +697,21 @@ export function reduce(
             break
           }
         }
-        if (pendingAgentSpawns.has(event.toolUseId)) {
+        // For background dispatches, the Agent tool returns IMMEDIATELY
+        // after spawning — tool_result fires before the worker writes
+        // its JSONL, so the corresponding sub_agent_started arrives
+        // LATER. Deleting the pending entry on tool_result would strand
+        // that future event as an orphan with pendingSpawns=0 (same
+        // root-cause family as #1057 / RFC Bug 1, different reducer
+        // case). Preserve bg entries; clear foreground ones — they
+        // HAD their chance to correlate during the turn.
+        //
+        // See `pending-bg-spawn-survives-turn-end.test.ts` for the
+        // foreground/background-distinction regression gate.
+        const pendingEntry = pendingAgentSpawns.get(event.toolUseId ?? "")
+        if (pendingEntry && !pendingEntry.runInBackground) {
           const next = new Map(pendingAgentSpawns)
-          next.delete(event.toolUseId)
+          next.delete(event.toolUseId!)
           pendingAgentSpawns = next
         }
       }

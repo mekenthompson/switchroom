@@ -19,7 +19,16 @@ Flow:
  11. Save last recall to state (for PostCompact re-injection)
 
 Exit codes:
-  0 — always (graceful degradation on any error)
+  0 — normal success (incl. graceful in-flight errors like recall API
+      timeouts where we still produce a valid hookSpecificOutput).
+  2 — uncaught exception in non-debug mode. Switchroom #1070: the
+      wrapper (bin/run-hook.sh) reads this as a failure and records
+      an issue via the #424 issue-sink, so silent memory outages
+      surface to the operator instead of looking like "no memories
+      found". Stdout is left empty (same shape as the no-memories
+      success path) so the agent's prompt assembly still works.
+  2 — debug mode any error (unchanged — surfaces to Claude per
+      Claude Code hook contract).
 """
 
 import hashlib
@@ -715,11 +724,43 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        print(f"[Hindsight] Unexpected error in recall: {e}", file=sys.stderr)
-        # Exit 2 in debug mode surfaces errors to Claude; 0 degrades silently
+        # Switchroom #1070 — surface uncaught recall failures to the
+        # #424 issue-sink instead of silently degrading to an empty
+        # memory block. The wrapper (bin/run-hook.sh) treats any
+        # non-zero exit as a hook failure and calls `switchroom issues
+        # record`, which surfaces on the operator's issues card.
+        #
+        # Bound the stderr line to class + message (truncated). The
+        # full traceback is gated behind the existing debug flag so
+        # we don't leak prompt/state contents into journald
+        # unredacted (#1069's threat model).
+        _msg = str(e)
+        if len(_msg) > 400:
+            _msg = _msg[:400] + "…"
+        print(
+            f"[Hindsight] Unexpected error in recall: "
+            f"{type(e).__name__}: {_msg}",
+            file=sys.stderr,
+        )
+        # Try to read the debug flag to decide on traceback verbosity
+        # AND on the legacy debug-mode exit code (which is also 2,
+        # but operators rely on the existing behaviour shape — don't
+        # change it for them). Both paths now exit non-zero so the
+        # issue-sink captures memory outages either way.
+        _is_debug = False
         try:
             from lib.config import load_config
 
-            sys.exit(2 if load_config().get("debug") else 0)
+            _is_debug = bool(load_config().get("debug"))
         except Exception:
-            sys.exit(0)
+            pass
+        if _is_debug:
+            import traceback
+
+            traceback.print_exc(file=sys.stderr)
+        # Stdout is left empty here (same shape as the no-memories
+        # success path on line ~651). The agent's prompt assembly
+        # treats absence of additionalContext as "no recall this
+        # turn" and proceeds. The non-zero exit is what wakes up the
+        # issue-sink.
+        sys.exit(2)

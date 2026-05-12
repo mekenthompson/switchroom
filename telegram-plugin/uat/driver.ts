@@ -639,6 +639,27 @@ export class Driver {
     return { messageId: sent.id };
   }
 
+  /**
+   * Send a geolocation point. Used by the UAT location-inbound scenario
+   * to exercise the gateway's `message:location` handler (#1077).
+   */
+  async sendLocation(
+    chatId: number,
+    latitude: number,
+    longitude: number,
+    opts?: SendTextOptions,
+  ): Promise<{ messageId: number }> {
+    const c = this.requireClient();
+    const replyTo = opts?.replyTo ?? opts?.messageThreadId;
+    const media = InputMedia.geo(latitude, longitude);
+    const sent = await c.sendMedia(
+      chatId,
+      media,
+      replyTo ? { replyTo } : undefined,
+    );
+    return { messageId: sent.id };
+  }
+
   private requireClient(): TelegramClient {
     if (!this.client) {
       throw new Error("Driver not connected — call connect() first");

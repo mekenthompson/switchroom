@@ -8969,8 +8969,17 @@ async function handleVaultRecentDenialCallback(ctx: Context, data: string): Prom
   // Strip the entire audit-listing keyboard on first tap + append a
   // status line so the action is visible. Operator re-runs `/vault
   // audit` to act on remaining denials — that's the documented flow.
+  // HTML-escape the source text before concatenation. `ctx.callbackQuery.
+  // message.text` returns the body with entities STRIPPED (Telegram
+  // decodes the original HTML), so any raw `<`, `>`, `&` in agent/key
+  // names that survived the original audit-listing's escape pass would
+  // now break the HTML re-parse — and finalizeCallback's catch swallows
+  // the failure, leaving the keyboard tappable. Caught in PR #1158 review
+  // for the operator-event card; the same fix applies here.
   const sourceMsg = ctx.callbackQuery?.message
-  const baseText = sourceMsg && 'text' in sourceMsg && sourceMsg.text ? sourceMsg.text : ''
+  const baseText = sourceMsg && 'text' in sourceMsg && sourceMsg.text
+    ? escapeHtmlForTg(sourceMsg.text)
+    : ''
   const statusLine =
     `\n\n✅ <b>${escapeHtmlForTg(agentName)}</b> granted read access to ` +
     `<code>${escapeHtmlForTg(keyName)}</code> for 30 days ` +
@@ -11521,10 +11530,18 @@ bot.on('callback_query:data', async ctx => {
     const ackText = grantOk
       ? `🔁 Always allow ${rule.label} for ${agentName}`
       : `✅ Allowed (always-allow yaml edit failed; check gateway log)`
+    // HTML-escape baseText — `ctx.callbackQuery.message.text` returns
+    // entities-stripped plain UTF-8, so raw `<`/`>`/`&` in the
+    // expanded permission card's `description` or `input_preview`
+    // (claude-generated tool descriptions routinely carry these)
+    // would break the HTML re-parse. PR #1158 review caught the same
+    // issue on the operator-event card.
     const sourceMsg = ctx.callbackQuery?.message
-    const baseText = sourceMsg && 'text' in sourceMsg && sourceMsg.text ? sourceMsg.text : ''
+    const baseText = sourceMsg && 'text' in sourceMsg && sourceMsg.text
+      ? escapeHtmlForTg(sourceMsg.text)
+      : ''
     const editLabel = grantOk
-      ? `🔁 <b>Always allow ${rule.label}</b> for ${agentName} — restart agent for full effect`
+      ? `🔁 <b>Always allow ${escapeHtmlForTg(rule.label)}</b> for ${escapeHtmlForTg(agentName)} — restart agent for full effect`
       : `✅ <b>Allowed</b> (always-allow rule edit failed; see logs)`
     // #1150 audit: route through finalizeCallback so the keyboard
     // strips alongside the status-line edit. Pre-fix this called
@@ -11549,8 +11566,20 @@ bot.on('callback_query:data', async ctx => {
   // Forward permission decision to connected bridges
   pendingPermissions.delete(request_id)
   const label = behavior === 'allow' ? '✅ Allowed' : '❌ Denied'
+  // HTML-escape the source text — same hazard as the `always` and
+  // recent-denial paths above. The original permission card was
+  // posted with plain text (`gateway.ts:2828` — `🔐 Permission:
+  // <toolName>`), but the expanded form via `behavior === 'more'`
+  // (this same handler, line ~11471) appends claude-supplied
+  // `description` and `input_preview` strings that frequently contain
+  // raw `<`/`>`/`&` (shell commands, JSON nested in JSON, etc). Mixing
+  // a plain-text edit with `parseMode: 'HTML'` is the safe direction:
+  // escaped baseText round-trips visually as plain text; the appended
+  // status line carries our chosen styling cleanly.
   const msg = ctx.callbackQuery?.message
-  const baseText = msg && 'text' in msg && msg.text ? msg.text : ''
+  const baseText = msg && 'text' in msg && msg.text
+    ? escapeHtmlForTg(msg.text)
+    : ''
   // #1150 audit: P0 fix — was `editMessageText` WITHOUT reply_markup
   // strip, leaving the [Allow][Deny][Always] keyboard live after the
   // decision. Operator could re-tap and flip Deny → Allow after the
@@ -11559,6 +11588,7 @@ bot.on('callback_query:data', async ctx => {
   await finalizeCallback(ctx, {
     ackText: label,
     newText: baseText ? `${baseText}\n\n${label}` : label,
+    parseMode: 'HTML',
     synthInbound: () => {
       ipcServer.broadcast({
         type: 'permission',

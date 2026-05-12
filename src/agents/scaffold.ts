@@ -2691,6 +2691,27 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
             },
           ],
         },
+        {
+          // Layer 2 of the sandbox UX work — fires on every PostToolUse,
+          // detects EROFS / read-only / sandbox-related errors in
+          // tool_response, and injects a one-line hint via
+          // additionalContext so the agent responds usefully on Telegram
+          // instead of silently retrying or echoing the raw kernel
+          // error. Pairs with the SANDBOX primer in
+          // --append-system-prompt. Hook is fail-silent: a broken hint
+          // never blocks the tool flow.
+          matcher: ".*",
+          hooks: [
+            {
+              type: "command",
+              command: wrap(
+                "hook:sandbox-hint-posttool",
+                `node "${join(DOCKER_HOOKS_PATH, "sandbox-hint-posttool.mjs")}"`,
+              ),
+              timeout: 3,
+            },
+          ],
+        },
       ]
     : [];
 

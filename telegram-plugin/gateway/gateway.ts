@@ -8961,13 +8961,29 @@ async function handleVaultRecentDenialCallback(ctx: Context, data: string): Prom
     )
     return
   }
-  await switchroomReply(
-    ctx,
-    `✅ Granted <b>${escapeHtmlForTg(agentName)}</b> read access to ` +
-    `<code>${escapeHtmlForTg(keyName)}</code> for 30 days. ` +
-    `(grant <code>${escapeHtmlForTg(id)}</code>)`,
-    { html: true },
-  )
+  // #1150 audit: P0 fix — pre-fix the audit-listing message kept its
+  // tappable [Always allow ...] buttons after a successful mint, so
+  // the operator could re-tap the same denial and re-mint the grant
+  // (broker idempotency saves us from a duplicate write but the
+  // operator experience was "did anything happen? let me tap again").
+  // Strip the entire audit-listing keyboard on first tap + append a
+  // status line so the action is visible. Operator re-runs `/vault
+  // audit` to act on remaining denials — that's the documented flow.
+  const sourceMsg = ctx.callbackQuery?.message
+  const baseText = sourceMsg && 'text' in sourceMsg && sourceMsg.text ? sourceMsg.text : ''
+  const statusLine =
+    `\n\n✅ <b>${escapeHtmlForTg(agentName)}</b> granted read access to ` +
+    `<code>${escapeHtmlForTg(keyName)}</code> for 30 days ` +
+    `(grant <code>${escapeHtmlForTg(id)}</code>). ` +
+    `Re-run /vault audit to act on remaining denials.`
+  await finalizeCallback(ctx, {
+    ackText: '✅ Grant minted',
+    newText: baseText ? `${baseText}${statusLine}` : statusLine,
+    parseMode: 'HTML',
+    // No synthInbound — operator-only flow. The granted agent picks
+    // up the token via .vault-token file on next CLI invocation; no
+    // turn-wake needed.
+  })
 }
 
 /**
@@ -9843,12 +9859,26 @@ async function executeGrantWizard(ctx: Context, chatId: string, state: Extract<P
     await switchroomReply(ctx, `<b>Grant created but token write failed:</b> ${escapeHtmlForTg(String(err))}`, { html: true })
     return
   }
-  // Collapse wizard message to just the outcome
+  // Collapse wizard message to just the outcome.
+  // #1150 audit: P0 fix — pre-fix this `editMessageText` call omitted
+  // `reply_markup: { inline_keyboard: [] }` so the wizard's [Generate]
+  // / [Cancel] buttons stayed tappable on the success card. Operator
+  // could re-tap [Generate] and mint a second redundant grant.
+  // Strip the keyboard atomically with the success text via the
+  // finalizeCallback helper.
   const msgId = state.wizardMsgId
   const successText = `✅ Grant <code>${escapeHtmlForTg(id)}</code> created. Written to <code>~/.switchroom/agents/${escapeHtmlForTg(state.agent!)}/.vault-token</code>`
   if (msgId != null) {
-    await ctx.api.editMessageText(chatId, msgId, successText, { parse_mode: 'HTML' }).catch(() => {})
+    await finalizeCallback(ctx, {
+      ackText: '✅ Grant created',
+      newText: successText,
+      parseMode: 'HTML',
+      // No synthInbound — operator-only flow.
+    })
   } else {
+    // Fallback when wizard message id was lost (rare; e.g. operator
+    // deleted the card). Send a fresh reply with the success text;
+    // no keyboard to strip in this branch.
     await switchroomReply(ctx, successText, { html: true })
   }
 }
@@ -11437,40 +11467,57 @@ bot.on('callback_query:data', async ctx => {
       process.stderr.write(`telegram gateway: always-allow grant failed: ${(err as Error).message}\n`)
     }
 
-    // Forward approval for the in-flight request regardless — even if
-    // the yaml edit failed, the operator clearly meant "yes" so we
-    // honour the immediate decision and surface the failure as a
-    // hint in the chat.
-    ipcServer.broadcast({ type: 'permission', requestId: request_id, behavior: 'allow' })
     pendingPermissions.delete(request_id)
 
     const ackText = grantOk
       ? `🔁 Always allow ${rule.label} for ${agentName}`
       : `✅ Allowed (always-allow yaml edit failed; check gateway log)`
-    await ctx.answerCallbackQuery({ text: ackText.slice(0, 200) }).catch(() => {})
     const sourceMsg = ctx.callbackQuery?.message
-    if (sourceMsg && 'text' in sourceMsg && sourceMsg.text) {
-      const editLabel = grantOk
-        ? `🔁 <b>Always allow ${rule.label}</b> for ${agentName} — restart agent for full effect`
-        : `✅ <b>Allowed</b> (always-allow rule edit failed; see logs)`
-      await ctx.editMessageText(`${sourceMsg.text}\n\n${editLabel}`, { parse_mode: 'HTML' }).catch(() => {})
-    }
+    const baseText = sourceMsg && 'text' in sourceMsg && sourceMsg.text ? sourceMsg.text : ''
+    const editLabel = grantOk
+      ? `🔁 <b>Always allow ${rule.label}</b> for ${agentName} — restart agent for full effect`
+      : `✅ <b>Allowed</b> (always-allow rule edit failed; see logs)`
+    // #1150 audit: route through finalizeCallback so the keyboard
+    // strips alongside the status-line edit. Pre-fix this called
+    // editMessageText without `reply_markup` so the Allow/Deny/Always
+    // buttons stayed tappable after the decision — re-tap would re-
+    // fire the permission broadcast.
+    await finalizeCallback(ctx, {
+      ackText: ackText.slice(0, 200),
+      newText: baseText ? `${baseText}\n\n${editLabel}` : editLabel,
+      parseMode: 'HTML',
+      // Forward approval for the in-flight request regardless — even
+      // if the yaml edit failed, the operator clearly meant "yes" so
+      // we honour the immediate decision and surface the failure as
+      // a hint in the chat.
+      synthInbound: () => {
+        ipcServer.broadcast({ type: 'permission', requestId: request_id, behavior: 'allow' })
+      },
+    })
     return
   }
 
   // Forward permission decision to connected bridges
-  ipcServer.broadcast({
-    type: 'permission',
-    requestId: request_id,
-    behavior: behavior as 'allow' | 'deny',
-  })
   pendingPermissions.delete(request_id)
   const label = behavior === 'allow' ? '✅ Allowed' : '❌ Denied'
-  await ctx.answerCallbackQuery({ text: label }).catch(() => {})
   const msg = ctx.callbackQuery?.message
-  if (msg && 'text' in msg && msg.text) {
-    await ctx.editMessageText(`${msg.text}\n\n${label}`).catch(() => {})
-  }
+  const baseText = msg && 'text' in msg && msg.text ? msg.text : ''
+  // #1150 audit: P0 fix — was `editMessageText` WITHOUT reply_markup
+  // strip, leaving the [Allow][Deny][Always] keyboard live after the
+  // decision. Operator could re-tap and flip Deny → Allow after the
+  // permission was already broadcast. Routing through finalizeCallback
+  // strips the keyboard atomically with the status-line edit.
+  await finalizeCallback(ctx, {
+    ackText: label,
+    newText: baseText ? `${baseText}\n\n${label}` : label,
+    synthInbound: () => {
+      ipcServer.broadcast({
+        type: 'permission',
+        requestId: request_id,
+        behavior: behavior as 'allow' | 'deny',
+      })
+    },
+  })
 })
 
 // ─── Inbound message handlers ─────────────────────────────────────────────

@@ -231,7 +231,7 @@ Once configured, unskip the card scenario by changing
 ## 6. Running scenarios — env setup
 
 The harness reads four env vars at `spinUp()` time. The recommended
-workflow is to materialise them once into `telegram-plugin/uat/.env`
+workflow is to materialise them once into `.env`
 — the harness loads that file automatically on import (see
 `load-env.ts`). The file is gitignored repo-wide (`.env*` in
 `/.gitignore`); never commit a populated copy.
@@ -252,7 +252,7 @@ export SWITCHROOM_VAULT_PASSPHRASE
   echo "TELEGRAM_API_HASH=$(docker exec switchroom-test-harness switchroom vault get telegram-uat-api-hash)"
   echo "TELEGRAM_UAT_DRIVER_SESSION=$(docker exec switchroom-test-harness switchroom vault get telegram-uat-driver-session)"
   echo "TELEGRAM_TEST_BOT_USERNAME=meken_switchroom_test_bot"
-} > telegram-plugin/uat/.env )
+} > .env )
 
 unset SWITCHROOM_VAULT_PASSPHRASE
 ```

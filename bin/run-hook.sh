@@ -105,20 +105,36 @@ debug_mode() {
 }
 
 record_failure() {
-  local detail summary
-  # Last ~60 lines of stderr; CLI will further cap to DETAIL_MAX_BYTES.
-  if [ -s "$STDERR_TMP" ]; then
-    detail="$(tail -n 60 "$STDERR_TMP")"
-  else
-    detail=""
-  fi
+  local summary has_detail
   summary="${SOURCE}: ${CODE} exited ${STATUS}"
+  if [ -s "$STDERR_TMP" ]; then
+    has_detail=1
+  else
+    has_detail=0
+  fi
 
-  # Pipe detail via stdin so we don't have to shell-quote arbitrary
-  # error text. CLI reads it when --detail-stdin is set.
+  # SECURITY (#1069): hook stderr is untrusted — a failing hook may
+  # echo a bearer token (401), a PAT URL (git clone fail), an LLM
+  # provider response body (recall.py traceback), etc. Before #1069 the
+  # raw bytes landed in issues.jsonl and surfaced verbatim in Telegram
+  # via the issues-card / `/issues` list.
+  #
+  # The fix runs inside the CLI: `issues record --detail-stdin` pipes
+  # the input through `secret-detect/redact.ts` before `capDetail`
+  # writes to the store (see src/issues/store.ts:capDetail). One bun
+  # CLI fork covers both the record AND the redact, vs. two forks for
+  # an explicit `... | secret-detect redact --stdin | issues record`
+  # pipeline that would double the ~785ms cold-start documented in
+  # `resolve_success`. The standalone `switchroom secret-detect redact
+  # --stdin` shim is still wired for ad-hoc operator use and tests.
+  #
+  # We never materialize the stderr tail into a bash variable —
+  # streaming `tail | issues record` keeps RSS bounded if a hook prints
+  # megabytes (the CLI side caps stdin at 64 KB anyway).
+
   if debug_mode; then
-    if [ -n "$detail" ]; then
-      printf '%s' "$detail" | "$SWITCHROOM_CLI" issues record \
+    if [ "$has_detail" -eq 1 ]; then
+      tail -n 60 "$STDERR_TMP" | "$SWITCHROOM_CLI" issues record \
         --severity error \
         --source "$SOURCE" \
         --code "$CODE" \
@@ -138,8 +154,8 @@ record_failure() {
         || emit_warn "failed to record issue (non-fatal)"
     fi
   else
-    if [ -n "$detail" ]; then
-      printf '%s' "$detail" | "$SWITCHROOM_CLI" issues record \
+    if [ "$has_detail" -eq 1 ]; then
+      tail -n 60 "$STDERR_TMP" | "$SWITCHROOM_CLI" issues record \
         --severity error \
         --source "$SOURCE" \
         --code "$CODE" \

@@ -186,14 +186,36 @@ describe('silence-poke — subagent dispatch extension', () => {
     expect(fx.emitted[0]).toMatchObject({ level: 'soft', subagent_wait: true })
   })
 
-  it('subagent flag clears on outbound (after subagent reports back)', () => {
+  it('subagent flag PERSISTS through narrating outbound (PR4 fix)', () => {
+    // Reviewer note from PR2 #1125 — the parent's "spinning up @reviewer"
+    // narration is the outbound that opens the wait. Clearing the
+    // subagent flag at that moment would defeat the extended-threshold
+    // guarantee for the wait that follows. The flag must persist until
+    // endTurn().
     const fx = setupDeps()
     startTurn('k', 0)
     noteSubagentDispatch('k')
-    noteOutbound('k', 60_000) // simulate parent narrating "spinning up @reviewer"
-    // Now soft threshold should be 75s again
-    __tickForTests(60_000 + 80_000)
+    noteOutbound('k', 60_000) // parent narrates "spinning up @reviewer"
+    // Subagent wait continues. With the flag persistent, soft threshold
+    // is still 300s, so a 90s gap should NOT fire.
+    __tickForTests(60_000 + 90_000)
+    expect(fx.emitted.filter((e) => e.kind === 'silence_poke_fired')).toHaveLength(0)
+    // At 300s past the outbound, the soft poke fires (subagent wait
+    // is genuinely long).
+    __tickForTests(60_000 + 300_000)
     expect(fx.emitted.filter((e) => e.kind === 'silence_poke_fired')).toHaveLength(1)
+    expect(fx.emitted[0]).toMatchObject({ level: 'soft', subagent_wait: true })
+  })
+
+  it('subagent flag clears on endTurn', () => {
+    setupDeps()
+    startTurn('k', 0)
+    noteSubagentDispatch('k')
+    // Take snapshot
+    const before = __getStateForTests('k')
+    expect(before?.subagentDispatchActive).toBe(true)
+    endTurn('k')
+    expect(__getStateForTests('k')).toBeUndefined()
   })
 })
 

@@ -20,11 +20,12 @@ doc, the work isn't done. Redesign, don't ship and patch later.
 Nobody wants to learn switchroom. They want their agents talking back in
 Telegram.
 
-The product should teach itself: inline guidance from the CLI and the
-progress card, sensible defaults, error messages that tell you what to
-do next. `docs/` is the optional deep-dive, not the required reading. If
-a user can't figure out the basics without leaving the terminal or the
-Telegram thread, we've made them do our job.
+The product should teach itself: inline guidance from the CLI and from
+the agent's own replies, sensible defaults, error messages that tell
+you what to do next. `docs/` is the optional deep-dive, not the
+required reading. If a user can't figure out the basics without
+leaving the terminal or the Telegram thread, we've made them do our
+job.
 
 ### Check questions
 
@@ -48,11 +49,11 @@ Telegram thread, we've made them do our job.
 - ❌ **Bad:** Setup completes, the bot joins the group, and silently
   ignores messages until the user reads `docs/telegram-plugin.md`.
 
-- ✅ **Good:** A failing skill on an agent shows up in the progress card
-  as *"⚠ skill `weekly-review` failed: missing `hindsight` MCP. Run
-  `switchroom agent reconcile coach` to repair."*
-- ❌ **Bad:** Progress card shows `❌ Error` with no next step and a
-  pointer to "check the agent logs."
+- ✅ **Good:** A failing skill on an agent shows up as a real `reply`
+  with `accent: 'issue'`: *"⚠ skill `weekly-review` failed: missing
+  `hindsight` MCP. Run `switchroom agent reconcile coach` to repair."*
+- ❌ **Bad:** A bare `❌ Error` reply with no next step and a pointer
+  to "check the agent logs."
 
 - ✅ **Good:** `switchroom vault set telegram-bot-token` prompts for the
   value, masks input, confirms encryption, and tells the user *"now
@@ -67,8 +68,9 @@ Telegram thread, we've made them do our job.
 Ship the pre-built Lego set, not the bag of bricks.
 
 `switchroom setup` should produce a **working fleet** on the first run
-— a default agent, a working bot, a pinned progress card on the first
-message. The defaults cover 80% of cases. Power users will customise;
+— a default agent, a working bot, the agent responding
+conversationally on the first message. The defaults cover 80% of
+cases. Power users will customise;
 make them **opt into complexity, never opt out of it**. Configuration
 is work. Give them the working thing first. Let them tinker later.
 
@@ -91,9 +93,10 @@ is work. Give them the working thing first. Let them tinker later.
   before proceeding.
 
 - ✅ **Good:** Playwright MCP is wired by default; opt out with
-  `mcp_servers: { playwright: false }`. Progress cards on by default
-  with tuned coalescing/chunking thresholds.
-- ❌ **Bad:** "Configure the MCP servers and progress card cadence
+  `mcp_servers: { playwright: false }`. The conversational-pacing
+  prompt + silence-poke safety net are on for every agent with tuned
+  thresholds.
+- ❌ **Bad:** "Configure the MCP servers and silence-poke thresholds
   yourself in `settings.json`." Maximum flexibility, zero defaults.
 
 - ✅ **Good:** `switchroom agent create exec --profile executive`
@@ -144,12 +147,14 @@ asks users to re-learn the product.
   restart-agent` next to `switchroom start_telegram`.
 
 - ✅ **Good:** Every long-running operation — interactive reply,
-  scheduled task, sub-agent delegation — produces the same progress
-  card with the same step formatting and the same coalesce / chunk /
-  pin rules.
+  scheduled task, sub-agent delegation — uses the same conversational
+  pacing rhythm. Soft-commit, mid-turn updates at meaningful
+  punctuation, final answer pings once. Sub-agent work is narrated in
+  the same thread as the parent.
 - ❌ **Bad:** Scheduled tasks render their output as a plain
-  `sendMessage`, sub-agent work hides behind a different label, and
-  the progress card only shows up for interactive replies.
+  `sendMessage` with no soft-commit, sub-agent work hides behind a
+  separate UI surface, interactive replies have different update
+  cadence than agent-initiated narration.
 
 - ✅ **Good:** Every config field has a documented cascade mode
   (union / override / per-key merge / concat / deep-merge) and behaves
@@ -174,10 +179,26 @@ asks users to re-learn the product.
   rewrites config, and you have to know which one to run when.
 
 - ✅ **Good:** Same Telegram UX surface for every agent — same `/auth`
-  router, same progress card, same emoji reactions, same chunking
-  rules, regardless of profile.
+  router, same reaction lifecycle, same conversational pacing, same
+  silence-poke safety net, regardless of profile.
 - ❌ **Bad:** Custom one-off Telegram behaviours per profile that look
   slightly different in each topic.
+
+### Sub-principle: "The chat IS the artifact"
+
+Framework UI elements that mirror the conversation (cards, pinned
+widgets, status bars) cover for the model's failure to communicate
+naturally. We've been here once already (the pinned progress card,
+retired in #1122). Build the model to communicate; let the framework
+be the safety net, not the headline. Single source of truth for "what
+is the agent doing": the chat itself, paced by the model. The
+framework's job is to escalate the *reaction* (ambient) and fire a
+backstop message at 5min silence (safety net) — not to mirror state
+in parallel.
+
+When you're tempted to add a new pinned card / status bar / live
+widget, ask: would the model sending a real `reply` cover this? If
+yes, change the prompt instead.
 
 ---
 
@@ -186,14 +207,15 @@ asks users to re-learn the product.
 Before you open a PR, ask:
 
 1. **Docs test:** Can someone use this without reading `docs/`? If not,
-   what's missing from the CLI, the progress card, or the error
-   message?
+   what's missing from the CLI surface, the agent's own messaging, or
+   the error message?
 2. **Defaults test:** Does this work immediately on a fresh
    `switchroom setup`, or does the user have to configure it first?
    Can you ship better defaults?
 3. **Consistency test:** Does this feel like it belongs next to the
    rest of switchroom? Does it use the same CLI shape, the same
-   cascade, the same progress card, the same vault reference syntax?
+   cascade, the same conversational rhythm, the same vault reference
+   syntax? Does it respect the "chat IS the artifact" sub-principle?
 
 If you can't answer **yes** to all three, you're not done. Redesign,
 don't ship and patch later.

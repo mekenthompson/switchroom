@@ -50,5 +50,21 @@ export function resolveVaultApprovalPosture(
         `vault.broker.approvalAuth from switchroom.yaml.`,
     )
   }
+  // An empty / whitespace-only blob is just as dangerous as a missing one
+  // under telegram-id posture: the gateway would hold "" as the auto-
+  // unlock passphrase, and any Approve tap would invoke the broker with
+  // an empty passphrase. The broker rejects that, but the operator
+  // discovers it only by tapping Approve on a real grant card. Refuse
+  // to boot instead — same security stance as the read-error path.
+  if (loaded.trim().length === 0) {
+    throw new Error(
+      `telegram gateway: vault.broker.approvalAuth=telegram-id but the ` +
+        `auto-unlock blob at ${credPath} is empty / whitespace-only. ` +
+        `Refusing to boot — an empty passphrase would silently invert the ` +
+        `operator's declared security posture. Rerun \`switchroom vault ` +
+        `broker enable-auto-unlock\` to repair the blob, or remove ` +
+        `vault.broker.approvalAuth from switchroom.yaml.`,
+    )
+  }
   return { mode: 'telegram-id', passphrase: loaded, credPath }
 }

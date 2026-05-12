@@ -76,20 +76,20 @@ ALLOWLIST=(
   # `message_thread_id` (parse_mode + reply_markup only).
   # Range bumped 2026-05 for #1115 vault-approval-posture insertions
   # (~100 lines added to gateway).
-  "telegram-plugin/gateway/gateway.ts:2300-2360:operator-event broadcast; no thread_id in opts"
+  "telegram-plugin/gateway/gateway.ts:2250-2310:operator-event broadcast; no thread_id in opts"
 
   # permission-request keyboard send. opts only has reply_markup. No thread_id.
   # Range bumped 2026-05 for #1122 PR2 silence-poke + #1115 vault-posture insertions.
-  "telegram-plugin/gateway/gateway.ts:2740-2810:permission-request keyboard; no thread_id"
+  "telegram-plugin/gateway/gateway.ts:2695-2760:permission-request keyboard; no thread_id"
 
   # reply chunk-loop fallback after robustApiCall threw THREAD_NOT_FOUND.
   # The caller dropped the thread; this raw sendMessage retries on the
   # main chat. Wrapping would re-enter the THREAD_NOT_FOUND throw on a
   # phantom second deletion.
-  "telegram-plugin/gateway/gateway.ts:3210-3270:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
+  "telegram-plugin/gateway/gateway.ts:3160-3220:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
-  "telegram-plugin/gateway/gateway.ts:8100-8170:credit-watch notify; no thread_id"
+  "telegram-plugin/gateway/gateway.ts:8050-8120:credit-watch notify; no thread_id"
 
   # gateway.ts:9260-9490 — ctx.api.editMessageText for vault grant wizard
   # cards. Every callsite has `.catch(() => {})` — a THREAD_NOT_FOUND

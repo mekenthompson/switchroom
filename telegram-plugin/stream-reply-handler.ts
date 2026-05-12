@@ -101,6 +101,12 @@ export interface StreamReplyArgs {
    */
   protect_content?: boolean
   /**
+   * When true, the INITIAL `sendMessage` is silent (no device ping).
+   * Edits never ping regardless. Used by mid-turn stream_reply calls
+   * under the #1122 conversational-pacing redesign. Default false.
+   */
+  disable_notification?: boolean
+  /**
    * Optional surgical quote text. When set along with `reply_to`, the initial
    * send includes `reply_parameters: { message_id, quote: { text, position: 0 } }`
    * so Telegram highlights the specific quoted sentence rather than the whole
@@ -508,6 +514,7 @@ export async function handleStreamReply(
       ...(replyToMessageId != null ? { replyToMessageId } : {}),
       ...(args.quote_text != null && replyToMessageId != null ? { quoteText: args.quote_text } : {}),
       ...(args.protect_content === true ? { protectContent: true } : {}),
+      ...(args.disable_notification === true ? { disableNotification: true } : {}),
       ...(args.reply_markup != null ? { replyMarkup: args.reply_markup } : {}),
       previewTransport: resolvedTransport,
       isPrivateChat: deps.isPrivateChat === true,

@@ -108,6 +108,7 @@ const TOOL_SCHEMAS = [
         disable_web_page_preview: { type: 'boolean', description: 'Disable link preview thumbnails. Default: true.' },
         protect_content: { type: 'boolean', description: 'When true, Telegram prevents the message from being forwarded or saved.' },
         quote_text: { type: 'string', description: 'Surgical quote: specific text to highlight from the reply_to message. Requires reply_to.' },
+        disable_notification: { type: 'boolean', description: 'When true, Telegram delivers the message silently — no device ping for this user. Default false (pings). Use true for mid-turn updates ("still working through X") so only the final answer pings. Always omit (or pass false) on the final answer of a turn.' },
         inline_keyboard: {
           type: 'array',
           description: 'Optional 2D array of tappable buttons rendered under the message. Outer array = rows; inner array = buttons in each row (max 8 per row, 8 rows). Each button needs a `text` (label, max 64 chars) plus EXACTLY ONE of: `url` (opens link in browser; must start with http(s):// or tg://) or `callback_data` (string, max 58 chars; tap is delivered to this agent as an inbound channel event with meta.button_callback_data=<the data> and the original button_text). Use buttons for single-tap approval/triage flows like [Approve] [Hold]; one tap on mobile beats asking the user to type YES/NO. By default a tap shows a brief "✓ received" toast and removes the entire keyboard so the user can\'t double-fire — override per-button via `ack_text` (custom toast text, max 200 chars) and `single_use: false` (preserve the keyboard so e.g. a [Refresh] button stays tappable).',
@@ -146,6 +147,7 @@ const TOOL_SCHEMAS = [
         quote: { type: 'boolean', description: 'Opt out of the default quote-reply behavior. Default: true. Ignored when reply_to is explicitly set.' },
         protect_content: { type: 'boolean', description: 'When true, Telegram prevents the message from being forwarded or saved.' },
         quote_text: { type: 'string', description: 'Surgical quote: specific text to highlight from the reply_to message. Requires reply_to.' },
+        disable_notification: { type: 'boolean', description: 'When true, the INITIAL message send is silent (no device ping). Has no effect on subsequent edits — Telegram never pings on editMessageText. Default false. Use for mid-turn stream starts you do not want to ping; omit on the final answer.' },
         inline_keyboard: {
           type: 'array',
           description: '2D array of tappable buttons under the final message. Same shape and constraints as `reply.inline_keyboard` — each button has `text` and EXACTLY ONE of `url` or `callback_data`, plus optional `ack_text` (custom tap-toast; default "✓ received") and `single_use` (default true; set false to keep the keyboard tappable after a tap). Tap on a callback_data button is delivered to this agent as an inbound channel event with meta.button_callback_data set.',

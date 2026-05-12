@@ -214,6 +214,18 @@ export interface SubAgentState {
    * until the sub-agent calls TodoWrite at least once.
    */
   readonly tasks: ReadonlyArray<TaskItem>
+  /**
+   * True when this sub-agent was dispatched via `Agent(run_in_background:
+   * true)`. Carried over from the matched `PendingAgentSpawn` at
+   * `sub_agent_started` reduce time so the driver's fleet update can
+   * tag the FleetMember as `status:'background'` without relying on a
+   * parallel Set (RFC §Bug 7 — derive bg-flag from reducer state).
+   *
+   * Defaults to `false` for orphan sub-agents (no matching pending
+   * entry); reverse-race adoption via the parent's `tool_use` case
+   * upgrades it later when the dispatch correlates.
+   */
+  readonly runInBackground: boolean
 }
 
 /**
@@ -558,15 +570,22 @@ export function reduce(
         if (bestAgentId != null) {
           const sa = subAgents.get(bestAgentId)!
           const next = new Map(subAgents)
+          // RFC §Bug 7 — propagate the bg flag during reverse-race
+          // adoption too. Without this, an orphan sub_agent_started
+          // followed by a late bg-dispatch tool_use would leave the
+          // SubAgentState's runInBackground stuck at false, and the
+          // driver's fleet member would render as foreground.
+          const runInBackground = event.input?.run_in_background === true
           next.set(bestAgentId, {
             ...sa,
             parentToolUseId: event.toolUseId,
             description,
             subagentType,
+            runInBackground,
           })
           subAgents = next
           adopted = true
-          process.stderr.write(`telegram gateway: progress-card: tool_use → agent correlation toolUseId=${event.toolUseId} agentId=${bestAgentId} (reverse-race adopt orphan)\n`)
+          process.stderr.write(`telegram gateway: progress-card: tool_use → agent correlation toolUseId=${event.toolUseId} agentId=${bestAgentId} bg=${runInBackground} (reverse-race adopt orphan)\n`)
         }
         if (!adopted) {
           // Capture run_in_background flag — load-bearing for the
@@ -730,6 +749,7 @@ export function reduce(
       let parentToolUseId: string | null = null
       let description = '(uncorrelated)'
       let subagentType: string | undefined
+      let runInBackground = false
       let pendingAgentSpawns = state.pendingAgentSpawns
       let items = state.items
       for (const [parentId, pending] of pendingAgentSpawns) {
@@ -737,6 +757,7 @@ export function reduce(
           parentToolUseId = parentId
           description = pending.description
           subagentType = pending.subagentType
+          runInBackground = pending.runInBackground
           const nextPending = new Map(pendingAgentSpawns)
           nextPending.delete(parentId)
           pendingAgentSpawns = nextPending
@@ -764,6 +785,7 @@ export function reduce(
         lastEventAt: now,
         recentCompletedTools: [],
         tasks: [],
+        runInBackground,
       }
       const subAgents = new Map(state.subAgents)
       subAgents.set(event.agentId, sub)

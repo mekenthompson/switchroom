@@ -219,6 +219,42 @@ describe('silence-poke — subagent dispatch extension', () => {
     endTurn('k')
     expect(__getStateForTests('k')).toBeUndefined()
   })
+
+  // CC-5 defensive invariant (`docs/status-ask-cause-classes.md`):
+  // the original catalog claim was that `subagentDispatchActive` can
+  // leak across turns if `endTurn` is skipped (turn dies abnormally,
+  // gateway crashes between turn_end signal and cleanup). Investigation
+  // shows the claim doesn't hold — `startTurn` calls `state.set(key, ...)`
+  // unconditionally with `subagentDispatchActive: false`, so the next
+  // turn's startTurn wipes any stale flag.
+  //
+  // We're pinning that invariant here as a regression guard. If a future
+  // refactor changes `startTurn` to a read-modify-write (merge instead
+  // of overwrite), this test breaks immediately. Keeps the catalog's
+  // worry productive: even though it's not currently a bug, the
+  // invariant that makes it not-a-bug is now load-bearing.
+  it('startTurn overwrites stale subagentDispatchActive when endTurn was skipped (CC-5 invariant)', () => {
+    const fx = setupDeps()
+    // Turn 1: dispatch a subagent, then SKIP endTurn (simulating an
+    // abnormal abort path — context-exhaustion, gateway crash mid-turn,
+    // etc).
+    startTurn('k', 0)
+    noteSubagentDispatch('k')
+    expect(__getStateForTests('k')?.subagentDispatchActive).toBe(true)
+
+    // Turn 2 in the same key: startTurn MUST clear the flag.
+    startTurn('k', 1_000_000)
+    expect(__getStateForTests('k')?.subagentDispatchActive).toBe(false)
+
+    // Verify the soft poke fires at the normal 75s threshold, not at
+    // the extended 300s subagentSoft threshold. If the flag had leaked,
+    // ticking at 75s after the new turn start would find subagentSoft
+    // active and skip the fire.
+    __tickForTests(1_000_000 + 75_000)
+    const fired = fx.emitted.filter((e) => e.kind === 'silence_poke_fired')
+    expect(fired).toHaveLength(1)
+    expect(fired[0]).toMatchObject({ level: 'soft', subagent_wait: false })
+  })
 })
 
 describe('silence-poke — consumeArmedPoke draining', () => {

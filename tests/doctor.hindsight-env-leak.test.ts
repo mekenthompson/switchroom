@@ -89,16 +89,22 @@ describe("detectHindsightEnvLeak (#1068)", () => {
     expect(detectHindsightEnvLeak("[]").leaked).toBe(false);
   });
 
-  it("post-fix container (env-file routed) reads as clean", () => {
-    // After the #1068 fix, the API key is in the container's env (set by
-    // --env-file at start time) but NOT in `.Config.Env`. Docker only
-    // echoes `-e` and Dockerfile-baked vars into .Config.Env. So the
-    // inspect output looks like:
+  it("post-fix container (entrypoint shim, bind-mounted secret) reads as clean", () => {
+    // After the #1068 fix, the API key is exported INSIDE the container
+    // by an entrypoint shim that reads /run/secrets/hindsight-llm-key
+    // (bind-mounted from the host tmpfs). Docker has no view into the
+    // in-container export, so `.Config.Env` does NOT contain the key.
+    //
+    // Earlier draft used `--env-file`, but that approach was rejected
+    // during review — empirically `--env-file` values ARE echoed into
+    // `.Config.Env` on Docker 29.4.1, identically to `-e`. Only an
+    // in-container export keeps the value out.
     const json = JSON.stringify([
       "PATH=/usr/local/sbin:/usr/local/bin",
       "HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE=1000",
       "HINDSIGHT_API_LLM_PROVIDER=openai",
-      // No HINDSIGHT_API_LLM_API_KEY here — that's the whole point.
+      // No HINDSIGHT_API_LLM_API_KEY here — set inside the container by
+      // the shim, never seen by docker.
     ]);
     const result = detectHindsightEnvLeak(json);
     expect(result.leaked).toBe(false);

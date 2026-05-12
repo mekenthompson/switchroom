@@ -499,8 +499,16 @@ function checkVault(config: SwitchroomConfig): CheckResult[] {
  * secret-shaped values. Used by the doctor probe to surface pre-fix
  * containers that were started with `-e HINDSIGHT_API_LLM_API_KEY=...`
  * — those values appear in `docker inspect` and are readable by anyone
- * in the docker group. Post-fix containers route the key via
- * `--env-file`, which docker does NOT echo into `.Config.Env`.
+ * in the docker group.
+ *
+ * Post-fix containers bind-mount the secret file and use an entrypoint
+ * shim to export the env var INSIDE the container. Docker doesn't see
+ * the export, so `.Config.Env` does not contain the key.
+ *
+ * Note: `--env-file` was the original approach but was rejected during
+ * review — empirically `--env-file` values DO populate `.Config.Env`
+ * identically to `-e` on Docker 29.4.1. Only an in-container export
+ * (via entrypoint shim) keeps the value out of `Config.Env`.
  *
  * @internal exported for testing
  */
@@ -596,7 +604,8 @@ export function checkHindsightEnvLeak(): CheckResult | null {
       `secret-shaped env vars exposed via \`docker inspect\`: ${result.leakedKeys.join(", ")}`,
     fix:
       "Container was started before the #1068 fix. Run `switchroom memory --stop && switchroom memory --start` " +
-      "to restart it with the API key routed via `--env-file` on tmpfs instead of `docker run -e`.",
+      "to restart it with the API key bind-mounted from a tmpfs file and exported by an entrypoint shim " +
+      "(so the value never lands in `.Config.Env`).",
   };
 }
 

@@ -1,14 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import {
-  existsSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, readFileSync, rmSync, statSync } from "node:fs";
 
 // Mock execFileSync so `docker run` never actually fires. We capture
 // the args to assert on the command shape.
@@ -25,26 +16,22 @@ import {
   startHindsight,
   stopHindsight,
   writeHindsightLlmKeyFile,
-  hindsightSecretEnvFilePath,
+  hindsightSecretFilePath,
   pickHindsightSecretDir,
+  HINDSIGHT_SECRET_CONTAINER_PATH,
 } from "../../src/setup/hindsight.js";
 
 const mockedExec = execFileSync as unknown as ReturnType<typeof vi.fn>;
 
-// We isolate filesystem side-effects by stubbing the tmpfs dir picker. The
-// real implementation tries `/run/switchroom/hindsight` then `/dev/shm/...`;
-// in CI/test we redirect both into a per-test tmpdir.
-//
-// We do this by monkey-patching the env / using a tmpdir override: but
-// since pickHindsightSecretDir() doesn't read env, we go a different
-// route — write a wrapper that pre-creates one of the candidate dirs
-// under our test tmpdir and points it via a module-scoped override.
-//
-// Simpler approach: write to `/dev/shm` if it's writable (it is on Linux
-// CI); skip the test on platforms where it isn't. The function under test
-// already returns the chosen path so the assertion can introspect it.
+function findRunArgs(): string[] {
+  const runCall = mockedExec.mock.calls.find(
+    (c) => Array.isArray(c[1]) && (c[1] as string[])[0] === "run",
+  );
+  expect(runCall).toBeDefined();
+  return runCall![1] as string[];
+}
 
-describe("hindsight secret env-file (#1068)", () => {
+describe("hindsight secret routing (#1068)", () => {
   let writtenPath: string | null = null;
 
   beforeEach(() => {
@@ -65,20 +52,11 @@ describe("hindsight secret env-file (#1068)", () => {
       uiPort: 9999,
     });
 
-    // Find the docker-run call.
-    const runCall = mockedExec.mock.calls.find(
-      (c) => Array.isArray(c[1]) && (c[1] as string[])[0] === "run",
-    );
-    expect(runCall).toBeDefined();
-    const args = runCall![1] as string[];
-
-    // Joined arg string must not contain the API key value or the
-    // sensitive var name as a `-e` value.
+    const args = findRunArgs();
     const joined = args.join(" ");
     expect(joined).not.toContain("sk-test-secret-value-do-not-leak");
-    expect(joined).not.toContain("-e HINDSIGHT_API_LLM_API_KEY");
 
-    // And no `-e KEY=VALUE` entry should contain the key name.
+    // Inspect every -e value: none may be HINDSIGHT_API_LLM_API_KEY.
     for (let i = 0; i < args.length - 1; i++) {
       if (args[i] === "-e") {
         expect(args[i + 1]).not.toMatch(/^HINDSIGHT_API_LLM_API_KEY=/);
@@ -86,41 +64,93 @@ describe("hindsight secret env-file (#1068)", () => {
     }
   });
 
-  it("passes --env-file <path> when apiKey is supplied", () => {
-    startHindsight("openai", "sk-another-test-key-value", {
+  it("does NOT pass --env-file (rejected approach — env-file leaks too)", () => {
+    startHindsight("openai", "sk-do-not-use-env-file", {
       apiPort: 8888,
       uiPort: 9999,
     });
+    const args = findRunArgs();
+    // --env-file populates .Config.Env identically to -e on Docker 29+,
+    // so the fix must NOT use it for secrets. Asserted explicitly so a
+    // regression to the v1 approach is loud.
+    expect(args).not.toContain("--env-file");
 
-    const runCall = mockedExec.mock.calls.find(
-      (c) => Array.isArray(c[1]) && (c[1] as string[])[0] === "run",
-    );
-    const args = runCall![1] as string[];
-
-    const envFileIdx = args.indexOf("--env-file");
-    expect(envFileIdx).toBeGreaterThanOrEqual(0);
-    const envFilePath = args[envFileIdx + 1];
-    expect(envFilePath).toBeTruthy();
-    writtenPath = envFilePath;
-
-    // File should exist and be mode 0600.
-    expect(existsSync(envFilePath)).toBe(true);
-    const mode = statSync(envFilePath).mode & 0o777;
-    expect(mode).toBe(0o600);
-
-    // Contents should be exactly one line.
-    const content = readFileSync(envFilePath, "utf-8");
-    expect(content).toBe("HINDSIGHT_API_LLM_API_KEY=sk-another-test-key-value\n");
+    // Capture the bind-mount path for cleanup.
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-v" && (args[i + 1] as string).includes("/llm-key:")) {
+        writtenPath = (args[i + 1] as string).split(":")[0];
+      }
+    }
   });
 
-  it("does NOT pass --env-file when apiKey is undefined", () => {
-    startHindsight("ollama", undefined, { apiPort: 8888, uiPort: 9999 });
+  it("bind-mounts the secret file read-only into the container", () => {
+    startHindsight("openai", "sk-bind-mount-test", { apiPort: 8888, uiPort: 9999 });
+    const args = findRunArgs();
 
-    const runCall = mockedExec.mock.calls.find(
-      (c) => Array.isArray(c[1]) && (c[1] as string[])[0] === "run",
+    // Look for the -v entry pointing at the in-container secret path.
+    const mountIdx = args.findIndex(
+      (a, i) =>
+        a === "-v" &&
+        typeof args[i + 1] === "string" &&
+        (args[i + 1] as string).includes(`:${HINDSIGHT_SECRET_CONTAINER_PATH}:ro`),
     );
-    const args = runCall![1] as string[];
+    expect(mountIdx).toBeGreaterThanOrEqual(0);
+
+    const mountSpec = args[mountIdx + 1];
+    const [hostPath, containerPath, mode] = mountSpec.split(":");
+    expect(containerPath).toBe(HINDSIGHT_SECRET_CONTAINER_PATH);
+    expect(mode).toBe("ro");
+    writtenPath = hostPath;
+
+    // Host file exists and is mode 0600 with bare-value contents.
+    expect(existsSync(hostPath)).toBe(true);
+    const fileMode = statSync(hostPath).mode & 0o777;
+    expect(fileMode).toBe(0o600);
+    const content = readFileSync(hostPath, "utf-8");
+    expect(content).toBe("sk-bind-mount-test");
+  });
+
+  it("overrides entrypoint with sh + shim that exports key from the bind-mounted file", () => {
+    startHindsight("openai", "sk-shim-test", { apiPort: 8888, uiPort: 9999 });
+    const args = findRunArgs();
+
+    // --entrypoint sh comes BEFORE the image; -c '<shim>' comes AFTER.
+    const entrypointIdx = args.indexOf("--entrypoint");
+    expect(entrypointIdx).toBeGreaterThanOrEqual(0);
+    expect(args[entrypointIdx + 1]).toBe("sh");
+
+    // Find the image arg, then assert the following -c shim.
+    const imageIdx = args.findIndex((a) =>
+      typeof a === "string" && a.startsWith("ghcr.io/vectorize-io/hindsight"),
+    );
+    expect(imageIdx).toBeGreaterThanOrEqual(0);
+    expect(args[imageIdx + 1]).toBe("-c");
+    const shim = args[imageIdx + 2];
+    expect(shim).toContain(`cat ${HINDSIGHT_SECRET_CONTAINER_PATH}`);
+    expect(shim).toContain("export HINDSIGHT_API_LLM_API_KEY");
+    expect(shim).toContain("exec /app/start-all.sh");
+    // The shim must NOT contain the literal key value.
+    expect(shim).not.toContain("sk-shim-test");
+
+    // Capture for cleanup.
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-v" && (args[i + 1] as string).includes("/llm-key:")) {
+        writtenPath = (args[i + 1] as string).split(":")[0];
+      }
+    }
+  });
+
+  it("does NOT bind-mount or override entrypoint when apiKey is undefined", () => {
+    startHindsight("ollama", undefined, { apiPort: 8888, uiPort: 9999 });
+    const args = findRunArgs();
+    expect(args).not.toContain("--entrypoint");
     expect(args).not.toContain("--env-file");
+    // No -v entry should target the secret container path.
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-v") {
+        expect(args[i + 1]).not.toContain(HINDSIGHT_SECRET_CONTAINER_PATH);
+      }
+    }
   });
 
   it("still passes non-secret env (provider, observation cap) via -e", () => {
@@ -128,11 +158,7 @@ describe("hindsight secret env-file (#1068)", () => {
       apiPort: 8888,
       uiPort: 9999,
     });
-
-    const runCall = mockedExec.mock.calls.find(
-      (c) => Array.isArray(c[1]) && (c[1] as string[])[0] === "run",
-    );
-    const args = runCall![1] as string[];
+    const args = findRunArgs();
     const envPairs: string[] = [];
     for (let i = 0; i < args.length - 1; i++) {
       if (args[i] === "-e") envPairs.push(args[i + 1]);
@@ -140,35 +166,45 @@ describe("hindsight secret env-file (#1068)", () => {
     expect(envPairs.some((p) => p.startsWith("HINDSIGHT_API_LLM_PROVIDER=openai"))).toBe(true);
     expect(envPairs.some((p) => p.startsWith("HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE="))).toBe(true);
 
-    // Capture for cleanup.
-    const envFileIdx = args.indexOf("--env-file");
-    if (envFileIdx >= 0) writtenPath = args[envFileIdx + 1];
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-v" && (args[i + 1] as string).includes("/llm-key:")) {
+        writtenPath = (args[i + 1] as string).split(":")[0];
+      }
+    }
   });
 
   it("writeHindsightLlmKeyFile refuses keys containing newlines", () => {
     expect(() => writeHindsightLlmKeyFile("sk-bad\nvalue")).toThrow(/newline/i);
   });
 
-  it("writes the env-file under a tmpfs-backed dir", () => {
+  it("writes the secret file under a tmpfs-backed dir", () => {
     const dir = pickHindsightSecretDir();
-    // Must be one of the sanctioned tmpfs locations — never /tmp or $HOME.
     expect(
       dir === "/run/switchroom/hindsight" || dir === "/dev/shm/switchroom-hindsight",
     ).toBe(true);
   });
 
-  it("stopHindsight unlinks the env-file (best-effort)", () => {
-    // Seed: write a file via the helper.
+  it("hindsightSecretFilePath returns a stable path ending in llm-key", () => {
+    const p = hindsightSecretFilePath();
+    expect(p.endsWith("/llm-key")).toBe(true);
+  });
+
+  it("stopHindsight unlinks the host secret file (best-effort)", () => {
     const path = writeHindsightLlmKeyFile("sk-cleanup-test-value");
     expect(existsSync(path)).toBe(true);
-
     stopHindsight();
-
     expect(existsSync(path)).toBe(false);
   });
 
-  it("hindsightSecretEnvFilePath returns a stable path ending in llm-key.env", () => {
-    const p = hindsightSecretEnvFilePath();
-    expect(p.endsWith("/llm-key.env")).toBe(true);
+  it("stopHindsight also cleans up the legacy llm-key.env path (pre-pivot)", () => {
+    // Simulate a host that has the old envfile layout sitting around.
+    const dir = pickHindsightSecretDir();
+    const legacyPath = `${dir}/llm-key.env`;
+    require("node:fs").writeFileSync(legacyPath, "HINDSIGHT_API_LLM_API_KEY=stale\n", { mode: 0o600 });
+    expect(existsSync(legacyPath)).toBe(true);
+
+    stopHindsight();
+
+    expect(existsSync(legacyPath)).toBe(false);
   });
 });

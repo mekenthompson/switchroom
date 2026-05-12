@@ -158,7 +158,7 @@ export function isHindsightContainerExists(): boolean {
 }
 
 /**
- * Pick a tmpfs-backed directory for the LLM-key env-file.
+ * Pick a tmpfs-backed directory for the LLM-key secret file.
  *
  * Resolution order:
  *   1. `/run/switchroom/hindsight/` — preferred on systemd hosts, tmpfs by default.
@@ -187,7 +187,7 @@ export function pickHindsightSecretDir(): string {
     }
   }
   throw new Error(
-    "No writable tmpfs location for the Hindsight LLM key env-file. " +
+    "No writable tmpfs location for the Hindsight LLM key file. " +
       "Tried (in order):\n  " +
       errors.join("\n  ") +
       "\n\nRefusing to fall back to /tmp because it isn't tmpfs on every " +
@@ -196,48 +196,62 @@ export function pickHindsightSecretDir(): string {
 }
 
 /**
- * Path to the secret env-file. Single fixed name per container — there's
- * only one `switchroom-hindsight` container, so a stable path is fine.
+ * Path to the secret file on the host. Single fixed name per container —
+ * there's only one `switchroom-hindsight` container, so a stable path is fine.
  */
-export function hindsightSecretEnvFilePath(): string {
-  return `${pickHindsightSecretDir()}/llm-key.env`;
+export function hindsightSecretFilePath(): string {
+  return `${pickHindsightSecretDir()}/llm-key`;
 }
 
 /**
- * Write the LLM API key to a tmpfs-backed env-file with mode 0600.
+ * In-container mount point for the secret file. Bind-mounted read-only
+ * from the host path returned by `hindsightSecretFilePath()`. The
+ * entrypoint shim (see startHindsight) reads this file and exports
+ * the env var inside the container so it never enters `Config.Env`.
+ */
+export const HINDSIGHT_SECRET_CONTAINER_PATH = "/run/secrets/hindsight-llm-key";
+
+/**
+ * Write the LLM API key to a tmpfs-backed file with mode 0600. The file
+ * contains JUST the key value (no `KEY=` prefix) — the in-container
+ * shim does the `export` step.
  *
- * Why an env-file instead of `-e`:
- *   - `docker inspect <container>` exposes `-e` values in `.Config.Env`
- *     to anyone in the docker group.
- *   - `docker run -e KEY=VALUE ...` writes the secret to the parent
- *     process's command line, which lands in shell history and journald.
+ * Why a bind-mounted secret file + entrypoint shim instead of `-e` or
+ * `--env-file`:
  *
- * With `--env-file`, the value lives only in (a) the file on tmpfs, and
- * (b) the container's own process environment. `docker inspect` shows
- * `.Config.Env` *without* env-file values.
+ *   - `-e KEY=VALUE` exposes the value via `docker inspect`'s
+ *     `.Config.Env` to anyone in the docker group, AND writes the
+ *     secret to the parent process's command line (shell history,
+ *     journald).
+ *   - `--env-file path` — empirically verified on Docker 29.4.1 — DOES
+ *     populate `.Config.Env` identically to `-e`. It only closes the
+ *     argv leak, not the inspect leak.
+ *   - Hindsight upstream does not support `HINDSIGHT_API_LLM_API_KEY_FILE`
+ *     indirection (checked vectorize-io/hindsight, no `*_FILE` env
+ *     convention as of this fix).
+ *
+ * The bind-mount + shim approach closes BOTH leaks: docker only knows
+ * about a volume mount and a CMD override; the env var is set inside
+ * the container by `sh -c 'export …' && exec /app/start-all.sh`, which
+ * docker has no view into. `docker inspect .Config.Env` won't contain
+ * the key.
  *
  * Cleanup story:
- *   - `stopHindsight()` unlinks the file (best-effort).
+ *   - `stopHindsight()` unlinks the host file (best-effort).
  *   - The dir lives on tmpfs, so a host reboot wipes it.
- *   - The container has `--restart unless-stopped`, but the env-file is
- *     read at `docker run` time only (one-shot copy into the container's
- *     env), so a stale-or-deleted file post-start doesn't matter for
- *     restarts: the kernel keeps the env around for the container's
- *     lifetime regardless of the host file. A subsequent `docker run`
- *     (i.e. operator re-running `switchroom memory --start`) will
- *     re-create the file from scratch.
+ *   - The bind-mount is read-only inside the container, so the
+ *     containerized process can't tamper.
  */
 export function writeHindsightLlmKeyFile(apiKey: string): string {
-  const path = hindsightSecretEnvFilePath();
-  // Single-line env-file: docker --env-file accepts `KEY=VALUE` per line.
-  // The value can contain `=` but not embedded newlines; OpenAI / Anthropic /
-  // Google API keys are all opaque base64-ish strings so that's not a real
-  // constraint, but we trim defensively.
+  const path = hindsightSecretFilePath();
   const trimmed = apiKey.trim();
   if (trimmed.includes("\n") || trimmed.includes("\r")) {
     throw new Error("Hindsight LLM API key contains a newline; refusing to write.");
   }
-  writeFileSync(path, `HINDSIGHT_API_LLM_API_KEY=${trimmed}\n`, { mode: 0o600 });
+  // No trailing newline — the shim uses `$(cat …)` and a trailing
+  // newline gets stripped by command substitution anyway, but keeping
+  // the file byte-exact avoids surprises if someone inspects it.
+  writeFileSync(path, trimmed, { mode: 0o600 });
   // Re-chmod in case umask / pre-existing file altered the bits.
   chmodSync(path, 0o600);
   return path;
@@ -248,9 +262,10 @@ export function writeHindsightLlmKeyFile(apiKey: string): string {
  *
  * @param provider - Optional LLM provider (e.g., "ollama", "openai", "anthropic")
  * @param apiKey - Optional LLM API key (e.g., OpenAI key). When present,
- *   passed via a tmpfs `--env-file` so it doesn't appear in `docker
- *   inspect`'s `.Config.Env` or in shell history / journald. See
- *   `writeHindsightLlmKeyFile()` for the threat model.
+ *   written to a tmpfs file and bind-mounted into the container; an
+ *   entrypoint shim exports the env var INSIDE the container so it
+ *   never enters `.Config.Env`. See `writeHindsightLlmKeyFile()` for
+ *   the threat model.
  * @param ports - Optional host port mapping. If omitted, tries upstream
  *   defaults (8888/9999) then 18888/19999.
  */
@@ -272,13 +287,29 @@ export function startHindsight(
   // useful as a debugging breadcrumb in `docker inspect`.
   if (provider) envArgs.push("-e", `HINDSIGHT_API_LLM_PROVIDER=${provider}`);
 
-  // The API key is sensitive; route it through a tmpfs env-file instead
-  // of `-e KEY=VALUE`. See writeHindsightLlmKeyFile() for the threat model.
-  const envFileArgs: string[] = [];
+  // Secret routing: bind-mount the host file read-only at a fixed
+  // in-container path, then override CMD with a shim that exports the
+  // key from the file before `exec`ing into Hindsight's start-all.sh.
+  // This keeps the key out of .Config.Env entirely — docker only sees
+  // the volume mount and CMD argv, neither of which contain the value.
+  const secretMountArgs: string[] = [];
+  let cmdOverride: string[] = [];
   if (apiKey) {
-    const envFilePath = writeHindsightLlmKeyFile(apiKey);
-    envFileArgs.push("--env-file", envFilePath);
+    const hostPath = writeHindsightLlmKeyFile(apiKey);
+    // `:ro` bind mount — the container has no business writing back.
+    secretMountArgs.push("-v", `${hostPath}:${HINDSIGHT_SECRET_CONTAINER_PATH}:ro`);
+    // Override CMD via `--entrypoint sh` + args after the image. The
+    // shim must exec the upstream CMD (`/app/start-all.sh`) so that
+    // PID-1 semantics, signal handling, and tini-style behavior are
+    // preserved. The `set -e` guards a missing/unreadable secret file
+    // — fail loud rather than booting Hindsight with no API key.
+    cmdOverride = [
+      "-c",
+      `set -e; export HINDSIGHT_API_LLM_API_KEY="$(cat ${HINDSIGHT_SECRET_CONTAINER_PATH})"; exec /app/start-all.sh`,
+    ];
   }
+
+  const entrypointArgs = apiKey ? ["--entrypoint", "sh"] : [];
 
   const args = [
     "run", "-d",
@@ -288,8 +319,10 @@ export function startHindsight(
     "-p", `127.0.0.1:${uiPort}:9999`,
     "-v", "switchroom-hindsight-data:/home/hindsight/.pg0",
     ...envArgs,
-    ...envFileArgs,
+    ...secretMountArgs,
+    ...entrypointArgs,
     "ghcr.io/vectorize-io/hindsight:latest",
+    ...cmdOverride,
   ];
 
   execFileSync("docker", args, { stdio: "pipe" });
@@ -298,7 +331,7 @@ export function startHindsight(
 /**
  * Stop and remove the Hindsight Docker container.
  *
- * Also unlinks the LLM-key env-file on tmpfs (best-effort) so a stopped
+ * Also unlinks the LLM-key secret file on tmpfs (best-effort) so a stopped
  * container doesn't leave the key sitting at a predictable path. A host
  * reboot also wipes it (tmpfs), and a re-`startHindsight()` rewrites it.
  */
@@ -311,11 +344,15 @@ export function stopHindsight(): void {
   } catch { /* container may already be removed */ }
   // Best-effort cleanup. We probe both candidate dirs because the file
   // may have been written under whichever was writable at start time.
+  // Both the old env-file path (pre-pivot) and the new bare-value path
+  // are unlinked, so a partial rollout doesn't strand keys.
   for (const dir of ["/run/switchroom/hindsight", "/dev/shm/switchroom-hindsight"]) {
-    const path = `${dir}/llm-key.env`;
-    try {
-      if (existsSync(path)) unlinkSync(path);
-    } catch { /* nothing to clean up */ }
+    for (const name of ["llm-key", "llm-key.env"]) {
+      const path = `${dir}/${name}`;
+      try {
+        if (existsSync(path)) unlinkSync(path);
+      } catch { /* nothing to clean up */ }
+    }
   }
 }
 

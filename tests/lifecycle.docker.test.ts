@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock node:child_process so docker(...) calls are observable and don't
 // escape the test. tmux.js is mocked separately so we can control
@@ -128,6 +128,115 @@ describe("lifecycle (docker mode): start/stop/restart shellouts", () => {
       throw e;
     });
     expect(() => restartAgent("foo")).toThrowError(/Failed to restart agent "foo"/);
+  });
+});
+
+// Issue #1118: ALL callers of restartAgent must produce a fresh
+// clean-shutdown marker so the next boot's reason classifier sees
+// "graceful" instead of falling through to "crash" (operator-driven
+// restarts via auth.ts, reconcile, web/api, etc. previously omitted
+// the reason argument → no marker written → next boot misclassified
+// as crash → misleading "💥 agent-crashed" card on every legitimate
+// operator action).
+describe("lifecycle (docker mode): restartAgent ALWAYS writes a clean-shutdown marker (#1118)", () => {
+  let tmpRoot: string;
+  let prevAgentsDir: string | undefined;
+
+  beforeEach(async () => {
+    const { mkdtempSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join: joinPath } = await import("node:path");
+    tmpRoot = mkdtempSync(joinPath(tmpdir(), "sw-restartagent-1118-"));
+    prevAgentsDir = process.env.SWITCHROOM_AGENTS_DIR;
+    process.env.SWITCHROOM_AGENTS_DIR = tmpRoot;
+  });
+
+  afterEach(async () => {
+    const { rmSync } = await import("node:fs");
+    if (prevAgentsDir === undefined) delete process.env.SWITCHROOM_AGENTS_DIR;
+    else process.env.SWITCHROOM_AGENTS_DIR = prevAgentsDir;
+    rmSync(tmpRoot, { recursive: true, force: true });
+  });
+
+  it("restartAgent(name) — no reason arg — writes a 'cli: restart' marker (regression #1118)", async () => {
+    recordingStub({ "compose up": () => "" });
+    restartAgent("foo");
+    const { readFileSync, existsSync } = await import("node:fs");
+    const { join: joinPath } = await import("node:path");
+    const markerPath = joinPath(tmpRoot, "foo", "telegram", "clean-shutdown.json");
+    expect(existsSync(markerPath)).toBe(true);
+    const m = JSON.parse(readFileSync(markerPath, "utf-8")) as {
+      ts: number;
+      signal: string;
+      reason: string;
+    };
+    expect(m.reason).toBe("cli: restart");
+    expect(m.signal).toBe("SIGTERM");
+    expect(typeof m.ts).toBe("number");
+    // Marker must be FRESH at write time — the boot reason classifier
+    // uses a 60s 'graceful' window, so a marker ts older than ~now is
+    // useless. Allow 5s slack for slow CI.
+    expect(Date.now() - m.ts).toBeLessThan(5_000);
+  });
+
+  it("restartAgent(name, customReason) — reason arg honored (regression: don't clobber explicit caller reason)", async () => {
+    recordingStub({ "compose up": () => "" });
+    restartAgent("foo", "auth: token rotated");
+    const { readFileSync } = await import("node:fs");
+    const { join: joinPath } = await import("node:path");
+    const markerPath = joinPath(tmpRoot, "foo", "telegram", "clean-shutdown.json");
+    const m = JSON.parse(readFileSync(markerPath, "utf-8")) as { reason: string };
+    expect(m.reason).toBe("auth: token rotated");
+  });
+
+  it("restartAgent preserves a fresh prior marker (cooperative race: gateway-written reason wins)", async () => {
+    // Production race: in-chat /new handler writes
+    // "user: /new from chat" into the marker, then spawns a detached
+    // `switchroom agent restart` CLI. The CLI's restartAgent() call
+    // would normally write "cli: restart" — but preserveExisting:true
+    // MUST leave the user attribution in place so the greeting card
+    // shows who really triggered it.
+    const { mkdirSync, writeFileSync, readFileSync } = await import("node:fs");
+    const { join: joinPath } = await import("node:path");
+    const dir = joinPath(tmpRoot, "foo", "telegram");
+    mkdirSync(dir, { recursive: true });
+    const markerPath = joinPath(dir, "clean-shutdown.json");
+    writeFileSync(
+      markerPath,
+      JSON.stringify({
+        ts: Date.now(),
+        signal: "SIGTERM",
+        reason: "user: /new from chat",
+      }),
+    );
+
+    recordingStub({ "compose up": () => "" });
+    restartAgent("foo");
+
+    const after = JSON.parse(readFileSync(markerPath, "utf-8")) as { reason: string };
+    expect(after.reason).toBe("user: /new from chat");
+  });
+
+  it("restartAgent overwrites a stale prior marker (>30s old)", async () => {
+    const { mkdirSync, writeFileSync, readFileSync } = await import("node:fs");
+    const { join: joinPath } = await import("node:path");
+    const dir = joinPath(tmpRoot, "foo", "telegram");
+    mkdirSync(dir, { recursive: true });
+    const markerPath = joinPath(dir, "clean-shutdown.json");
+    writeFileSync(
+      markerPath,
+      JSON.stringify({
+        ts: Date.now() - 60_000,
+        signal: "SIGTERM",
+        reason: "user: ancient marker",
+      }),
+    );
+
+    recordingStub({ "compose up": () => "" });
+    restartAgent("foo");
+
+    const after = JSON.parse(readFileSync(markerPath, "utf-8")) as { reason: string };
+    expect(after.reason).toBe("cli: restart");
   });
 });
 

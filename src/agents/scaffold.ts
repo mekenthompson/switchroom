@@ -16,6 +16,7 @@ import {
 import { homedir } from "node:os";
 import { execSync, execFileSync } from "node:child_process";
 import { basename, join, resolve } from "node:path";
+import { createHash } from "node:crypto";
 import chalk from "chalk";
 import type { AgentConfig, QuotaConfig, SwitchroomConfig, TelegramConfig } from "../config/schema.js";
 
@@ -1680,6 +1681,13 @@ export function scaffoldAgent(
   const agentDir = resolve(agentsDir, name);
   const created: string[] = [];
   const skipped: string[] = [];
+  /**
+   * Files we re-rendered AND backed up an operator-edited version
+   * of. Surfaced via stderr at the end of scaffoldAgent so operators
+   * notice; per-agent items are also included in `created` for the
+   * normal "N files created" count.
+   */
+  const rewrittenWithBackup: string[] = [];
 
   const profilePath = getProfilePath(agentConfig.extends ?? DEFAULT_PROFILE);
   const basePath = getBaseProfilePath();
@@ -1987,25 +1995,25 @@ export function scaffoldAgent(
   for (const { src, dest } of templateFiles) {
     const srcPath = join(profilePath, src);
     if (existsSync(srcPath)) {
-      writeIfMissing(
+      // CLAUDE.md uses a fingerprint-aware re-render so profile-template
+      // changes (e.g. `_shared/telegram-style.md.hbs`) propagate to
+      // existing agents on `switchroom apply`. Old behaviour
+      // (writeIfMissing) froze the file forever after first scaffold —
+      // the root cause of the #1122 conversational-pacing rollout
+      // silently bypassing every running agent's prompt. Operator
+      // hand-edits are preserved as a backup at
+      // `<filename>.before-rerender.<unix-ms>` so they can be
+      // re-merged manually.
+      rerenderWithFingerprint(
         join(agentDir, dest),
         () => {
           let rendered = renderTemplate(srcPath, context);
-          // Append the switchroom-managed vault protocol section. Every
-          // agent gets it regardless of profile — it's load-bearing
-          // safety guidance (how to handle VAULT-BROKER-DENIED, when to
-          // call vault_request_access, why --no-broker can't work from
-          // inside the sandbox). Reconcile re-applies it on every run.
           if (dest === "CLAUDE.md") {
             const vaultProtocol = renderVaultProtocolFragment(context);
             if (vaultProtocol) {
               rendered = rendered.trimEnd() + "\n\n" + vaultProtocol + "\n";
             }
           }
-          // Phase 5: append claude_md_raw escape hatch on initial
-          // scaffold. CLAUDE.md is user-protected afterwards so the
-          // hatch is one-shot — users who edit CLAUDE.md after scaffold
-          // keep their edits through subsequent reconciles.
           if (dest === "CLAUDE.md" && agentConfig.claude_md_raw) {
             rendered = rendered.trimEnd() + "\n\n" + agentConfig.claude_md_raw + "\n";
           }
@@ -2013,6 +2021,7 @@ export function scaffoldAgent(
         },
         created,
         skipped,
+        rewrittenWithBackup,
       );
     }
   }
@@ -2397,6 +2406,17 @@ export function scaffoldAgent(
     });
   }
 
+  // Loud warning when CLAUDE.md (or any future fingerprint-tracked
+  // file) was operator-edited and we backed it up. Surfaced via
+  // stderr so it lands in `switchroom apply` output; not added to
+  // ScaffoldResult to keep the public type stable.
+  for (const f of rewrittenWithBackup) {
+    process.stderr.write(
+      `scaffold: re-rendered ${f} from template change; backed up your `
+      + `edited version to ${f}.before-rerender.* — review and re-merge `
+      + `manually if needed.\n`,
+    );
+  }
   return { agentDir, created, skipped };
 }
 
@@ -3748,6 +3768,109 @@ function writeIfChanged(
     return;
   }
   writeFileSync(filePath, next, mode !== undefined ? { encoding: "utf-8", mode } : "utf-8");
+  created.push(filePath);
+}
+
+/**
+ * Smart-rerender for files we GENERATE from a template but that the
+ * operator MIGHT hand-edit between scaffolds. The previous
+ * `writeIfMissing` behaviour froze the file forever after first write
+ * — which meant a profile-template change (e.g. a new
+ * `_shared/telegram-style.md.hbs` prompt) never reached existing
+ * agents via `switchroom apply`. That was the root cause of the
+ * #1122 conversational-pacing rollout silently bypassing every
+ * agent's CLAUDE.md (discovered 2026-05-12 UAT overnight run).
+ *
+ * Contract:
+ *  - First write: fresh content, drop a fingerprint sidecar
+ *    (`<filename>.fingerprint`) holding the SHA-256 of what we wrote.
+ *  - Subsequent apply:
+ *     - Render fresh. If `hash(rendered) === hash(file_on_disk)`,
+ *       no-op — file already reflects current template.
+ *     - Else, read the fingerprint sidecar.
+ *        - If sidecar matches `hash(file_on_disk)`: the operator has
+ *          NOT touched the file since we last wrote it — template
+ *          drifted, safe to overwrite + update fingerprint.
+ *        - If sidecar doesn't match (or is missing): operator
+ *          hand-edited the file. Back up the existing file to
+ *          `<filename>.before-rerender.<unix-ms>` and overwrite
+ *          + update fingerprint. The backup is loud enough for the
+ *          operator to notice and re-merge their edits manually.
+ *
+ * Caveat: hashing is SHA-256 (`node:crypto`); cost is microseconds
+ * per call. Fingerprint sidecar gets ~64 bytes per file. Trivial.
+ */
+function rerenderWithFingerprint(
+  filePath: string,
+  contentFn: () => string,
+  created: string[],
+  skipped: string[],
+  rewrittenWithBackup: string[],
+  mode?: number,
+): void {
+  const next = contentFn();
+  const nextHash = createHash("sha256").update(next, "utf-8").digest("hex");
+  const fingerprintPath = filePath + ".fingerprint";
+  const writeMode = mode !== undefined ? { encoding: "utf-8" as const, mode } : "utf-8" as const;
+
+  if (!existsSync(filePath)) {
+    writeFileSync(filePath, next, writeMode);
+    writeFileSync(fingerprintPath, nextHash, "utf-8");
+    created.push(filePath);
+    return;
+  }
+
+  const prev = readFileSync(filePath, "utf-8");
+  if (prev === next) {
+    // File is already exactly what we'd render — refresh the fingerprint
+    // (cheap, covers the case where someone deleted the fingerprint or
+    // we're migrating an existing file into the fingerprint regime).
+    try {
+      writeFileSync(fingerprintPath, nextHash, "utf-8");
+    } catch {
+      // best-effort
+    }
+    skipped.push(filePath);
+    return;
+  }
+
+  // Source has drifted. Decide whether to clobber.
+  const prevHash = createHash("sha256").update(prev, "utf-8").digest("hex");
+  const recordedFingerprint = existsSync(fingerprintPath)
+    ? readFileSync(fingerprintPath, "utf-8").trim()
+    : null;
+
+  if (recordedFingerprint === prevHash) {
+    // Operator hasn't touched the file since we last wrote it —
+    // template drifted, clobber cleanly.
+    writeFileSync(filePath, next, writeMode);
+    writeFileSync(fingerprintPath, nextHash, "utf-8");
+    created.push(filePath);
+    return;
+  }
+
+  // Either no fingerprint (legacy state — file pre-dates this regime)
+  // or fingerprint mismatch (operator edited). Back up + overwrite.
+  const backupPath = `${filePath}.before-rerender.${Date.now()}`;
+  try {
+    writeFileSync(backupPath, prev, "utf-8");
+  } catch (err) {
+    // If we can't back up, BAIL — refuse to clobber unrecoverable
+    // operator edits. Push to `skipped` so apply's summary lists
+    // the file as untouched and the operator can investigate.
+    process.stderr.write(
+      `scaffold: refusing to overwrite ${filePath} — backup write failed ` +
+      `(${(err as Error).message}). Operator edits preserved.\n`,
+    );
+    skipped.push(filePath);
+    return;
+  }
+  writeFileSync(filePath, next, writeMode);
+  writeFileSync(fingerprintPath, nextHash, "utf-8");
+  rewrittenWithBackup.push(filePath);
+  // Also count this as "created" for apply's running total so the
+  // post-apply summary reflects that the file was rewritten rather
+  // than silently absent from both columns.
   created.push(filePath);
 }
 

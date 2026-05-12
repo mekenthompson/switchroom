@@ -12491,6 +12491,43 @@ void (async () => {
               onUnstall: (agentId, description) => {
                 progressDriver?.onSubAgentUnstall?.(agentId, description)
               },
+              // RFC §Bug 6: background `Agent` dispatches in some
+              // Claude Code versions don't write a terminal
+              // `system + turn_duration` line to the sub-agent JSONL.
+              // The watcher detects the silent-stall window and
+              // synthesises terminal here; we mirror it into the
+              // progress driver as a real `sub_agent_turn_end`
+              // SessionEvent so the deferred-completion gate
+              // releases and the pinned card flips from 🌀 to ✅.
+              //
+              // Find the parent turnKey + chatId by peeking the
+              // driver's fleet (same idiom onFinish uses just below).
+              onStallTerminal: (agentId) => {
+                try {
+                  const fleets = progressDriver?.peekAllFleets() ?? []
+                  for (const f of fleets) {
+                    if (f.fleet.has(agentId)) {
+                      progressDriver?.ingest(
+                        { kind: 'sub_agent_turn_end', agentId },
+                        f.chatId ?? null,
+                        undefined,
+                      )
+                      return
+                    }
+                  }
+                  // No fleet entry — the driver-side state was lost
+                  // (cs.dispose ran or peek timing missed). Drop a
+                  // log line and fall through to onFinish's audit
+                  // surface; the card may already be cleaned up.
+                  process.stderr.write(
+                    `telegram gateway: subagent-watcher: onStallTerminal ${agentId} — no fleet entry to retarget; synthetic sub_agent_turn_end skipped\n`,
+                  )
+                } catch (err) {
+                  process.stderr.write(
+                    `telegram gateway: subagent-watcher: onStallTerminal ${agentId} ingest error: ${(err as Error).message}\n`,
+                  )
+                }
+              },
               // #card-audit-log: symmetric sub_agent_finished surface.
               // The driver's per-chat shadow knows the parent turnKey and
               // the registry DB carries the background flag — combine them

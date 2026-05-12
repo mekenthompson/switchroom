@@ -16,8 +16,10 @@ function recentMarker(offsetMs = 0) {
   return { ts: NOW - offsetMs }
 }
 
-function recentCleanMarker(offsetMs = 0) {
-  return { ts: NOW - offsetMs }
+function recentCleanMarker(offsetMs = 0, reason?: string) {
+  // `signal` is part of the CleanShutdownMarker shape; required at the
+  // type level but not exercised by determineRestartReason itself.
+  return { ts: NOW - offsetMs, signal: 'SIGTERM', reason }
 }
 
 function sessionMarker() {
@@ -87,6 +89,67 @@ describe('determineRestartReason', () => {
       now: NOW,
     })
     expect(result).toBe('planned')
+  })
+
+  it('returns "graceful" when clean-shutdown marker has operator: reason and is within the extended 5-min window (#1141 follow-up: 9-agent fleet recreate can exceed 60s)', () => {
+    const result = determineRestartReason({
+      marker: null,
+      cleanMarker: recentCleanMarker(97_000, 'operator: switchroom update'),
+      sessionMarker: sessionMarker(),
+      now: NOW,
+    })
+    expect(result).toBe('graceful')
+  })
+
+  it('still treats operator: marker as stale beyond 5 min (longer window not "silent forever")', () => {
+    const result = determineRestartReason({
+      marker: null,
+      cleanMarker: recentCleanMarker(6 * 60_000, 'operator: switchroom update'),
+      sessionMarker: sessionMarker(),
+      now: NOW,
+    })
+    expect(result).toBe('crash')
+  })
+
+  it('non-operator reasons (user:, cli:) keep the tight 60s window — a /restart that takes >60s before its gateway boots is still a crash', () => {
+    const result = determineRestartReason({
+      marker: null,
+      cleanMarker: recentCleanMarker(90_000, 'user: /restart from chat'),
+      sessionMarker: sessionMarker(),
+      now: NOW,
+    })
+    expect(result).toBe('crash')
+  })
+
+  it('cli: reasons also keep the tight 60s window', () => {
+    const result = determineRestartReason({
+      marker: null,
+      cleanMarker: recentCleanMarker(90_000, 'cli: switchroom restart'),
+      sessionMarker: sessionMarker(),
+      now: NOW,
+    })
+    expect(result).toBe('crash')
+  })
+
+  it('operator: marker just barely inside the 5-min window still graceful', () => {
+    const result = determineRestartReason({
+      marker: null,
+      cleanMarker: recentCleanMarker(4 * 60_000 + 59_000, 'operator: switchroom update'),
+      sessionMarker: sessionMarker(),
+      now: NOW,
+    })
+    expect(result).toBe('graceful')
+  })
+
+  it('respects operatorMaxAgeMs override (tests can tighten the window)', () => {
+    const result = determineRestartReason({
+      marker: null,
+      cleanMarker: recentCleanMarker(120_000, 'operator: switchroom update'),
+      sessionMarker: sessionMarker(),
+      now: NOW,
+      operatorMaxAgeMs: 60_000, // override tightens to 60s
+    })
+    expect(result).toBe('crash')
   })
 
   it('respects custom markerMaxAgeMs — stale marker does not count as planned', () => {

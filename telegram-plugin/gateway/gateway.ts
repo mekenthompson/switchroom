@@ -12806,8 +12806,22 @@ void (async () => {
             const ageSec = Math.max(0, Math.round((nowMs - cleanMarker.ts) / 1000))
             const reasonTag = cleanMarker.reason ? ` reason=${JSON.stringify(cleanMarker.reason)}` : ''
             const cleanFresh = shouldSuppressRecoveryBanner(cleanMarker, nowMs, CLEAN_SHUTDOWN_MAX_AGE_MS)
+            // The 60s `cleanFresh` window is the tight default. The
+            // separate `determineRestartReason()` call below applies an
+            // extended 5-min window for `operator:`-prefixed markers
+            // (#1142 — fleet recreate can exceed 60s before the last
+            // container's gateway boots). Mirror that here so the
+            // diagnostic log line doesn't contradict the actual
+            // decision: an "operator:" marker that's >60s old but
+            // inside the extended window logs as `_fresh_extended`,
+            // not `_stale`. The decision/log mismatch was flagged in
+            // PR #1142 review.
+            const isOperatorMarker = typeof cleanMarker.reason === 'string'
+              && cleanMarker.reason.startsWith('operator:')
             if (cleanFresh) {
               process.stderr.write(`telegram gateway: boot.clean_shutdown_detected age=${ageSec}s signal=${cleanMarker.signal}${reasonTag}\n`)
+            } else if (isOperatorMarker && nowMs - cleanMarker.ts < 5 * 60_000) {
+              process.stderr.write(`telegram gateway: boot.clean_shutdown_marker_fresh_extended age=${ageSec}s signal=${cleanMarker.signal}${reasonTag} window=5min\n`)
             } else {
               process.stderr.write(`telegram gateway: boot.clean_shutdown_marker_stale age=${ageSec}s signal=${cleanMarker.signal}${reasonTag}\n`)
             }

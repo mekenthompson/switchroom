@@ -111,7 +111,7 @@ import {
 import {
   initHistory, recordInbound, recordOutbound, recordEdit,
   deleteFromHistory, query as queryHistory, getLatestInboundMessageId,
-  recordReaction,
+  recordReaction, lookupMessageRoleAndText,
   checkpointWal as checkpointHistoryWal,
   pruneMessagesOlderThanDays,
 } from '../history.js'
@@ -225,7 +225,7 @@ import { handleInjectCommand } from './inject-handler.js'
 import { type BannerState } from '../slot-banner.js'
 import { refreshBanner } from '../slot-banner-driver.js'
 import { dispatchFallbackNotification } from '../auto-fallback-dispatcher.js'
-import { loadConfig as loadSwitchroomConfig } from '../../src/config/loader.js'
+import { loadConfig as loadSwitchroomConfig } from '../../src/config/loader.js'; import { resolveAgentConfig } from '../../src/config/merge.js'
 import type { AgentAudit } from '../welcome-text.js'
 import { shouldSweepChatAtBoot } from './boot-sweep-filter.js'
 
@@ -243,6 +243,7 @@ import type {
   InboundMessage,
   InjectInboundMessage,
 } from './ipc-protocol.js'
+import { DebounceBuffer, HourCap, buildReactionInboundMeta, buildReactionInboundText, evaluateTriggerCandidate, isGroupChat, resolveReactionsConfig, truncatePreview, type PendingReaction, type ReactionBatch, type ReactionsResolvedConfig } from './reaction-trigger.js'
 import { writePidFile, clearPidFile } from './pid-file.js'
 import { acquireStartupLock, releaseStartupLock } from './startup-mutex.js'
 import { drainShutdown } from './shutdown-drain.js'
@@ -11506,14 +11507,128 @@ bot.on('message:checklist_tasks_added' as Parameters<typeof bot.on>[0], (ctx) =>
   handleChecklistUpdate(ctx as unknown as Context, 'checklist_tasks_added')
 })
 
+// ─── Reaction-trigger runtime state (#1074) ──────────────────────────────
+//
+// Bot-message reactions in the configured allowlist trigger a synthetic
+// inbound turn (`<channel source="reaction">`) — mirrors the cron-fold-in
+// dispatch path. Three pieces of mutable state, all module-local:
+//
+//   - `reactionsCfg` — cascade-resolved config slice with built-in
+//     defaults; lazy-initialized on first reaction event.
+//   - `reactionHourCap` — in-memory rolling-1-hour counter per chat.
+//   - `reactionDebounce` — per-chat debounce buffer that batches rapid
+//     reactions into a single delivered synthetic.
+//
+// The persistence path (`recordReaction`) is independent — reactions
+// are persisted regardless of trigger outcome. This is the v1 contract
+// pinned by the existing UAT (`reactions-dm.test.ts`) and by tests
+// that rely on `get_recent_messages` surfacing user_reaction.
+let reactionsCfg: ReactionsResolvedConfig | null = null
+let reactionHourCap: HourCap | null = null
+let reactionDebounce: DebounceBuffer | null = null
+// Bot's own Telegram user_id; populated at startup from getMe(). Kept
+// for parity with botUsername; not currently used for authorship
+// detection on reactions (history.role is the primary signal).
+let botUserId = 0
+
+function getReactionsConfig(): ReactionsResolvedConfig {
+  if (reactionsCfg) return reactionsCfg
+  let raw: unknown = undefined
+  try {
+    const cfg = loadSwitchroomConfig()
+    const agentName = process.env.SWITCHROOM_AGENT_NAME
+    if (agentName) {
+      const rawAgent = cfg.agents?.[agentName]
+      if (rawAgent) {
+        const resolved = resolveAgentConfig(cfg.defaults, cfg.profiles, rawAgent)
+        raw = (resolved as { reactions?: unknown }).reactions
+      }
+    }
+  } catch (err) {
+    process.stderr.write(
+      `telegram gateway: reactions: config load failed, falling back to defaults: ${(err as Error).message}\n`,
+    )
+  }
+  reactionsCfg = resolveReactionsConfig(
+    raw as Parameters<typeof resolveReactionsConfig>[0] ?? null,
+  )
+  return reactionsCfg
+}
+
+function getReactionHourCap(): HourCap {
+  if (!reactionHourCap) {
+    reactionHourCap = new HourCap(getReactionsConfig().perHourCap)
+  }
+  return reactionHourCap
+}
+
+function getReactionDebounce(): DebounceBuffer {
+  if (!reactionDebounce) {
+    reactionDebounce = new DebounceBuffer(
+      getReactionsConfig().debounceMs,
+      flushReactionBatch,
+    )
+  }
+  return reactionDebounce
+}
+
+/**
+ * Dispatch a debounce-flushed batch as a synthetic InboundMessage via
+ * the same `ipcServer.sendToAgent` path the cron-fold-in uses.
+ * Discriminated by `meta.source="reaction"`. Carries the bot-side
+ * message preview (capped at PREVIEW_MAX_CHARS in
+ * `reaction-trigger.ts`) — never the bot token, never vault material.
+ */
+function flushReactionBatch(batch: ReactionBatch): void {
+  const agentName = process.env.SWITCHROOM_AGENT_NAME
+  if (!agentName) {
+    process.stderr.write(
+      `telegram gateway: reactions: dispatch skipped — SWITCHROOM_AGENT_NAME unset\n`,
+    )
+    return
+  }
+  // Use the latest reaction's metadata for the wire envelope; the
+  // batched listing lives inside `text` + `meta.count`.
+  const head = batch.reactions[batch.reactions.length - 1]!
+  const text = buildReactionInboundText(batch)
+  const meta = buildReactionInboundMeta(batch)
+  const ts = Date.now()
+  const inbound: InboundMessage = {
+    type: 'inbound',
+    chatId: String(batch.chatId),
+    ...(head.threadId !== undefined ? { threadId: head.threadId } : {}),
+    // Synthetic id — same convention cron uses. The bridge only uses
+    // messageId for telegram_reply context; reaction-synthesized turns
+    // are not quote-replies, so any monotonic value works.
+    messageId: ts,
+    user: head.user,
+    userId: head.userId,
+    ts,
+    text,
+    meta,
+  }
+  const delivered = ipcServer.sendToAgent(agentName, inbound)
+  process.stderr.write(
+    `telegram gateway: reactions.dispatch agent=${agentName} chat=${batch.chatId} ` +
+    `count=${batch.reactions.length} batched=${batch.batched} delivered=${delivered}\n`,
+  )
+}
+
 // ─── Inbound message_reaction handler ────────────────────────────────────
 // Telegram delivers MessageReactionUpdated events when a user adds, changes,
 // or removes an emoji reaction from a bot message. We persist the current
-// reaction to the SQLite history row so get_recent_messages can surface it.
+// reaction to the SQLite history row so get_recent_messages can surface it,
+// AND (since #1074) optionally forward qualifying reactions to the agent
+// as synthetic inbound turns.
 //
 // Only emoji reactions are handled for v1 — custom emoji are silently skipped.
 // Requires "message_reaction" in allowed_updates (see run() call below).
 bot.on('message_reaction' as Parameters<typeof bot.on>[0], (ctx) => {
+  // Capture outer-scope handle so the async helper has stable shape.
+  void handleMessageReaction(ctx as unknown as Context)
+})
+
+async function handleMessageReaction(ctx: Context): Promise<void> {
   try {
     // The payload is typed loosely via grammy's Context; cast to the
     // Bot API shape we need (MessageReactionUpdated).
@@ -11522,6 +11637,8 @@ bot.on('message_reaction' as Parameters<typeof bot.on>[0], (ctx) => {
         message_reaction?: {
           chat: { id: number }
           message_id: number
+          message_thread_id?: number
+          user?: { id: number; first_name?: string; username?: string }
           old_reaction: Array<{ type: string; emoji?: string }>
           new_reaction: Array<{ type: string; emoji?: string }>
         }
@@ -11567,10 +11684,99 @@ bot.on('message_reaction' as Parameters<typeof bot.on>[0], (ctx) => {
     process.stderr.write(
       `telegram gateway: reaction: chatId=${chat_id} messageId=${message_id} emoji=${emoji ?? '(none)'} action=${action}\n`,
     )
+
+    // ─── Trigger predicate (#1074) ───────────────────────────────────────
+    //
+    // Only `add` / `change` carry a NEW emoji; `remove` is log-only.
+    // From here on we ignore failures rather than reject (the persist
+    // path above is the v1 contract; trigger is best-effort).
+    if (action === 'remove' || emoji === null) return
+    if (!HISTORY_ENABLED) return // need history to identify bot-authored target
+    const reacter = update.user
+    if (!reacter) return // anonymous group-channel reactions — not user-attributable
+
+    const cfg = getReactionsConfig()
+    if (!cfg.enabled) return
+
+    // Resolve target authorship + preview text from local history.
+    // If the row is missing (reacted-to message predates retention,
+    // history disabled mid-run, or was reaped), we cannot tell and
+    // therefore must NOT trigger (fail-closed on authorship).
+    const row = lookupMessageRoleAndText(chat_id, message_id)
+    const botAuthored = row?.role === 'assistant'
+    const preview = truncatePreview(row?.text ?? '')
+
+    const decision = evaluateTriggerCandidate(cfg, {
+      chatId: update.chat.id,
+      messageId: message_id,
+      emoji,
+      action,
+      botAuthored,
+    })
+    if (!decision.ok) {
+      // Only log the bot-authored allowlist-miss case; other rejections
+      // (disabled / not-bot-authored / no-emoji) are not interesting
+      // events and would spam stderr in groups where the bot has
+      // never spoken.
+      if (decision.reason === 'emoji_not_in_allowlist' && botAuthored) {
+        process.stderr.write(
+          `telegram gateway: reactions.reject reason=allowlist_miss emoji=${emoji} chat=${chat_id}\n`,
+        )
+      }
+      return
+    }
+
+    // ─── Group admin check (fail-closed on lookup failure) ──────────────
+    if (cfg.groupAdminOnly && isGroupChat(update.chat.id)) {
+      let isAdmin = false
+      try {
+        const member = await robustApiCall(
+          () => bot.api.getChatMember(update.chat.id, reacter.id),
+          { chat_id, verb: 'getChatMember' },
+        )
+        const status = (member as { status?: string } | undefined)?.status
+        isAdmin = status === 'creator' || status === 'administrator'
+      } catch (err) {
+        process.stderr.write(
+          `telegram gateway: reactions.admin_lookup_failed chat=${chat_id} ` +
+          `user=${reacter.id} err=${(err as Error).message}\n`,
+        )
+        isAdmin = false
+      }
+      if (!isAdmin) {
+        process.stderr.write(
+          `telegram gateway: reactions.reject reason=group_non_admin chat=${chat_id} user=${reacter.id}\n`,
+        )
+        return
+      }
+    }
+
+    // ─── Hour cap ───────────────────────────────────────────────────────
+    if (!getReactionHourCap().tryConsume(chat_id)) {
+      process.stderr.write(
+        `telegram gateway: reactions.reject reason=hour_cap_exhausted chat=${chat_id} cap=${cfg.perHourCap}\n`,
+      )
+      return
+    }
+
+    // ─── Enqueue into the per-chat debounce buffer ──────────────────────
+    const pending: PendingReaction = {
+      targetMessageId: message_id,
+      emoji,
+      action,
+      ts: Date.now(),
+      preview,
+      userId: reacter.id,
+      user: reacter.first_name ?? reacter.username ?? String(reacter.id),
+      ...(typeof update.message_thread_id === 'number'
+        ? { threadId: update.message_thread_id }
+        : {}),
+    }
+    getReactionDebounce().enqueue(update.chat.id, pending)
   } catch (err) {
     process.stderr.write(`telegram gateway: message_reaction handler error: ${err}\n`)
   }
-})
+}
 
 // ─── Error handler ────────────────────────────────────────────────────────
 bot.catch(err => {
@@ -12504,6 +12710,7 @@ void (async () => {
       // "live-but-silent gateway" incident.
       attempt = 0
       botUsername = me.username
+      botUserId = me.id
       process.stderr.write(`telegram gateway: polling as @${me.username}\n`)
       if (TOPIC_ID != null) process.stderr.write(`telegram gateway: topic filter active — thread_id=${TOPIC_ID}\n`)
 

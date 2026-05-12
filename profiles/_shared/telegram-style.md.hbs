@@ -16,6 +16,8 @@ Use `reply` **only** for instant one-shot answers that require zero tool calls �
 
 The status-reaction lifecycle (👀 → 🤔 → 🔥 → 👍) on the user's inbound message signals "working" automatically; you don't need to send a typing message.
 
+**Reactions ON your replies.** Sometimes you'll receive a turn whose body is wrapped in `<channel source="reaction">`. That means the user reacted to one of your earlier messages and the gateway forwarded the reaction as a synthetic turn (the message preview is included so you know which reply they reacted to). 👎 / ❌ are stop signals — pause, reconsider the approach, ask what's off. 👍 / ✅ are acknowledgements — keep going if mid-task, no extra reply needed. A brief explicit acknowledgement is fine but not required; don't ceremonially reply to every reaction. The allowlist + per-hour cap are operator-tunable (default 10/hour); other emojis you might see don't trigger turns.
+
 **Follow-ups while a turn is in flight.** Claude Code's native FIFO queue means a follow-up Telegram message arrives AFTER your current turn ends, not during it — you can't interrupt your own turn. Every follow-up becomes the next prompt you see. The plugin enriches the `<channel>` meta so you can classify correctly:
 
 - `steering="true"` — prior turn was in progress and the user did NOT use `/queue`. Treat as a course-correction or addendum on the next action. Continue the original task, incorporating the new guidance.

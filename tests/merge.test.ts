@@ -893,3 +893,107 @@ describe("translateHooksToClaudeShape", () => {
     ]);
   });
 });
+
+// ─── reactions cascade (#1074) ────────────────────────────────────────────
+
+describe("mergeAgentConfig reactions block", () => {
+  it("falls through every field from defaults when agent omits the block", () => {
+    const defaults: AgentDefaults = {
+      reactions: {
+        enabled: false,
+        debounce_ms: 5000,
+        per_hour_cap: 3,
+        group_admin_only: false,
+        trigger_emojis: ["🔥"],
+      },
+    } as AgentDefaults;
+    const result = mergeAgentConfig(defaults, baseAgent());
+    expect((result as { reactions?: Record<string, unknown> }).reactions).toEqual({
+      enabled: false,
+      debounce_ms: 5000,
+      per_hour_cap: 3,
+      group_admin_only: false,
+      trigger_emojis: ["🔥"],
+    });
+  });
+
+  it("agent fields override defaults on a per-field basis", () => {
+    const defaults: AgentDefaults = {
+      reactions: {
+        enabled: true,
+        debounce_ms: 5000,
+        per_hour_cap: 10,
+        group_admin_only: true,
+        trigger_emojis: ["👍", "👎"],
+      },
+    } as AgentDefaults;
+    const agent = baseAgent({
+      reactions: { debounce_ms: 1000 },
+    } as Partial<AgentConfig>);
+    const result = mergeAgentConfig(defaults, agent);
+    const rx = (result as { reactions?: Record<string, unknown> }).reactions!;
+    expect(rx.debounce_ms).toBe(1000);
+    // Other fields fall through.
+    expect(rx.enabled).toBe(true);
+    expect(rx.per_hour_cap).toBe(10);
+    expect(rx.trigger_emojis).toEqual(["👍", "👎"]);
+  });
+
+  it("trigger_emojis: REPLACES (not union)", () => {
+    const defaults: AgentDefaults = {
+      reactions: { trigger_emojis: ["👍", "👎"] },
+    } as AgentDefaults;
+    const agent = baseAgent({
+      reactions: { trigger_emojis: ["🔥"] },
+    } as Partial<AgentConfig>);
+    const result = mergeAgentConfig(defaults, agent);
+    const rx = (result as { reactions?: Record<string, unknown> }).reactions!;
+    expect(rx.trigger_emojis).toEqual(["🔥"]);
+  });
+
+  it("trigger_emojis: [] replaces defaults to disable triggering without flipping enabled", () => {
+    const defaults: AgentDefaults = {
+      reactions: { trigger_emojis: ["👍", "👎"], enabled: true },
+    } as AgentDefaults;
+    const agent = baseAgent({
+      reactions: { trigger_emojis: [] },
+    } as Partial<AgentConfig>);
+    const result = mergeAgentConfig(defaults, agent);
+    const rx = (result as { reactions?: Record<string, unknown> }).reactions!;
+    expect(rx.trigger_emojis).toEqual([]);
+    expect(rx.enabled).toBe(true);
+  });
+
+  it("undefined fields on agent do not clobber defaults", () => {
+    const defaults: AgentDefaults = {
+      reactions: { enabled: false, debounce_ms: 5000 },
+    } as AgentDefaults;
+    const agent = baseAgent({
+      // Empty reactions block — every field is undefined.
+      reactions: {},
+    } as Partial<AgentConfig>);
+    const result = mergeAgentConfig(defaults, agent);
+    const rx = (result as { reactions?: Record<string, unknown> }).reactions!;
+    expect(rx.enabled).toBe(false);
+    expect(rx.debounce_ms).toBe(5000);
+  });
+
+  it("works through resolveAgentConfig with a profile in the middle", () => {
+    const defaults: AgentDefaults = {
+      reactions: { enabled: true, per_hour_cap: 5 },
+    } as AgentDefaults;
+    const profiles: Record<string, Profile> = {
+      coach: { reactions: { debounce_ms: 1000 } } as Profile,
+    };
+    const agent = baseAgent({
+      extends: "coach",
+      reactions: { trigger_emojis: ["✅"] },
+    } as Partial<AgentConfig>);
+    const result = resolveAgentConfig(defaults, profiles, agent);
+    const rx = (result as { reactions?: Record<string, unknown> }).reactions!;
+    expect(rx.enabled).toBe(true);
+    expect(rx.per_hour_cap).toBe(5);
+    expect(rx.debounce_ms).toBe(1000);
+    expect(rx.trigger_emojis).toEqual(["✅"]);
+  });
+});

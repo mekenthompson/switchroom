@@ -583,6 +583,31 @@ export function mergeAgentConfig(
     merged.extra_stable_files = dedupe([...d, ...a]);
   }
 
+  // --- reactions: per-field override merge, agent wins ---
+  //
+  // Each scalar field (enabled, debounce_ms, per_hour_cap,
+  // group_admin_only) is independently overridable. `trigger_emojis`
+  // uses REPLACE semantics — setting it at any layer replaces the
+  // lower layers entirely. This is deliberate: operators must be
+  // able to narrow the allowlist (including to `[]`) without
+  // flipping `enabled: false`. A union mode would silently keep
+  // defaults visible, defeating the narrowing case.
+  //
+  // Undefined fields don't clobber lower layers — this is what
+  // lets the gateway's resolveReactionsConfig() fall through to
+  // built-in defaults when nothing is set anywhere.
+  const dReactions = (defaults as { reactions?: Record<string, unknown> }).reactions;
+  const mReactions = (merged as { reactions?: Record<string, unknown> }).reactions;
+  if (dReactions || mReactions) {
+    const base = dReactions ?? {};
+    const override = mReactions ?? {};
+    const combined: Record<string, unknown> = { ...base };
+    for (const [k, v] of Object.entries(override)) {
+      if (v !== undefined) combined[k] = v;
+    }
+    (merged as { reactions?: Record<string, unknown> }).reactions = combined;
+  }
+
   // --- experimental: shallow per-key merge, agent wins ---
   //
   // The schema declares `experimental` at every cascade layer

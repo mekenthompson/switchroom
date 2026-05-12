@@ -94,8 +94,12 @@ const BG_DISPATCH_PROMPT =
  * When Bug 1 + Bug 2 are fixed, change `describe.skip` to `describe`
  * below — the assertions are correct; only the production code is
  * wrong.
+ *
+ * Update post-#1105: all five RFC bugs (1–5 in earlier PRs, 6–7 in
+ * #1105) merged. Unskipped here for the next UAT re-run. If 6/6 ACs
+ * pass, close #709 / #776 / #782 / #788.
  */
-describe.skip("uat: background sub-agent visibility (#709/#776/#782/#788)", () => {
+describe("uat: background sub-agent visibility (#709/#776/#782/#788)", () => {
   it(
     "card stays pinned with 🌀 Background header + live fleet activity, then flips to ✅ Done",
     async () => {

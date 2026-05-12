@@ -10,7 +10,12 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { GrammyError } from 'grammy'
-import { createRetryApiCall, type RetryObserver } from '../retry-api-call.js'
+import {
+  createRetryApiCall,
+  createSwallowingRetryApiCall,
+  retryWithThreadFallback,
+  type RetryObserver,
+} from '../retry-api-call.js'
 import { errors, makeGrammyError } from './fake-bot-api.js'
 
 // vitest's vi.advanceTimersByTimeAsync isn't implemented by Bun's test runner.
@@ -283,5 +288,151 @@ describe('retryApiCall', () => {
       await pending
       expect(log).toHaveBeenCalledWith(expect.stringMatching(/network error.*1s/))
     })
+  })
+})
+
+// #1075 — coverage for the swallow + thread-fallback helpers that wrap
+// the retry policy for the six previously-unwrapped outbound surfaces.
+describe('createSwallowingRetryApiCall (#1075)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('resolves to the underlying value on success', async () => {
+    const retry = createRetryApiCall()
+    const swallow = createSwallowingRetryApiCall(retry)
+    const fn = vi.fn<() => Promise<string>>().mockResolvedValue('ok')
+    const result = await swallow(fn)
+    expect(result).toBe('ok')
+  })
+
+  it('returns undefined and logs when THREAD_NOT_FOUND fires', async () => {
+    const retry = createRetryApiCall()
+    const log = vi.fn()
+    const swallow = createSwallowingRetryApiCall(retry, log)
+    const fn = vi.fn<() => Promise<void>>().mockRejectedValueOnce(errors.threadNotFound())
+    const result = await swallow(fn, { threadId: 42, chat_id: 'c', verb: 'test.send' })
+    expect(result).toBeUndefined()
+    expect(log).toHaveBeenCalledWith(expect.stringMatching(/test\.send.*THREAD_NOT_FOUND/))
+    expect(fn).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns undefined and logs on 403 forbidden', async () => {
+    const retry = createRetryApiCall()
+    const log = vi.fn()
+    const swallow = createSwallowingRetryApiCall(retry, log)
+    const fn = vi.fn<() => Promise<void>>().mockRejectedValueOnce(errors.forbidden())
+    const result = await swallow(fn, { chat_id: 'c', verb: 'forbidden.send' })
+    expect(result).toBeUndefined()
+    expect(log).toHaveBeenCalled()
+  })
+
+  it('returns undefined on benign not-modified (passes through retry semantics)', async () => {
+    const retry = createRetryApiCall()
+    const swallow = createSwallowingRetryApiCall(retry)
+    const fn = vi
+      .fn<() => Promise<void>>()
+      .mockRejectedValueOnce(errors.badRequest('Bad Request: message is not modified'))
+    const result = await swallow(fn)
+    // retry already swallows benign 400s to undefined, so swallowing wrapper
+    // resolves to undefined cleanly with NO error log fired.
+    expect(result).toBeUndefined()
+  })
+})
+
+describe('retryWithThreadFallback (#1075)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('resolves on success with threadId passed through', async () => {
+    const retry = createRetryApiCall()
+    const send = vi
+      .fn<(tid: number | undefined) => Promise<{ message_id: number }>>()
+      .mockResolvedValue({ message_id: 1 })
+    const result = await retryWithThreadFallback(retry, send, {
+      threadId: 42,
+      chat_id: 'c',
+      verb: 'fallback.test',
+    })
+    expect(result.message_id).toBe(1)
+    expect(send).toHaveBeenCalledWith(42)
+  })
+
+  it('drops the thread id and retries once on THREAD_NOT_FOUND', async () => {
+    const retry = createRetryApiCall()
+    const send = vi
+      .fn<(tid: number | undefined) => Promise<{ message_id: number }>>()
+      .mockRejectedValueOnce(errors.threadNotFound())
+      .mockResolvedValueOnce({ message_id: 2 })
+    const result = await retryWithThreadFallback(retry, send, {
+      threadId: 42,
+      chat_id: 'c',
+    })
+    expect(result.message_id).toBe(2)
+    expect(send).toHaveBeenCalledTimes(2)
+    expect(send.mock.calls[0][0]).toBe(42)
+    // Fallback call must drop the thread id.
+    expect(send.mock.calls[1][0]).toBeUndefined()
+  })
+
+  it('propagates non-thread-not-found errors without retry', async () => {
+    const retry = createRetryApiCall()
+    const send = vi
+      .fn<(tid: number | undefined) => Promise<{ message_id: number }>>()
+      .mockRejectedValueOnce(errors.forbidden())
+    await expect(
+      retryWithThreadFallback(retry, send, { threadId: 42, chat_id: 'c' }),
+    ).rejects.toMatchObject({ error_code: 403 })
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it('handles delete on a thread-bearing message (THREAD_NOT_FOUND coverage for delete)', async () => {
+    const retry = createRetryApiCall()
+    const send = vi
+      .fn<(tid: number | undefined) => Promise<boolean>>()
+      .mockRejectedValueOnce(errors.threadNotFound())
+      .mockResolvedValueOnce(true)
+    const result = await retryWithThreadFallback(retry, send, {
+      threadId: 99,
+      chat_id: 'c',
+      verb: 'deleteMessage',
+    })
+    expect(result).toBe(true)
+    expect(send).toHaveBeenCalledTimes(2)
+  })
+
+  it('handles pin on a thread-bearing message', async () => {
+    const retry = createRetryApiCall()
+    const send = vi
+      .fn<(tid: number | undefined) => Promise<boolean>>()
+      .mockRejectedValueOnce(errors.threadNotFound())
+      .mockResolvedValueOnce(true)
+    const result = await retryWithThreadFallback(retry, send, {
+      threadId: 7,
+      chat_id: 'c',
+      verb: 'pinChatMessage',
+    })
+    expect(result).toBe(true)
+  })
+
+  it('handles edit on a thread-bearing message', async () => {
+    const retry = createRetryApiCall()
+    const send = vi
+      .fn<(tid: number | undefined) => Promise<boolean>>()
+      .mockRejectedValueOnce(errors.threadNotFound())
+      .mockResolvedValueOnce(true)
+    const result = await retryWithThreadFallback(retry, send, {
+      threadId: 7,
+      chat_id: 'c',
+      verb: 'editMessageText',
+    })
+    expect(result).toBe(true)
   })
 })

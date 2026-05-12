@@ -1,0 +1,140 @@
+/**
+ * runtime-metrics.ts — high-value gateway events fanned out to PostHog
+ * AND a local JSONL file.
+ *
+ * Why both sinks:
+ *  - PostHog gets the events for dashboards, funnels, error correlation,
+ *    fleet-wide KPI tracking. This is the source of truth for the
+ *    conversational-turn-UX redesign KPIs (see docs/posthog.md).
+ *  - JSONL is preserved as a per-agent debug breadcrumb so the agent's
+ *    own context (or an operator on the host) can read what happened
+ *    without round-tripping to PostHog. Same file the silence-poke
+ *    subsystem (next PR) will append to.
+ *
+ * Distinct from `streaming-metrics.ts` — that module is the noisy
+ * gated-by-env stderr stream used for one-off streaming-perf analysis.
+ * Runtime metrics are always-on, narrow, and KPI-shaped.
+ */
+
+import { existsSync, mkdirSync, appendFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { captureEvent } from './analytics-posthog.js'
+
+export type RuntimeMetricEvent =
+  /**
+   * A user-sent message that matches a status-query pattern
+   * ("status?", "still there?", etc). Primary lagging KPI for the
+   * conversational turn UX — every fire is a JTBD failure.
+   */
+  | {
+      kind: 'inbound_status_query'
+      chat_id: string
+      message_id: number | null
+      thread_id: number | null
+      text_length: number
+      prior_turn_in_flight: boolean
+      seconds_since_turn_start: number | null
+    }
+  /**
+   * A fresh turn began (user message arrived, ack reaction fired).
+   * Pairs with `turn_ended` for duration / TTFO computation.
+   */
+  | {
+      kind: 'turn_started'
+      chat_id: string
+      message_id: number | null
+      thread_id: number | null
+      inbound_classified_as_status_query: boolean
+    }
+  /**
+   * A turn completed (terminal reply or silent close). Carries the
+   * gap distribution + TTFO so the dashboard can compute outbound
+   * silence p95 without per-event reconstruction.
+   */
+  | {
+      kind: 'turn_ended'
+      chat_id: string
+      thread_id: number | null
+      duration_ms: number
+      ttfo_ms: number | null
+      outbound_count: number
+      longest_silent_gap_ms: number
+      ended_via: 'reply' | 'stream_reply_done' | 'silent' | 'forced'
+    }
+
+/**
+ * The JSONL sink lives under the runtime state dir so it's per-agent
+ * and survives container restarts (the dir is bind-mounted from the
+ * host). Path can be overridden for tests via SWITCHROOM_RUNTIME_METRICS_PATH.
+ */
+function resolveJsonlPath(): string {
+  const override = process.env.SWITCHROOM_RUNTIME_METRICS_PATH
+  if (override && override.trim() !== '') return override.trim()
+  const base = process.env.SWITCHROOM_RUNTIME_STATE_DIR ?? '/state/agent'
+  return join(base, 'runtime-metrics.jsonl')
+}
+
+function appendJsonl(line: string): void {
+  const path = resolveJsonlPath()
+  try {
+    mkdirSync(dirname(path), { recursive: true })
+    appendFileSync(path, line + '\n', 'utf-8')
+  } catch (err) {
+    // JSONL is a local debug aid; failing to write must not break
+    // the gateway. Surface to stderr so it's at least visible in
+    // the plugin log.
+    process.stderr.write(`runtime-metrics: jsonl write failed: ${(err as Error).message}\n`)
+  }
+}
+
+/**
+ * Whether to write JSONL at all. Defaults to ON (the user asked for it
+ * to stay as a local debugging side-channel). Operator can opt-out with
+ * SWITCHROOM_RUNTIME_METRICS_JSONL_DISABLED=1 if disk pressure is a
+ * concern.
+ */
+function jsonlEnabled(): boolean {
+  const v = process.env.SWITCHROOM_RUNTIME_METRICS_JSONL_DISABLED
+  return !(v === '1' || v === 'true')
+}
+
+/**
+ * Emit one runtime metric event. Fans out to:
+ *   1. JSONL file (unless disabled)
+ *   2. PostHog (unless SWITCHROOM_TELEMETRY_DISABLED=1)
+ *
+ * Never throws. Each sink fails independently — a broken sink does not
+ * block the other.
+ */
+export function emitRuntimeMetric(event: RuntimeMetricEvent): void {
+  const wrapped = { ts: Date.now(), ...event }
+  if (jsonlEnabled()) {
+    try {
+      appendJsonl(JSON.stringify(wrapped))
+    } catch {
+      // already guarded inside appendJsonl
+    }
+  }
+  // captureEvent is async + internally guarded; void-fire to avoid blocking
+  // the caller. PostHog batches, so this is cheap.
+  void captureEvent(event.kind, { ...event, ts: wrapped.ts })
+}
+
+/** Exposed for tests — pin the JSONL path to a temp file. */
+export function __setRuntimeMetricsPathForTests(path: string | null): void {
+  if (path == null) {
+    delete process.env.SWITCHROOM_RUNTIME_METRICS_PATH
+  } else {
+    process.env.SWITCHROOM_RUNTIME_METRICS_PATH = path
+  }
+}
+
+/** Exposed for tests — read back the current resolved path. */
+export function __getRuntimeMetricsPathForTests(): string {
+  return resolveJsonlPath()
+}
+
+/** Exposed for tests — JSONL gate helper. */
+export function __isJsonlEnabledForTests(): boolean {
+  return jsonlEnabled()
+}

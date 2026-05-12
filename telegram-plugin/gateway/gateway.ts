@@ -69,6 +69,12 @@ import { createPinManager } from '../progress-card-pin-manager.js'
 import { createPinWatchdog } from '../progress-card-pin-watchdog.js'
 import { logStreamingEvent } from '../streaming-metrics.js'
 import * as signalTracker from '../turn-signal-tracker.js'
+import {
+  installGlobalErrorHandlers as installPosthogErrorHandlers,
+  shutdownAnalytics,
+} from '../analytics-posthog.js'
+import { emitRuntimeMetric } from '../runtime-metrics.js'
+import { classifyInbound } from '../inbound-classifier.js'
 import { createAnswerStream, type AnswerStreamHandle } from '../answer-stream.js'
 import { type SessionEvent } from '../session-tail.js'
 import {
@@ -338,6 +344,20 @@ import { resolveCallingSubagent } from './resolve-calling-subagent.js'
 
 // ─── Stderr logging ───────────────────────────────────────────────────────
 installPluginLogger()
+
+// ─── Telemetry ────────────────────────────────────────────────────────────
+// Catch uncaught exceptions + unhandled rejections and forward them to
+// PostHog Error Tracking before the process dies. Mirrors the CLI's
+// install (src/cli/index.ts), so gateway + CLI errors land in the same
+// dashboard tagged `source: 'gateway'` vs `source: 'cli'`.
+installPosthogErrorHandlers()
+// Flush analytics on graceful shutdown so the last batch isn't lost.
+// The signal handlers themselves remain owned by other modules — we
+// piggyback by emitting a `beforeExit` listener which fires after
+// SIGTERM/SIGINT have run their handlers and the event loop is empty.
+process.on('beforeExit', () => {
+  void shutdownAnalytics()
+})
 
 // ─── Env + state dir ──────────────────────────────────────────────────────
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
@@ -2973,6 +2993,9 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
     replacedPreview: previewMessageId != null,
     previewMessageId,
   })
+  // #1122 KPI: a `reply` always produces a fresh user-visible outbound
+  // message — count it for the outbound-gap / TTFO KPI.
+  signalTracker.noteOutbound(statusKey(chat_id, threadId), Date.now())
 
   if (previewMessageId != null && reply_to != null && replyMode !== 'off') {
     await deleteStalePreview(previewMessageId)
@@ -3248,6 +3271,17 @@ async function executeStreamReply(args: Record<string, unknown>): Promise<unknow
     }
     streamButtonMeta = extractAgentButtonMeta(rawStreamKeyboard)
     streamReplyMarkup = { inline_keyboard: wrapAgentCallbacks(rawStreamKeyboard) }
+  }
+
+  // #1122 KPI: stream_reply's FIRST emit is a fresh user-visible outbound
+  // message (subsequent calls edit the same message — no device ping).
+  // Snapshot state BEFORE handleStreamReply to detect first-emit precisely.
+  {
+    const streamThreadId = args.message_thread_id != null ? Number(args.message_thread_id) : undefined
+    const sKeyBefore = streamKey(streamChatId, streamThreadId)
+    if (!activeDraftStreams.has(sKeyBefore)) {
+      signalTracker.noteOutbound(statusKey(streamChatId, streamThreadId), Date.now())
+    }
   }
 
   const result = await handleStreamReply(
@@ -4777,6 +4811,19 @@ function handleSessionEvent(ev: SessionEvent): void {
           const tKey = statusKey(chatId, threadId)
           signalTracker.noteSignal(tKey, Date.now())
           logStreamingEvent({ kind: 'turn_signal_gap', chatId, longestGapMs: signalTracker.getLongestGap(tKey), turnDurationMs })
+          // #1122 KPI: emit turn_ended (silent-marker path) with TTFO +
+          // outbound-gap metrics for the conversational-pacing dashboard.
+          const outboundMetrics = signalTracker.getOutboundMetrics(tKey)
+          emitRuntimeMetric({
+            kind: 'turn_ended',
+            chat_id: chatId,
+            thread_id: threadId ?? null,
+            duration_ms: turnDurationMs,
+            ttfo_ms: outboundMetrics.ttfoMs,
+            outbound_count: outboundMetrics.outboundCount,
+            longest_silent_gap_ms: outboundMetrics.longestOutboundGapMs,
+            ended_via: 'silent',
+          })
           signalTracker.clear(tKey)
         }
         lastPtyPreviewByChat.delete(statusKey(chatId, threadId))
@@ -5002,6 +5049,20 @@ function handleSessionEvent(ev: SessionEvent): void {
         const tKey = statusKey(chatId, threadId)
         signalTracker.noteSignal(tKey, Date.now())
         logStreamingEvent({ kind: 'turn_signal_gap', chatId, longestGapMs: signalTracker.getLongestGap(tKey), turnDurationMs })
+        // #1122 KPI: emit turn_ended with TTFO + outbound-gap metrics so
+        // the dashboard can compute outbound silence p95 and TTFO p95
+        // without per-event reconstruction.
+        const outboundMetrics = signalTracker.getOutboundMetrics(tKey)
+        emitRuntimeMetric({
+          kind: 'turn_ended',
+          chat_id: chatId,
+          thread_id: threadId ?? null,
+          duration_ms: turnDurationMs,
+          ttfo_ms: outboundMetrics.ttfoMs,
+          outbound_count: outboundMetrics.outboundCount,
+          longest_silent_gap_ms: outboundMetrics.longestOutboundGapMs,
+          ended_via: outboundMetrics.outboundCount > 0 ? 'reply' : 'silent',
+        })
         signalTracker.clear(tKey)
       }
       lastPtyPreviewByChat.delete(statusKey(chatId, threadId))
@@ -5379,6 +5440,33 @@ async function handleInbound(
   const msgId = ctx.message?.message_id
 
   if (messageThreadId != null) chatThreadMap.set(chat_id, messageThreadId)
+
+  // #1122 KPI: classify "are you still working / status?" pings as the
+  // primary lagging KPI of the conversational-turn-UX redesign. Every fire
+  // means the design failed to make the user feel heard. Read-only —
+  // never alters routing; the text still reaches the agent.
+  try {
+    const classification = classifyInbound(text)
+    if (classification.isStatusQuery) {
+      const priorKey = statusKey(chat_id, messageThreadId)
+      const priorTurnStartedAt = activeTurnStartedAt.get(priorKey)
+      const priorTurnInFlight = activeStatusReactions.get(priorKey) != null
+      emitRuntimeMetric({
+        kind: 'inbound_status_query',
+        chat_id,
+        message_id: msgId ?? null,
+        thread_id: messageThreadId ?? null,
+        text_length: text.length,
+        prior_turn_in_flight: priorTurnInFlight,
+        seconds_since_turn_start: priorTurnStartedAt != null
+          ? Math.round((inboundReceivedAt - priorTurnStartedAt) / 1000)
+          : null,
+      })
+    }
+  } catch (err) {
+    // Classifier is fire-and-forget — never break inbound on a metric error.
+    process.stderr.write(`telegram gateway: inbound classifier error: ${(err as Error).message}\n`)
+  }
 
   // `!`-prefix interrupt (#575). Closes
   // `reference/steer-or-queue-mid-flight.md`'s correction path.
@@ -6000,6 +6088,15 @@ async function handleInbound(
         logStreamingEvent({ kind: 'inbound_ack', chatId: chat_id, messageId: msgId, ackDelayMs: Date.now() - inboundReceivedAt })
         // #203: signal tracker — start tracking silent gaps for this fresh turn.
         signalTracker.reset(statusKey(chat_id, messageThreadId), Date.now())
+        // #1122 KPI: emit turn_started so dashboards can compute funnel
+        // start counts + correlate to turn_ended for duration / TTFO.
+        emitRuntimeMetric({
+          kind: 'turn_started',
+          chat_id,
+          message_id: msgId,
+          thread_id: messageThreadId ?? null,
+          inbound_classified_as_status_query: classifyInbound(text).isStatusQuery,
+        })
         const agentDir = resolveAgentDirFromEnv()
         if (agentDir != null) {
           addActiveReaction(agentDir, { chatId: chat_id, messageId: msgId, threadId: messageThreadId ?? null, reactedAt: Date.now() })

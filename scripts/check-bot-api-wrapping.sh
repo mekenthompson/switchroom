@@ -67,30 +67,33 @@ ALLOWLIST=(
   "telegram-plugin/auto-fallback-dispatcher.ts:1-9999:DM ownerChatId; no thread_id"
 
   # "Paired!" sendMessage to senderId (always a DM, bare). No thread_id.
-  "telegram-plugin/gateway/gateway.ts:975-990:Paired! sendMessage to DM senderId; no thread_id"
+  # Range bumped 2026-05 for #1122 PR1 telemetry insertions that shifted
+  # lines down. Use generous windows so further small shifts don't
+  # cascade through this allowlist.
+  "telegram-plugin/gateway/gateway.ts:990-1020:Paired! sendMessage to DM senderId; no thread_id"
 
   # operator-event broadcast. The loop's `opts` is built without
   # `message_thread_id` (parse_mode + reply_markup only).
-  "telegram-plugin/gateway/gateway.ts:2200-2215:operator-event broadcast; no thread_id in opts"
+  "telegram-plugin/gateway/gateway.ts:2215-2245:operator-event broadcast; no thread_id in opts"
 
   # permission-request keyboard send. opts only has reply_markup. No thread_id.
-  "telegram-plugin/gateway/gateway.ts:2580-2595:permission-request keyboard; no thread_id"
+  "telegram-plugin/gateway/gateway.ts:2595-2625:permission-request keyboard; no thread_id"
 
   # reply chunk-loop fallback after robustApiCall threw THREAD_NOT_FOUND.
   # The caller dropped the thread; this raw sendMessage retries on the
   # main chat. Wrapping would re-enter the THREAD_NOT_FOUND throw on a
   # phantom second deletion.
-  "telegram-plugin/gateway/gateway.ts:3035-3050:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
+  "telegram-plugin/gateway/gateway.ts:3050-3080:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
-  "telegram-plugin/gateway/gateway.ts:7900-7915:credit-watch notify; no thread_id"
+  "telegram-plugin/gateway/gateway.ts:7990-8020:credit-watch notify; no thread_id"
 
-  # gateway.ts:9000-9130 — ctx.api.editMessageText for vault grant wizard
+  # gateway.ts:9260-9400 — ctx.api.editMessageText for vault grant wizard
   # cards. Every callsite has `.catch(() => {})` — a THREAD_NOT_FOUND
   # is already swallowed there. Acceptable because the wizard messages
   # are tap-driven UI and a missed edit just leaves the previous state
   # visible (the user can re-tap).
-  "telegram-plugin/gateway/gateway.ts:9165-9300:vault grant wizard ctx.api.editMessageText already has .catch swallow"
+  "telegram-plugin/gateway/gateway.ts:9260-9400:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter
   # via DI. The gateway wires those adapters through robustApiCall (see

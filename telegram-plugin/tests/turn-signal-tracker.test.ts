@@ -2,8 +2,10 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import {
   reset,
   noteSignal,
+  noteOutbound,
   getLongestGap,
   getLastSignalAt,
+  getOutboundMetrics,
   clear,
   __resetAllForTests,
 } from '../turn-signal-tracker.js'
@@ -103,5 +105,84 @@ describe('turn-signal-tracker', () => {
     // turn_end emits the metric, then clears
     clear(k)
     expect(getLongestGap(k)).toBe(0)
+  })
+})
+
+describe('turn-signal-tracker — outbound metrics (#1122)', () => {
+  it('a turn with zero outbound messages reports ttfoMs=null, count=0, gap=0', () => {
+    reset('k', 1000)
+    const m = getOutboundMetrics('k')
+    expect(m.ttfoMs).toBeNull()
+    expect(m.outboundCount).toBe(0)
+    expect(m.longestOutboundGapMs).toBe(0)
+  })
+
+  it('first noteOutbound() records TTFO = (now - turnStartedAt)', () => {
+    reset('k', 1000)
+    noteOutbound('k', 1750)
+    const m = getOutboundMetrics('k')
+    expect(m.ttfoMs).toBe(750)
+    expect(m.outboundCount).toBe(1)
+    expect(m.longestOutboundGapMs).toBe(0) // single message — no gap yet
+  })
+
+  it('multiple outbound messages compute the longest gap between them', () => {
+    reset('k', 0)
+    noteOutbound('k', 100)   // ttfo=100, no gap
+    noteOutbound('k', 200)   // gap=100
+    noteOutbound('k', 1700)  // gap=1500 (longest)
+    noteOutbound('k', 1800)  // gap=100
+    const m = getOutboundMetrics('k')
+    expect(m.ttfoMs).toBe(100)
+    expect(m.outboundCount).toBe(4)
+    expect(m.longestOutboundGapMs).toBe(1500)
+  })
+
+  it('noteOutbound() on an unknown key is a no-op', () => {
+    noteOutbound('untracked', 1000)
+    const m = getOutboundMetrics('untracked')
+    expect(m.ttfoMs).toBeNull()
+    expect(m.outboundCount).toBe(0)
+  })
+
+  it('reset() clears outbound state from prior turn', () => {
+    reset('k', 0)
+    noteOutbound('k', 100)
+    noteOutbound('k', 5000) // big gap
+    reset('k', 10000) // new turn
+    noteOutbound('k', 10100)
+    const m = getOutboundMetrics('k')
+    expect(m.ttfoMs).toBe(100)
+    expect(m.outboundCount).toBe(1)
+    expect(m.longestOutboundGapMs).toBe(0)
+  })
+
+  it('clear() wipes outbound state too', () => {
+    reset('k', 0)
+    noteOutbound('k', 100)
+    clear('k')
+    const m = getOutboundMetrics('k')
+    expect(m.ttfoMs).toBeNull()
+    expect(m.outboundCount).toBe(0)
+  })
+
+  it('outbound and signal counters track independently', () => {
+    reset('k', 0)
+    // Many signals (status reaction churn) but only one outbound
+    noteSignal('k', 100)
+    noteSignal('k', 500)
+    noteSignal('k', 2500)
+    noteOutbound('k', 3000) // first outbound, ttfo=3000
+    const m = getOutboundMetrics('k')
+    expect(m.ttfoMs).toBe(3000)
+    expect(m.outboundCount).toBe(1)
+    // Signal-gap reflects ALL signals (including reactions)
+    expect(getLongestGap('k')).toBeGreaterThanOrEqual(1000)
+  })
+
+  it('TTFO = 0 when first outbound fires at exact turn-start tick', () => {
+    reset('k', 5000)
+    noteOutbound('k', 5000)
+    expect(getOutboundMetrics('k').ttfoMs).toBe(0)
   })
 })

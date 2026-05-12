@@ -107,7 +107,13 @@ import {
   initHistory, recordInbound, recordOutbound, recordEdit,
   deleteFromHistory, query as queryHistory, getLatestInboundMessageId,
   recordReaction,
+  checkpointWal as checkpointHistoryWal,
+  pruneMessagesOlderThanDays,
 } from '../history.js'
+import {
+  runRegistryReaper,
+  resolveRetentionDays as resolveRegistryRetentionDays,
+} from '../registry/reaper.js'
 import { parseQueuePrefix, parseSteerPrefix, formatPriorAssistantPreview, formatReplyToText } from '../steering.js'
 import {
   renderOperatorEvent,
@@ -892,6 +898,74 @@ try {
 } catch (err) {
   process.stderr.write(`telegram gateway: turn-registry init failed (${(err as Error).message}) — turn tracking disabled\n`)
   turnsDb = null
+}
+
+// ─── Periodic history reaper (#1073) ──────────────────────────────────────
+// The init-time prune in history.ts only touched the `messages` table.
+// `subagents` and `turns` in registry.db grew unbounded — every Agent()
+// call and every turn added a row that never expired. The SQLite WAL
+// also grew without bound because no path issued a checkpoint.
+//
+// Strategy:
+//   1. At boot, prune both registry tables on the same window as
+//      messages (catch-up for long-stopped agents waking up to stale
+//      data). Plus a one-shot WAL checkpoint on history.db.
+//   2. Every 6h thereafter, re-run the registry reaper + history WAL
+//      checkpoint. The window is intentionally coarse — a daily-ish
+//      cadence keeps the WAL bounded without thrashing IO on a quiet
+//      agent.
+//
+// Retention selection — same resolveRegistryRetentionDays helper used
+// at boot and on every tick, so an operator can change env or
+// access.json and the next tick picks it up.
+const REGISTRY_REAPER_INTERVAL_MS = 6 * 60 * 60 * 1000
+function runHistoryReaperNow(reason: 'boot' | 'periodic'): void {
+  const retentionDays = resolveRegistryRetentionDays(HISTORY_ACCESS.historyRetentionDays)
+  // Registry reaper: subagents + turns + WAL checkpoint on registry.db.
+  if (turnsDb != null) {
+    try {
+      const result = runRegistryReaper(turnsDb, { retentionDays })
+      process.stderr.write(
+        `telegram gateway: registry-reaper (${reason}) retentionDays=${retentionDays}`
+        + ` subagents.deleted=${result.subagents.deleted} (${result.subagents.batches} batches)`
+        + ` turns.deleted=${result.turns.deleted} (${result.turns.batches} batches)`
+        + ` wal.checkpoint=${result.walCheckpointed ? 'ok' : 'busy'}\n`,
+      )
+    } catch (err) {
+      process.stderr.write(`telegram gateway: registry-reaper (${reason}) failed: ${(err as Error).message}\n`)
+    }
+  }
+  // History DB extension: on boot, extend the messages init-prune to
+  // cover the case where the existing one-shot prune in initHistory()
+  // ran with a stale retention value (or didn't run at all on an old
+  // DB). On periodic ticks, also prune messages so a multi-month
+  // session doesn't slowly outgrow its window. We deliberately reuse
+  // the messages-table retention from access.json (`historyRetentionDays`,
+  // defaulting to 30) here — the new HISTORY_RETENTION_DAYS env applies
+  // to registry tables only, per the issue scope. Messages retention
+  // policy is unchanged.
+  if (HISTORY_ENABLED) {
+    try {
+      const messagesRetentionDays = HISTORY_ACCESS.historyRetentionDays ?? 30
+      const deleted = pruneMessagesOlderThanDays(messagesRetentionDays)
+      const walOk = checkpointHistoryWal()
+      if (deleted > 0 || reason === 'boot') {
+        process.stderr.write(
+          `telegram gateway: history-reaper (${reason}) messagesRetentionDays=${messagesRetentionDays}`
+          + ` messages.deleted=${deleted} wal.checkpoint=${walOk ? 'ok' : 'busy'}\n`,
+        )
+      }
+    } catch (err) {
+      process.stderr.write(`telegram gateway: history-reaper (${reason}) failed: ${(err as Error).message}\n`)
+    }
+  }
+}
+// Run once at boot to catch up long-stopped agents.
+runHistoryReaperNow('boot')
+// Then every 6h. unref() so the interval doesn't keep the process alive
+// past shutdown.
+if (!STATIC) {
+  setInterval(() => runHistoryReaperNow('periodic'), REGISTRY_REAPER_INTERVAL_MS).unref()
 }
 
 // ─── Approval polling ─────────────────────────────────────────────────────

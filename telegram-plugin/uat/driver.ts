@@ -65,6 +65,13 @@ export interface ObservedMessage {
   date: Date;
   /** `true` when this observation is an edit of an earlier message. */
   edited: boolean;
+  /**
+   * `true` when this message was delivered as a silent push (Telegram
+   * `silent` flag, set by the sender's `disable_notification: true`).
+   * Used to verify the conversational-pacing contract: mid-turn updates
+   * must be silent, only the final answer should ping.
+   */
+  silent: boolean;
 }
 
 export interface ObservedButton {
@@ -701,5 +708,6 @@ function toObserved(msg: Message, edited: boolean): ObservedMessage {
     fromBot: msg.sender.type === "user" && msg.sender.isBot === true,
     date: msg.date,
     edited,
+    silent: msg.isSilent,
   };
 }

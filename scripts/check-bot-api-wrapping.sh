@@ -90,15 +90,16 @@ ALLOWLIST=(
   "telegram-plugin/gateway/gateway.ts:3160-3320:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
-  # Range bumped 2026-05-13 for stuck-turn-recovery v2 cleanup expansion.
-  "telegram-plugin/gateway/gateway.ts:8100-8260:credit-watch notify; no thread_id"
+  # Range bumped 2026-05-13 for stuck-turn-recovery (#1136) v2 cleanup
+  # (~100 lines) + gate-deny-log helper (~65 lines).
+  "telegram-plugin/gateway/gateway.ts:8100-8330:credit-watch notify; no thread_id"
 
   # gateway.ts:9260-9490 — ctx.api.editMessageText for vault grant wizard
   # cards. Every callsite has `.catch(() => {})` — a THREAD_NOT_FOUND
   # is already swallowed there. Acceptable because the wizard messages
   # are tap-driven UI and a missed edit just leaves the previous state
   # visible (the user can re-tap).
-  "telegram-plugin/gateway/gateway.ts:9340-9720:vault grant wizard ctx.api.editMessageText already has .catch swallow"
+  "telegram-plugin/gateway/gateway.ts:9340-9790:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter
   # via DI. The gateway wires those adapters through robustApiCall (see

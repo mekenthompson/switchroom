@@ -124,20 +124,26 @@ describe("buildSettingsHooksBlock", () => {
     expect(JSON.stringify(first)).toBe(JSON.stringify(second));
   });
 
-  it("includes --config flag in handoff command when configPath is provided", () => {
+  it("bakes the in-container config path into the handoff command, not the host path (#1079)", () => {
     const agentConfig = makeAgentConfig();
+    const hostConfigPath = "/home/user/switchroom.yaml";
     const result = buildSettingsHooksBlock({
       agentName: "test-agent",
       agentConfig,
       hindsightEnabled: false,
       useSwitchroomPlugin: false,
-      configPath: "/home/user/switchroom.yaml",
+      configPath: hostConfigPath,
     });
 
     const stop = result.Stop as Array<{ hooks: Array<{ command: string }> }> | undefined;
     expect(stop).toBeDefined();
     const stopCmds = (stop ?? []).flatMap(e => e.hooks.map(h => h.command));
-    expect(stopCmds.some(c => c.includes("--config") && c.includes("switchroom.yaml"))).toBe(true);
+    const handoffCmd = stopCmds.find(c => c.includes("handoff"));
+    expect(handoffCmd).toBeDefined();
+    // The hook runs inside the agent container — must reference the
+    // bind-mount path, never the host path.
+    expect(handoffCmd).toContain("--config '/state/config/switchroom.yaml'");
+    expect(handoffCmd).not.toContain(hostConfigPath);
   });
 
   it("handoff command has no --config flag when configPath is omitted", () => {

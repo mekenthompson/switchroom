@@ -912,6 +912,113 @@ export function checkLeakedHomeSwitchroom(
   };
 }
 
+/**
+ * Hygiene probe for the switchroom git checkout itself (#1072).
+ *
+ * The original OpenClaw export bundle (`clerk-export/`) and its tarball
+ * carry real secrets. They're gitignored, so they can't reach a commit,
+ * but they sit on disk in the repo root and are exposed to any tool that
+ * scans the working tree (backups, grep, "send my repo to X" workflows).
+ *
+ * The proper fix is to migrate the bundle into the vault and delete the
+ * on-disk copies (see `scripts/migrate-clerk-export-to-vault.sh`). This
+ * check surfaces the residual on-disk state so an operator who skipped
+ * the migration script — or restored an old worktree — sees a clear
+ * warning.
+ *
+ * Scope: only meaningful when doctor runs from inside a switchroom
+ * checkout. The caller is expected to skip this section if `repoRoot`
+ * isn't a switchroom repo.
+ */
+export function checkRepoHygiene(repoRoot: string): CheckResult[] {
+  const results: CheckResult[] = [];
+
+  // 1. Directory: `clerk-export/`
+  const exportDir = join(repoRoot, "clerk-export");
+  if (existsSync(exportDir)) {
+    results.push({
+      name: "repo hygiene: clerk-export/ on disk (#1072)",
+      status: "warn",
+      detail:
+        `${exportDir} contains real secrets exported from OpenClaw. ` +
+        `Gitignored, so it can't be committed, but it's still readable ` +
+        `by any tool that scans the working tree.`,
+      fix:
+        `Run scripts/migrate-clerk-export-to-vault.sh to move the bundle ` +
+        `into the vault, then delete the on-disk copy.`,
+    });
+  }
+
+  // 2. Tarball: known name + glob for any *-with-secrets*.tar.gz at repo root
+  const knownTarball = join(repoRoot, "clerk-export-with-secrets.tar.gz");
+  if (existsSync(knownTarball)) {
+    results.push({
+      name: "repo hygiene: clerk-export-with-secrets.tar.gz on disk (#1072)",
+      status: "warn",
+      detail:
+        `${knownTarball} is a sealed copy of the OpenClaw secret bundle. ` +
+        `Gitignored, but persists on disk.`,
+      fix:
+        `Run scripts/migrate-clerk-export-to-vault.sh (handles the tarball ` +
+        `too) then 'trash' or 'rm' the file.`,
+    });
+  }
+
+  // 3. Glob: any *-with-secrets*.tar.gz at repo root that wasn't the known one
+  try {
+    const entries = readdirSync(repoRoot);
+    for (const name of entries) {
+      if (name === "clerk-export-with-secrets.tar.gz") continue; // already reported
+      if (/-with-secrets.*\.tar\.gz$/i.test(name)) {
+        results.push({
+          name: `repo hygiene: ${name} on disk (#1072)`,
+          status: "warn",
+          detail:
+            `${join(repoRoot, name)} matches the *-with-secrets*.tar.gz ` +
+            `pattern. Likely contains real credentials.`,
+          fix:
+            `Inspect, migrate any secrets into the vault, then delete the ` +
+            `archive.`,
+        });
+      }
+    }
+  } catch {
+    // Unreadable repo root — surface as a warning rather than crash.
+    results.push({
+      name: "repo hygiene: scan failed (#1072)",
+      status: "warn",
+      detail: `could not enumerate ${repoRoot} for *-with-secrets*.tar.gz`,
+    });
+  }
+
+  if (results.length === 0) {
+    results.push({
+      name: "repo hygiene: clerk-export bundle (#1072)",
+      status: "ok",
+      detail: "no clerk-export/ or *-with-secrets*.tar.gz at repo root",
+    });
+  }
+
+  return results;
+}
+
+/**
+ * Heuristic: does this directory look like a switchroom git checkout?
+ * Used to gate `checkRepoHygiene` so doctor running from a random cwd
+ * on a non-developer host doesn't emit a noisy "ok" line.
+ */
+export function isSwitchroomCheckout(dir: string): boolean {
+  try {
+    if (!existsSync(join(dir, ".git"))) return false;
+    const pkgPath = join(dir, "package.json");
+    if (!existsSync(pkgPath)) return false;
+    const pkg = JSON.parse(readFileSync(pkgPath, "utf-8")) as { name?: string };
+    return pkg.name === "switchroom";
+  } catch {
+    return false;
+  }
+}
+
 export function checkAgents(config: SwitchroomConfig, configPath: string): CheckResult[] {
   const results: CheckResult[] = [];
   const agentsDir = resolveAgentsDir(config);
@@ -1738,6 +1845,17 @@ export function registerDoctorCommand(program: Command): void {
           { title: "Docker (Phase 1a)", results: runDockerSection(config) },
           { title: "MFF Skill", results: await checkMff(passphrase, vaultPath) },
         ];
+
+        // Repo Hygiene (#1072): only when doctor runs from a switchroom
+        // checkout. On a consumer host this section is silent — the
+        // probe is for the developer/operator who has the source tree.
+        const cwd = process.cwd();
+        if (isSwitchroomCheckout(cwd)) {
+          sections.push({
+            title: "Repo Hygiene",
+            results: checkRepoHygiene(cwd),
+          });
+        }
 
         if (opts.json) {
           console.log(

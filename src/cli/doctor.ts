@@ -495,6 +495,121 @@ function checkVault(config: SwitchroomConfig): CheckResult[] {
   }
 }
 
+/**
+ * Inspect a running `switchroom-hindsight` container's `.Config.Env` for
+ * secret-shaped values. Used by the doctor probe to surface pre-fix
+ * containers that were started with `-e HINDSIGHT_API_LLM_API_KEY=...`
+ * — those values appear in `docker inspect` and are readable by anyone
+ * in the docker group.
+ *
+ * Post-fix containers bind-mount the secret file and use an entrypoint
+ * shim to export the env var INSIDE the container. Docker doesn't see
+ * the export, so `.Config.Env` does not contain the key.
+ *
+ * Note: `--env-file` was the original approach but was rejected during
+ * review — empirically `--env-file` values DO populate `.Config.Env`
+ * identically to `-e` on Docker 29.4.1. Only an in-container export
+ * (via entrypoint shim) keeps the value out of `Config.Env`.
+ *
+ * @internal exported for testing
+ */
+export function detectHindsightEnvLeak(
+  dockerInspectJson: string,
+): { leaked: true; leakedKeys: string[] } | { leaked: false } {
+  let env: unknown;
+  try {
+    env = JSON.parse(dockerInspectJson);
+  } catch {
+    return { leaked: false };
+  }
+  if (!Array.isArray(env)) return { leaked: false };
+
+  const leakedKeys: string[] = [];
+  // Patterns mirror telegram-plugin/secret-detect/patterns.ts:
+  //   - `*KEY*=sk-...` (OpenAI / Anthropic / generic)
+  //   - `*KEY*=AKIA...` (AWS access key)
+  //   - `*TOKEN*=` followed by 20+ base64-ish chars
+  //   - `*PASSWORD*=` / `*SECRET*=` with any non-trivial value
+  //   - explicit HINDSIGHT_API_LLM_API_KEY= with any non-empty value
+  //     (belt-and-braces — the variable name alone is sufficient signal)
+  const namePattern = /^[A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD)$/;
+  for (const entry of env) {
+    if (typeof entry !== "string") continue;
+    const eq = entry.indexOf("=");
+    if (eq < 0) continue;
+    const name = entry.slice(0, eq);
+    const value = entry.slice(eq + 1);
+    if (!value) continue;
+
+    if (name === "HINDSIGHT_API_LLM_API_KEY") {
+      leakedKeys.push(name);
+      continue;
+    }
+    if (!namePattern.test(name)) continue;
+
+    // Known provider prefixes — high confidence.
+    if (
+      /^sk-[A-Za-z0-9_-]{8,}/.test(value) ||
+      /^AKIA[0-9A-Z]{16}/.test(value) ||
+      /^ghp_[A-Za-z0-9]{20,}/.test(value) ||
+      /^xox[baprs]-[A-Za-z0-9-]{10,}/.test(value)
+    ) {
+      leakedKeys.push(name);
+      continue;
+    }
+
+    // Generic high-entropy value (20+ base64-ish chars). Only applied
+    // when the variable name is explicitly secret-shaped — the
+    // `namePattern` test above gates this.
+    if (/^[A-Za-z0-9_\-+/=.]{20,}$/.test(value)) {
+      leakedKeys.push(name);
+    }
+  }
+
+  return leakedKeys.length > 0 ? { leaked: true, leakedKeys } : { leaked: false };
+}
+
+/**
+ * Probe the running `switchroom-hindsight` container (if any) for the
+ * pre-#1068 env-var leak. Skips silently when docker or the container
+ * isn't around — this is purely a leak-detector, not a container-health
+ * check (the existing `hindsight reachable` row covers that).
+ *
+ * @internal exported for testing
+ */
+export function checkHindsightEnvLeak(): CheckResult | null {
+  let inspectOut: string;
+  try {
+    inspectOut = execSync(
+      "docker inspect switchroom-hindsight --format '{{json .Config.Env}}'",
+      { stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8" },
+    ).trim();
+  } catch {
+    // No docker, or no container — nothing to probe.
+    return null;
+  }
+  if (!inspectOut) return null;
+
+  const result = detectHindsightEnvLeak(inspectOut);
+  if (!result.leaked) {
+    return {
+      name: "hindsight env leak",
+      status: "ok",
+      detail: "no secret-shaped env vars visible in `docker inspect`",
+    };
+  }
+  return {
+    name: "hindsight env leak",
+    status: "fail",
+    detail:
+      `secret-shaped env vars exposed via \`docker inspect\`: ${result.leakedKeys.join(", ")}`,
+    fix:
+      "Container was started before the #1068 fix. Run `switchroom memory --stop && switchroom memory --start` " +
+      "to restart it with the API key bind-mounted from a tmpfs file and exported by an entrypoint shim " +
+      "(so the value never lands in `.Config.Env`).",
+  };
+}
+
 async function checkHindsight(config: SwitchroomConfig): Promise<CheckResult[]> {
   const memoryBackend = config.memory?.backend;
   if (memoryBackend !== "hindsight") {
@@ -557,6 +672,12 @@ async function checkHindsight(config: SwitchroomConfig): Promise<CheckResult[]> 
     status: "ok",
     detail: `${probe.serverName} ${probe.serverVersion} at ${host}:${port}`,
   });
+
+  // Secret-leak probe (#1068): pre-fix containers were started with
+  // `-e HINDSIGHT_API_LLM_API_KEY=...`, which leaks via `docker inspect`.
+  // The probe is best-effort — null result means no container to inspect.
+  const leakResult = checkHindsightEnvLeak();
+  if (leakResult) results.push(leakResult);
 
   // Per-agent bank health checks
   for (const [agentName, agentConfig] of Object.entries(config.agents)) {

@@ -50,6 +50,12 @@ import {
   AGENT_LIVE_POLL_INTERVAL_MS,
 } from './boot-probes.js'
 import { escapeHtml } from '../card-format.js'
+import {
+  loadCache as loadBootIssueCache,
+  diffProbes as diffBootProbes,
+  applyAndSave as saveBootIssueCache,
+  type ProbeDiffMap,
+} from './boot-issue-cache.js'
 import { join } from 'path'
 import { loadConfig as _loadSwitchroomConfig } from '../../src/config/loader.js'
 
@@ -271,6 +277,15 @@ export interface RenderBootCardOpts {
    * Closes #708.
    */
   accounts?: ReadonlyArray<AccountSummary>
+  /** Probe keys for which the prior boot saw degraded/fail and this boot
+   *  sees ok. Rendered as a small ✅ line above the degraded section so
+   *  the user gets positive-feedback that a known issue is gone. */
+  resolvedRows?: ReadonlyArray<ProbeKey>
+  /** Probe keys whose degraded/fail row is hidden on this boot because
+   *  the user has seen the same fingerprint for too many consecutive
+   *  boots (snooze). The renderer skips the corresponding probe row.
+   *  See `boot-issue-cache.ts`. */
+  snoozeRows?: ReadonlyArray<ProbeKey>
   /** Clock injection point for tests; defaults to `new Date()`. */
   now?: Date
 }
@@ -306,6 +321,19 @@ export function renderBootCard(opts: RenderBootCardOpts): string {
   const ack = `${ackEmoji} <b>${escapeHtml(agentName)}</b> back up · ${escapeHtml(version)}`
 
   const degradedRows: string[] = []
+  const snoozeSet = new Set<ProbeKey>(opts.snoozeRows ?? [])
+
+  // Resolved rows (issue dedup, this PR) — render ✅ entries for probes
+  // that were degraded/fail on the previous boot and are now ok. Small
+  // positive-feedback signal so the user sees their fix worked instead
+  // of guessing from the absence of a row.
+  if (opts.resolvedRows && opts.resolvedRows.length > 0) {
+    for (const key of opts.resolvedRows) {
+      const lbl = PROBE_LABELS[key]
+      if (!lbl) continue
+      degradedRows.push(`✅ <b>${escapeHtml(lbl)}</b>  resolved`)
+    }
+  }
 
   // Crash recovery: surface explicitly so the user can tell whether
   // their next message will land on a fresh process. The agent-crashed
@@ -331,7 +359,20 @@ export function renderBootCard(opts: RenderBootCardOpts): string {
       const r = probes[key]
       if (!r) continue
       if (r.status === 'ok') continue
+      // Snoozed rows (issue dedup, this PR) — the user has seen the
+      // same fingerprint enough consecutive boots that we hide the row.
+      // The cache still tracks it; if the fingerprint changes (new
+      // failure mode) the snooze resets and the row reappears.
+      if (snoozeSet.has(key)) continue
       const dot = DOT[r.status] ?? DOT.fail
+      // The "Still: " prefix is reserved for rows the user has seen
+      // before (consecutiveBoots > 1) but hasn't been snoozed yet.
+      // We can't compute that from probes alone — the caller signals
+      // it implicitly: a degraded/fail row that's NOT in snoozeRows
+      // and NOT in resolvedRows is either novel or still-being-shown.
+      // We surface the existing row format unchanged here; the
+      // "Still:" / "New:" distinction is conveyed by which rows the
+      // user does or doesn't see across consecutive boots.
       degradedRows.push(`${dot} <b>${PROBE_LABELS[key]}</b>  ${escapeHtml(r.detail)}`)
       if (r.nextStep) {
         degradedRows.push(`    ↳ ${renderNextStep(r.nextStep)}`)
@@ -436,6 +477,15 @@ export interface RunProbesOpts {
   /** When true, resolve the agent PID via cgroup walk instead of MainPID
    *  (which is the tmux server pid under tmux supervisor). */
   tmuxSupervisor?: boolean
+  /** Path to the per-agent boot-issue cache file. When set, the
+   *  post-settle render applies snooze + resolved-row dedup against
+   *  prior boots (see `boot-issue-cache.ts`). Omit to disable dedup
+   *  entirely (legacy behaviour). */
+  bootIssueCachePath?: string
+  /** Override snoozeBoots threshold for tests. */
+  snoozeBoots?: number
+  /** Override snoozeMs threshold for tests. */
+  snoozeMs?: number
   /** When true, the gateway is running inside an agent docker container.
    *  Probes that depend on systemctl (Agent, Crons) switch to /proc walks
    *  and externally-managed surface text instead of execing systemctl
@@ -545,6 +595,38 @@ export async function startBootCard(
           }
         }
 
+        // Issue-dedup diff: when a cache path is configured, compare this
+        // boot's probe outcomes against the cached fingerprints to derive
+        // resolvedRows (was bad, now ok) and snoozeRows (same fingerprint
+        // shown too many consecutive boots). One disk read up-front, one
+        // disk write on the way out — no second write from the live-watch
+        // loop below (which reuses the same masks).
+        let diff: ProbeDiffMap = {}
+        let resolvedRows: import('./boot-card.js').ProbeKey[] = []
+        let snoozeRows: import('./boot-card.js').ProbeKey[] = []
+        if (opts.bootIssueCachePath) {
+          try {
+            const cache = loadBootIssueCache(opts.bootIssueCachePath)
+            diff = diffBootProbes(probes, cache, {
+              snoozeBoots: opts.snoozeBoots,
+              snoozeMs: opts.snoozeMs,
+            })
+            for (const [k, d] of Object.entries(diff) as [import('./boot-card.js').ProbeKey, NonNullable<ProbeDiffMap[import('./boot-card.js').ProbeKey]>][]) {
+              if (d.resolved) resolvedRows.push(k)
+              if (d.snoozed) snoozeRows.push(k)
+            }
+            // Persist once. The live-watch loop reuses the same mask in
+            // memory; it does NOT re-write the cache.
+            saveBootIssueCache(opts.bootIssueCachePath, cache, diff)
+          } catch (diffErr: unknown) {
+            logger(
+              `telegram gateway: boot-card: issue-dedup diff failed: ${
+                (diffErr as Error)?.message ?? String(diffErr)
+              }\n`,
+            )
+          }
+        }
+
         // Render with current probe state and edit if anything changed.
         let currentText = renderBootCard({
           agentName: opts.agentName,
@@ -554,6 +636,8 @@ export async function startBootCard(
           restartReason: opts.restartReason,
           restartAgeMs: opts.restartAgeMs,
           ...(accountRows ? { accounts: accountRows } : {}),
+          ...(resolvedRows.length > 0 ? { resolvedRows } : {}),
+          ...(snoozeRows.length > 0 ? { snoozeRows } : {}),
         })
 
         if (currentText !== ackText) {
@@ -601,6 +685,10 @@ export async function startBootCard(
             restartReason: opts.restartReason,
             restartAgeMs: opts.restartAgeMs,
             ...(accountRows ? { accounts: accountRows } : {}),
+            // Reuse the same masks computed once above — no second
+            // cache write from the live-watch loop.
+            ...(resolvedRows.length > 0 ? { resolvedRows } : {}),
+            ...(snoozeRows.length > 0 ? { snoozeRows } : {}),
           })
 
           if (updatedText === currentText) continue

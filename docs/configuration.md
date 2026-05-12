@@ -37,6 +37,11 @@ Each field type has specific merge behavior when values exist at multiple layers
 | `bundled_skills` | per-key | Opt-out map for switchroom's bundled-default skills. Set a key to `false` to suppress (e.g. `pdf: false`). See [docs/skills.md](./skills.md). |
 | `subagents` | per-key | Sub-agent definitions rendered to `.claude/agents/<name>.md` |
 | `schedule` | concatenate | Cron-based scheduled tasks (in-agent scheduler sidecar — see [scheduling.md](./scheduling.md)) |
+| `reactions.enabled` | override | Master switch for the reaction-trigger path (#1074). When `false`, reactions are still persisted but never forwarded to the agent as synthetic inbound turns. Default `true`. |
+| `reactions.trigger_emojis` | replace | Emoji allowlist that triggers a synthetic `<channel source="reaction">` inbound when reacted to a bot message. **Replace semantics**, not union — set to `[]` to disable triggering without flipping `enabled`. Default `['👎', '❌', '👍', '✅']`. |
+| `reactions.debounce_ms` | override | Per-chat debounce window in ms. Reactions within the window collapse into one batched synthetic. Default `30000`. |
+| `reactions.per_hour_cap` | override | Max reaction-triggered synthetic turns per chat per rolling hour. Refusals are stderr-logged but not surfaced to the agent. Default `10`. |
+| `reactions.group_admin_only` | override | In groups/supergroups, only trigger when the reacter is `creator` or `administrator`. Failing the lookup is treated as non-admin (fail-closed). DMs are never affected by this flag. Default `true`. |
 | `session.max_idle` | override | Fresh session after idle period (`2h`, `30m`) |
 | `session.max_turns` | override | Fresh session after N user turns |
 | `channels.telegram.plugin` | override | `switchroom` (default, enhanced) or `official` |

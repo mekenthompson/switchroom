@@ -640,6 +640,29 @@ export class Driver {
   }
 
   /**
+   * Send or remove an emoji reaction on a target message. Used by the
+   * UAT reaction-trigger scenario (#1074) to exercise the gateway's
+   * MessageReactionUpdated handler — the driver reacts to a bot reply,
+   * the bot's reaction-trigger pipeline synthesizes a new inbound turn
+   * to the agent.
+   *
+   * Pass `emoji: null` to remove the existing reaction (mtcute's
+   * `sendReaction` collapses send + remove into one method).
+   */
+  async sendReaction(
+    chatId: number,
+    messageId: number,
+    emoji: string | null,
+  ): Promise<void> {
+    const c = this.requireClient();
+    await c.sendReaction({
+      chatId,
+      message: messageId,
+      emoji: emoji === null ? null : emoji,
+    });
+  }
+
+  /**
    * Send a geolocation point. Used by the UAT location-inbound scenario
    * to exercise the gateway's `message:location` handler (#1077).
    */

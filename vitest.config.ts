@@ -167,6 +167,9 @@ export default defineConfig({
       // Approval-kernel tests (RFC B) use bun:test + in-memory bun:sqlite.
       "**/src/vault/approvals/kernel.test.ts",
       "**/src/vault/broker/server-approvals.test.ts",
+      // reaction-trigger tests (#1074) use bun:test — run via test:bun.
+      "**/telegram-plugin/tests/reaction-trigger.test.ts",
+      "**/telegram-plugin/tests/reaction-trigger-flow.test.ts",
     ],
     coverage: {
       provider: "v8",

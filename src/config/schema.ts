@@ -743,6 +743,77 @@ export const AgentDriveConfigSchema = z
   })
   .optional();
 
+/**
+ * Reaction-trigger configuration — controls when an emoji reaction on a
+ * bot message is forwarded to the agent as a synthetic inbound turn
+ * (`<channel source="reaction">`). See `docs/configuration.md` and
+ * `telegram-plugin/gateway/reaction-trigger.ts`.
+ *
+ * The reaction-persistence path (`recordReaction` → user_reaction column)
+ * is independent of this config — reactions are always persisted regardless
+ * of trigger outcome. This block only governs the synthetic-inbound path.
+ *
+ * Cascade modes:
+ *   - enabled / debounce_ms / per_hour_cap / group_admin_only: override.
+ *     Simple scalars; agent wins, defaults fall through when unset.
+ *   - trigger_emojis: replace (NOT union). Operators must be able to
+ *     narrow the allowlist — including to `[]` to disable triggering
+ *     without flipping `enabled: false`. A union mode would silently
+ *     keep defaults visible, defeating the per-agent narrowing case.
+ */
+export const ReactionsSchema = z
+  .object({
+    enabled: z
+      .boolean()
+      .optional()
+      .describe(
+        "Master switch for the reaction-trigger path. When false, " +
+        "reactions are still persisted via recordReaction but never " +
+        "dispatched to the agent as synthetic inbound turns. Default true.",
+      ),
+    trigger_emojis: z
+      .array(z.string())
+      .optional()
+      .describe(
+        "Emoji allowlist that triggers a synthetic inbound when reacted " +
+        "to a bot message. Default ['👎', '❌', '👍', '✅']. Cascade " +
+        "mode: REPLACE (not union) — setting this at a layer replaces " +
+        "lower layers entirely, so an operator can narrow to [] to " +
+        "disable triggering without flipping `enabled`.",
+      ),
+    debounce_ms: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe(
+        "Per-chat debounce window in ms. A qualifying reaction holds for " +
+        "this long; a second qualifying reaction within the window " +
+        "collapses both into a single batched synthetic turn. Default 30000.",
+      ),
+    per_hour_cap: z
+      .number()
+      .int()
+      .nonnegative()
+      .optional()
+      .describe(
+        "Max reaction-triggered synthetic turns per chat per rolling hour. " +
+        "Refusals are stderr-logged but not surfaced to the agent. " +
+        "Default 10. Set to 0 to disable triggering via the cap path.",
+      ),
+    group_admin_only: z
+      .boolean()
+      .optional()
+      .describe(
+        "In groups/supergroups (negative chat_id), only trigger a synthetic " +
+        "turn when the reacter is a chat admin (creator or administrator). " +
+        "Failing the lookup is treated as non-admin (fail-closed). " +
+        "DMs are never affected by this flag — the reacter IS the user. " +
+        "Default true.",
+      ),
+  })
+  .optional();
+
 const profileFields = {
   extends: z.string().optional(),
   bot_token: z.string().optional(),
@@ -790,6 +861,7 @@ const profileFields = {
     })
     .optional(),
   schedule: z.array(ScheduleEntrySchema).optional(),
+  reactions: ReactionsSchema,
   model: z
     .string()
     .regex(
@@ -1047,6 +1119,7 @@ export const AgentSchema = z.object({
   tools: AgentToolsSchema,
   memory: AgentMemorySchema,
   schedule: z.array(ScheduleEntrySchema).default([]),
+  reactions: ReactionsSchema,
   model: z
     .string()
     .regex(

@@ -80,6 +80,9 @@ export default defineConfig({
       // discussion in PR #994.
       "**/telegram-plugin/uat/**",
       "**/telegram-plugin/tests/history.test.ts",
+      // history-reaper.test.ts uses bun:sqlite + bun:test (#1073) —
+      // excluded here, run via test:bun.
+      "**/telegram-plugin/tests/history-reaper.test.ts",
       "**/telegram-plugin/tests/ipc-server-client.test.ts",
       "**/telegram-plugin/tests/ipc-server-race.test.ts",
       "**/telegram-plugin/tests/gateway-bridge.test.ts",

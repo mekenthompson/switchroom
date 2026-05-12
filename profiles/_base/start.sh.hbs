@@ -46,6 +46,19 @@ if [ "$SWITCHROOM_RUNTIME" = "docker" ] && [ -z "$SWITCHROOM_DOCKER_TMUX_INNER" 
       "$@" >> "$_logfile" 2>&1
       local _exit=$?
       local _now=$SECONDS
+      # Exit 78 = sysexits EX_CONFIG, the "permanent config error, do
+      # not restart" sentinel. The gateway uses this on a 401 from
+      # Telegram (#1076 — revoked / wrong-typed bot token). Restarting
+      # would just re-hit the same 401, burn the 10-in-60 s budget,
+      # and leave the agent silently dead. The supervisor instead
+      # records the quarantine in the log and stops — the host CLI
+      # (`switchroom doctor`, `switchroom agent restart`) reads the
+      # quarantine marker at <TELEGRAM_STATE_DIR>/quarantine.json and
+      # surfaces it to the operator.
+      if [ $_exit -eq 78 ]; then
+        echo "[supervise] $_name exit 78 (EX_CONFIG) — quarantined, not restarting. Operator action required." >> "$_logfile"
+        return 0
+      fi
       if [ $((_now - _window_start)) -ge 60 ]; then
         _restarts=0
         _window_start=$_now

@@ -77,6 +77,7 @@ import {
 } from '../pty-tail.js'
 import { clearStaleTelegramPollingState } from '../startup-reset.js'
 import { gatewayStartupRetry } from './startup-network-retry.js'
+import { writeQuarantineMarker } from './quarantine.js'
 import {
   parseAuthSubCommand,
   checkRemoveSafety,
@@ -12006,6 +12007,68 @@ void (async () => {
         // production incident that motivates this. Safe to re-run on retries.
         await clearStaleTelegramPollingState(bot.api)
         return bot.api.getMe()
+      }, {
+        // #1076: a revoked/wrong-typed bot token returns 401 Unauthorized.
+        // The pre-fix path rethrew non-network errors → the surrounding
+        // catch exited 1 → `_switchroom_supervise` respawned → repeat. Ten
+        // restarts in <60 s tripped the supervisor cap and the gateway
+        // went silently dead. New path: classify 401, write a high-
+        // severity issue (no token material, even truncated — threat
+        // model assumes the token is the misused secret), write the
+        // quarantine marker so the host CLI can refuse the next start,
+        // exit 78 (sysexits EX_CONFIG) so `_switchroom_supervise`
+        // stops respawning (start.sh.hbs treats 78 as "config error,
+        // don't restart").
+        onUnauthorized: (err) => {
+          const agentName = process.env.SWITCHROOM_AGENT_NAME ?? '-'
+          process.stderr.write(
+            `telegram gateway: startup.unauthorized — Telegram API rejected the bot token (401). ` +
+              `Marking agent quarantined; ` +
+              `operator action: rotate the token, then \`switchroom agent unquarantine ${agentName}\`. ` +
+              `err.name=${(err as Error)?.name ?? '?'}\n`,
+          )
+          // Issue sink — surfaces in `switchroom issues list` and
+          // `switchroom doctor`. The detail field deliberately omits the
+          // error message ("Unauthorized" is fine in principle but we
+          // keep the surface tight against future Grammy versions that
+          // might include header/body excerpts).
+          try {
+            switchroomExec([
+              'issues', 'record',
+              '--severity', 'critical',
+              '--source', 'gateway.startup',
+              '--code', 'gateway.startup.unauthorized',
+              '--summary', 'bot token rejected by Telegram (401) at startup',
+              '--detail', 'Telegram API returned 401 Unauthorized for the gateway startup probe. The bot token is revoked, rotated, or wrong-typed. Run `switchroom agent unquarantine ' + agentName + '` after rotating the token.',
+              '--quiet',
+            ])
+          } catch (issueErr) {
+            process.stderr.write(
+              `telegram gateway: startup.unauthorized: failed to write issue sink: ${(issueErr as Error).message}\n`,
+            )
+          }
+          // Quarantine marker — read by `switchroom apply` /
+          // `switchroom agent restart` to refuse a doomed restart, and
+          // by `switchroom doctor` to surface the state. Lives at
+          // <TELEGRAM_STATE_DIR>/quarantine.json (the same dir the
+          // gateway already minted at boot).
+          try {
+            writeQuarantineMarker(
+              STATE_DIR,
+              'startup.unauthorized',
+              'Telegram API returned 401 Unauthorized for getMe at gateway startup.',
+            )
+          } catch (markerErr) {
+            process.stderr.write(
+              `telegram gateway: startup.unauthorized: failed to write quarantine marker: ${(markerErr as Error).message}\n`,
+            )
+          }
+          // 78 = sysexits EX_CONFIG. start.sh.hbs's _switchroom_supervise
+          // honours this as "config error, do not restart". A bare
+          // exit 1 would put us right back in the respawn loop this fix
+          // exists to prevent.
+          process.exit(78)
+        },
       })
       // Backport of upstream `7e401ed` (claude-plugins-official #1397):
       // reset the backoff counter on successful poll-loop start so a

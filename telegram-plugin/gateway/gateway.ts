@@ -2510,6 +2510,106 @@ silencePoke.startTimer({
         `silence-poke fallback sendMessage failed chat=${ctx.chatId} thread=${ctx.threadId}: ${err}\n`,
       )
     }
+    // #1122 follow-up: end the wedged turn AFTER the fallback fires.
+    // Without this, `activeTurnStartedAt` stays set, every subsequent
+    // inbound is routed as `queued="true" prior_turn_in_progress="true"`
+    // (see handleInbound mid-turn branch ~line 6160), and the user's
+    // conversation is permanently stuck behind a dead turn no signal
+    // will ever close. Caught by the human-style fuzz on 2026-05-13:
+    // 23/23 inbounds queued behind msg 599 that never got a turn_ended.
+    //
+    // Cleanup mirrors the regular reply / silent-marker turn-end paths
+    // (lines 4985 / 5274) so a late `turn_end` from claude — once it
+    // finally exits the wedge — finds nulled state and bails at the
+    // handler-entry `const turn = currentTurn` check (lines 4441,
+    // 4593, etc), avoiding a double-emit / stale-turn-close on the
+    // next inbound's fresh turn.
+    const fbKey = ctx.key
+    const fbChatId = ctx.chatId
+    const fbThreadId = ctx.threadId ?? undefined
+    const wedgedTurn = currentTurn
+    // Match by sessionChatId + sessionThreadId before mutating
+    // `currentTurn` — multi-chat agents shouldn't have their CURRENT
+    // (different-chat) turn nulled by this fallback.
+    const turnMatchesFallback =
+      wedgedTurn != null &&
+      wedgedTurn.sessionChatId === fbChatId &&
+      wedgedTurn.sessionThreadId === fbThreadId
+    const turnStartedAt = activeTurnStartedAt.get(fbKey)
+    if (turnStartedAt != null) {
+      const turnDurationMs = Date.now() - turnStartedAt
+      const outboundMetrics = signalTracker.getOutboundMetrics(fbKey)
+      emitRuntimeMetric({
+        kind: 'turn_ended',
+        chat_id: fbChatId,
+        thread_id: ctx.threadId,
+        duration_ms: turnDurationMs,
+        ttfo_ms: outboundMetrics.ttfoMs,
+        outbound_count: outboundMetrics.outboundCount,
+        longest_silent_gap_ms: outboundMetrics.longestOutboundGapMs,
+        ended_via: 'framework_fallback',
+      })
+      signalTracker.clear(fbKey)
+    }
+    // Stamp the turn-DB end row as `timeout` so the wedged turn doesn't
+    // stay open until a SIGTERM/restart relabels it (false-negative for
+    // clean completion). Mirrors the canonical stop-path at line 5250.
+    if (turnsDb != null && turnMatchesFallback && wedgedTurn?.registryKey != null) {
+      const _turnKey = wedgedTurn.registryKey
+      const capturedJoined = wedgedTurn.capturedText.join('')
+      const assistantReplyPreview = capturedJoined
+        ? capturedJoined.slice(0, TURN_PREVIEW_MAX)
+        : null
+      try {
+        recordTurnEnd(turnsDb, {
+          turnKey: _turnKey,
+          endedVia: 'timeout' as const,
+          lastAssistantMsgId: wedgedTurn.lastAssistantMsgId,
+          lastAssistantDone: wedgedTurn.lastAssistantDone,
+          assistantReplyPreview,
+          toolCallCount: wedgedTurn.toolCallCount,
+        })
+      } catch (err) {
+        process.stderr.write(
+          `telegram gateway: recordTurnEnd(timeout) failed turnKey=${_turnKey}: ${(err as Error).message}\n`,
+        )
+      }
+    }
+    // Bridge-watchdog (#412): clear the on-disk turn-active marker so
+    // the watchdog doesn't read a stale "turn active" file after a
+    // wedge-recovery. Same defence the canonical paths run at 4971,
+    // 5270.
+    try { removeTurnActiveMarker(STATE_DIR) } catch { /* best-effort */ }
+    // Stream/lane teardown — a pinned progress card or buffered
+    // preamble survives the wedge otherwise and lands on the next
+    // turn. Mirror the canonical stop-path at 5228-5229; skip
+    // closeProgressLane analogue from the silent-marker path because
+    // we have no streams to finalize here.
+    closeActivityLane(fbChatId, fbThreadId)
+    closeProgressLane(fbChatId, fbThreadId)
+    lastPtyPreviewByChat.delete(fbKey)
+    preambleSuppressor.dropNow()
+    // Drop silence-poke state and clear turn-active so the next inbound
+    // for this chat starts a fresh turn instead of queueing forever.
+    silencePoke.endTurn(fbKey)
+    purgeReactionTracking(fbKey)
+    // Null `currentTurn` if it's still pointing at the wedged turn —
+    // when claude eventually fires a late `turn_end` for this session
+    // (or never does), the handler's `const turn = currentTurn` snapshot
+    // returns null and the regular teardown short-circuits. Without
+    // this, the late event would re-emit `turn_ended` AND clobber
+    // whatever fresh turn the next inbound started.
+    if (turnMatchesFallback && currentTurn === wedgedTurn) currentTurn = null
+    // Best-effort: clear any pending silent-end marker so the Stop hook
+    // doesn't double-block when claude eventually exits the wedged turn.
+    try {
+      clearSilentEndState(fbKey)
+    } catch { /* best-effort */ }
+    process.stderr.write(
+      `telegram gateway: silence-poke framework-fallback ended wedged turn ` +
+      `chat=${fbChatId} thread=${ctx.threadId ?? '-'} silence_ms=${ctx.silenceMs} ` +
+      `currentTurn_nulled=${turnMatchesFallback}\n`,
+    )
   },
 })
 

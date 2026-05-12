@@ -79,24 +79,26 @@ ALLOWLIST=(
   "telegram-plugin/gateway/gateway.ts:2250-2310:operator-event broadcast; no thread_id in opts"
 
   # permission-request keyboard send. opts only has reply_markup. No thread_id.
-  # Range bumped 2026-05 for #1122 PR2 silence-poke + #1115 vault-posture insertions.
-  "telegram-plugin/gateway/gateway.ts:2695-2760:permission-request keyboard; no thread_id"
+  # Range bumped 2026-05-13 for stuck-turn-recovery v2 cleanup expansion
+  # (~100 lines total added around line 2510).
+  "telegram-plugin/gateway/gateway.ts:2695-2860:permission-request keyboard; no thread_id"
 
   # reply chunk-loop fallback after robustApiCall threw THREAD_NOT_FOUND.
   # The caller dropped the thread; this raw sendMessage retries on the
   # main chat. Wrapping would re-enter the THREAD_NOT_FOUND throw on a
   # phantom second deletion.
-  "telegram-plugin/gateway/gateway.ts:3160-3220:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
+  "telegram-plugin/gateway/gateway.ts:3160-3320:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
-  "telegram-plugin/gateway/gateway.ts:8100-8160:credit-watch notify; no thread_id"
+  # Range bumped 2026-05-13 for stuck-turn-recovery v2 cleanup expansion.
+  "telegram-plugin/gateway/gateway.ts:8100-8260:credit-watch notify; no thread_id"
 
   # gateway.ts:9260-9490 — ctx.api.editMessageText for vault grant wizard
   # cards. Every callsite has `.catch(() => {})` — a THREAD_NOT_FOUND
   # is already swallowed there. Acceptable because the wizard messages
   # are tap-driven UI and a missed edit just leaves the previous state
   # visible (the user can re-tap).
-  "telegram-plugin/gateway/gateway.ts:9340-9590:vault grant wizard ctx.api.editMessageText already has .catch swallow"
+  "telegram-plugin/gateway/gateway.ts:9340-9720:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter
   # via DI. The gateway wires those adapters through robustApiCall (see

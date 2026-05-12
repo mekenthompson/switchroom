@@ -398,6 +398,27 @@ describe("broker mint_grant attest_via_posture", () => {
     expect(denied).toBeDefined();
   });
 
+  it("list_grants cross-agent posture refused: req.agent !== agentName", async () => {
+    broker = makeBroker({
+      config: makeTelegramIdConfig({ postureMintAgents: ["uat-agent"] }),
+      passphrase: "broker-pass",
+      agentName: "uat-agent",
+    });
+    await broker.start(socketPath, undefined, undefined);
+    const resp = await rpc(socketPath, {
+      v: 1,
+      op: "list_grants",
+      agent: "other-agent", // ← different from agentName
+      attest_via_posture: true,
+    });
+    expect(resp.ok).toBe(false);
+    if (!resp.ok) expect(resp.code).toBe("DENIED");
+    const denied = audit.find(
+      (e) => e.op === "list_grants" && /denied:posture-cross-agent-list-refused/.test(e.result),
+    );
+    expect(denied).toBeDefined();
+  });
+
   it("put attest_via_posture: respects postureMintAgents allowlist", async () => {
     broker = makeBroker({
       config: makeTelegramIdConfig({ postureMintAgents: [] }),

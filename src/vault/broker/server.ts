@@ -1795,8 +1795,11 @@ export class VaultBroker {
         // Agent-self-match: the request's declared `agent` MUST equal
         // the calling peer's resolved agentName. Without this, an
         // allowlisted agent could mint grants naming OTHER agents
-        // (cross-agent posture mint). mint_grant has an `agent`
-        // field per the protocol; list_grants's is optional.
+        // (cross-agent posture mint), or list another agent's grants
+        // for free reconnaissance. mint_grant has an `agent` field;
+        // list_grants's `agent` is optional — when unset we coerce to
+        // the calling agent rather than letting the broker default
+        // to "all agents".
         const reqAgent = (req as { agent?: string }).agent;
         if (req.op === "mint_grant" && reqAgent !== agentName) {
           writeAudit({
@@ -1812,6 +1815,30 @@ export class VaultBroker {
               errorResponse(
                 "DENIED",
                 `posture-attested mint refused: request.agent=${reqAgent ?? "<unset>"} but calling peer is ${agentName}`,
+              ),
+            ),
+          );
+          return;
+        }
+        if (req.op === "list_grants" && reqAgent !== undefined && reqAgent !== agentName) {
+          // Explicit cross-agent list refused — same defence as
+          // mint_grant's. An allowlisted agent gets to see its own
+          // grants only via the posture path; if it wants to list
+          // another agent's grants, it must use the operator-
+          // passphrase path (which also gates on attestation).
+          writeAudit({
+            ts: new Date().toISOString(),
+            op: req.op,
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: "denied:posture-cross-agent-list-refused",
+          });
+          socket.write(
+            encodeResponse(
+              errorResponse(
+                "DENIED",
+                `posture-attested list refused: request.agent=${reqAgent} but calling peer is ${agentName}`,
               ),
             ),
           );

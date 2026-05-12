@@ -2510,6 +2510,48 @@ silencePoke.startTimer({
         `silence-poke fallback sendMessage failed chat=${ctx.chatId} thread=${ctx.threadId}: ${err}\n`,
       )
     }
+    // #1122 follow-up: end the wedged turn AFTER the fallback fires.
+    // Without this, `activeTurnStartedAt` stays set, every subsequent
+    // inbound is routed as `queued="true" prior_turn_in_progress="true"`
+    // (see handleInbound mid-turn branch ~line 6160), and the user's
+    // conversation is permanently stuck behind a dead turn no signal
+    // will ever close. Caught by the human-style fuzz on 2026-05-13:
+    // 23/23 inbounds queued behind msg 599 that never got a turn_ended.
+    //
+    // Cleanup mirrors the regular reply / silent-marker turn-end paths
+    // (lines 4929 / 5182). Emit a `turn_ended` with ended_via=
+    // 'framework_fallback' so the dashboard can count wedge-recoveries
+    // separately from organic ends.
+    const fbKey = ctx.key
+    const turnStartedAt = activeTurnStartedAt.get(fbKey)
+    if (turnStartedAt != null) {
+      const turnDurationMs = Date.now() - turnStartedAt
+      const outboundMetrics = signalTracker.getOutboundMetrics(fbKey)
+      emitRuntimeMetric({
+        kind: 'turn_ended',
+        chat_id: ctx.chatId,
+        thread_id: ctx.threadId,
+        duration_ms: turnDurationMs,
+        ttfo_ms: outboundMetrics.ttfoMs,
+        outbound_count: outboundMetrics.outboundCount,
+        longest_silent_gap_ms: outboundMetrics.longestOutboundGapMs,
+        ended_via: 'framework_fallback',
+      })
+      signalTracker.clear(fbKey)
+    }
+    // Drop silence-poke state and clear turn-active so the next inbound
+    // for this chat starts a fresh turn instead of queueing forever.
+    silencePoke.endTurn(fbKey)
+    purgeReactionTracking(fbKey)
+    // Best-effort: clear any pending silent-end marker so the Stop hook
+    // doesn't double-block when claude eventually exits the wedged turn.
+    try {
+      clearSilentEndState(fbKey)
+    } catch { /* best-effort */ }
+    process.stderr.write(
+      `telegram gateway: silence-poke framework-fallback ended wedged turn ` +
+      `chat=${ctx.chatId} thread=${ctx.threadId ?? '-'} silence_ms=${ctx.silenceMs}\n`,
+    )
   },
 })
 

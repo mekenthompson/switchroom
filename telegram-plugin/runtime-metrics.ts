@@ -59,7 +59,7 @@ export type RuntimeMetricEvent =
       ttfo_ms: number | null
       outbound_count: number
       longest_silent_gap_ms: number
-      ended_via: 'reply' | 'stream_reply_done' | 'silent' | 'forced'
+      ended_via: 'reply' | 'stream_reply_done' | 'silent' | 'forced' | 'framework_fallback'
     }
   /**
    * Framework safety-net: a silence-poke was armed at 75s (soft) or

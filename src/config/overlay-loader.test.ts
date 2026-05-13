@@ -30,7 +30,7 @@ import type { SwitchroomConfig } from "./schema.js";
  * shape.
  */
 function makeConfig(
-  agents: Record<string, { schedule?: unknown[] }>,
+  agents: Record<string, { schedule?: unknown[]; skills?: string[] }>,
 ): SwitchroomConfig {
   // `agents` lives at the TOP level of `SwitchroomConfig`, alongside
   // `switchroom`, `telegram`, `defaults`, `profiles` — NOT inside the
@@ -252,5 +252,105 @@ describe("applyAgentOverlays", () => {
     const cfg = makeConfig({});
     const { warnings } = applyAgentOverlays(cfg);
     expect(warnings).toEqual([]);
+  });
+});
+
+describe("applyAgentOverlays — skills.d pass (#1163 Phase 2)", () => {
+  // Regression guard for the #1209 review finding: pre-fix the
+  // schedule.d pass had an early `continue` that skipped the skills.d
+  // pass entirely when an agent had no schedule.d files. Newly-
+  // scaffolded agents (the common case) would silently lose their
+  // overlay-installed skills.
+
+  let tmpHome2: string;
+  let prevHome2: string | undefined;
+  let warnSpy2: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    tmpHome2 = mkdtempSync(join(tmpdir(), "overlay-loader-skills-"));
+    prevHome2 = process.env.HOME;
+    process.env.HOME = tmpHome2;
+    warnSpy2 = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    if (prevHome2 === undefined) delete process.env.HOME;
+    else process.env.HOME = prevHome2;
+    warnSpy2.mockRestore();
+    try {
+      rmSync(tmpHome2, { recursive: true, force: true });
+    } catch { /* best-effort */ }
+  });
+
+  function writeSkillsOverlay(agent: string, slug: string, skills: string[]) {
+    const dir = join(tmpHome2, ".switchroom", "agents", agent, "skills.d");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${slug}.yaml`), `skills:\n${skills.map((s) => `  - ${s}`).join("\n")}\n`);
+  }
+
+  it("merges skills.d entries even when schedule.d is empty (#1209 regression)", () => {
+    writeSkillsOverlay("foo", "ws", ["webapp-testing"]);
+    const cfg = makeConfig({ foo: { skills: [] } });
+    const { config } = applyAgentOverlays(cfg);
+    expect(config.agents.foo.skills).toEqual(["webapp-testing"]);
+  });
+
+  it("appends overlay skills AFTER main-config skills", () => {
+    writeSkillsOverlay("foo", "wt", ["webapp-testing"]);
+    const cfg = makeConfig({ foo: { skills: ["operator-installed"] } });
+    const { config } = applyAgentOverlays(cfg);
+    expect(config.agents.foo.skills).toEqual([
+      "operator-installed",
+      "webapp-testing",
+    ]);
+  });
+
+  it("dedupes skills across overlay + main-config (main wins)", () => {
+    writeSkillsOverlay("foo", "dup", ["webapp-testing", "pdf"]);
+    const cfg = makeConfig({ foo: { skills: ["webapp-testing"] } });
+    const { config } = applyAgentOverlays(cfg);
+    // webapp-testing kept once (from main); pdf appended once.
+    expect(config.agents.foo.skills).toEqual(["webapp-testing", "pdf"]);
+  });
+
+  it("loads multiple overlay files in sorted order, deduping cross-file", () => {
+    writeSkillsOverlay("foo", "a", ["alpha"]);
+    writeSkillsOverlay("foo", "b", ["beta", "alpha"]);   // alpha dup
+    writeSkillsOverlay("foo", "c", ["gamma"]);
+    const cfg = makeConfig({ foo: { skills: [] } });
+    const { config } = applyAgentOverlays(cfg);
+    expect(config.agents.foo.skills).toEqual(["alpha", "beta", "gamma"]);
+  });
+
+  it("is a no-op when no skills.d directory exists", () => {
+    const cfg = makeConfig({ foo: { skills: ["existing"] } });
+    const { config, warnings } = applyAgentOverlays(cfg);
+    expect(config.agents.foo.skills).toEqual(["existing"]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("per-file failure isolation: bad YAML doesn't block good files", () => {
+    writeSkillsOverlay("foo", "good", ["alpha"]);
+    const dir = join(tmpHome2, ".switchroom", "agents", "foo", "skills.d");
+    writeFileSync(join(dir, "bad.yaml"), "skills: [malformed");
+    const cfg = makeConfig({ foo: { skills: [] } });
+    const { config, warnings } = applyAgentOverlays(cfg);
+    expect(config.agents.foo.skills).toEqual(["alpha"]);
+    expect(warnings.some((w) => w.file.endsWith("bad.yaml"))).toBe(true);
+  });
+
+  it("loads BOTH schedule.d and skills.d when both populated", () => {
+    // Pin that the schedule-fix doesn't regress when skills.d is also present.
+    const dirSched = join(tmpHome2, ".switchroom", "agents", "foo", "schedule.d");
+    mkdirSync(dirSched, { recursive: true });
+    writeFileSync(
+      join(dirSched, "ping.yaml"),
+      "schedule:\n  - cron: \"*/10 * * * *\"\n    prompt: \"ping\"\n",
+    );
+    writeSkillsOverlay("foo", "ws", ["webapp-testing"]);
+    const cfg = makeConfig({ foo: { schedule: [], skills: [] } });
+    const { config } = applyAgentOverlays(cfg);
+    expect((config.agents.foo.schedule as unknown[])).toHaveLength(1);
+    expect(config.agents.foo.skills).toEqual(["webapp-testing"]);
   });
 });

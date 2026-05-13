@@ -18,12 +18,18 @@
  *   - Per-file failure is isolated: malformed YAML, schema-rejected files,
  *     and even one agent's bad overlay never block other files or agents.
  *
- * `skills.d/` is intentionally NOT loaded in this PR. The main-config
- * `agents.<name>.skills` field is `string[]` (a list of skill names), not a
- * structured-entry list, so an append-and-tag merge model needs a separate
- * design pass. See `OverlayDocSchema.skills` for the reserved field — the
- * schema accepts it shape-wise so a future PR can wire merging without a
- * breaking change.
+ * `skills.d/` IS loaded now (Phase 2 of #1163). Each overlay file may
+ * declare a `skills:` list; entries are merged into
+ * `agents.<name>.skills` via array-append + dedupe. Order: main-config
+ * entries first, then overlay-sourced entries in sorted-file order.
+ * Duplicate names are dropped silently (operator's main-config skill +
+ * agent's overlay-installed bundled skill of the same name is treated
+ * as "main wins, no-op").
+ *
+ * Skills overlay files are written by the `skill_install` MCP tool
+ * via `overlay-writer.ts`. Source format is validated at write time
+ * (currently only `bundled:<name>` is allowed; git+SHA-pinned support
+ * is tracked separately for #1163 Phase 2 follow-up).
  */
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { resolve } from "node:path";
@@ -112,17 +118,21 @@ export function applyAgentOverlays(config: SwitchroomConfig): ApplyOverlaysResul
   const warnings: OverlayWarning[] = [];
   // `agents` lives at the top level of `SwitchroomConfig` alongside
   // `switchroom`, `telegram`, `defaults`, `profiles` — NOT inside the
-  // inner `switchroom:` block. Pre-fix this read `config.switchroom?.
-  // agents` which always returned undefined, so the overlay loader
-  // silently became a no-op for every agent. Caught by #1200 (TS error
-  // TS2339 + 19 cascading failures, CI red since #1182/#1187 landed).
+  // inner `switchroom:` block. (Fixed in #1205 / #1200.)
   const agents = config.agents ?? {};
 
   for (const [agentName, agentCfg] of Object.entries(agents)) {
     try {
       const scheduleDir = overlayDirFor(agentName, "schedule.d");
       const files = listYamlFiles(scheduleDir);
-      if (files.length === 0) continue;
+      // #1209 review fix: don't `continue` past the skills.d pass when
+      // an agent has no schedule.d files. Pre-fix the early-return
+      // made the skills.d branch dead code for newly-scaffolded agents
+      // (which is the common case — most agents start with neither
+      // overlay dir populated). Gate the schedule body on
+      // `files.length > 0` instead so we always fall through to the
+      // skills.d pass below.
+      if (files.length > 0) {
 
       // Snapshot the main-config entry shapes so we can detect "would
       // override" attempts. Append-only means: if the overlay's
@@ -155,7 +165,11 @@ export function applyAgentOverlays(config: SwitchroomConfig): ApplyOverlaysResul
             merged.push(stampOverlay(entry));
           }
 
-          // Phase B does NOT merge `doc.skills` — see file header.
+          // Phase 2 (#1163) — schedule.d files MAY also declare a
+          // `skills:` list (one schema, two storage dirs). Skip skills
+          // when the file came from schedule.d to keep schema-vs-dir
+          // separation crisp (and so the operator can grep skill
+          // installs by looking only at skills.d/).
         } catch (err) {
           const reason =
             err instanceof ZodError
@@ -170,16 +184,74 @@ export function applyAgentOverlays(config: SwitchroomConfig): ApplyOverlaysResul
       }
 
       agentCfg.schedule = merged;
+      } // close the files.length > 0 guard
     } catch (err) {
-      // Per-agent isolation — a directory-read failure (permissions etc.)
-      // for agent X must NOT block loading for agents Y/Z.
+      // Per-agent isolation for the schedule.d pass — separate from
+      // the skills.d pass below so a permission-error on one dir
+      // doesn't block the other.
       warnings.push({
         agent: agentName,
-        file: "(agent overlay scan)",
+        file: "(agent schedule overlay scan)",
         reason: `unexpected error: ${(err as Error).message}`,
       });
       console.warn(
-        `[switchroom] overlay-loader: agent='${agentName}': unexpected error: ${(err as Error).message}`,
+        `[switchroom] overlay-loader: agent='${agentName}' schedule.d: unexpected error: ${(err as Error).message}`,
+      );
+    }
+
+    // ── Skills overlay pass (#1163 Phase 2) ─────────────────────────
+    try {
+      const skillsDir = overlayDirFor(agentName, "skills.d");
+      const skillFiles = listYamlFiles(skillsDir);
+      // No early continue — this is the LAST pass in the for-agent loop,
+      // but using `continue` here would still skip any future passes
+      // added below. Gate the merge work on file presence instead, same
+      // pattern as the schedule.d guard above (#1209 review).
+      if (skillFiles.length === 0) {
+        // nothing to merge; fall through to the per-agent catch (no-op).
+      } else {
+
+      const merged: string[] = [...(agentCfg.skills ?? [])];
+      const seen = new Set(merged);
+
+      for (const file of skillFiles) {
+        try {
+          const raw = readFileSync(file, "utf-8");
+          const parsed = parseYaml(raw);
+          const doc = OverlayDocSchema.parse(parsed);
+          for (const skillName of doc.skills ?? []) {
+            // Dedupe — silently drop main-config dup or duplicate across
+            // overlay files. The skill_install tool also dedupes on
+            // write, so this is defense-in-depth.
+            if (seen.has(skillName)) continue;
+            seen.add(skillName);
+            merged.push(skillName);
+          }
+        } catch (err) {
+          const reason =
+            err instanceof ZodError
+              ? `schema rejection: ${err.errors.map((e) => `${e.path.join(".")}: ${e.message}`).join("; ")}`
+              : `parse error: ${(err as Error).message}`;
+          warnings.push({ agent: agentName, file, reason });
+          console.warn(
+            `[switchroom] overlay-loader: agent='${agentName}' file='${file}': ${reason}`,
+          );
+        }
+      }
+
+      agentCfg.skills = merged;
+      } // close the skillFiles.length > 0 guard
+    } catch (err) {
+      // Per-agent isolation for the skills.d pass — same as schedule.d.
+      // A directory-read failure (permissions etc.) for agent X must
+      // NOT block loading for agents Y/Z.
+      warnings.push({
+        agent: agentName,
+        file: "(agent skills overlay scan)",
+        reason: `unexpected error: ${(err as Error).message}`,
+      });
+      console.warn(
+        `[switchroom] overlay-loader: agent='${agentName}' skills.d: unexpected error: ${(err as Error).message}`,
       );
     }
   }

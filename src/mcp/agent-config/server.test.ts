@@ -39,7 +39,9 @@ describe("TOOLS export", () => {
       "cron_list",
       "schedule_add",
       "schedule_remove",
+      "skill_install",   // #1163 Phase 2
       "skill_list",
+      "skill_remove",    // #1163 Phase 2
     ]);
   });
 

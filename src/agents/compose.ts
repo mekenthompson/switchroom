@@ -39,6 +39,10 @@ export const AGENT_UID_MAX = 10999;
 export interface ResourceDefaults {
   memLimit: string;
   cpus: number;
+  /** Optional — when set, emitted as `mem_reservation` (cgroup memory.low). */
+  memReservation?: string;
+  /** Optional — when set, emitted as `pids_limit` (cgroup pids.max). */
+  pidsLimit?: number;
 }
 
 const RESOURCE_BY_PROFILE: Record<string, ResourceDefaults> = {
@@ -54,20 +58,58 @@ const RESOURCE_BY_PROFILE: Record<string, ResourceDefaults> = {
 };
 
 /**
- * Resolve resource defaults for an agent. Special-cases the agent name
- * "klanker" (matches the canonical fleet's klanker profile), then falls
- * through to the agent's `extends:` profile name, then to "default".
+ * Operator override shape — matches the snake_case keys in the
+ * `resources` schema field. Resolved into camelCase `ResourceDefaults`
+ * by `resolveResourceDefaults`. All fields optional: an unset field
+ * falls back to the per-profile default.
+ */
+export interface ResourceOverrides {
+  memory?: string;
+  memory_reservation?: string;
+  pids_limit?: number;
+  cpus?: number;
+}
+
+/**
+ * Resolve resource limits for an agent.
  *
- * Operator overrides at the agent level (resources.mem_limit etc.) win
- * over these defaults — see emitAgentService.
+ * Precedence (highest wins, per-field):
+ *   1. Operator override on `agent.resources.<field>` (cascaded by
+ *      `mergeAgentConfig` from defaults / profile / per-agent layers).
+ *   2. Agent-name special-case: `klanker` → klanker profile defaults.
+ *      Preserved for backward compatibility — the canonical fleet's
+ *      klanker hits this when its YAML doesn't override.
+ *   3. The agent's `extends:` profile entry in RESOURCE_BY_PROFILE.
+ *   4. The `default` profile entry.
+ *
+ * Per-field merge: an override that sets only `memory` keeps the
+ * profile's `cpus` and any default `memReservation` / `pidsLimit`.
+ * This matches the schema description for the `resources` field.
  */
 export function resolveResourceDefaults(
   agentName: string,
   profile: string | undefined,
+  overrides?: ResourceOverrides | undefined,
 ): ResourceDefaults {
-  if (agentName === "klanker") return RESOURCE_BY_PROFILE.klanker!;
-  if (profile && RESOURCE_BY_PROFILE[profile]) return RESOURCE_BY_PROFILE[profile]!;
-  return RESOURCE_BY_PROFILE.default!;
+  let base: ResourceDefaults;
+  if (agentName === "klanker") {
+    base = RESOURCE_BY_PROFILE.klanker!;
+  } else if (profile && RESOURCE_BY_PROFILE[profile]) {
+    base = RESOURCE_BY_PROFILE[profile]!;
+  } else {
+    base = RESOURCE_BY_PROFILE.default!;
+  }
+  if (!overrides) return { ...base };
+  const merged: ResourceDefaults = { ...base };
+  if (overrides.memory !== undefined) merged.memLimit = overrides.memory;
+  if (overrides.cpus !== undefined) merged.cpus = overrides.cpus;
+  if (overrides.memory_reservation !== undefined) {
+    merged.memReservation = overrides.memory_reservation;
+  }
+  if (overrides.pids_limit !== undefined) {
+    merged.pidsLimit = overrides.pids_limit;
+  }
+  return merged;
 }
 
 /**
@@ -308,7 +350,10 @@ export function describeAgents(config: SwitchroomConfig): AgentServiceData[] {
     const resolved = resolveAgentConfig(config.defaults, config.profiles, agent);
     const profile = agent.extends ?? "default";
     const uid = allocateAgentUid(name);
-    const resources = resolveResourceDefaults(name, profile);
+    // `resolved.resources` is the cascaded operator override (per-field
+    // merge of defaults.resources → profile.resources → agent.resources,
+    // see mergeAgentConfig). Unset fields fall back to RESOURCE_BY_PROFILE.
+    const resources = resolveResourceDefaults(name, profile, resolved.resources);
     const strippedCaps = readStrippedCaps(agent);
     out.push({
       name,
@@ -946,6 +991,12 @@ function emitAgentService(
   lines.push(`    stop_grace_period: 45s`);
   lines.push(`    user: "${a.uid}:${a.uid}"`);
   lines.push(`    mem_limit: ${a.resources.memLimit}`);
+  if (a.resources.memReservation !== undefined) {
+    lines.push(`    mem_reservation: ${a.resources.memReservation}`);
+  }
+  if (a.resources.pidsLimit !== undefined) {
+    lines.push(`    pids_limit: ${a.resources.pidsLimit}`);
+  }
   lines.push(`    cpus: ${a.resources.cpus.toFixed(1)}`);
   lines.push(`    security_opt:`);
   lines.push(`      - "no-new-privileges:true"`);

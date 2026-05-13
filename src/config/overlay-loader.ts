@@ -125,7 +125,14 @@ export function applyAgentOverlays(config: SwitchroomConfig): ApplyOverlaysResul
     try {
       const scheduleDir = overlayDirFor(agentName, "schedule.d");
       const files = listYamlFiles(scheduleDir);
-      if (files.length === 0) continue;
+      // #1209 review fix: don't `continue` past the skills.d pass when
+      // an agent has no schedule.d files. Pre-fix the early-return
+      // made the skills.d branch dead code for newly-scaffolded agents
+      // (which is the common case — most agents start with neither
+      // overlay dir populated). Gate the schedule body on
+      // `files.length > 0` instead so we always fall through to the
+      // skills.d pass below.
+      if (files.length > 0) {
 
       // Snapshot the main-config entry shapes so we can detect "would
       // override" attempts. Append-only means: if the overlay's
@@ -177,6 +184,7 @@ export function applyAgentOverlays(config: SwitchroomConfig): ApplyOverlaysResul
       }
 
       agentCfg.schedule = merged;
+      } // close the files.length > 0 guard
     } catch (err) {
       // Per-agent isolation for the schedule.d pass — separate from
       // the skills.d pass below so a permission-error on one dir
@@ -195,7 +203,13 @@ export function applyAgentOverlays(config: SwitchroomConfig): ApplyOverlaysResul
     try {
       const skillsDir = overlayDirFor(agentName, "skills.d");
       const skillFiles = listYamlFiles(skillsDir);
-      if (skillFiles.length === 0) continue;
+      // No early continue — this is the LAST pass in the for-agent loop,
+      // but using `continue` here would still skip any future passes
+      // added below. Gate the merge work on file presence instead, same
+      // pattern as the schedule.d guard above (#1209 review).
+      if (skillFiles.length === 0) {
+        // nothing to merge; fall through to the per-agent catch (no-op).
+      } else {
 
       const merged: string[] = [...(agentCfg.skills ?? [])];
       const seen = new Set(merged);
@@ -226,6 +240,7 @@ export function applyAgentOverlays(config: SwitchroomConfig): ApplyOverlaysResul
       }
 
       agentCfg.skills = merged;
+      } // close the skillFiles.length > 0 guard
     } catch (err) {
       // Per-agent isolation for the skills.d pass — same as schedule.d.
       // A directory-read failure (permissions etc.) for agent X must

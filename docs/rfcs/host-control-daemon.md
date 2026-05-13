@@ -161,6 +161,17 @@ the in-progress update. By running it under its own project name
 `compose down` cycle cannot touch it. The daemon outlives the
 fleet it controls.
 
+**On the `sudo` argument that gated v2.** An earlier draft cited
+"`switchroom apply` self-elevates via `sudo` and there is no
+host `sudo` inside a container" as a second blocker for any
+in-container deployment. That argument doesn't survive the
+docker-first v0.7+ design: `apply`'s privilege need is to chown
+per-agent state dirs and bind the broker socket across UIDs,
+both of which are container capabilities (`CAP_CHOWN`,
+`CAP_FOWNER`, `CAP_DAC_OVERRIDE`) rather than host-`sudo` calls.
+The daemon container declares those caps explicitly (see the
+`cap_add` block below); no `sudo` round-trip required.
+
 **Same release surface as everything else.** The daemon ships
 from `ghcr.io/switchroom/switchroom-hostd:<tag>`, pulled on
 `switchroom update` like the other images. Operators don't manage
@@ -181,7 +192,6 @@ services:
     image: ghcr.io/switchroom/switchroom-hostd:${TAG:-latest}
     container_name: switchroom-hostd
     restart: unless-stopped
-    network_mode: host
     user: "${OPERATOR_UID}:${OPERATOR_GID}"
     cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]   # chown per-agent sockets
     volumes:
@@ -197,6 +207,19 @@ services:
       retries: 3
       start_period: 20s
 ```
+
+Notes on the compose shape:
+
+- **No `network_mode: host`.** The daemon's only ingress is the
+  per-agent UDS, which is a filesystem object (bind-mounted from
+  `~/.switchroom/hostd/<agent>/`). Host networking would buy
+  nothing and is correctly omitted.
+- **`${HOME}` works because compose interpolates env vars when
+  the operator runs `docker compose up`.** The equivalent
+  `docker run` one-liner the install verb prints uses a shell-
+  expanded path (`$HOME` outside quotes) so it works without
+  compose's env interpolation. Both forms land at the same
+  absolute path.
 
 The daemon shells out to a `switchroom` CLI invocation inside its
 own container — the image bakes in the same bundle as the agent

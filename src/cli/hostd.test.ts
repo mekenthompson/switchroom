@@ -33,6 +33,15 @@ describe("renderHostdComposeFile", () => {
     // /host-home/.switchroom inside the container so HOME=/host-home
     // resolves correctly.
     expect(out).toContain("/home/alice/.switchroom:/host-home/.switchroom:rw");
+    // Symlink-safe direct file bind for switchroom.yaml. Operators
+    // who keep the yaml in a sibling git-tracked repo (the canonical
+    // setup) symlink it into ~/.switchroom/. The dir bind preserves
+    // the symlink as a symlink (with a host-path target the container
+    // can't resolve); the direct file bind follows the symlink at
+    // mount time.
+    expect(out).toContain(
+      "/home/alice/.switchroom/switchroom.yaml:/state/config/switchroom.yaml:ro",
+    );
     // docker.sock is a fixed host path; bind-mount is host-home-agnostic.
     expect(out).toContain("/var/run/docker.sock:/var/run/docker.sock:rw");
   });
@@ -67,7 +76,10 @@ describe("renderHostdComposeFile", () => {
   it("sets HOME, SWITCHROOM_CONFIG, PATH env so spawned switchroom CLI works", () => {
     const out = renderHostdComposeFile({ hostHome: "/h", imageTag: "latest" });
     expect(out).toContain("HOME: /host-home");
-    expect(out).toContain("SWITCHROOM_CONFIG: /host-home/.switchroom/switchroom.yaml");
+    // SWITCHROOM_CONFIG points at /state/config/switchroom.yaml — the
+    // symlink-safe direct file bind. Mirrors the agent container's
+    // config path convention.
+    expect(out).toContain("SWITCHROOM_CONFIG: /state/config/switchroom.yaml");
     expect(out).toContain("PATH:");
   });
 

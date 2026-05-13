@@ -161,7 +161,9 @@ export function isHindsightContainerExists(): boolean {
  * Pick a tmpfs-backed directory for the LLM-key secret file.
  *
  * Resolution order:
- *   1. `/run/switchroom/hindsight/` — preferred on systemd hosts, tmpfs by default.
+ *   1. `/run/switchroom/hindsight/` — preferred when `/run` is a tmpfs
+ *      mount (the default on most Linux distros, regardless of init
+ *      system).
  *   2. `/dev/shm/switchroom-hindsight/` — fallback when `/run` is read-only
  *      (rootless containers, some hardened hosts).
  *

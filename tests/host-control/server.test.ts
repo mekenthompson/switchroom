@@ -5,7 +5,7 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, rmSync, mkdirSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostdServer } from "../../src/host-control/server.js";
@@ -56,6 +56,26 @@ describe("hostd server — startup & socket binding", () => {
     expect(bound).toHaveLength(2);
     expect(bound.some((p) => p.endsWith("/klanker/sock"))).toBe(true);
     expect(bound.some((p) => p.endsWith("/bob/sock"))).toBe(true);
+  });
+
+  it("parent hostd dir and per-agent dirs are 0755 so the operator can traverse", () => {
+    // Regression for the silent-bind-mount-skip bug: when the daemon
+    // ran the parent dir was created 0o700 (root-only). The compose
+    // generator runs as the operator's uid and calls
+    // existsSync(<hostdDir>/<agentName>) at apply time — with 0o700
+    // root-owned, the operator's uid can't traverse and the
+    // existsSync returns false, so compose silently omits the bind
+    // mount. Result: agent containers had no /run/switchroom/hostd/
+    // <name>/sock and could never reach the daemon. 0o755 fixes the
+    // traversal while the socket-level mode (0o660 + chown-to-agent)
+    // keeps the actual security boundary intact.
+    const parent = join(tmp, ".switchroom", "hostd");
+    const klankerDir = join(parent, "klanker");
+    const bobDir = join(parent, "bob");
+    // & 0o777 to drop the file-type bits and compare just the mode.
+    expect(statSync(parent).mode & 0o777).toBe(0o755);
+    expect(statSync(klankerDir).mode & 0o777).toBe(0o755);
+    expect(statSync(bobDir).mode & 0o777).toBe(0o755);
   });
 
   it("rebinds on a fresh start after stop (idempotent unlink)", async () => {

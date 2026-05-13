@@ -488,6 +488,72 @@ describe("scaffoldAgent", () => {
     expect(existsSync(join(result.agentDir, ".mcp.json"))).toBe(false);
   });
 
+  // PR δ (#1175 RFC C Phase 3): admin agents get the `hostd` MCP wired
+  // into .mcp.json so the agent's Claude session can call hostd verbs
+  // (agent_restart, agent_start, agent_stop, update_check, update_apply)
+  // as tool calls. Non-admin agents don't get the MCP because compose
+  // only bind-mounts the per-agent hostd socket for admins — wiring
+  // them up would just surface ENOENT at first call.
+  it("adds the hostd MCP server to .mcp.json when agent has admin: true", () => {
+    const agentConfig = makeAgentConfig({
+      admin: true,
+      channels: { telegram: { plugin: "switchroom" } },
+    });
+    const switchroomConfig: SwitchroomConfig = {
+      switchroom: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      agents: { "admin-agent": agentConfig },
+    } as SwitchroomConfig;
+
+    const result = scaffoldAgent(
+      "admin-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      switchroomConfig,
+      undefined,
+      "/fake/switchroom.yaml",
+    );
+
+    const mcpJson = JSON.parse(
+      readFileSync(join(result.agentDir, ".mcp.json"), "utf-8"),
+    );
+    expect(mcpJson.mcpServers.hostd).toBeDefined();
+    expect(mcpJson.mcpServers.hostd.command).toBe("/usr/local/bin/switchroom");
+    expect(mcpJson.mcpServers.hostd.args).toEqual(["mcp", "hostd"]);
+    expect(mcpJson.mcpServers.hostd.env.SWITCHROOM_AGENT_NAME).toBe(
+      "admin-agent",
+    );
+  });
+
+  it("does NOT add the hostd MCP server when agent is not admin", () => {
+    const agentConfig = makeAgentConfig({
+      channels: { telegram: { plugin: "switchroom" } },
+    });
+    const switchroomConfig: SwitchroomConfig = {
+      switchroom: { version: 1, agents_dir: tmpDir },
+      telegram: telegramConfig,
+      agents: { "plain-agent": agentConfig },
+    } as SwitchroomConfig;
+
+    const result = scaffoldAgent(
+      "plain-agent",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      switchroomConfig,
+      undefined,
+      "/fake/switchroom.yaml",
+    );
+
+    const mcpJson = JSON.parse(
+      readFileSync(join(result.agentDir, ".mcp.json"), "utf-8"),
+    );
+    expect(mcpJson.mcpServers.hostd).toBeUndefined();
+    // agent-config is always present for switchroom-plugin agents
+    expect(mcpJson.mcpServers["agent-config"]).toBeDefined();
+  });
+
   it("is idempotent — running twice with unchanged config + template = no-op", () => {
     // #1122: idempotency means "same inputs → same final state on
     // subsequent runs," NOT "user hand-edits are frozen forever." The

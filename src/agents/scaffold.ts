@@ -2021,6 +2021,20 @@ export function scaffoldAgent(
       },
     };
 
+    // hostd MCP — admin-only (#1175 RFC C / PR δ). Compose only
+    // bind-mounts the hostd socket for admin agents, so non-admin
+    // entries here would just surface ENOENT at first call.
+    if (agentConfig.admin === true) {
+      mcpServers["hostd"] = {
+        command: switchroomCliPath,
+        args: ["mcp", "hostd"],
+        env: {
+          SWITCHROOM_AGENT_NAME: name,
+          SWITCHROOM_CONFIG: resolvedConfigPath,
+        },
+      };
+    }
+
     // Add hindsight memory MCP if configured
     if (hindsightEnabled && switchroomConfig) {
       const hindsightEntry = getHindsightSettingsEntry(name, switchroomConfig);
@@ -3682,6 +3696,23 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
         },
       },
     };
+
+    // hostd MCP — admin-only fleet-management tools (agent_restart,
+    // agent_start, agent_stop, update_check, update_apply). Wired only
+    // for admin-flagged agents because compose only bind-mounts the
+    // per-agent hostd socket for those (#1175 RFC C §5.2). Without
+    // the socket, the tools fail at first call with a clean ENOENT
+    // error message — but cleaner UX to just not surface them.
+    if (agentConfig.admin === true) {
+      mcpServers["hostd"] = {
+        command: switchroomCliPath,
+        args: ["mcp", "hostd"],
+        env: {
+          SWITCHROOM_AGENT_NAME: name,
+          SWITCHROOM_CONFIG: resolvedConfigPath,
+        },
+      };
+    }
 
     if (hindsightEnabled) {
       const hindsightEntry = getHindsightSettingsEntry(name, switchroomConfig);

@@ -110,7 +110,13 @@ function stampOverlay(entry: ScheduleEntry): ScheduleEntry {
  */
 export function applyAgentOverlays(config: SwitchroomConfig): ApplyOverlaysResult {
   const warnings: OverlayWarning[] = [];
-  const agents = config.switchroom?.agents ?? {};
+  // `agents` lives at the top level of `SwitchroomConfig` alongside
+  // `switchroom`, `telegram`, `defaults`, `profiles` — NOT inside the
+  // inner `switchroom:` block. Pre-fix this read `config.switchroom?.
+  // agents` which always returned undefined, so the overlay loader
+  // silently became a no-op for every agent. Caught by #1200 (TS error
+  // TS2339 + 19 cascading failures, CI red since #1182/#1187 landed).
+  const agents = config.agents ?? {};
 
   for (const [agentName, agentCfg] of Object.entries(agents)) {
     try {

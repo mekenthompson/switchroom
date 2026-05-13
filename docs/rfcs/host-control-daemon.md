@@ -580,23 +580,42 @@ compose bind mounts):
 
 **Remaining work to make the daemon actually deployable:**
 
-1. **Phase 1.5 — packaging.** Add `docker/Dockerfile.hostd`; extend
-   `scripts/build.mjs` to bake the image (mirroring how
-   `Dockerfile.broker` is handled). Drop a sibling
-   `~/.switchroom/hostd/docker-compose.yml` template. Add
-   `switchroom hostd install` verb that writes/refreshes that
-   file. Publish to `ghcr.io/switchroom/switchroom-hostd:<tag>`.
-2. **Phase 2 — gateway integration.** Replace the
+1. ✅ **Phase 1.5 — packaging** (#1202). `docker/Dockerfile.hostd`,
+   `scripts/build.mjs` bundle target, GHCR workflow entry,
+   `~/.switchroom/hostd/docker-compose.yml` template via the new
+   `switchroom hostd {install,status,uninstall}` verb. Published
+   at `ghcr.io/switchroom/switchroom-hostd:<tag>`. Hotfixed for
+   `withConfigError` HOF misuse + symlinked-config bind (#1203)
+   and bun-vs-node CLI shim (#1204). Integration tests added
+   in #1207.
+2. ✅ **Phase 2 verbs in daemon** (this PR). The five deferred verbs
+   are now implemented in `protocol.ts` + `server.ts`:
+   - `update_check` — read-only `switchroom update --check` proxy.
+     Any caller (admin or not). Synchronous response.
+   - `update_apply` — `switchroom update`. Admin only. Async
+     fire-and-forget pattern (started → get_status). Gated by the
+     new fleet-mutation lock (mutually exclusive with `apply`).
+   - `apply` — `switchroom apply --non-interactive`. Same shape
+     as `update_apply` (admin-only, async, fleet-lock-gated).
+   - `agent_start` / `agent_stop` — per-agent verbs. Self-target
+     always allowed; cross-agent requires admin. Synchronous.
+     NOT gated by the fleet-mutation lock (per-service docker
+     compose ops can safely race across agents).
+   `reconcile` was dropped from the original list — there's no
+   underlying `switchroom reconcile` CLI verb; `apply` covers the
+   same intent.
+3. **Phase 2 gateway swap** (separate PR, deferred). Replace the
    `spawnSwitchroomDetached` callsites in `telegram-plugin/gateway/`
-   with `await hostd("agent_restart", …)` etc., gated on
-   `host_control.enabled`. Fail-closed when the daemon is
-   unreachable (§7 Phase 1 behaviour). Add the remaining verbs
-   (`update_apply`, `apply`, `agent_start`, `agent_stop`,
-   `reconcile`, `update_check`) — `update_apply` and `apply`
-   need the broker passphrase-attestation client.
-3. **Phase 2.5 — Telegram surface.** `switchroom audit hostd` verb
+   with `await hostd(verb, …)` calls, gated on `host_control.enabled`
+   + `isHostdReachable(agentName)`. Fail-back to detached spawn when
+   the daemon is unreachable. Per-callsite refactor (~7-10 sites);
+   benefits from the audit trail + idempotency + fleet-mutation lock
+   the daemon now provides. `update_apply`/`apply` from the
+   Telegram surface starts working on docker hosts (closes the
+   #926 docker-availability guard's apologetic-error path).
+4. **Phase 2.5 — Telegram surface.** `switchroom audit hostd` verb
    + `/audit hostd` admin command.
-4. **Phase 3 — legacy removal.** Once the daemon is the default,
+5. **Phase 3 — legacy removal.** Once the daemon is the default,
    delete the legacy `triggerSelfRestart()` v0.6 systemctl path
    and the `resolveSystemdRunPath()` cgroup-escape branch in
    `spawnSwitchroomDetached`. Both are dead-code-inside-docker

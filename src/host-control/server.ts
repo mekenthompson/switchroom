@@ -10,11 +10,16 @@
  *   - `get_status`     (lookup of prior async mutations; gate matches
  *                      the original verb)
  *
- * Deferred to Phase 2: `update_check`, `update_apply`, `apply`,
- * `agent_start`, `agent_stop`, `reconcile`. Those need
- * operator-passphrase attestation (delegated to the broker) and a
- * non-trivial gateway integration; landing them in this PR would
- * balloon scope past one reviewable unit.
+ * Shipped in Phase 2 (#1208): `update_check`, `update_apply`,
+ * `apply`, `agent_start`, `agent_stop`. See RFC C §10 for the full
+ * verb table. `update_apply` and `apply` share a new fleet-mutation
+ * lock (this file's `fleetMutationInFlight`). `reconcile` was
+ * dropped from the original list — no underlying CLI verb exists;
+ * `apply` covers the intent.
+ *
+ * Still deferred: gateway integration (replacing
+ * `spawnSwitchroomDetached` callsites in telegram-plugin/gateway/
+ * with hostd RPC). Separate PR.
  */
 
 import { createServer, type Server, type Socket } from "node:net";
@@ -96,6 +101,27 @@ export class HostdServer {
   private statusByRequestId = new Map<string, StatusEntry>();
   /** idempotency_key → request_id of the canonical (first) call. */
   private idempotencyKeys = new Map<string, { request_id: string; ts: number }>();
+  /**
+   * Fleet-wide mutation lock — set while a long-running fleet
+   * mutation (`update_apply` or `apply`) is in flight. Phase 2 verb
+   * dispatchers consult this to refuse concurrent fleet mutations
+   * with `denied`, with the in-flight verb's request_id in the reason
+   * so the caller can `get_status` the existing run.
+   *
+   * Why fleet-wide and not per-verb: `update_apply` regenerates the
+   * compose file + recreates containers — if it runs concurrently
+   * with `apply` (which ALSO regenerates compose), the second one
+   * sees a half-written compose mid-write. A single mutex
+   * serializes both verbs even though they're different ops.
+   *
+   * Per-agent verbs (`agent_start`/`agent_stop`/`agent_restart`)
+   * are NOT gated by this lock — `docker compose <op> <service>` is
+   * service-scoped, and serializing across agents would prevent the
+   * common "fleet boot in parallel" case for no real safety win.
+   */
+  private fleetMutationInFlight:
+    | { op: "update_apply" | "apply"; request_id: string; started_at: number }
+    | null = null;
 
   constructor(private opts: ServerOptions) {}
 
@@ -305,6 +331,22 @@ export class HostdServer {
         case "get_status":
           resp = this.handleGetStatus(req, caller, started);
           break;
+        // ── Phase 2 verbs ────────────────────────────────────────
+        case "update_check":
+          resp = await this.handleUpdateCheck(req, started);
+          break;
+        case "update_apply":
+          resp = this.handleUpdateApply(req, caller, started);
+          break;
+        case "apply":
+          resp = this.handleApply(req, caller, started);
+          break;
+        case "agent_start":
+          resp = await this.handleAgentStart(req, started);
+          break;
+        case "agent_stop":
+          resp = await this.handleAgentStop(req, started);
+          break;
       }
     } catch (err) {
       resp = errorResponse(
@@ -358,6 +400,32 @@ export class HostdServer {
         if (ownCall || callerAdmin) return null;
         return `get_status: request_id not found or not visible to caller "${caller.name}"`;
       }
+      // ── Phase 2 verb gates ─────────────────────────────────────
+      case "update_check":
+        // Read-only fleet introspection (calls `switchroom update
+        // --check` — dry-run, prints the plan, no side effects).
+        // Same posture as upgrade_status: any caller including
+        // non-admin agents may query.
+        return null;
+      case "update_apply":
+      case "apply":
+        // Fleet-wide mutations. Require admin: a non-admin agent
+        // accidentally regenerating compose / pulling images on the
+        // whole fleet is the obvious foot-gun. Operator is always
+        // allowed (kind === "operator" already returned null above).
+        return callerAdmin
+          ? null
+          : `${req.op} requires admin: true on caller "${caller.name}"`;
+      case "agent_start":
+      case "agent_stop":
+        // Mirror agent_restart's gate: self-target always allowed;
+        // cross-agent requires admin. Mutations are per-service so
+        // there's no concurrent-fleet-write hazard.
+        if (req.args.name === ("name" in caller ? caller.name : null))
+          return null;
+        return callerAdmin
+          ? null
+          : `${req.op} cross-agent requires admin: true on caller "${caller.name}"`;
     }
   }
 
@@ -423,6 +491,221 @@ export class HostdServer {
       stdout_tail: tail(res.stdout),
       stderr_tail: tail(res.stderr),
     };
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // Phase 2 verbs (RFC §10)
+  // ──────────────────────────────────────────────────────────────────
+
+  /** Read-only: `switchroom update --check` — prints the plan, no
+   *  side effects. Same shape as upgrade_status. */
+  private async handleUpdateCheck(
+    req: Extract<HostdRequest, { op: "update_check" }>,
+    started: number,
+  ): Promise<HostdResponse> {
+    const res = await this.runSwitchroom(["update", "--check"]);
+    const result: Result = res.exit_code === 0 ? "completed" : "error";
+    return {
+      v: 1,
+      request_id: req.request_id,
+      result,
+      exit_code: res.exit_code,
+      duration_ms: Date.now() - started,
+      stdout_tail: tail(res.stdout),
+      stderr_tail: tail(res.stderr),
+    };
+  }
+
+  /**
+   * Mutating + long-running: `switchroom update` (pull + apply +
+   * recreate + doctor). Async fire-and-forget pattern (same as
+   * agent_restart). The fleet-mutation lock gates concurrent
+   * update_apply / apply calls — if one is in flight we return
+   * `denied` with the in-flight request_id so the caller can poll
+   * `get_status` instead of racing.
+   */
+  private handleUpdateApply(
+    req: Extract<HostdRequest, { op: "update_apply" }>,
+    caller: SocketIdentity,
+    started: number,
+  ): HostdResponse {
+    const denied = this.checkFleetMutationLock(req.op, req.request_id, started);
+    if (denied) return denied;
+
+    const args = ["update"];
+    if (req.args?.skip_images) args.push("--skip-images");
+    if (req.args?.rebuild) args.push("--rebuild");
+
+    const entry: StatusEntry = {
+      request_id: req.request_id,
+      caller,
+      op: req.op,
+      result: "started",
+      exit_code: null,
+      started_at: started,
+      finished_at: null,
+      stdout_tail: "",
+      stderr_tail: "",
+    };
+    this.recordStatus(entry);
+    this.fleetMutationInFlight = {
+      op: "update_apply",
+      request_id: req.request_id,
+      started_at: started,
+    };
+    this.spawnFleetMutation(req.op, args, entry);
+    return {
+      v: 1,
+      request_id: req.request_id,
+      result: "started",
+      exit_code: null,
+      duration_ms: Date.now() - started,
+    };
+  }
+
+  /**
+   * Mutating: `switchroom apply --non-interactive` (regenerate per-
+   * agent scaffolds + compose file; doesn't recreate containers).
+   * Faster than update_apply (10-30s typically) but still gated by
+   * the same fleet-mutation lock — concurrent apply + update_apply
+   * would write to the same compose file mid-render.
+   */
+  private handleApply(
+    req: Extract<HostdRequest, { op: "apply" }>,
+    caller: SocketIdentity,
+    started: number,
+  ): HostdResponse {
+    const denied = this.checkFleetMutationLock(req.op, req.request_id, started);
+    if (denied) return denied;
+
+    const args = ["apply", "--non-interactive"];
+    const entry: StatusEntry = {
+      request_id: req.request_id,
+      caller,
+      op: req.op,
+      result: "started",
+      exit_code: null,
+      started_at: started,
+      finished_at: null,
+      stdout_tail: "",
+      stderr_tail: "",
+    };
+    this.recordStatus(entry);
+    this.fleetMutationInFlight = {
+      op: "apply",
+      request_id: req.request_id,
+      started_at: started,
+    };
+    this.spawnFleetMutation(req.op, args, entry);
+    return {
+      v: 1,
+      request_id: req.request_id,
+      result: "started",
+      exit_code: null,
+      duration_ms: Date.now() - started,
+    };
+  }
+
+  /** Synchronous: `switchroom agent start <name>` — fast (~1-2s for
+   *  `docker compose start <service>`). No fleet-mutation lock —
+   *  the underlying compose op is service-scoped. */
+  private async handleAgentStart(
+    req: Extract<HostdRequest, { op: "agent_start" }>,
+    started: number,
+  ): Promise<HostdResponse> {
+    const res = await this.runSwitchroom(["agent", "start", req.args.name]);
+    return {
+      v: 1,
+      request_id: req.request_id,
+      result: res.exit_code === 0 ? "completed" : "error",
+      exit_code: res.exit_code,
+      duration_ms: Date.now() - started,
+      stdout_tail: tail(res.stdout),
+      stderr_tail: tail(res.stderr),
+    };
+  }
+
+  /** Synchronous: `switchroom agent stop <name>`. Same posture as
+   *  agent_start. Note: the CLI does NOT accept `--force` today
+   *  (verified via `src/cli/agent.ts` registration). If drain-skip
+   *  semantics arrive, plumb the flag here in lockstep with the
+   *  schema's `args.force` field. */
+  private async handleAgentStop(
+    req: Extract<HostdRequest, { op: "agent_stop" }>,
+    started: number,
+  ): Promise<HostdResponse> {
+    const args = ["agent", "stop", req.args.name];
+    const res = await this.runSwitchroom(args);
+    return {
+      v: 1,
+      request_id: req.request_id,
+      result: res.exit_code === 0 ? "completed" : "error",
+      exit_code: res.exit_code,
+      duration_ms: Date.now() - started,
+      stdout_tail: tail(res.stdout),
+      stderr_tail: tail(res.stderr),
+    };
+  }
+
+  /**
+   * Acquire the fleet-mutation lock. If something else is already
+   * holding it, return a `denied` response naming the in-flight
+   * request so the caller can `get_status` it instead of waiting.
+   * Idempotency-key dedupe already happened upstream — by the time
+   * we reach this check, we know this isn't a retry of the
+   * in-flight call.
+   */
+  private checkFleetMutationLock(
+    op: "update_apply" | "apply",
+    request_id: string,
+    started: number,
+  ): HostdResponse | null {
+    const inFlight = this.fleetMutationInFlight;
+    if (!inFlight) return null;
+    const ageMs = Date.now() - inFlight.started_at;
+    return deniedResponse(
+      request_id,
+      `${op}: fleet-mutation lock held by ${inFlight.op} ` +
+        `(request_id "${inFlight.request_id}", running ${Math.floor(ageMs / 1000)}s). ` +
+        `Wait for it to complete (poll get_status with target_request_id="${inFlight.request_id}") ` +
+        `before issuing another fleet mutation.`,
+      Date.now() - started,
+    );
+  }
+
+  /** Shared fire-and-forget spawn used by update_apply + apply.
+   *  Updates the status entry on completion AND releases the
+   *  fleet-mutation lock (success or fail). */
+  private spawnFleetMutation(
+    op: "update_apply" | "apply",
+    args: string[],
+    entry: StatusEntry,
+  ): void {
+    this.runSwitchroom(args)
+      .then((res) => {
+        entry.result = res.exit_code === 0 ? "completed" : "error";
+        entry.exit_code = res.exit_code;
+        entry.finished_at = Date.now();
+        entry.stdout_tail = tail(res.stdout);
+        entry.stderr_tail = tail(res.stderr);
+      })
+      .catch((err) => {
+        entry.result = "error";
+        entry.exit_code = null;
+        entry.finished_at = Date.now();
+        entry.error = (err as Error).message;
+      })
+      .finally(() => {
+        // Release the lock IF we're still the one holding it. A test
+        // (or a future code path) that reset the daemon's state
+        // mid-call shouldn't have its replacement lock clobbered.
+        if (
+          this.fleetMutationInFlight &&
+          this.fleetMutationInFlight.request_id === entry.request_id
+        ) {
+          this.fleetMutationInFlight = null;
+        }
+      });
   }
 
   private handleGetStatus(

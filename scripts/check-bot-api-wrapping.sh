@@ -70,7 +70,7 @@ ALLOWLIST=(
   # Range bumped 2026-05 for #1122 PR1 telemetry insertions that shifted
   # lines down. Use generous windows so further small shifts don't
   # cascade through this allowlist.
-  "telegram-plugin/gateway/gateway.ts:980-1010:Paired! sendMessage to DM senderId; no thread_id"
+  "telegram-plugin/gateway/gateway.ts:980-1030:Paired! sendMessage to DM senderId; no thread_id"
 
   # operator-event broadcast. The loop's `opts` is built without
   # `message_thread_id` (parse_mode + reply_markup only).
@@ -81,13 +81,13 @@ ALLOWLIST=(
   # permission-request keyboard send. opts only has reply_markup. No thread_id.
   # Range bumped 2026-05-13 for stuck-turn-recovery v2 cleanup expansion
   # (~100 lines total added around line 2510).
-  "telegram-plugin/gateway/gateway.ts:2695-2860:permission-request keyboard; no thread_id"
+  "telegram-plugin/gateway/gateway.ts:2695-2880:permission-request keyboard; no thread_id"
 
   # reply chunk-loop fallback after robustApiCall threw THREAD_NOT_FOUND.
   # The caller dropped the thread; this raw sendMessage retries on the
   # main chat. Wrapping would re-enter the THREAD_NOT_FOUND throw on a
   # phantom second deletion.
-  "telegram-plugin/gateway/gateway.ts:3160-3340:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
+  "telegram-plugin/gateway/gateway.ts:3160-3360:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
   # Range bumped 2026-05-13 for stuck-turn-recovery (#1136) v2 cleanup

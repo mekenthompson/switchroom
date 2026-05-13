@@ -49,8 +49,12 @@ const STAGING_SUBDIR = ".staging";
 export interface OverlayPaths {
   agentRoot: string;       // ~/.switchroom/agents/<name>
   scheduleDir: string;     // <agentRoot>/schedule.d
-  stagingDir: string;      // <scheduleDir>/.staging
-  lockPath: string;        // <agentRoot>/.lock
+  scheduleStagingDir: string; // <scheduleDir>/.staging
+  skillsDir: string;       // <agentRoot>/skills.d (Phase 2 of #1163)
+  skillsStagingDir: string;   // <skillsDir>/.staging
+  lockPath: string;        // <agentRoot>/.lock — covers BOTH overlay subdirs
+  /** @deprecated Use scheduleStagingDir; preserved for backwards compat. */
+  stagingDir: string;
 }
 
 export function overlayPathsFor(
@@ -61,17 +65,31 @@ export function overlayPathsFor(
     ? resolve(opts.root, agent)
     : resolve(resolveDualPath(`~/.switchroom/agents/${agent}`));
   const scheduleDir = join(base, "schedule.d");
+  const scheduleStagingDir = join(scheduleDir, STAGING_SUBDIR);
+  const skillsDir = join(base, "skills.d");
+  const skillsStagingDir = join(skillsDir, STAGING_SUBDIR);
   return {
     agentRoot: base,
     scheduleDir,
-    stagingDir: join(scheduleDir, STAGING_SUBDIR),
+    scheduleStagingDir,
+    skillsDir,
+    skillsStagingDir,
     lockPath: join(base, ".lock"),
+    // Backwards-compat alias — callers that referenced `stagingDir` get
+    // the schedule one (the original semantics). New callers should use
+    // the kind-specific names.
+    stagingDir: scheduleStagingDir,
   };
 }
 
 function ensureDirs(paths: OverlayPaths): void {
   mkdirSync(paths.scheduleDir, { recursive: true });
-  mkdirSync(paths.stagingDir, { recursive: true });
+  mkdirSync(paths.scheduleStagingDir, { recursive: true });
+}
+
+function ensureSkillsDirs(paths: OverlayPaths): void {
+  mkdirSync(paths.skillsDir, { recursive: true });
+  mkdirSync(paths.skillsStagingDir, { recursive: true });
 }
 
 /**
@@ -83,7 +101,11 @@ function ensureDirs(paths: OverlayPaths): void {
  * advisory — operators cooperating with the protocol are protected.
  */
 function withAgentLock<T>(paths: OverlayPaths, fn: () => T): T {
-  ensureDirs(paths);
+  // Pre-create the agentRoot so the lockfile open succeeds. Subdir
+  // ensure (`ensureDirs` / `ensureSkillsDirs`) is the caller's
+  // responsibility — keeps the lock helper subdir-agnostic so both
+  // schedule.d and skills.d writes share the same flock.
+  mkdirSync(paths.agentRoot, { recursive: true });
   // Simple O_EXCL-based lock with a stale-detection window. We retry
   // briefly to avoid spurious failures when two writers race; longer
   // waits are caller's responsibility.
@@ -147,7 +169,7 @@ export function writeOverlayEntry(
   const paths = overlayPathsFor(agent, opts);
   return withAgentLock(paths, () => {
     ensureDirs(paths);
-    const stagingPath = join(paths.stagingDir, `${slug}.yaml`);
+    const stagingPath = join(paths.scheduleStagingDir, `${slug}.yaml`);
     const finalPath = join(paths.scheduleDir, `${slug}.yaml`);
     const fd = openSync(stagingPath, "w", 0o600);
     try {
@@ -159,6 +181,71 @@ export function writeOverlayEntry(
     renameSync(stagingPath, finalPath);
     return finalPath;
   });
+}
+
+/**
+ * Atomically write a skills-overlay YAML document to
+ * `~/.switchroom/agents/<agent>/skills.d/<slug>.yaml`. Mirrors
+ * `writeOverlayEntry` but targets the skills.d/ tree. (#1163 Phase 2.)
+ */
+export function writeSkillsOverlayEntry(
+  agent: string,
+  slug: string,
+  yamlText: string,
+  opts: { root?: string } = {},
+): string {
+  const paths = overlayPathsFor(agent, opts);
+  return withAgentLock(paths, () => {
+    ensureSkillsDirs(paths);
+    const stagingPath = join(paths.skillsStagingDir, `${slug}.yaml`);
+    const finalPath = join(paths.skillsDir, `${slug}.yaml`);
+    const fd = openSync(stagingPath, "w", 0o600);
+    try {
+      writeSync(fd, yamlText);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(stagingPath, finalPath);
+    return finalPath;
+  });
+}
+
+/** Delete a <slug>.yaml under skills.d. (#1163 Phase 2.) */
+export function deleteSkillsOverlayEntry(
+  agent: string,
+  slug: string,
+  opts: { root?: string } = {},
+): boolean {
+  const paths = overlayPathsFor(agent, opts);
+  return withAgentLock(paths, () => {
+    const finalPath = join(paths.skillsDir, `${slug}.yaml`);
+    if (!existsSync(finalPath)) return false;
+    unlinkSync(finalPath);
+    return true;
+  });
+}
+
+/** Enumerate skills overlay files. Mirror of `listOverlayEntries`. */
+export function listSkillsOverlayEntries(
+  agent: string,
+  opts: { root?: string } = {},
+): ListedOverlayEntry[] {
+  const paths = overlayPathsFor(agent, opts);
+  if (!existsSync(paths.skillsDir)) return [];
+  const out: ListedOverlayEntry[] = [];
+  for (const name of readdirSync(paths.skillsDir)) {
+    if (!/\.ya?ml$/i.test(name)) continue;
+    const full = join(paths.skillsDir, name);
+    try {
+      const raw = readFileSync(full, "utf-8");
+      const slug = name.replace(/\.ya?ml$/i, "");
+      out.push({ slug, path: full, raw });
+    } catch {
+      /* unreadable file — skip */
+    }
+  }
+  return out.sort((a, b) => a.slug.localeCompare(b.slug));
 }
 
 /**

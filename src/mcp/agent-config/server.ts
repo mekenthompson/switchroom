@@ -67,6 +67,8 @@ interface ToolArgs {
   secrets?: string[];
   name?: string;
   cron_hash?: string;
+  // skill_install (#1163 Phase 2)
+  source?: string;
 }
 
 function buildArgs(base: string[], a: ToolArgs): string[] {
@@ -165,6 +167,56 @@ export const TOOLS = [
       },
     },
   },
+  // #1163 Phase 2 — skill self-service.
+  {
+    name: "skill_install",
+    description:
+      "Install a skill into the agent's overlay (#1163 Phase 2). " +
+      "v1 source allow-list: `bundled:<name>` only — the named skill " +
+      "must already exist in the bundled-skills pool on the host. " +
+      "git+https://...@<pinned-sha> sources are designed but deferred " +
+      "to a follow-up; `file://` / `local-path:` are rejected. After " +
+      "successful install, the agent's `.claude/skills/<name>` symlink " +
+      "is created automatically via reconcile, no agent restart " +
+      "required. Skill quota: 20 per agent.",
+    inputSchema: {
+      type: "object" as const,
+      required: ["source"],
+      properties: {
+        source: {
+          type: "string",
+          description:
+            "Source descriptor. v1: `bundled:<skill-name>` (the bundled " +
+            "skill must exist in the host's skills pool).",
+        },
+        name: {
+          type: "string",
+          pattern: "^[a-z0-9][a-z0-9_-]{0,62}$",
+          description:
+            "Optional override slug (defaults to the skill name from source).",
+        },
+      },
+    },
+  },
+  {
+    name: "skill_remove",
+    description:
+      "Remove an overlay-installed skill by slug. The agent's " +
+      "`.claude/skills/<name>` symlink is removed on next reconcile. " +
+      "Does NOT affect operator-installed skills listed directly in " +
+      "switchroom.yaml — those are removed by the operator only.",
+    inputSchema: {
+      type: "object" as const,
+      required: ["name"],
+      properties: {
+        name: {
+          type: "string",
+          pattern: "^[a-z0-9][a-z0-9_-]{0,62}$",
+          description: "Slug passed at install time.",
+        },
+      },
+    },
+  },
 ];
 
 export function dispatchTool(
@@ -209,6 +261,29 @@ export function dispatchTool(
       if (a.agent) base.push("--agent", a.agent);
       if (a.name) base.push("--name", a.name);
       if (a.cron_hash) base.push("--cron-hash", a.cron_hash);
+      cliArgs = base;
+      parseMode = "json";
+      break;
+    }
+    case "skill_install": {
+      const a = args as ToolArgs;
+      if (!a.source) {
+        return errorText("skill_install: source is required");
+      }
+      const base = ["skill", "install", "--source", a.source as string];
+      if (a.agent) base.push("--agent", a.agent);
+      if (a.name) base.push("--name", a.name);
+      cliArgs = base;
+      parseMode = "json";
+      break;
+    }
+    case "skill_remove": {
+      const a = args as ToolArgs;
+      if (!a.name) {
+        return errorText("skill_remove: name is required");
+      }
+      const base = ["skill", "remove", "--name", a.name as string];
+      if (a.agent) base.push("--agent", a.agent);
       cliArgs = base;
       parseMode = "json";
       break;

@@ -395,6 +395,67 @@ For Claude Code settings switchroom doesn't wrap:
 - **`claude_md_raw:`** — appended verbatim to CLAUDE.md on initial scaffold
 - **`cli_args:`** — extra flags appended to `exec claude` in start.sh (POSIX-quoted)
 
+## Admin-Only: Extra Bind-Mounts (`bind_mounts:`)
+
+Agent containers ship with a fixed bind-mount set (state dir, .claude
+project dir, logs, read-only skills + credentials). That is the right
+default for the typical fleet — sandboxed agents stay isolated from
+the host's source trees and operator state.
+
+For the **dogfood / self-modification** case — an admin agent asked to
+fix a switchroom bug or edit a bundled skill — that isolation is the
+blocker. The agent can read `/opt/switchroom/switchroom.js` (the
+compiled bundle baked into the image) but not the TypeScript source
+on the host. `bind_mounts:` is the per-agent escape hatch.
+
+```yaml
+agents:
+  klanker:
+    admin: true                      # required — see "Admin gating" below
+    bind_mounts:
+      - source: /home/me/code/switchroom
+        mode: rw                     # read-write, for `bun build` + commits
+      - source: /home/me/code/some-other-repo
+        mode: ro                     # read-only is the default
+    add_dirs:
+      - /home/me/code/switchroom     # also extend claude's tool-reach allowlist
+      - /home/me/code/some-other-repo
+```
+
+Each entry takes:
+
+- **`source:`** (required) — absolute host path. Tilde-expansion is **not**
+  performed; pass the literal path. Refused if the path is under a
+  system-path denylist (`/`, `/etc`, `/proc`, `/sys`, `/dev`, `/run`,
+  `/var/run`, `/boot`, `/var/lib/docker`) or equals `/var/run/docker.sock`.
+- **`target:`** (optional) — container path the mount appears at.
+  Defaults to the same path as `source`, matching switchroom's existing
+  dual-mount convention so absolute paths in scaffolded scripts and tool
+  invocations Just Work.
+- **`mode:`** (optional, default `ro`) — `ro` or `rw`.
+
+### Admin gating
+
+`bind_mounts:` requires `admin: true` on the same agent. `switchroom apply`
+hard-fails if a non-admin agent declares it — silently dropping the
+entries would mask an intended privilege grant. The two are coupled
+deliberately: the same operator who already trusts an agent with vault
+grant-management (`/grant`) and fleet-admin slash commands (`/agents`,
+`/logs`, `/update`) is the right principal for source-tree access.
+
+If you want filesystem reach without admin powers, the right answer is
+to invoke a separate Claude session from outside switchroom (a host
+shell session) — not to relax the gate.
+
+### Pair with `add_dirs:`
+
+`bind_mounts:` makes the path **exist** inside the container.
+`add_dirs:` makes the claude CLI's tool-allowlist **include** it.
+You typically want both. Without `add_dirs:`, claude's Read/Edit tools
+will reject the path as outside the working set even though the file is
+there. Without `bind_mounts:`, the path doesn't exist in the sandbox and
+`add_dirs:` is a no-op.
+
 ## Minimal Example
 
 ```yaml

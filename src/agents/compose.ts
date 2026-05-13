@@ -26,7 +26,7 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { SwitchroomConfig, AgentConfig } from "../config/schema.js";
+import type { SwitchroomConfig, AgentConfig, AgentBindMount } from "../config/schema.js";
 import { resolveAgentConfig } from "../config/merge.js";
 import { isReservedAgentName } from "../vault/broker/peercred.js";
 
@@ -254,6 +254,14 @@ interface AgentServiceData {
    */
   admin: boolean;
   /**
+   * Operator-declared extra bind-mounts (#1164). ADMIN-ONLY: validated
+   * + emitted by `emitAgentService` if and only if `admin === true`.
+   * Read directly from the per-agent config — deliberately not
+   * cascade-merged, so a profile can't silently grant filesystem reach
+   * to every agent that extends it.
+   */
+  bindMounts: AgentBindMount[];
+  /**
    * Operator-declared env vars from the cascade-resolved agent config
    * (`agent.env` block in switchroom.yaml). Propagated into the
    * compose `environment:` block so child processes forked
@@ -288,6 +296,9 @@ export function describeAgents(config: SwitchroomConfig): AgentServiceData[] {
       resources,
       strippedCaps,
       admin: agent.admin === true,
+      // Per-agent only (no cascade) — see AgentServiceData.bindMounts
+      // doc comment for the rationale.
+      bindMounts: agent.bind_mounts ? [...agent.bind_mounts] : [],
       // Read user env from the cascade-resolved config so defaults +
       // profile + agent layers all contribute. Empty object when the
       // operator hasn't declared any (the common case).
@@ -296,6 +307,86 @@ export function describeAgents(config: SwitchroomConfig): AgentServiceData[] {
     void resolved;
   }
   return out;
+}
+
+/**
+ * System paths refused as bind_mount sources, regardless of mode.
+ * Prefix-matched: an entry `/etc` rejects `/etc/foo` too.
+ *
+ * Mounting any of these inside an agent container is either pointless
+ * (the container has its own /proc, /sys, /dev) or a privilege-escalation
+ * vector (host `/etc` exposes shadow/passwd; `/var/lib/docker` and the
+ * docker socket give root-equivalent host control).
+ */
+const BIND_MOUNT_DENYLIST = [
+  "/",
+  "/etc",
+  "/proc",
+  "/sys",
+  "/dev",
+  "/run",
+  "/var/run",
+  "/boot",
+  "/var/lib/docker",
+];
+
+/** Exact source paths refused regardless of denylist prefix-matching. */
+const BIND_MOUNT_EXACT_DENY = new Set(["/var/run/docker.sock"]);
+
+/**
+ * Validate one entry from an agent's `bind_mounts:` list. Returns the
+ * resolved (source, target, mode) on success; throws a descriptive
+ * Error on rejection. Pure — no IO.
+ *
+ * Callers MUST also check the owning agent's `admin === true` before
+ * calling this; the admin gate is upstream (in emitAgentService).
+ */
+export function resolveBindMount(
+  agentName: string,
+  entry: AgentBindMount,
+): { source: string; target: string; mode: "ro" | "rw" } {
+  const source = entry.source;
+  if (typeof source !== "string" || source.length === 0) {
+    throw new Error(
+      `compose: agent "${agentName}" bind_mount has empty source`,
+    );
+  }
+  if (!source.startsWith("/")) {
+    throw new Error(
+      `compose: agent "${agentName}" bind_mount source "${source}" must be an absolute path ` +
+      `(tilde-expansion is not performed; pass the literal absolute path)`,
+    );
+  }
+  if (source.includes("/../") || source.endsWith("/..") || source === "/..") {
+    throw new Error(
+      `compose: agent "${agentName}" bind_mount source "${source}" contains '..' — refuse ambiguous paths`,
+    );
+  }
+  if (BIND_MOUNT_EXACT_DENY.has(source)) {
+    throw new Error(
+      `compose: agent "${agentName}" bind_mount source "${source}" is denylisted ` +
+      `(host docker socket — would grant root-equivalent control of the host)`,
+    );
+  }
+  for (const deny of BIND_MOUNT_DENYLIST) {
+    if (source === deny || source.startsWith(deny === "/" ? "/" : deny + "/")) {
+      // "/" matches everything, so handle it separately: only refuse the
+      // literal "/" as source. A path like "/home/x" passes — it merely
+      // *starts* with "/" but the denylist intent is "the root itself".
+      if (deny === "/" && source !== "/") continue;
+      throw new Error(
+        `compose: agent "${agentName}" bind_mount source "${source}" is under denylisted system path "${deny}"`,
+      );
+    }
+  }
+  const target = entry.target ?? source;
+  if (!target.startsWith("/")) {
+    throw new Error(
+      `compose: agent "${agentName}" bind_mount target "${target}" must be an absolute path`,
+    );
+  }
+  const mode = entry.mode ?? "ro";
+  return { source, target, mode };
 }
 
 /** Capability-add escape hatch — we strip these in Docker mode (RFC). */
@@ -894,6 +985,29 @@ function emitAgentService(
       lines.push(
         `      - ${homePrefix}/.switchroom/vault-audit.log:/state/agent/home/.switchroom/vault-audit.log:ro`,
       );
+    }
+  }
+  // Operator-declared extra bind-mounts (#1164). ADMIN-ONLY: emitting
+  // anything for a non-admin agent is a hard error — bind_mounts is the
+  // escape hatch that lets an agent dogfood / self-modify host source
+  // trees, so silently dropping the entries would mask a misconfigured
+  // privilege grant.
+  if (a.bindMounts.length > 0) {
+    if (!a.admin) {
+      throw new Error(
+        `compose: agent "${a.name}" declares bind_mounts but is not admin: true. ` +
+        `bind_mounts is an admin-only escalation (see issue #1164 and the bind_mounts ` +
+        `schema doc). Either set admin: true on this agent or remove bind_mounts.`,
+      );
+    }
+    for (const entry of a.bindMounts) {
+      const { source, target, mode } = resolveBindMount(a.name, entry);
+      // Match the existing :ro / no-suffix convention used by the
+      // skills/credentials mounts above. `:rw` is omitted because docker's
+      // default is read-write — being explicit would diverge from the
+      // surrounding lines and add noise.
+      const suffix = mode === "ro" ? ":ro" : "";
+      lines.push(`      - ${source}:${target}${suffix}`);
     }
   }
   // Dual mounts — the same host directory is bound BOTH at the canonical

@@ -1,12 +1,78 @@
 # Changelog
 
-## Unreleased
+## v0.8.0 — voice/architecture cleanup + host-control daemon + vault posture toggle
 
-### New features
+Big release. ~35 PRs since v0.7.16. Three headline themes:
+
+1. **Voice and prompt architecture cleanup (#1177, #1178)** — the agent system prompt was duplicating "don't make AI tells" rules 3-4× across SOUL.md / CLAUDE.md / telegram-style.md.hbs in slightly different forms, while ~57% of `telegram-style.md.hbs` was operational protocol that fires only on specific runtime triggers (interrupted-turn resume, fresh-boot wake audit, "why did you restart" debug, `!` interrupt detail, "status?" UX-failure signal). Anti-AI guidance was drowning in a 6,000-word always-loaded prompt. Two-PR fix: consolidate voice rules into SOUL.md "Never" as the canonical ban-list, add a procedural "Execution Bias" section to CLAUDE.md (verify mutable facts, final answer needs evidence, weak tool result is not a conclusion, one clarifying question not five), and hoist the runtime protocols into a new bundled `switchroom-runtime` skill that loads on demand. Net: assembled CLAUDE.md drops from ~32KB to ~27.7KB per turn, and the voice/persona content sits at the prompt position it deserves.
+
+2. **`switchroom-hostd` host-control daemon — Phase 1 (#1175, RFC C in #1171)** — first cut of the host-control daemon that lets the in-agent gateway reach back to the host for privileged operations (docker compose recreate, vault rotation, etc.) without granting docker.sock to every agent container. Phase 1 ships the protocol, server, client, and compose wiring; subsequent phases add the actual privileged-op handlers. RFC at `docs/proposed/RFC-C-host-control-daemon.md`.
+
+3. **Vault posture toggle (`approvalAuth: passphrase | telegram-id`, #1115 et al.)** — opt-in single-factor approval for vault grant cards (full breakdown below).
+
+### Voice / architecture cleanup (#1177 + #1178)
+
+**Voice consolidation into SOUL.md (#1177).** AI-tells ban-list unified into `profiles/default/workspace/SOUL.md.hbs` "Never" — covers opener/closer phrases ("Certainly!", "I hope this helps", "Let me know if"), promotional adjectives ("powerful", "compelling", "vibrant", "revolutionary"), em-dash rule, rule-of-three / negative-parallelism, hedging filler, excessive bolding, sycophantic preamble, apology-for-prior-responses. The old paragraph at `telegram-style.md.hbs:42` is now a 70-word pointer to SOUL. New "Execution Bias" section in `profiles/default/CLAUDE.md.hbs` between Safety and the telegram-style partial: procedural rules (act in-turn, verify mutable facts before claiming, final answer needs evidence, weak tool result is not a conclusion, one clarifying question not five). Procedural shape inspired by OpenClaw's same-named section; switchroom-flavored wording. Subsumes the prior posture-only "don't guess, don't assume" / "verify before editing" bullets.
+
+**Runtime protocols hoisted to `switchroom-runtime` skill (#1178).** New bundled skill at `skills/switchroom-runtime/SKILL.md` holds the resume protocol, wake audit, "why did you restart" debug commands, `!` interrupt implementation detail, and "status?" UX-failure signal procedure. The always-loaded prompt keeps short trigger sentences ("If `$TELEGRAM_STATE_DIR/.wake-audit-pending` exists, invoke `/switchroom-runtime`") instead of the inline bash snippets. Auto-symlinked into every agent's `.claude/skills/` via the existing default-skills reconciler — no per-agent config required. Operator opt-out via `bundled_skills: { switchroom-runtime: false }`. Size cap test in `tests/scaffold.persona.test.ts` tightened 32000 → 28000 to lock in the budget.
+
+### Host-control daemon — Phase 1 (#1175, RFC #1171)
+
+`switchroom-hostd` is a new host-side daemon that mediates privileged operations the in-agent gateway can't perform directly (docker compose interactions, host-filesystem writes outside the per-agent mount, etc.). Phase 1 ships the NDJSON-over-UDS protocol, server, client library used by the gateway, and the compose wiring that bind-mounts the hostd socket into agent containers. Subsequent phases implement specific privileged ops (the immediate driver is fixing `/update apply` from inside Telegram on docker hosts — see #926). RFC at `docs/proposed/RFC-C-host-control-daemon.md` walks the design space.
+
+### Vault posture (#1115 epic)
 
 - **`vault.broker.approvalAuth` posture toggle (`passphrase` | `telegram-id`)** — opt-in single-factor approval for vault grant cards. Default (`passphrase`) is unchanged: the operator types the vault passphrase on every Approve tap (two-factor — Telegram ID + passphrase). Setting `approvalAuth: telegram-id` (requires `autoUnlock: true`) makes Approve mint immediately with no passphrase prompt, relying on Telegram account identity alone. Threat-model writeup in `docs/configuration.md`; `switchroom doctor` surfaces the active posture. Single-factor mode collapses security to the operator's Telegram account — opt-in only. The gateway hard-fails on boot if `approvalAuth: telegram-id` is set but the auto-unlock blob is missing, unreadable, OR empty/whitespace-only — we never silently downgrade an operator's declared posture.
 
-- **`vault.broker.approvalAuth: telegram-id` works on Docker (#1115 follow-up)** — the posture was non-functional on the canonical Docker runtime because the gateway inside an agent container couldn't reach the auto-unlock blob (bind-mounted only to the broker singleton). Fixed via broker-mediated attestation: new `attest_via_posture: true` flag on `mint_grant` / `list_grants` / `put`; broker validates its own config opt-in + lock state + per-agent peer, then uses its retained passphrase internally. **Passphrase never crosses the wire.** Plus a **per-agent opt-in allowlist** `vault.broker.postureMintAgents` (default `[]`): under `approvalAuth: telegram-id`, only listed agents can use the silent-mint path. Broker also enforces `req.agent === agentName` so an allowlisted agent can't mint grants naming another agent.
+- **`vault.broker.approvalAuth: telegram-id` works on Docker (#1115 follow-up, #1140)** — the posture was non-functional on the canonical Docker runtime because the gateway inside an agent container couldn't reach the auto-unlock blob (bind-mounted only to the broker singleton). Fixed via broker-mediated attestation: new `attest_via_posture: true` flag on `mint_grant` / `list_grants` / `put`; broker validates its own config opt-in + lock state + per-agent peer, then uses its retained passphrase internally. **Passphrase never crosses the wire.** Plus a **per-agent opt-in allowlist** `vault.broker.postureMintAgents` (default `[]`): under `approvalAuth: telegram-id`, only listed agents can use the silent-mint path. Broker also enforces `req.agent === agentName` so an allowlisted agent can't mint grants naming another agent.
+
+- **Vault-posture config errors exit cleanly (#1135)** — instead of crash-looping, the gateway now exits with `EX_CONFIG` (78) when a vault-posture config combination is invalid (e.g. `approvalAuth: telegram-id` without `autoUnlock: true`). Systemd / docker treat that as a permanent config error, not a transient crash worth restarting.
+
+- **Operator-update restart silence (#1139, #1141, #1142)** — `switchroom update` now stamps a `clean-shutdown.json` marker (`reason: "operator: switchroom update"`) on every agent before the compose recreate so the post-recreate boot card renders as graceful rather than "your agent crashed." Marker freshness window extended to 5min for `operator:` reasons (initial 90s was too tight when the docker pull was slow). Marker stamped via `docker exec` so the inside-container path matches the outside-container path the gateway will read.
+
+### Operator-event card / button-UX foundation (#1150 audit closure)
+
+The #1150 epic was a thorough audit of the inbound button-tap UX surface, surfacing three P0 surfaces and many smaller polish items. All landed:
+
+- **`finalizeCallback` helper (#1152)** — single chokepoint enforcing the three button-UX invariants: atomic status edit + keyboard strip, idempotent under retry, escapes source-text on all paths. Foundation for the rest of the epic.
+
+- **3 P0 button-UX surfaces (#1157, #1158, #1165)** — vault_request_save rename action, reauth re-tappability, atomic status line + keyboard strip on operator-event cards. The keyboard no longer lingers after the action completes.
+
+- **Source-text escape generalization (#1160, #1162)** — every `finalizeCallback`-class callsite now escapes user-provided text consistently. Catches the pre-existing 5 callsites that weren't on the new helper yet.
+
+- **Synthetic-inbound buffering on bridge disconnect (#1156)** — synthetic turns (cron fires, vault-save replays) queued by the gateway during a bridge restart now flush correctly when the bridge comes back, instead of getting dropped.
+
+- **Interrupt marker uses `tmux send-keys` directly (#1133)** — under the v0.7 docker runtime, the prior path through `interruptAgent` was a no-op for in-container tmux because there was no host-side docker-exec wrapper. Direct `tmux send-keys` against the agent container's socket works.
+
+- **Framework-fallback ends wedged turns (#1136)** — when Claude's framework-fallback path fired (context-exhaustion, output-rate-limit, model-error), the turn never ended cleanly on the gateway side, so subsequent inbounds got queued forever. Now `silencePoke.endTurn` fires on all bail paths.
+
+- **Session-scoped always-allow cache (#1169)** — sub-agents now inherit parent approvals so the `/auth slot` reauth flow doesn't re-prompt for every sub-agent dispatched in the same session.
+
+- **Boot-card improvements (#1170)** — quota row plus Claude CLI version on every boot/status card, so operators know what's actually running without `docker exec`.
+
+- **Audit closure (#1167, #1168)** — `ask_user` button-tap end-to-end smoke test + synth-inbound builder refactor with 13 shape-pin tests.
+
+### Bind mounts + compose
+
+- **Admin-gated `bind_mounts:` (#1164, #1166, #1172)** — per-agent admin-gated bind mounts for host paths an agent needs (e.g. an external photo library, a vendor directory). Path normalization, target-path denylist (no `/etc`, `/proc`, `/sys`, `/run` etc.), and a docs reframe to explain the trust model.
+
+- **`TINI_KILL_PROCESS_GROUP=1` (#1176)** — SIGTERM now reaches the gateway sidecar process group, not just tini. Fixes a class of "agent ignored SIGTERM" bugs under docker.
+
+- **Bundled-skills pool at `~/.switchroom/skills/_bundled` (#1173, #1174)** — host-stable pool that survives CLI version changes, so `_bundled/<name>` symlinks in agent dirs don't bit-rot. Mounted into agent containers via the compose wiring.
+
+### CLI + telemetry
+
+- **`switchroom status-ask report` (#1159)** — measures `inbound_status_query` events (the "status?" / "still there?" / "any update?" defect signal) so the rate can be tracked over time. Pairs with #1178's runtime-skill hoist of the same procedure.
+
+### Misc
+
+- **Inbound denials logged with reason (#1137)** — allowlist misconfigs aren't silent anymore.
+- **`gh run rerun` actually bumps Claude (#1143)** — `CACHE_BUST=run_attempt` in the docker workflow.
+- **UAT framework expansion** — many test additions across #1134, #1144, #1146, #1147, #1148, #1149, #1151, #1153, #1154 covering silence-poke, boot-card reasons, status-ask cause classes, ask_user button taps, reaction lifecycle.
+
+## Unreleased
+
+## v0.7.16 — vault UX epic close-out + host-shell broker socket
 
 ## v0.7.16 — vault UX epic close-out + host-shell broker socket
 

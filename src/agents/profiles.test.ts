@@ -171,8 +171,13 @@ describe("renderProfileClaudeTemplate", () => {
   });
 });
 
-describe("telegram-style partial — status? RCA-offer guidance (#162)", () => {
-  it("instructs the agent to treat 'status?' as a UX-failure signal", () => {
+describe("status? RCA-offer guidance (#162)", () => {
+  // The status? RCA-offer procedure was hoisted out of the always-loaded
+  // telegram-style partial into the switchroom-runtime skill in v0.8.0
+  // (#1178). The partial keeps a short trigger pointer; the skill holds
+  // the procedural detail. Tests now check both layers.
+
+  it("trigger pointer remains in the always-loaded telegram-style partial", () => {
     const REPO_ROOT = resolve(__dirname, "..", "..");
     const partial = readFileSync(
       join(REPO_ROOT, "profiles", "_shared", "telegram-style.md.hbs"),
@@ -180,31 +185,42 @@ describe("telegram-style partial — status? RCA-offer guidance (#162)", () => {
     );
     expect(partial).toContain("status?");
     expect(partial).toContain("UX-failure signal");
-    // Must reference the JTBD source for context
-    expect(partial).toContain("know-what-my-agent-is-doing.md");
+    expect(partial).toContain("/switchroom-runtime");
   });
 
-  it("offers to file an RCA via the /file-bug skill", () => {
+  it("instructs the agent to treat 'status?' as a UX-failure signal (skill body)", () => {
     const REPO_ROOT = resolve(__dirname, "..", "..");
-    const partial = readFileSync(
-      join(REPO_ROOT, "profiles", "_shared", "telegram-style.md.hbs"),
+    const skill = readFileSync(
+      join(REPO_ROOT, "skills", "switchroom-runtime", "SKILL.md"),
       "utf-8",
     );
-    expect(partial).toContain("/file-bug");
-    expect(partial).toContain("incident-rca");
+    expect(skill).toContain("status?");
+    expect(skill).toContain("UX-failure signal");
+    // Must reference the JTBD source for context
+    expect(skill).toContain("know-what-my-agent-is-doing.md");
+  });
+
+  it("offers to file an RCA via the /file-bug skill (skill body)", () => {
+    const REPO_ROOT = resolve(__dirname, "..", "..");
+    const skill = readFileSync(
+      join(REPO_ROOT, "skills", "switchroom-runtime", "SKILL.md"),
+      "utf-8",
+    );
+    expect(skill).toContain("/file-bug");
+    expect(skill).toContain("incident-rca");
   });
 
   it("warns against auto-filing on every status? (offer-then-confirm pattern)", () => {
     const REPO_ROOT = resolve(__dirname, "..", "..");
-    const partial = readFileSync(
-      join(REPO_ROOT, "profiles", "_shared", "telegram-style.md.hbs"),
+    const skill = readFileSync(
+      join(REPO_ROOT, "skills", "switchroom-runtime", "SKILL.md"),
       "utf-8",
     );
     // The "auto-file from a single status?" anti-pattern is explicitly
-    // called out — without it the agent might invoke /file-bug
-    // immediately on every "status?".
-    expect(partial.toLowerCase()).toContain("auto-file");
-    expect(partial.toLowerCase()).toContain("offer-then-confirm");
+    // called out so the agent doesn't invoke /file-bug immediately on
+    // every "status?".
+    expect(skill.toLowerCase()).toContain("auto-file");
+    expect(skill.toLowerCase()).toContain("offer-then-confirm");
   });
 });
 

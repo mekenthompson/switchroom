@@ -373,9 +373,14 @@ const INBOX_DIR = join(STATE_DIR, 'inbox')
  *     gateway plugin (we're a child of claude inside the same container).
  *     `targetAgent` is informational only here — we can't restart a
  *     different agent's container from inside our own (no docker.sock).
- *   - else (legacy systemd): detached `systemctl --user restart` of the
- *     two units. The detach is required so the systemctl job survives
- *     us being SIGTERM'd by systemd itself.
+ *   - else (v0.6 legacy non-docker path, scheduled for removal in
+ *     Phase 3 of the host-control daemon rollout — see
+ *     `docs/rfcs/host-control-daemon.md`): detached `systemctl --user
+ *     restart` of the two units. This branch is never reached on
+ *     v0.7+ docker installs (the `isDocker` guard above takes the
+ *     docker branch); only callable on legacy systemd hosts that
+ *     ran the gateway as a user unit. Don't add new dependencies
+ *     on this path.
  *
  * `targetAgent` defaults to `SWITCHROOM_AGENT_NAME`; pass a different
  * value only for the inline restart-button callback handler. Under

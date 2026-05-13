@@ -114,15 +114,19 @@ The gateway shells `switchroom <verb>` via `spawnSwitchroomDetached`
 that helper that are easy to "simplify away" and break the self-
 restart case:
 
-  1. **`systemd-run --scope` cgroup escape** (when available). Without
-     it, `docker compose up -d --remove-orphans` (the recreate step
-     of `switchroom update`) cgroup-kills the gateway, which kills
-     the spawned child mid-flight. Inside the agent container
-     `systemd-run` is absent, so the spawn falls through to plain
-     detached. This works for the `/restart` / `/new` / `/reset`
-     verbs which run host-side via `switchroom agent restart`. It
-     does NOT work for `/update apply` — see the docker-availability
-     guard below.
+  1. **Detached spawn + restart-marker dance.** The gateway runs
+     inside the agent container in v0.7+; when it asks docker (via
+     `switchroom agent restart`) to restart its own container, the
+     parent dies as soon as the recreate begins. The fix is to
+     spawn the child with `detached: true` + `.unref()` and capture
+     the originating chat in the restart marker before the kill —
+     see primitive 2. (Historical note: a legacy branch of this
+     helper also wraps the spawn in `systemd-run --user --scope`
+     for v0.6 non-docker installs where the gateway ran as a host
+     systemd unit. That branch is unreachable in v0.7+ docker
+     agents — `systemd-run` is absent inside the container — and
+     is scheduled for removal in Phase 3 of the host-control
+     daemon rollout. Don't add new dependencies on it.)
 
   2. **Restart marker + sweep** (`writeRestartMarker`,
      `stampUserRestartReason`, `sweepBeforeSelfRestart`). Captures
@@ -137,8 +141,12 @@ container has no docker binary or `/var/run/docker.sock` mount.
 `isDockerReachable()` in the gateway probes both before invoking
 `switchroom update`; on failure it surfaces a clean error pointing
 at the host CLI rather than letting the detached child fail with
-opaque exit-127. The proper fix (a host-side update daemon the
-gateway can call into) is tracked.
+opaque exit-127. The proper fix is the host-control daemon (RFC C
+at `docs/rfcs/host-control-daemon.md`): a host-side docker
+container — outside the switchroom compose project, with the
+docker socket mounted — that the gateway calls into via UDS.
+Phase 1 (library + opt-in flag + per-agent socket bind mounts) has
+landed; Phase 2 swaps the gateway callsites.
 
 **Agent-scheduler env knobs.**
 - `SWITCHROOM_INLINE_SCHEDULER` — set to `0` in the compose env to

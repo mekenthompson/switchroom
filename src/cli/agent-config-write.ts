@@ -62,6 +62,42 @@ import { existsSync, readFileSync } from "node:fs";
 
 const MAX_ENTRIES_PER_AGENT = 20;
 
+/**
+ * Defense-in-depth check that the caller is the operator host CLI,
+ * not an agent shell-out. Returns `{ ok: true }` when the caller may
+ * proceed; otherwise an exit-7 reason payload the CLI wrapper emits
+ * and process.exit's on.
+ *
+ * **This is not a capability boundary** — it inspects env, which an
+ * agent that can spawn child processes can scrub (`env -u
+ * SWITCHROOM_AGENT_NAME …`). True capability hardening (uid/gid
+ * check, host-only socket, mode-0400 token file outside the container
+ * mount) is a tracked follow-up. The env check still raises the bar
+ * meaningfully: it blocks the naive shell-out path and forces an
+ * attacker to be deliberate about env scrubbing, which leaves a
+ * trace in audit logs.
+ *
+ * Override: `SWITCHROOM_OPERATOR=1` bypasses the check for trusted
+ * host shells (CI, recovery, manual operator sessions) where the env
+ * pin happens to be set for unrelated reasons.
+ *
+ * @param env  Inject for tests; defaults to `process.env`.
+ */
+export function checkOperatorContext(
+  verb: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { ok: true } | { ok: false; message: string } {
+  if (env.SWITCHROOM_OPERATOR === "1") return { ok: true };
+  const agentEnv = env.SWITCHROOM_AGENT_NAME;
+  if (agentEnv && agentEnv.length > 0) {
+    return {
+      ok: false,
+      message: `schedule pending ${verb} is operator-only; refusing because $SWITCHROOM_AGENT_NAME=${agentEnv} (set SWITCHROOM_OPERATOR=1 to override on a trusted host)`,
+    };
+  }
+  return { ok: true };
+}
+
 type ErrorCode =
   | "E_OVERLAY_SECRETS_REQUIRES_APPROVAL"
   | "E_CRON_TOO_FREQUENT"
@@ -560,23 +596,11 @@ export function registerAgentConfigWriteCommands(program: Command): void {
     .command("pending")
     .description("Manage agent-requested schedule entries awaiting operator approval");
 
-  /**
-   * Privilege boundary: the `pending` verbs are operator-only. The
-   * canonical signal that a process is INSIDE an agent container is
-   * `$SWITCHROOM_AGENT_NAME` being set (compose pins it). If it's
-   * present, refuse the verb — otherwise an agent could self-approve
-   * its own staged entry by shelling out to the CLI. Operator host
-   * never has this env set; `SWITCHROOM_OPERATOR=1` is an explicit
-   * override for unusual host configs (CI, recovery shells).
-   */
+  /** Defense-in-depth: see {@link checkOperatorContext} for limits. */
   function requireOperatorContext(verb: string): void {
-    if (process.env.SWITCHROOM_OPERATOR === "1") return;
-    const agentEnv = process.env.SWITCHROOM_AGENT_NAME;
-    if (agentEnv && agentEnv.length > 0) {
-      emitError(
-        "E_NOT_FOUND",
-        `schedule pending ${verb} is operator-only; refusing because $SWITCHROOM_AGENT_NAME=${agentEnv} (set SWITCHROOM_OPERATOR=1 to override on a trusted host)`,
-      );
+    const r = checkOperatorContext(verb);
+    if (!r.ok) {
+      emitError("E_NOT_FOUND", r.message);
       process.exit(7);
     }
   }

@@ -16,7 +16,7 @@ import {
   commitPendingScheduleEntry,
   denyPendingScheduleEntry,
 } from "./agent-config-pending.js";
-import { scheduleAddOrStage } from "./agent-config-write.js";
+import { scheduleAddOrStage, checkOperatorContext } from "./agent-config-write.js";
 
 let root: string;
 let savedEnv: string | undefined;
@@ -212,6 +212,45 @@ describe("denyPendingScheduleEntry", () => {
     expect(r.denied).toBe(false);
     if (r.denied) return;
     expect(r.reason).toBe("not_found");
+  });
+});
+
+describe("checkOperatorContext (operator-only guard for pending verbs)", () => {
+  it("refuses when SWITCHROOM_AGENT_NAME is set (agent-container signal)", () => {
+    const r = checkOperatorContext("commit", { SWITCHROOM_AGENT_NAME: "alice" });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.message).toContain("operator-only");
+    expect(r.message).toContain("alice");
+    expect(r.message).toContain("SWITCHROOM_OPERATOR=1");
+  });
+
+  it("allows when neither env var is set (operator host default)", () => {
+    expect(checkOperatorContext("list", {}).ok).toBe(true);
+  });
+
+  it("allows SWITCHROOM_OPERATOR=1 override even when AGENT_NAME is set", () => {
+    expect(
+      checkOperatorContext("deny", {
+        SWITCHROOM_AGENT_NAME: "alice",
+        SWITCHROOM_OPERATOR: "1",
+      }).ok,
+    ).toBe(true);
+  });
+
+  it("treats empty SWITCHROOM_AGENT_NAME as unset (does not refuse)", () => {
+    expect(checkOperatorContext("commit", { SWITCHROOM_AGENT_NAME: "" }).ok).toBe(true);
+  });
+
+  it("does NOT honor SWITCHROOM_OPERATOR values other than literal '1'", () => {
+    // Hardening — if an attacker can set the env, they can also set
+    // `SWITCHROOM_OPERATOR=1`. But narrow the check so accidental
+    // `true` / `yes` / typo'd values don't bypass.
+    const r = checkOperatorContext("commit", {
+      SWITCHROOM_AGENT_NAME: "alice",
+      SWITCHROOM_OPERATOR: "true",
+    });
+    expect(r.ok).toBe(false);
   });
 });
 

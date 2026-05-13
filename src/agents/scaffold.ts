@@ -1108,6 +1108,7 @@ function seedWorkspaceBootstrapFiles(params: {
   context: Record<string, unknown>;
   created: string[];
   skipped: string[];
+  rewrittenWithBackup: string[];
 }): void {
   const profileWorkspaceDir = join(params.profilePath, "workspace");
   if (!existsSync(profileWorkspaceDir)) {
@@ -1132,20 +1133,47 @@ function seedWorkspaceBootstrapFiles(params: {
       if (entry === ".gitkeep") continue; // presence-only marker, ignore
       if (entry.endsWith(".hbs")) {
         const destRel = relPath.replace(/\.hbs$/, "");
-        writeIfMissing(
-          join(agentWorkspaceDir, destRel),
-          () => {
-            const rendered = renderTemplate(srcPath, params.context);
-            // Phase 2: append SOUL.custom.md sidecar if present
-            if (destRel === "SOUL.md") {
-              const customSoulPath = join(agentWorkspaceDir, "SOUL.custom.md");
-              return composeWithSidecar(rendered, customSoulPath);
-            }
-            return rendered;
-          },
-          params.created,
-          params.skipped,
-        );
+        const destPath = join(agentWorkspaceDir, destRel);
+        const renderFn = (): string => {
+          const rendered = renderTemplate(srcPath, params.context);
+          // Phase 2: append SOUL.custom.md sidecar if present
+          if (destRel === "SOUL.md") {
+            const customSoulPath = join(agentWorkspaceDir, "SOUL.custom.md");
+            return composeWithSidecar(rendered, customSoulPath);
+          }
+          return rendered;
+        };
+        if (destRel === "SOUL.md") {
+          // SOUL.md is the canonical voice / persona source for the agent
+          // (its "Never" AI-tells list, Personality, Communication, Values
+          // sections — see profiles/default/workspace/SOUL.md.hbs).
+          // Template changes here MUST propagate to existing agents,
+          // for the same reason CLAUDE.md uses fingerprint-aware
+          // re-render since #1122: without it, agents scaffolded under
+          // an older template never see voice-rule updates and the
+          // fleet drifts. SOUL.custom.md sidecar (operator-owned)
+          // remains writeIfMissing and is composed in by renderFn so
+          // operator additions survive the re-render. Operator
+          // hand-edits to SOUL.md itself are backed up at
+          // `SOUL.md.before-rerender.<ts>`.
+          rerenderWithFingerprint(
+            destPath,
+            renderFn,
+            params.created,
+            params.skipped,
+            params.rewrittenWithBackup,
+          );
+        } else {
+          // Other workspace bootstrap files (IDENTITY, TOOLS, MEMORY,
+          // HEARTBEAT, USER) are user-owned scratchpads — seed once,
+          // never overwrite. The agent itself edits them at runtime.
+          writeIfMissing(
+            destPath,
+            renderFn,
+            params.created,
+            params.skipped,
+          );
+        }
       } else {
         const destPath = join(agentWorkspaceDir, relPath);
         if (!existsSync(destPath)) {
@@ -2058,6 +2086,7 @@ export function scaffoldAgent(
     context,
     created,
     skipped,
+    rewrittenWithBackup,
   });
   ensureClaudeMdSymlinks(phase5WorkspaceDir, created);
 
@@ -3596,6 +3625,7 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
     context: workspaceContext,
     created: changes,
     skipped: [],
+    rewrittenWithBackup: changes,
   });
   ensureClaudeMdSymlinks(reconcileWorkspaceDir, changes);
 

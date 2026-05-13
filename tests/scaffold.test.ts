@@ -3875,8 +3875,14 @@ describe("installSwitchroomSkills", () => {
     expect(existsSync(claudeSkillsDir)).toBe(true);
     const entries = require("node:fs").readdirSync(claudeSkillsDir) as string[];
     const switchroomEntries = entries.filter((e: string) => e.startsWith("switchroom-")).sort();
-    // Universal bundled-default trio is present.
-    expect(switchroomEntries).toEqual(["switchroom-cli", "switchroom-health", "switchroom-status"]);
+    // Universal bundled-default quartet is present (cli + status + health
+    // since v0.7; runtime added in v0.8.0 for the protocol-hoist skill).
+    expect(switchroomEntries).toEqual([
+      "switchroom-cli",
+      "switchroom-health",
+      "switchroom-runtime",
+      "switchroom-status",
+    ]);
     // Foreman-only trio is absent.
     for (const op of ["switchroom-install", "switchroom-manage", "switchroom-architecture"]) {
       expect(entries).not.toContain(op);

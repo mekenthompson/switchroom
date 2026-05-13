@@ -71,6 +71,9 @@ interface UpdateOptions {
   syncBundledSkillsFn?: () => void;
   /** Test seam — replace the marker writer used by stamp-restart-marker. */
   writeMarkerFn?: (agent: string, reason: string) => void;
+  /** Test seam — override `host_control.enabled` detection for the
+   *  `refresh-hostd` step instead of reading from switchroom.yaml. */
+  hostControlEnabled?: boolean;
 }
 
 interface UpdateStep {
@@ -181,6 +184,50 @@ export function planUpdate(opts: UpdateOptions): UpdateStep[] {
         "--no-doctor",
       ]);
       if (r.status !== 0) throw new Error("switchroom apply failed");
+    },
+  });
+
+  // refresh-hostd: pull the latest hostd image and recreate the daemon
+  // container. RFC C §5.1 keeps the daemon in its own compose project
+  // (`switchroom-hostd`, separate from the agent fleet's `switchroom`
+  // project) so the fleet's `up -d --remove-orphans` cycles can't
+  // accidentally recreate the daemon mid-RPC. The downside is that the
+  // daemon doesn't get pulled by the fleet's pull-images step — so
+  // before this step existed, operators who ran `switchroom update`
+  // after a hostd protocol bump would end up with a stale daemon
+  // serving an old verb set. Phase 2 (#1208) shipped new verbs but the
+  // daemon container kept refusing them with
+  // `invalid_union_discriminator` until the operator separately ran
+  // `switchroom hostd install`. This step folds that into the update.
+  //
+  // Skipped when host_control.enabled is false (no daemon to refresh)
+  // OR --skip-images is set (operator opted out of pulls in general).
+  // Mirrors how pull-images skips on --skip-images.
+  let hostControlEnabled: boolean;
+  if (typeof opts.hostControlEnabled === "boolean") {
+    hostControlEnabled = opts.hostControlEnabled;
+  } else {
+    try {
+      hostControlEnabled = loadConfig().host_control?.enabled === true;
+    } catch {
+      // Best-effort: if config can't be loaded, skip refresh-hostd
+      // rather than fail the whole update. Operators who care about
+      // hostd will hit the config error somewhere else in the pipeline.
+      hostControlEnabled = false;
+    }
+  }
+  steps.push({
+    name: "refresh-hostd",
+    description:
+      "switchroom hostd install — pull latest hostd image + recreate the daemon container (separate compose project, see RFC C §5.1)",
+    skipReason: !hostControlEnabled
+      ? "host_control.enabled is not true — daemon not in use"
+      : opts.skipImages
+        ? "--skip-images flag set"
+        : undefined,
+    run: () => {
+      const r = runner(process.execPath, [scriptPath, "hostd", "install"]);
+      if (r.status !== 0) throw new Error("switchroom hostd install failed");
     },
   });
 

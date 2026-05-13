@@ -23,10 +23,10 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, statSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync, statSync, copyFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { getConfig, withConfigError } from "./helpers.js";
 
 /**
@@ -154,9 +154,9 @@ interface InstallOptions {
   dryRun?: boolean;
 }
 
-async function doInstall(opts: InstallOptions): Promise<void> {
+async function doInstall(opts: InstallOptions, program: Command): Promise<void> {
   await withConfigError(async () => {
-    const cfg = getConfig({ optsWithGlobals: () => ({ config: undefined }) } as unknown as Command);
+    const cfg = getConfig(program);
     if (cfg.host_control?.enabled !== true) {
       console.error(
         chalk.yellow(
@@ -278,8 +278,7 @@ function doStatus(): void {
   if (existsSync(dir)) {
     const entries: string[] = [];
     try {
-      const fs = require("node:fs");
-      for (const name of fs.readdirSync(dir)) {
+      for (const name of readdirSync(dir)) {
         if (name === "docker-compose.yml" || name.startsWith("docker-compose.yml.")) continue;
         const sockPath = join(dir, name, "sock");
         if (existsSync(sockPath)) {
@@ -334,7 +333,9 @@ export function registerHostdCommand(program: Command): void {
     .option("--tag <tag>", "Image tag (default: latest)", DEFAULT_IMAGE_TAG)
     .option("--dry-run", "Print the compose file and the docker commands without writing or running anything")
     .action(async (opts: InstallOptions) => {
-      await doInstall(opts);
+      // Threading `program` through preserves -c/--config global flag handling
+      // — getConfig() reads optsWithGlobals().config when set.
+      await doInstall(opts, program);
     });
 
   hostd

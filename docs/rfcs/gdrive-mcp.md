@@ -1,10 +1,18 @@
-# RFC C: Google Drive MCP integration
+# RFC D: Google Drive MCP integration
 
-Status: Draft v2
+Status: **Implemented in v0.6.0** (2026-05-06). Originally drafted as "RFC C" — renumbered to D after `host-control-daemon.md` claimed the C slot in v0.7.x. This document is retained as the design record; the implementation is the source of truth.
 Author: klanker (sub-agent draft)
 Date: 2026-05-06
 
-Prerequisite: **RFC B — Approval kernel** (`docs/rfcs/approval-kernel.md`) must be in place. The Drive MCP is the first real consumer.
+Prerequisite: **RFC B — Approval kernel** (`docs/rfcs/approval-kernel.md`) — landed in v0.6.0 (#762). The Drive MCP is the first real consumer.
+
+## Implementation pointers
+
+- Code: `src/drive/{oauth,vault-slots,onboarding,disconnect,reconciler,grants,wrapper}.ts` (+ co-located tests).
+- CLI: `src/cli/drive.ts` (`switchroom drive connect|disconnect`).
+- Config: `drive:` block (top-level + per-agent), schema in `src/config/schema.ts` (#768).
+- Landing PRs: #763 (full integration), #766 (CLI), #767 (desktop-loopback OAuth tier), #768 (`drive:` config block).
+- Still deferred (no tracking issue yet): folder picker UI (§6), Drive write operations (§12 out-of-scope; needs `doc:gdrive:write:*` scope namespace).
 
 ## 1. Summary
 

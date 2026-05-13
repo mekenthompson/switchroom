@@ -276,13 +276,13 @@ The vault broker is request/response. Approvals can wait up to 5 minutes for a t
 
 **Phase 2 — secrets as first consumer.** Migrate the deferred-secret card path (`gateway.ts:5555`) to call the kernel. Lower-traffic, validates the abstraction. Preserve the inline-passphrase capture UX. ~0.5 day.
 
-**Phase 3 — first MCP consumer (Google Drive).** Covered separately in **RFC C — Google Drive MCP integration**.
+**Phase 3 — first MCP consumer (Google Drive).** Covered separately in **RFC D — Google Drive MCP integration** (originally drafted as "RFC C", renumbered after `host-control-daemon.md` took the C slot).
 
 ## 13. Estimated effort
 
 RFC B Phase 1 + Phase 2: **~2 days.**
 
-Combined with RFC A (~0.5d) and RFC C (~1d): **~3.5 days total** across the three RFCs.
+Combined with RFC A (~0.5d) and RFC D (~1d): **~3.5 days total** across the three RFCs.
 
 ## 14. Out of scope
 

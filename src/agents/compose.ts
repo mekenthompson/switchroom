@@ -24,7 +24,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { SwitchroomConfig, AgentConfig, AgentBindMount } from "../config/schema.js";
 import { resolveAgentConfig } from "../config/merge.js";
@@ -999,6 +999,10 @@ function emitAgentService(
     PIP_BREAK_SYSTEM_PACKAGES: "1",
     PIP_USER: "1",
     SWITCHROOM_AGENT_NAME: a.name,
+    // Belt-and-braces in-container marker for the agent-config CLI's
+    // isContainerContext() probe (the primary signal is /.dockerenv,
+    // but a second independent check is the point of writing `||`).
+    SWITCHROOM_CONTAINER: "1",
     // Broker / kernel socket paths inside the agent container. The
     // per-agent volume is mounted at `/run/switchroom/broker` (and
     // `/run/switchroom/kernel`) — directly at the parent dir, NOT
@@ -1225,6 +1229,20 @@ function emitAgentService(
   if (existsSync(`${hostHomeForChecks}/.switchroom/credentials`)) {
     lines.push(`      - ${homePrefix}/.switchroom/credentials:${homePrefix}/.switchroom/credentials:ro`);
   }
+  // Ensure the host-side per-agent audit dir exists before docker
+  // compose tries to bind-mount it (docker auto-creates as root, which
+  // then traps the agent uid out of writing — pre-creating with the
+  // operator's umask sidesteps that).
+  try {
+    mkdirSync(`${hostHomeForChecks}/.switchroom/audit/${a.name}`, { recursive: true });
+  } catch { /* best-effort */ }
+  // Agent-config audit log (rw) — the read-only agent-config MCP broker
+  // (src/mcp/agent-config/server.ts) appends one JSONL row per tool call
+  // to ~/.switchroom/audit/<agent>/agent-config.jsonl. PER-AGENT mount:
+  // each agent sees only its own audit subdir, never any other agent's.
+  // Critical: do NOT mount the parent ~/.switchroom/audit/ — that would
+  // let any agent read every other agent's audit trail.
+  lines.push(`      - ${homePrefix}/.switchroom/audit/${a.name}:${homePrefix}/.switchroom/audit/${a.name}:rw`);
   // Bundled-skills pool: mount at the same absolute host path so the
   // symlinks created by reconcileAgentDefaultSkills (which target the
   // source-repo or npm-package skills/ dir — e.g.

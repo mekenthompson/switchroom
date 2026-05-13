@@ -1,0 +1,19 @@
+{"id":"7159b5a8c1b85511","targetSkill":"buildkite-secure-delivery","kind":"paraphrase","phrase":"Please secure the supply chain.","source":"paraphrase-template"}
+{"id":"d7508f30f8981362","targetSkill":"buildkite-secure-delivery","kind":"paraphrase","phrase":"I'd like to push a Docker image.","source":"paraphrase-template"}
+{"id":"22aa5d5ea074fd2a","targetSkill":"buildkite-secure-delivery","kind":"paraphrase","phrase":"Can you sign pipelines?","source":"paraphrase-template"}
+{"id":"622a19bd55db67fe","targetSkill":"buildkite-secure-delivery","kind":"paraphrase","phrase":"I need to verify pipeline signatures.","source":"paraphrase-template"}
+{"id":"6e40ae25b0f9e2c9","targetSkill":"buildkite-secure-delivery","kind":"paraphrase","phrase":"Could you sign pipelines for me?","source":"paraphrase-template"}
+{"id":"abb06ca591865855","targetSkill":"buildkite-secure-delivery","kind":"paraphrase","phrase":"Set up SLSA provenance, please.","source":"paraphrase-template"}
+{"id":"1b55e98386cb1f5b","targetSkill":"buildkite-secure-delivery","kind":"typo","phrase":"generate attestation","source":"typo-rule"}
+{"id":"bc3b78798b4d4b79","targetSkill":"buildkite-secure-delivery","kind":"typo","phrase":"set up LSA provenance","source":"typo-rule"}
+{"id":"d2b20a6ccfa030e0","targetSkill":"buildkite-secure-delivery","kind":"typo","phrase":"verify ppeline signatures","source":"typo-rule"}
+{"id":"3476eb096ee9cc34","targetSkill":"buildkite-secure-delivery","kind":"slang","phrase":"gonna need to verify pipeline signatures","source":"slang-template"}
+{"id":"22e1309b42936df1","targetSkill":"buildkite-secure-delivery","kind":"slang","phrase":"pls authenticate without static credentials","source":"slang-template"}
+{"id":"e931176cc2a11bef","targetSkill":"buildkite-secure-delivery","kind":"slang","phrase":"gonna need to sign pipelines","source":"slang-template"}
+{"id":"d3791d36b9efd441","targetSkill":"buildkite-secure-delivery","kind":"indirect","phrase":"something is going on with buildkite-secure-delivery","source":"indirect-template"}
+{"id":"7a84bba268c35a30","targetSkill":"buildkite-secure-delivery","kind":"indirect","phrase":"the buildkite-secure-delivery thing is weird","source":"indirect-template"}
+{"id":"611ccf4ac772b384","targetSkill":"buildkite-secure-delivery","kind":"indirect","phrase":"can you take a look at the buildkite-secure-delivery situation","source":"indirect-template"}
+{"id":"11f5120e4d63c32e","targetSkill":null,"kind":"negative","phrase":"acquire a distributed lock","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-agent-runtime"}
+{"id":"60999319a31298a0","targetSkill":null,"kind":"negative","phrase":"write a pipeline","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-pipelines"}
+{"id":"cb2c93354fa87337","targetSkill":null,"kind":"negative","phrase":"upload pipeline dynamically","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-agent-runtime"}
+{"id":"82dc0047aa12ffb7","targetSkill":null,"kind":"negative","phrase":"add caching","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-pipelines"}

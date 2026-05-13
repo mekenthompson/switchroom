@@ -1,0 +1,19 @@
+{"id":"4d738e2334447b23","targetSkill":"switchroom-manage","kind":"paraphrase","phrase":"I need to reprovision my agents.","source":"paraphrase-template"}
+{"id":"03021950a05b8eb2","targetSkill":"switchroom-manage","kind":"paraphrase","phrase":"Could you reprovision my agents for me?","source":"paraphrase-template"}
+{"id":"2fbf26091b974fd1","targetSkill":"switchroom-manage","kind":"paraphrase","phrase":"Manage my agents, please.","source":"paraphrase-template"}
+{"id":"901853b79731581a","targetSkill":"switchroom-manage","kind":"paraphrase","phrase":"Can you reinstall my agents?","source":"paraphrase-template"}
+{"id":"b08395074bcef3fe","targetSkill":"switchroom-manage","kind":"paraphrase","phrase":"I'd like to reinstall my agents.","source":"paraphrase-template"}
+{"id":"aa009cce97222e73","targetSkill":"switchroom-manage","kind":"paraphrase","phrase":"Help me list my agents.","source":"paraphrase-template"}
+{"id":"147aeda8ff8c7198","targetSkill":"switchroom-manage","kind":"typo","phrase":"create a enw agent","source":"typo-rule"}
+{"id":"ba2facfdf2b3e731","targetSkill":"switchroom-manage","kind":"typo","phrase":"reinstll my agents","source":"typo-rule"}
+{"id":"5d905da84feeda81","targetSkill":"switchroom-manage","kind":"typo","phrase":"list mya gents","source":"typo-rule"}
+{"id":"8fc8f3fac57b5331","targetSkill":"switchroom-manage","kind":"slang","phrase":"yo, how do i manage my agents","source":"slang-template"}
+{"id":"521f393dee14859b","targetSkill":"switchroom-manage","kind":"slang","phrase":"gonna need to add a new agent","source":"slang-template"}
+{"id":"55ed73ad5c5dfd1a","targetSkill":"switchroom-manage","kind":"slang","phrase":"quick q — can i add a new agent","source":"slang-template"}
+{"id":"4a6bc1cba595ad4d","targetSkill":"switchroom-manage","kind":"indirect","phrase":"the switchroom-manage thing is weird","source":"indirect-template"}
+{"id":"9d4dc98bf11d617e","targetSkill":"switchroom-manage","kind":"indirect","phrase":"can you take a look at the switchroom-manage situation","source":"indirect-template"}
+{"id":"bcc6a6e6512e2887","targetSkill":"switchroom-manage","kind":"indirect","phrase":"something is going on with switchroom-manage","source":"indirect-template"}
+{"id":"9ab6e31fce837dfc","targetSkill":null,"kind":"negative","phrase":"how do I get started with switchroom","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-install"}
+{"id":"bc1b39b6bf8b8562","targetSkill":null,"kind":"negative","phrase":"per-agent snapshot","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-status"}
+{"id":"894936e3d147ee65","targetSkill":null,"kind":"negative","phrase":"set up switchroom for the first time","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-install"}
+{"id":"f69a2b5b8d64dc82","targetSkill":null,"kind":"negative","phrase":"bootstrap switchroom from scratch","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-install"}

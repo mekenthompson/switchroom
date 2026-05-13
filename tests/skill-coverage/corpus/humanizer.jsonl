@@ -1,0 +1,18 @@
+{"id":"00ac3193aedba37f","targetSkill":"humanizer","kind":"paraphrase","phrase":"Let's rewrite this to sound natural.","source":"paraphrase-template"}
+{"id":"b8a8169d881e27ef","targetSkill":"humanizer","kind":"paraphrase","phrase":"Please edit this so it doesn't sound like AI.","source":"paraphrase-template"}
+{"id":"a3290aeac74bdac5","targetSkill":"humanizer","kind":"paraphrase","phrase":"Can you remove the rule of three?","source":"paraphrase-template"}
+{"id":"56d73ad8a10e9140","targetSkill":"humanizer","kind":"paraphrase","phrase":"Remove signs of AI writing, please.","source":"paraphrase-template"}
+{"id":"bb19cf611f4489e5","targetSkill":"humanizer","kind":"paraphrase","phrase":"Let's fix the em-dash overuse.","source":"paraphrase-template"}
+{"id":"d63b5bc3ae726c7c","targetSkill":"humanizer","kind":"paraphrase","phrase":"I need to make this sound more human.","source":"paraphrase-template"}
+{"id":"80bec780a669f77c","targetSkill":"humanizer","kind":"typo","phrase":"make this soudn more human","source":"typo-rule"}
+{"id":"5420bbaf61e30fb1","targetSkill":"humanizer","kind":"typo","phrase":"remove signs of AI writing","source":"typo-rule"}
+{"id":"598a299e44f64b44","targetSkill":"humanizer","kind":"typo","phrase":"fix theem-dash overuse","source":"typo-rule"}
+{"id":"55275d87b82264b9","targetSkill":"humanizer","kind":"slang","phrase":"yo, how do i remove signs of AI writing","source":"slang-template"}
+{"id":"4393cb8e127f0619","targetSkill":"humanizer","kind":"slang","phrase":"gonna need to remove signs of AI writing","source":"slang-template"}
+{"id":"e679468672b774bf","targetSkill":"humanizer","kind":"indirect","phrase":"this paragraph screams ChatGPT","source":"indirect-template"}
+{"id":"97a8e1155bfd5372","targetSkill":"humanizer","kind":"indirect","phrase":"the prose sounds robotic","source":"indirect-template"}
+{"id":"69742741d4c4468e","targetSkill":"humanizer","kind":"indirect","phrase":"this reads like AI slop","source":"indirect-template"}
+{"id":"9c6b7f7f9543041b","targetSkill":null,"kind":"negative","phrase":"humanizer-calibrate","source":"negative-from-adjacent","expectedOtherSkill":"humanizer-calibrate"}
+{"id":"caf6f3b37a17929c","targetSkill":null,"kind":"negative","phrase":"fresh voice template for humanizer","source":"negative-from-adjacent","expectedOtherSkill":"humanizer-calibrate"}
+{"id":"b13a5c7ce9b0a6d5","targetSkill":null,"kind":"negative","phrase":"build a voice template","source":"negative-from-adjacent","expectedOtherSkill":"humanizer-calibrate"}
+{"id":"91f194613377a010","targetSkill":null,"kind":"negative","phrase":"calibrate humanizer","source":"negative-from-adjacent","expectedOtherSkill":"humanizer-calibrate"}

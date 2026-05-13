@@ -1,0 +1,19 @@
+{"id":"d477e449908018be","targetSkill":"buildkite-pipelines","kind":"paraphrase","phrase":"Help me write a pipeline.","source":"paraphrase-template"}
+{"id":"07f4e023817af4bf","targetSkill":"buildkite-pipelines","kind":"paraphrase","phrase":"Can you parallel steps?","source":"paraphrase-template"}
+{"id":"571f3200656feb4c","targetSkill":"buildkite-pipelines","kind":"paraphrase","phrase":"Let's add retry.","source":"paraphrase-template"}
+{"id":"b41ce8c45093aebb","targetSkill":"buildkite-pipelines","kind":"paraphrase","phrase":"Let's show test failures in the build page.","source":"paraphrase-template"}
+{"id":"de34f75fcd9ba061","targetSkill":"buildkite-pipelines","kind":"paraphrase","phrase":"I'd like to add caching.","source":"paraphrase-template"}
+{"id":"ac77f27c5585077f","targetSkill":"buildkite-pipelines","kind":"paraphrase","phrase":"Let's add annotations.","source":"paraphrase-template"}
+{"id":"27b5c8f3cdf16397","targetSkill":"buildkite-pipelines","kind":"typo","phrase":"set up dnamic pipelines","source":"typo-rule"}
+{"id":"bfbb3a6ede41a126","targetSkill":"buildkite-pipelines","kind":"typo","phrase":"add annotations","source":"typo-rule"}
+{"id":"2dadb78d1b64609e","targetSkill":"buildkite-pipelines","kind":"typo","phrase":"write a pipeline","source":"typo-rule"}
+{"id":"2a852bba898b410f","targetSkill":"buildkite-pipelines","kind":"slang","phrase":"yo, how do i matrix build","source":"slang-template"}
+{"id":"66a5aa865a20852b","targetSkill":"buildkite-pipelines","kind":"slang","phrase":"pls only run tests when code changes","source":"slang-template"}
+{"id":"f4a8616c464de167","targetSkill":"buildkite-pipelines","kind":"slang","phrase":"yo, how do i only run tests when code changes","source":"slang-template"}
+{"id":"b66ef600f9f671e7","targetSkill":"buildkite-pipelines","kind":"indirect","phrase":"my pipeline.yml is a mess","source":"indirect-template"}
+{"id":"bc8a6227ee6c4c63","targetSkill":"buildkite-pipelines","kind":"indirect","phrase":"the build is slow","source":"indirect-template"}
+{"id":"b9226daf57456f76","targetSkill":"buildkite-pipelines","kind":"indirect","phrase":"tests run in serial when they shouldn't","source":"indirect-template"}
+{"id":"11f5120e4d63c32e","targetSkill":null,"kind":"negative","phrase":"acquire a distributed lock","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-agent-runtime"}
+{"id":"c9cd0a82299e5e4a","targetSkill":null,"kind":"negative","phrase":"view build logs","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-cli"}
+{"id":"1132acfc5c544bf6","targetSkill":null,"kind":"negative","phrase":"quarantine flaky tests","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-test-engine"}
+{"id":"6173445a0567d7d4","targetSkill":null,"kind":"negative","phrase":"debug environment variables in hooks","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-agent-runtime"}

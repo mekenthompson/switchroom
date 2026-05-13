@@ -1,0 +1,18 @@
+{"id":"41881c47a4a3e15e","targetSkill":"buildkite-api","kind":"paraphrase","phrase":"Please write a GraphQL query.","source":"paraphrase-template"}
+{"id":"70229c0b2563a947","targetSkill":"buildkite-api","kind":"paraphrase","phrase":"Let's paginate API results.","source":"paraphrase-template"}
+{"id":"e4752afd7e2b0af8","targetSkill":"buildkite-api","kind":"paraphrase","phrase":"Could you automate Buildkite for me?","source":"paraphrase-template"}
+{"id":"b3206a10a7334084","targetSkill":"buildkite-api","kind":"paraphrase","phrase":"Can you authenticate with the Buildkite API?","source":"paraphrase-template"}
+{"id":"d99e93374b36bcfd","targetSkill":"buildkite-api","kind":"paraphrase","phrase":"Automate Buildkite, please.","source":"paraphrase-template"}
+{"id":"fafd3f3ce34187a1","targetSkill":"buildkite-api","kind":"typo","phrase":"authenticate with  the Buildkite API","source":"typo-rule"}
+{"id":"96b51a92d571749d","targetSkill":"buildkite-api","kind":"typo","phrase":"write a GraaphQL query","source":"typo-rule"}
+{"id":"c08e8dcb8902ab27","targetSkill":"buildkite-api","kind":"typo","phrase":"integrate with Buildikte programmatically","source":"typo-rule"}
+{"id":"1bd0d143289db8b7","targetSkill":"buildkite-api","kind":"slang","phrase":"hey, automate Buildkite?","source":"slang-template"}
+{"id":"819505fee6a55796","targetSkill":"buildkite-api","kind":"slang","phrase":"any way to write a GraphQL query?","source":"slang-template"}
+{"id":"987403ce96059c8d","targetSkill":"buildkite-api","kind":"slang","phrase":"any way to write a script that calls Buildkite?","source":"slang-template"}
+{"id":"f738e434920ff1d5","targetSkill":"buildkite-api","kind":"indirect","phrase":"the buildkite-api thing is weird","source":"indirect-template"}
+{"id":"baffd7d7ee91fc8d","targetSkill":"buildkite-api","kind":"indirect","phrase":"can you take a look at the buildkite-api situation","source":"indirect-template"}
+{"id":"01bfdcf82bfef5a7","targetSkill":"buildkite-api","kind":"indirect","phrase":"something is going on with buildkite-api","source":"indirect-template"}
+{"id":"69373c12dd02cb39","targetSkill":null,"kind":"negative","phrase":"upload artifacts","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-cli"}
+{"id":"f8c2fccbbc969fe9","targetSkill":null,"kind":"negative","phrase":"manage cluster secrets","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-agent-infrastructure"}
+{"id":"d51be7e23a3be0ef","targetSkill":null,"kind":"negative","phrase":"set up SAML","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-agent-infrastructure"}
+{"id":"38f4356316901b5d","targetSkill":null,"kind":"negative","phrase":"download artifacts","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-cli"}

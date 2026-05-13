@@ -1,0 +1,19 @@
+{"id":"49994bfd7e52eb43","targetSkill":"xlsx","kind":"paraphrase","phrase":"I'd like to edit a spreadsheet.","source":"paraphrase-template"}
+{"id":"d882f4dfd96c6c20","targetSkill":"xlsx","kind":"paraphrase","phrase":"Help me create a spreadsheet from scratch.","source":"paraphrase-template"}
+{"id":"9fd4947b9ba7860f","targetSkill":"xlsx","kind":"paraphrase","phrase":"Let's build a financial model.","source":"paraphrase-template"}
+{"id":"87cab2eca0c166fa","targetSkill":"xlsx","kind":"paraphrase","phrase":"Fix malformed rows in this CSV, please.","source":"paraphrase-template"}
+{"id":"e3c386da78976895","targetSkill":"xlsx","kind":"paraphrase","phrase":"Open this xlsx, please.","source":"paraphrase-template"}
+{"id":"3e1753cbdf1e2f61","targetSkill":"xlsx","kind":"paraphrase","phrase":"Compute formulas in Excel, please.","source":"paraphrase-template"}
+{"id":"3d4e17fe8d0df1df","targetSkill":"xlsx","kind":"typo","phrase":"build a finnacial model","source":"typo-rule"}
+{"id":"a4e446d02afb040a","targetSkill":"xlsx","kind":"typo","phrase":"fix malfored rows in this CSV","source":"typo-rule"}
+{"id":"3778dfa96cd6c0cf","targetSkill":"xlsx","kind":"typo","phrase":"compute ormulas in Excel","source":"typo-rule"}
+{"id":"8afa57f9089aeff3","targetSkill":"xlsx","kind":"slang","phrase":"any way to fix malformed rows in this CSV?","source":"slang-template"}
+{"id":"b5276e28c63d1f84","targetSkill":"xlsx","kind":"slang","phrase":"pls convert CSV to xlsx","source":"slang-template"}
+{"id":"360ca4c4558b3be5","targetSkill":"xlsx","kind":"slang","phrase":"pls add columns to a CSV","source":"slang-template"}
+{"id":"ff7194311ef3118c","targetSkill":"xlsx","kind":"indirect","phrase":"this csv is a mess","source":"indirect-template"}
+{"id":"42771013c0b4680d","targetSkill":"xlsx","kind":"indirect","phrase":"the columns are all wrong in this sheet","source":"indirect-template"}
+{"id":"2f30a989da635cc1","targetSkill":"xlsx","kind":"indirect","phrase":"I need to crunch some numbers in a sheet","source":"indirect-template"}
+{"id":"a113419f817d8314","targetSkill":null,"kind":"negative","phrase":"produce a report as a Word file","source":"negative-from-adjacent","expectedOtherSkill":"docx"}
+{"id":"9aa3b919eee8c702","targetSkill":null,"kind":"negative","phrase":"extract tables from a PDF","source":"negative-from-adjacent","expectedOtherSkill":"pdf"}
+{"id":"9ead93293a462adb","targetSkill":null,"kind":"negative","phrase":"accept tracked changes","source":"negative-from-adjacent","expectedOtherSkill":"docx"}
+{"id":"21ecaa887914ad6a","targetSkill":null,"kind":"negative","phrase":"rotate PDF pages","source":"negative-from-adjacent","expectedOtherSkill":"pdf"}

@@ -225,6 +225,10 @@ import { shouldSweepChatAtBoot } from './boot-sweep-filter.js'
 
 import { createIpcServer, type IpcClient, type IpcServer } from './ipc-server.js'
 import { createPendingInboundBuffer } from './pending-inbound-buffer.js'
+import {
+  buildVaultGrantApprovedInbound,
+  buildVaultGrantDeniedInbound,
+} from './vault-grant-inbound-builders.js'
 import { createPollHealthCheck, type PollHealthCheckHandle } from './poll-health.js'
 import type {
   ToolCallMessage,
@@ -9179,31 +9183,18 @@ async function performVaultAccessApproval(
   // knows (a) which key was approved, (b) at what scope, (c) what to
   // do next. Meta carries the structured fields for forensics + for
   // future filters that want to suppress these in the chat tail.
-  const grantedSyntheticTs = Date.now()
-  const synthetic: InboundMessage = {
-    type: 'inbound',
-    chatId: pending.chat_id,
-    messageId: grantedSyntheticTs, // synthetic — no Telegram message id exists
-    user: 'vault-broker',
-    userId: 0,
-    ts: grantedSyntheticTs,
-    text:
-      `✅ Operator approved your vault access request for ` +
-      `\`${pending.key}\` (scope=${pending.scope}, ` +
-      `${Math.round(pending.ttl_seconds / 86400)}d, grant=${id}). ` +
-      `The token has been written. Please resume the task that was ` +
-      `waiting on this credential — fetch via the usual switchroom vault ` +
-      `get path.`,
-    meta: {
-      source: 'vault_grant_approved',
+  const synthetic = buildVaultGrantApprovedInbound({
+    ctx: {
       agent: pending.agent,
       key: pending.key,
       scope: pending.scope,
-      grant_id: id,
-      stage_id: stageId,
-      operator_id: senderId,
+      chat_id: pending.chat_id,
+      ttl_seconds: pending.ttl_seconds,
     },
-  }
+    grantId: id,
+    stageId,
+    operatorId: senderId,
+  })
   const delivered = ipcServer.sendToAgent(pending.agent, synthetic)
   process.stderr.write(
     `telegram gateway: vault_grant_approved injection agent=${pending.agent} ` +
@@ -9272,29 +9263,17 @@ async function handleVaultRequestAccessCallback(ctx: Context, data: string): Pro
     // try a different approach, skip the feature) instead of staying
     // wedged forever. Buffer-on-failure so a mid-reconnect bridge
     // still receives this on its next register.
-    const denyTs = Date.now()
-    const denyInbound: InboundMessage = {
-      type: 'inbound',
-      chatId: pending.chat_id,
-      messageId: denyTs,
-      user: 'vault-broker',
-      userId: 0,
-      ts: denyTs,
-      text:
-        `🚫 Operator denied your vault access request for ` +
-        `\`${pending.key}\` (scope=${pending.scope}). ` +
-        `The credential is unavailable — pick a fallback for the original task ` +
-        `(apologise to the user, try a different approach, or skip the feature). ` +
-        `Do NOT re-request this key without first asking the user.`,
-      meta: {
-        source: 'vault_grant_denied',
+    const denyInbound = buildVaultGrantDeniedInbound({
+      ctx: {
         agent: pending.agent,
         key: pending.key,
         scope: pending.scope,
-        stage_id: stageId,
-        operator_id: senderId,
+        chat_id: pending.chat_id,
+        ttl_seconds: pending.ttl_seconds,
       },
-    }
+      stageId,
+      operatorId: senderId,
+    })
     const denyDelivered = ipcServer.sendToAgent(pending.agent, denyInbound)
     process.stderr.write(
       `telegram gateway: vault_grant_denied injection agent=${pending.agent} ` +

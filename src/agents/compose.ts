@@ -1022,6 +1022,36 @@ function emitAgentService(
     SWITCHROOM_VAULT_BROKER_SOCK: `/run/switchroom/broker/sock`,
     SWITCHROOM_KERNEL_SOCKET: `/run/switchroom/kernel/sock`,
     SWITCHROOM_RUNTIME: "docker",
+    // tini's process-group signal mode. Default tini forwards signals
+    // ONLY to its single direct child — under our process tree that's
+    // tmux (or start.sh→tmux post-exec) at PID 7. The gateway sidecar
+    // and other backgrounded sidecars (autoaccept-poll, agent-scheduler)
+    // share PGID=7 with tmux but are NOT direct children of tini, so
+    // a SIGTERM from `docker stop` / `docker compose up -d --remove-
+    // orphans` reaches tmux only — the gateway gets SIGKILL'd after
+    // stop_grace_period without ever running its shutdown handler.
+    //
+    // The handler matters: it writes /state/agent/telegram/clean-
+    // shutdown.json with a fresh timestamp + reason (the SIGTERM
+    // fallback is "systemctl: external restart" — see clean-shutdown-
+    // marker.ts:139), and the next gateway boot reads that marker to
+    // resolve restartReason as 'graceful' instead of 'crash'. Without
+    // this env, every raw `docker compose up -d` recreate boots as
+    // crash + notifies the fleet (CC-equivalent to the bug PR #1141
+    // fixed for `switchroom update` specifically — that one uses
+    // `docker exec` to stamp the marker BEFORE the recreate, this one
+    // makes the in-gateway shutdown handler reliable so any graceful
+    // container stop self-attributes).
+    //
+    // TINI_KILL_PROCESS_GROUP=1 routes signals to the pgrp of tini's
+    // direct child via kill(-pgid, sig). Verified pgrp tree on
+    // 2026-05-13 (gymbro container): tmux client + supervisor bashes
+    // + bun gateway + bun scheduler + bun autoaccept all share PGID=7
+    // — they all get SIGTERM together. Claude (PGID=20, separate
+    // session via tmux server) is unaffected, which is correct: it
+    // doesn't write the marker and gets SIGKILL'd at grace-period
+    // expiry like before.
+    TINI_KILL_PROCESS_GROUP: "1",
   };
   // PostHog runtime telemetry — opt-out honoured, distinct-ID propagated
   // from the host CLI so CLI + runtime events merge under the same user.

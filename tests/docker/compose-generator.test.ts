@@ -244,6 +244,23 @@ describe("generateCompose", () => {
     expect(out).toMatch(/agent-coach:[\s\S]*?cpus: 1\.0/);
   });
 
+  it("profile.resources (inline profile) cascades down to per-agent", () => {
+    // Inline profile sets memory_reservation; the agent extends it.
+    // resolveAgentConfig folds profile through mergeAgentConfig, which
+    // means our resources cascade clause must apply at the profile
+    // layer too (not just defaults). Pin it.
+    const config = makeConfig({ alice: { extends: "tight" } });
+    config.profiles = {
+      tight: { resources: { memory_reservation: "192m", pids_limit: 300 } },
+    } as unknown as typeof config.profiles;
+    const out = generateCompose({ config });
+    expect(out).toMatch(/agent-alice:[\s\S]*?mem_reservation: 192m/);
+    expect(out).toMatch(/agent-alice:[\s\S]*?pids_limit: 300/);
+    // memory still defaults — "tight" isn't in RESOURCE_BY_PROFILE so
+    // it falls through to the catch-all default 1.5g.
+    expect(out).toMatch(/agent-alice:[\s\S]*?mem_limit: 1\.5g/);
+  });
+
   it("agent.resources.cpus overrides profile (fractional accepted)", () => {
     const out = generateCompose({
       config: makeConfig({ ziggy: { extends: "lightweight", resources: { cpus: 0.25 } } }),

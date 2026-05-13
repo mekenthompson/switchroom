@@ -1472,6 +1472,26 @@ export const AgentSchema = z.object({
       "Opt-in flags for experimental / legacy behaviours. Cascades through " +
       "defaults → profile → per-agent.",
     ),
+  // Mirror of profileFields.resources — must be repeated here because
+  // AgentSchema does not spread profileFields. Without this, the
+  // inferred AgentConfig type lacks `resources` and typed reads in
+  // compose.ts / merge.ts fail tsc (runtime works because zod doesn't
+  // strip unknown keys by default). See profileFields.resources at
+  // schema.ts above for the full description; keep the two in sync.
+  resources: z
+    .object({
+      memory: z
+        .string()
+        .regex(/^\d+(\.\d+)?[kmgKMG]?$/)
+        .optional(),
+      memory_reservation: z
+        .string()
+        .regex(/^\d+(\.\d+)?[kmgKMG]?$/)
+        .optional(),
+      pids_limit: z.number().int().positive().optional(),
+      cpus: z.number().positive().optional(),
+    })
+    .optional(),
 });
 
 export const TelegramConfigSchema = z.object({

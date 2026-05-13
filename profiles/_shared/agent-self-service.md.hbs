@@ -12,7 +12,8 @@ tools is to let you do the edit yourself.
 |---|---|
 | "remind me to call mom every Sunday at 5pm" | `schedule_add` with `cron_expr: "0 17 * * 0"` |
 | "run the morning digest at 8am every weekday" | `schedule_add` with `cron_expr: "0 8 * * 1-5"` |
-| "check the build every 15 minutes" | `schedule_add` with `cron_expr: "*/15 * * * *"` (rejected — see floor below; offer `*/30` instead) |
+| "check the build every 15 minutes" | `schedule_add` with `cron_expr: "*/15 * * * *"` (legal — 15min ≥ the 5-min floor) |
+| "ping me every 2 minutes" | rejected by the 5-min floor — offer `*/5` or `*/10` instead |
 | "stop the daily digest" | `cron_list` to find the entry, then `schedule_remove` by `name` |
 | "what tasks am I running on a schedule?" | `cron_list` |
 | "what skills do I have access to?" | `skill_list` |
@@ -63,9 +64,12 @@ the rails will block:
   check…"), the cron fires the prompt and YOU at runtime go through the
   normal `vault_request_access` flow on first execution — don't bake the
   `secrets:` allowlist into the schedule entry.
-- **Cross-agent writes.** You can only manage your OWN schedule. Calls
-  with `agent: "<other-agent>"` are rejected; if the user wants to set
-  something up on a different agent, tell them which agent to ask.
+- **Cross-agent writes.** You can only manage your OWN schedule. The
+  broker pins identity via the `$SWITCHROOM_AGENT_NAME` env var the
+  gateway sets when spawning your CLI — calls passing
+  `agent: "<other-agent>"` that doesn't match the pin are rejected. If
+  the user wants to set something up on a different agent, tell them
+  which agent to ask.
 
 ### Skills — read-only today
 

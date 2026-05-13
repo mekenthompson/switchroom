@@ -109,17 +109,28 @@ describe("uat: ask_user button-tap → keyboard strip + status line + agent cont
         // ── 5. Wait for the agent's confirmation reply. Invariant 3. ─
         // The agent receives the answer as a channel event and starts
         // a new turn. We expect a reply mentioning the choice within
-        // ~30s. The match deliberately allows variation in wording —
-        // the prompt asked for "single short line confirming the
-        // choice" but the model phrasing isn't pinned.
+        // ~60s.
+        //
+        // Predicate matcher filters out the EDITED card. The driver's
+        // `observeMessages` (driver.ts:252-263) dispatches BOTH new
+        // messages AND edit events through the same stream, with
+        // `ObservedMessage.edited` set accordingly. Without this
+        // filter the race between (a) the gateway's edit landing
+        // post-sleep and (b) the agent's confirmation turn would
+        // catch the edited card as the "match" — false-positive on
+        // invariant 3 if the edit's network round-trip beat the
+        // turn-completion. Predicate guards against that without
+        // depending on a sleep duration. (PR #1167 review item D.)
         const confirmation = await sc.expectMessage(
-          new RegExp(CHOSEN, "i"),
+          (m) => !m.edited && new RegExp(CHOSEN, "i").test(m.text),
           { from: "bot", timeout: 60_000 },
         );
-        // Soft assertion: the confirmation message ID must be GREATER
-        // than the card's — i.e. a new bot message, not the edited
-        // card surfacing as a "match". The edited card's id equals
-        // card.messageId; a new turn produces a fresh id.
+        // Defense in depth: the confirmation message id must be
+        // greater than the card's. A fresh turn always produces a
+        // new id; same id implies the edited card slipped through
+        // the predicate (e.g. if `edited` wasn't set on the
+        // observation). Soft assertion — predicate is the primary
+        // guard.
         expect(confirmation.messageId).toBeGreaterThan(card.messageId);
       } finally {
         await sc.tearDown();

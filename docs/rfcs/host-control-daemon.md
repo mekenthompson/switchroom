@@ -611,6 +611,63 @@ broker-attestation client). **~30 agent minutes** for Phase 2.5
 (audit surface). Streamed-progress frames remain a possible Phase 4
 follow-up if `get_status` polling proves choppy.
 
+### 10.1 Proposed Phase 3 verb — `run_tests`
+
+Discovered during the klanker Bash-wedge RCA (PR #1186, PR #1188). The
+agent-side prevention path for the persistent-shell wedge is "don't
+run heavy test suites in the agent's own session." The cleanest
+implementation of that prevention: a hostd verb that spawns `npm test`
+on the host, in the agent's worktree, with output streamed back.
+
+**Shape** (sketch; refine when implementing):
+
+```
+{
+  op: "run_tests",
+  args: {
+    worktree: "/state/agent/home/<repo>",          // bind-mount accessible to host
+    command: "npm test" | ["bun", "run", "test"], // explicit, no shell metachars
+    env_strip: ["SWITCHROOM_RUNTIME", ...],        // optional; defaults to compose's injected set
+    timeout_ms: 600_000,                            // default 10min, cap 30min
+  }
+}
+```
+
+**Response** (sketch):
+
+Same `started` / `get_status` polling pattern as `agent_restart`. The
+daemon spawns a host-side child, captures stdout/stderr to a per-
+request file under `~/.switchroom/audit/hostd/<request_id>.log`,
+sets `state: "running"` immediately, and updates to `done` with
+`exit_code` when the child exits. The agent client polls or
+opens a streaming `tail_status` (Phase 4) for live output.
+
+**Trust posture.** `run_tests` is the first verb that executes
+arbitrary code from the agent's worktree. Two posture constraints:
+
+1. **Path canonicalization.** `worktree` must canonicalize under
+   `~/.switchroom/agents/<agent>/home/**` — same containment check
+   the bind_mounts primitive (#1166) uses. Refuse anything outside.
+2. **Command allowlist.** Either a fixed string like `npm test` or
+   `bun run test`, or an explicit array; no shell expansion. The
+   agent can't ask hostd to run arbitrary commands — only registered
+   test entrypoints. Future verbs (`run_build`, `run_lint`) would
+   sit alongside with the same shape.
+
+**Why not run as a Bash sub-agent inside the agent container?**
+That works for prevention (the brief's recommendation today) but it
+doesn't help when the test suite needs > 5GB of memory (six agents
+× 6GB cgroups = 36GB, tight on a 60GB host; the test runners can
+exceed that). Running on the host directly avoids the cgroup
+constraint and the wedge surface entirely.
+
+**Effort estimate: ~180 agent minutes** for the verb itself
+(protocol schema + server handler + client method + tests),
+plus ~60 agent minutes to wire the agent gateway into using it
+optimistically (with sub-agent fallback). **~240 agent minutes
+total.** Tracks as a Phase 3 follow-up; deferred until Phase 2
+lands.
+
 ## 11. Relation to #1166 (bind_mounts)
 
 See §13 below for the rectification. Short version: bind_mounts

@@ -30,7 +30,10 @@ import {
 } from "../../src/agents/compose.js";
 import type { SwitchroomConfig } from "../../src/config/schema.js";
 
-function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Record<string, unknown>; admin?: boolean; env?: Record<string, string>; bind_mounts?: Array<{ source: string; target?: string; mode?: "ro" | "rw" }> }>): SwitchroomConfig {
+function makeConfig(
+  agents: Record<string, { extends?: string; settings_raw?: Record<string, unknown>; admin?: boolean; env?: Record<string, string>; bind_mounts?: Array<{ source: string; target?: string; mode?: "ro" | "rw" }> }>,
+  topLevel?: { host_control?: { enabled?: boolean } },
+): SwitchroomConfig {
   return {
     switchroom: { version: 1, agents_dir: "~/.switchroom/agents", skills_dir: "~/.switchroom/skills" },
     telegram: { bot_token: "x" },
@@ -53,6 +56,7 @@ function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Re
       ]),
     ),
     drive: undefined as unknown as SwitchroomConfig["drive"],
+    host_control: topLevel?.host_control,
   } as unknown as SwitchroomConfig;
 }
 
@@ -1003,6 +1007,105 @@ describe("agent bind_mounts (#1164)", () => {
       }),
     });
     expect(out).toContain("/home/me/code/switchroom:/home/me/code/switchroom:ro");
+  });
+});
+
+describe("host-control daemon bind mount (RFC C Phase 1)", () => {
+  // Admin agents get an extra per-agent UDS bind mount when
+  // host_control.enabled is true AND the host-side directory
+  // exists (compose `up` hard-fails on missing bind sources).
+
+  it("does NOT emit the hostd bind mount when host_control.enabled is unset", async () => {
+    const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "hostd-mount-off-"));
+    try {
+      mkdirSync(join(tmp, ".switchroom/hostd/klanker"), { recursive: true });
+      const out = generateCompose({
+        config: makeConfig({ klanker: { admin: true } }),
+        homeDir: tmp,
+      });
+      expect(out).not.toMatch(
+        /agent-klanker:[\s\S]*?\.switchroom\/hostd\/klanker:\/run\/switchroom\/hostd\/klanker/,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("does NOT emit the hostd bind mount on non-admin agents even when enabled", async () => {
+    const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "hostd-mount-nonadmin-"));
+    try {
+      mkdirSync(join(tmp, ".switchroom/hostd/bob"), { recursive: true });
+      const out = generateCompose({
+        config: makeConfig(
+          { bob: {} },
+          { host_control: { enabled: true } },
+        ),
+        homeDir: tmp,
+      });
+      expect(out).not.toMatch(
+        /agent-bob:[\s\S]*?\.switchroom\/hostd\/bob:\/run\/switchroom\/hostd\/bob/,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("emits the hostd bind mount when admin AND enabled AND host dir exists", async () => {
+    const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "hostd-mount-on-"));
+    try {
+      mkdirSync(join(tmp, ".switchroom/hostd/klanker"), { recursive: true });
+      const out = generateCompose({
+        config: makeConfig(
+          { klanker: { admin: true }, bob: {} },
+          { host_control: { enabled: true } },
+        ),
+        homeDir: tmp,
+      });
+      expect(out).toMatch(
+        new RegExp(
+          `agent-klanker:[\\s\\S]*?${tmp.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&")}/\\.switchroom/hostd/klanker:/run/switchroom/hostd/klanker(?!:)`,
+        ),
+      );
+      // bob (non-admin) does not get the mount even on the same fleet.
+      expect(out).not.toMatch(
+        /agent-bob:[\s\S]*?\.switchroom\/hostd\/bob:/,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the hostd bind mount when host dir doesn't exist (no compose hard-fail)", async () => {
+    // Same pattern as the vault-audit.log guard: docker compose `up`
+    // hard-fails when a bind source is missing. On a fresh install
+    // before the daemon has booted, the per-agent dir won't exist
+    // yet — emit nothing rather than blocking compose.
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "hostd-mount-fresh-"));
+    try {
+      // No mkdir — directory absent.
+      const out = generateCompose({
+        config: makeConfig(
+          { klanker: { admin: true } },
+          { host_control: { enabled: true } },
+        ),
+        homeDir: tmp,
+      });
+      expect(out).not.toMatch(/\.switchroom\/hostd\/klanker/);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 

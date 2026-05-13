@@ -421,6 +421,11 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // Tests override this so phase fleets get unique names that can't
   // collide with a production install on the same host.
   const containerNamePrefix = opts.containerNamePrefix ?? "switchroom";
+  // Host-control daemon (RFC C, Phase 1) — opt-in via top-level
+  // host_control.enabled. When false (default) compose emits the
+  // same shape as before; when true, admin agents get an extra
+  // bind-mount line for the daemon's per-agent UDS.
+  const hostControlEnabled = config.host_control?.enabled === true;
   // For existsSync() decisions on optional bind-mount sources (#907):
   // emission uses `homePrefix` (which may be the literal "${HOME}" so
   // sudo-bake works), but the existsSync probe must use the real host
@@ -733,6 +738,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
         posthogKeyOverride,
         posthogHostOverride,
       },
+      hostControlEnabled,
     );
   }
 
@@ -772,6 +778,7 @@ function emitAgentService(
   switchroomConfigPath: string | undefined,
   containerNamePrefix: string,
   posthog: PosthogRuntimeEnv,
+  hostControlEnabled: boolean,
 ): void {
   lines.push(`  agent-${a.name}:`);
   emitImageOrBuild(lines, "agent", imageTag, buildMode, buildContext);
@@ -984,6 +991,28 @@ function emitAgentService(
     if (existsSync(`${hostHomeForChecks}/.switchroom/vault-audit.log`)) {
       lines.push(
         `      - ${homePrefix}/.switchroom/vault-audit.log:/state/agent/home/.switchroom/vault-audit.log:ro`,
+      );
+    }
+    // Host-control daemon socket (#1164 follow-up — RFC C).
+    // ADMIN-ONLY and gated on `host_control.enabled: true`. The
+    // daemon (a systemd user unit on the host) binds the per-agent
+    // socket at `~/.switchroom/hostd/<name>/sock`, chowns it to the
+    // agent UID, and the agent connects via the in-container path
+    // `/run/switchroom/hostd/<name>/sock`. Same bind-mount shape
+    // the broker uses; identity comes from the host-side bind
+    // path so the agent can't forge it.
+    //
+    // No singleton container in Phase 1 (the daemon lives outside
+    // compose); only the per-agent volume here. The agent end is
+    // the directory, not the file, so the daemon can bind the
+    // socket inside it after starting. existsSync guard on the
+    // directory: if the daemon hasn't run yet, the directory will
+    // be missing — compose `up` would hard-fail on a missing :ro
+    // source. We bind read-write so the daemon can chown the
+    // socket file from the host side; the agent only connects.
+    if (hostControlEnabled && existsSync(`${hostHomeForChecks}/.switchroom/hostd/${a.name}`)) {
+      lines.push(
+        `      - ${homePrefix}/.switchroom/hostd/${a.name}:/run/switchroom/hostd/${a.name}`,
       );
     }
   }

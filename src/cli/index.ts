@@ -28,6 +28,7 @@ import { registerStatusAskCommand } from "./status-ask.js";
 import { registerAgentConfigCommands } from "./agent-config.js";
 import { registerAgentConfigMcpCommand } from "./mcp-agent-config.js";
 import { registerMigrateCommand } from "./migrate.js";
+import { registerHostdCommand } from "./hostd.js";
 import { captureEvent, installGlobalErrorHandlers } from "../analytics/posthog.js";
 
 installGlobalErrorHandlers();
@@ -80,3 +81,4 @@ registerStatusAskCommand(program);
 registerAgentConfigCommands(program);
 registerAgentConfigMcpCommand(program);
 registerMigrateCommand(program);
+registerHostdCommand(program);

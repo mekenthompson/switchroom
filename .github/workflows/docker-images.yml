@@ -123,6 +123,7 @@ jobs:
           - { name: agent,     file: docker/Dockerfile.agent }
           - { name: broker,    file: docker/Dockerfile.broker }
           - { name: kernel,    file: docker/Dockerfile.kernel }
+          - { name: hostd,     file: docker/Dockerfile.hostd }
     steps:
       - name: Checkout
         uses: actions/checkout@v4

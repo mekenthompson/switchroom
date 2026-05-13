@@ -8,7 +8,7 @@ The harness lives in `tests/skill-coverage/`. The audit + inventory in this dire
 
 1. A switchroom agent container is **running** and you have host-side read access to its bind mounts:
    - gateway socket at `~/.switchroom/agents/<name>/telegram/gateway.sock`
-   - session JSONL dir at `~/.claude/projects/<name>/` (host-side mirror of `/state/.claude/projects/` inside the agent)
+   - session JSONL dir at `~/.claude/projects/<name>/` (host-side mirror of `/state/.claude/` inside the agent)
 2. The harness corpus is current — regenerate after any edit to `fixtures/skills.json`:
    ```bash
    bun tests/skill-coverage/corpus/generate-corpus.ts --seed=1
@@ -19,7 +19,7 @@ The harness lives in `tests/skill-coverage/`. The audit + inventory in this dire
 
 Each probe is a real Claude Code turn against the user's Claude Pro/Max subscription. Default corpus = ~19 probes/skill × 25 in-scope skills = ~475 turns. At a wall-clock average of ~45s/turn that's ~6 wall-hours and ~475 turn-quota debits.
 
-The probes will also post to the agent's bound Telegram chat as if the user said them — pause notifications or use a throwaway chat-binding before firing.
+`harness/inject.ts` injects each probe with a synthetic `chatId` (`-1001000000000`), so the gateway routes the synthesized turn through its normal pipeline but the reply lands in an inert chat the bot isn't a member of — the agent's real bound Telegram chat does **not** see the probes. Slice runs are safe to fire against an agent that an operator is actively using; the only collision is the agent being busy mid-turn (see "Prereqs").
 
 ## Live run
 
@@ -39,7 +39,11 @@ bun tests/skill-coverage/cli.ts <agent-name> \
   --agent-cwd=... --gateway-socket=... --go
 ```
 
-The runner emits `scorecard.json` + `scorecard.md` in `tests/skill-coverage/out/`.
+The runner emits three artifacts at `tests/skill-coverage/out/skill-coverage.{run.json,scorecard.json,scorecard.md}` (override the base with `--out=<path>`):
+
+- `<outBase>.run.json` — full `RunRecord` (every probe's raw events when `--debug-raw-events`, else just outcomes). Forensic source of truth.
+- `<outBase>.scorecard.json` — machine-readable scorecard (precision/recall/F1 per skill + aggregate).
+- `<outBase>.scorecard.md` — same data as a human-readable markdown table; this is the file to check in.
 
 ## Reading the scorecard
 

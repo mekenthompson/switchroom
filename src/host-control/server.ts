@@ -103,7 +103,17 @@ export class HostdServer {
   async start(): Promise<void> {
     const hostdDir = join(this.opts.homeDir, ".switchroom", "hostd");
     await mkdir(hostdDir, { recursive: true });
-    await chmod(hostdDir, 0o700).catch(() => undefined);
+    // 0o755 (not 0o700) so the operator's compose generator can
+    // existsSync(<hostdDir>/<agentName>) at apply time — the dir
+    // listing is needed to emit the per-agent bind mount into the
+    // agent service. Confidentiality of incoming connections is
+    // enforced by the SOCKET mode (0o660) + chown-to-agent-uid below,
+    // not by the dir mode. The dir only ever contains other agent
+    // subdirs + sockets, all of which are themselves access-controlled.
+    // Pre-fix the daemon bound sockets but compose silently skipped
+    // every bind mount because the operator's uid couldn't traverse
+    // a root-owned 0700 dir, so no agent could ever reach the daemon.
+    await chmod(hostdDir, 0o755).catch(() => undefined);
 
     const agentNames = Object.keys(this.opts.agentUids).sort();
     if (agentNames.length === 0) {
@@ -125,7 +135,10 @@ export class HostdServer {
         const dir = join(hostdDir, name);
         const sockPath = join(dir, "sock");
         await mkdir(dir, { recursive: true });
-        await chmod(dir, 0o700).catch(() => undefined);
+        // Same rationale as the parent dir above: 0o755 so the
+        // operator's `existsSync(<dir>)` in compose.ts succeeds;
+        // socket-level mode + chown is the security boundary.
+        await chmod(dir, 0o755).catch(() => undefined);
         if (existsSync(sockPath)) await unlink(sockPath).catch(() => undefined);
 
         const server = createServer((socket) =>

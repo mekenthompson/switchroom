@@ -52,10 +52,22 @@
  * false-firing).
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 
-const THRESHOLD = 3
+// Higher than the original 3 to avoid false-firing on legitimate
+// empty-output command sequences (a sed, then two greps with no matches,
+// is a normal refactor pattern and shouldn't trigger). PR #1188 review
+// found 3 was guaranteed-FP. 5 + the noOutputExpected /
+// returnCodeInterpretation skip below should keep real wedges detectable
+// while staying quiet during normal grep/find/sed chains.
+const THRESHOLD = 5
+
+// node:fs operations on the counter / sentinel files are read-modify-write
+// without explicit locking. Safe because Claude Code serializes tool calls
+// per session — there is at most one PostToolUse fire in flight per agent
+// at any time. Documented so a future caller doesn't introduce parallelism
+// and silently lose counts.
 
 function readStdin() {
   try {
@@ -113,41 +125,100 @@ function writeSentinel(payload) {
   }
 }
 
+function clearSentinel() {
+  const p = sentinelPath()
+  if (!p) return
+  try {
+    rmSync(p, { force: true })
+  } catch {
+    // fail-silent
+  }
+}
+
+function resetCounter() {
+  // Counter reset means we're back in healthy territory — clear the
+  // sentinel too so a future operator-side surface that polls for
+  // `wedge-detected.json` doesn't see stale state from a long-cleared
+  // wedge. Per PR #1188 review B2.
+  writeCounter(0)
+  clearSentinel()
+}
+
 /**
- * Test whether a Bash tool_response matches the wedge signature
- * (empty stdout AND empty stderr).
+ * Test whether a Bash tool_response matches the wedge signature.
  *
- * Defensive: tool_response shape varies across Claude Code versions and
- * across plain-string vs structured-object representations. We check a
- * handful of likely markers and fail-no-match on anything else.
+ * The wedge produces: empty stdout AND empty stderr AND no
+ * Claude-Code-supplied "no output is expected here" annotation AND not
+ * interrupted by the user.
+ *
+ * The benign empty-output cases that PR #1188 review B1 called out
+ * (grep/find/sed/test with no matches or in-place mutation) are
+ * disambiguated by:
+ *   - `noOutputExpected: true` — Claude Code annotates Bash calls whose
+ *     command pattern legitimately produces no output.
+ *   - `returnCodeInterpretation: "..."` — present when Claude Code has
+ *     a human-readable explanation for the exit code (e.g. "No matches
+ *     found" for grep). Its presence means "this empty result is
+ *     understood, not a desync."
+ *   - `interrupted: true` — user pressed `!` mid-command. Not a wedge.
+ *
+ * Defensive: response shape varies across Claude Code versions and
+ * across plain-string vs structured-object representations. We check
+ * each known marker and fail-no-match on anything else.
  */
 function isEmptyBashResponse(toolResponse) {
   if (toolResponse == null) return false
+
+  // Structured-object path. Most reliable — read the fields directly
+  // and consult the annotations.
+  if (typeof toolResponse === 'object') {
+    const r = toolResponse
+    // Interruption is user-initiated, not a desync. Don't count.
+    if (r.interrupted === true) return false
+    // Claude Code already knows this command's empty output is expected.
+    if (r.noOutputExpected === true) return false
+    // Claude Code has a human-readable explanation — the empty result is
+    // accounted for, not a parse failure.
+    if (typeof r.returnCodeInterpretation === 'string' && r.returnCodeInterpretation.length > 0) {
+      return false
+    }
+    // Real empty-result check. Both streams empty (or missing).
+    const stdout = typeof r.stdout === 'string' ? r.stdout : ''
+    const stderr = typeof r.stderr === 'string' ? r.stderr : ''
+    if (stdout === '' && stderr === '') return true
+    return false
+  }
+
+  // String path — older Claude Code versions, or when the response was
+  // wrapped before reaching the hook. We can't read structured fields,
+  // so we rely on substring shape and accept slightly higher FP risk on
+  // this path (covered by THRESHOLD raise + skill-side recovery being
+  // cheap).
   let body
   try {
-    body = typeof toolResponse === 'string' ? toolResponse : JSON.stringify(toolResponse)
+    body = String(toolResponse)
   } catch {
     return false
   }
-  // Cap scan to keep us cheap on huge outputs (which are by definition
-  // not empty, so we can early-return).
   if (body.length > 4096) return false
 
-  // Several response shapes Claude Code has used:
-  //   1. XML-style tags: <bash-stdout></bash-stdout><bash-stderr></bash-stderr>
-  //   2. JSON object stringified: {"stdout":"","stderr":"",...}
-  //   3. JSON object's literal stdout/stderr fields (when we passed the
-  //      object directly).
+  // If the string form contains noOutputExpected:true or a
+  // returnCodeInterpretation, treat as accounted-for.
+  if (/"noOutputExpected"\s*:\s*true/.test(body)) return false
+  if (/"interrupted"\s*:\s*true/.test(body)) return false
+  if (/"returnCodeInterpretation"\s*:\s*"[^"]+"/.test(body)) return false
+
+  // XML-style tags: <bash-stdout></bash-stdout><bash-stderr></bash-stderr>
   const hasEmptyStdoutTag = /<bash-stdout>\s*<\/bash-stdout>/i.test(body)
   const hasEmptyStderrTag = /<bash-stderr>\s*<\/bash-stderr>/i.test(body)
   if (hasEmptyStdoutTag && hasEmptyStderrTag) return true
 
+  // JSON-stringified shape from older serializers.
   const hasEmptyStdoutJson = /"stdout"\s*:\s*""/.test(body)
   const hasEmptyStderrJson = /"stderr"\s*:\s*""/.test(body)
   if (hasEmptyStdoutJson && hasEmptyStderrJson) return true
 
-  // Defensive: if the response is literally `{}` or `""`, that's also a
-  // zero-info Bash result. Treat the same as empty.
+  // Literal zero-info bodies.
   if (body === '{}' || body === '""' || body === '') return true
 
   return false
@@ -191,13 +262,13 @@ function main() {
   // about Bash, but a different tool firing means we're at least not in
   // a tight loop of Bash retries — safe to reset).
   if (evt.tool_name !== 'Bash') {
-    writeCounter(0)
+    resetCounter()
     return
   }
 
   if (!isEmptyBashResponse(evt.tool_response)) {
     // Bash call returned real output → not wedged → reset.
-    writeCounter(0)
+    resetCounter()
     return
   }
 

@@ -12,13 +12,20 @@ import { join, resolve } from "node:path";
  *   stdout: optional JSON
  *             {"hookSpecificOutput":{"hookEventName":"PostToolUse",
  *              "additionalContext":"..."}}
- *           emitted only when the consecutive-empty-Bash counter
- *           crosses THRESHOLD (=3).
+ *           emitted when consecutive empty Bash results reach THRESHOLD (=5)
+ *           and on every subsequent empty result while still wedged.
  *   exit:   0 always.
  *
  * State files in $TELEGRAM_STATE_DIR:
  *   wedge-counter.txt   — integer, consecutive empty Bash results.
  *   wedge-detected.json — sentinel written when counter >= THRESHOLD.
+ *                         CLEARED on any counter reset (PR #1188 review B2).
+ *
+ * Detection skips (PR #1188 review B1):
+ *   - tool_response.noOutputExpected === true  (grep/find/sed/etc.)
+ *   - tool_response.returnCodeInterpretation present (Claude already
+ *     explained the result)
+ *   - tool_response.interrupted === true  (user pressed `!`)
  */
 
 const HOOK = resolve(
@@ -28,6 +35,7 @@ const HOOK = resolve(
   "hooks",
   "wedge-detect-posttool.mjs",
 );
+const THRESHOLD = 5;
 
 interface RunResult {
   status: number;
@@ -86,6 +94,16 @@ function bashEvent(toolResponse: unknown): Record<string, unknown> {
   };
 }
 
+const EMPTY = { stdout: "", stderr: "", interrupted: false };
+
+function ramp(count: number, stateDir: string): RunResult {
+  let last: RunResult | null = null;
+  for (let i = 0; i < count; i++) {
+    last = run(bashEvent(EMPTY), stateDir);
+  }
+  return last!;
+}
+
 describe("wedge-detect-posttool.mjs", () => {
   let stateDir: string;
 
@@ -105,11 +123,9 @@ describe("wedge-detect-posttool.mjs", () => {
   });
 
   it("non-Bash event resets the counter and is silent", () => {
-    // Pre-seed counter as if a wedge was in progress.
-    const r1 = run(bashEvent({ stdout: "", stderr: "" }), stateDir);
+    const r1 = run(bashEvent(EMPTY), stateDir);
     expect(r1.counter).toBe(1);
 
-    // Read event (not Bash) → counter reset to 0.
     const r2 = run(
       { session_id: "sess-test", tool_use_id: "t-r", tool_name: "Read", tool_response: "ok" },
       stateDir,
@@ -120,7 +136,7 @@ describe("wedge-detect-posttool.mjs", () => {
   });
 
   it("non-empty Bash result resets the counter", () => {
-    const r1 = run(bashEvent({ stdout: "", stderr: "" }), stateDir);
+    const r1 = run(bashEvent(EMPTY), stateDir);
     expect(r1.counter).toBe(1);
 
     const r2 = run(bashEvent({ stdout: "hello\n", stderr: "" }), stateDir);
@@ -128,26 +144,23 @@ describe("wedge-detect-posttool.mjs", () => {
     expect(r2.sentinel).toBeNull();
   });
 
-  it("counts consecutive empty Bash results with JSON-style response shape", () => {
-    const r1 = run(bashEvent({ stdout: "", stderr: "" }), stateDir);
-    expect(r1.counter).toBe(1);
-    expect(r1.sentinel).toBeNull();
-
-    const r2 = run(bashEvent({ stdout: "", stderr: "" }), stateDir);
-    expect(r2.counter).toBe(2);
-    expect(r2.sentinel).toBeNull();
-
-    const r3 = run(bashEvent({ stdout: "", stderr: "" }), stateDir);
-    expect(r3.counter).toBe(3);
-    expect(r3.sentinel).not.toBeNull();
-    expect(r3.sentinel?.consecutive).toBe(3);
-    expect(r3.sentinel?.agent).toBe("test-agent");
-    expect(r3.sentinel?.session_id).toBe("sess-test");
+  it(`counts consecutive empty Bash results up to THRESHOLD=${THRESHOLD}`, () => {
+    for (let i = 1; i < THRESHOLD; i++) {
+      const r = run(bashEvent(EMPTY), stateDir);
+      expect(r.counter).toBe(i);
+      expect(r.sentinel).toBeNull();
+    }
+    const last = run(bashEvent(EMPTY), stateDir);
+    expect(last.counter).toBe(THRESHOLD);
+    expect(last.sentinel).not.toBeNull();
+    expect(last.sentinel?.consecutive).toBe(THRESHOLD);
+    expect(last.sentinel?.agent).toBe("test-agent");
+    expect(last.sentinel?.session_id).toBe("sess-test");
   });
 
   it("detects XML-tag style empty Bash response", () => {
     const response = "<bash-stdout></bash-stdout><bash-stderr></bash-stderr>";
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < THRESHOLD; i++) {
       const r = run(bashEvent(response), stateDir);
       expect(r.counter).toBe(i + 1);
     }
@@ -155,12 +168,9 @@ describe("wedge-detect-posttool.mjs", () => {
   });
 
   it("at threshold, emits additionalContext nudge to stdout", () => {
-    run(bashEvent({ stdout: "", stderr: "" }), stateDir);
-    run(bashEvent({ stdout: "", stderr: "" }), stateDir);
-    const r3 = run(bashEvent({ stdout: "", stderr: "" }), stateDir);
-
-    expect(r3.stdout.length).toBeGreaterThan(0);
-    const parsed = JSON.parse(r3.stdout.trim()) as Record<string, unknown>;
+    const last = ramp(THRESHOLD, stateDir);
+    expect(last.stdout.length).toBeGreaterThan(0);
+    const parsed = JSON.parse(last.stdout.trim()) as Record<string, unknown>;
     const hsOutput = parsed.hookSpecificOutput as Record<string, unknown>;
     expect(hsOutput.hookEventName).toBe("PostToolUse");
     const ctx = hsOutput.additionalContext as string;
@@ -170,20 +180,18 @@ describe("wedge-detect-posttool.mjs", () => {
   });
 
   it("at threshold, logs to stderr for docker logs visibility", () => {
-    run(bashEvent({ stdout: "", stderr: "" }), stateDir);
-    run(bashEvent({ stdout: "", stderr: "" }), stateDir);
-    const r3 = run(bashEvent({ stdout: "", stderr: "" }), stateDir);
-    expect(r3.stderr).toContain("wedge-detect");
-    expect(r3.stderr).toContain("consecutive empty-result Bash calls");
+    const last = ramp(THRESHOLD, stateDir);
+    expect(last.stderr).toContain("wedge-detect");
+    expect(last.stderr).toContain("consecutive empty-result Bash calls");
   });
 
   it("missing TELEGRAM_STATE_DIR — silent no-op (no crash)", () => {
-    const r = run(bashEvent({ stdout: "", stderr: "" }), null);
+    const r = run(bashEvent(EMPTY), null);
     expect(r.status).toBe(0);
   });
 
   it("a long real Bash output (>4KB) is treated as non-empty, resets counter", () => {
-    run(bashEvent({ stdout: "", stderr: "" }), stateDir);
+    run(bashEvent(EMPTY), stateDir);
     const bigResponse = { stdout: "x".repeat(5000), stderr: "" };
     const r = run(bashEvent(bigResponse), stateDir);
     expect(r.counter).toBe(0);
@@ -200,5 +208,114 @@ describe("wedge-detect-posttool.mjs", () => {
       stateDir,
     );
     expect(r.counter).toBe(1);
+  });
+
+  // PR #1188 review S1: still-wedged re-emit.
+  it("re-emits nudge and re-writes sentinel at N=THRESHOLD+1 and N+2", () => {
+    ramp(THRESHOLD, stateDir);
+    const r6 = run(bashEvent(EMPTY), stateDir);
+    expect(r6.counter).toBe(THRESHOLD + 1);
+    expect(r6.sentinel?.consecutive).toBe(THRESHOLD + 1);
+    expect(r6.stdout).toContain("KillBash");
+
+    const r7 = run(bashEvent(EMPTY), stateDir);
+    expect(r7.counter).toBe(THRESHOLD + 2);
+    expect(r7.sentinel?.consecutive).toBe(THRESHOLD + 2);
+  });
+
+  // PR #1188 review B2: sentinel cleared on counter reset.
+  it("counter reset (non-empty Bash result) clears the sentinel", () => {
+    ramp(THRESHOLD, stateDir);
+    expect(existsSync(join(stateDir, "wedge-detected.json"))).toBe(true);
+
+    // Healthy Bash result → reset → sentinel removed.
+    const r = run(bashEvent({ stdout: "hello\n", stderr: "" }), stateDir);
+    expect(r.counter).toBe(0);
+    expect(existsSync(join(stateDir, "wedge-detected.json"))).toBe(false);
+  });
+
+  it("counter reset (non-Bash event) also clears the sentinel", () => {
+    ramp(THRESHOLD, stateDir);
+    expect(existsSync(join(stateDir, "wedge-detected.json"))).toBe(true);
+
+    const r = run(
+      { session_id: "sess-test", tool_use_id: "tx", tool_name: "Read", tool_response: "ok" },
+      stateDir,
+    );
+    expect(r.counter).toBe(0);
+    expect(existsSync(join(stateDir, "wedge-detected.json"))).toBe(false);
+  });
+
+  // PR #1188 review B1: legitimate empty-output commands annotated by
+  // Claude Code must NOT count toward the wedge counter.
+  it("noOutputExpected:true does NOT increment the counter", () => {
+    for (let i = 0; i < THRESHOLD; i++) {
+      const r = run(
+        bashEvent({ stdout: "", stderr: "", interrupted: false, noOutputExpected: true }),
+        stateDir,
+      );
+      expect(r.counter).toBe(0);
+      expect(r.sentinel).toBeNull();
+    }
+  });
+
+  it("returnCodeInterpretation present does NOT increment the counter", () => {
+    for (let i = 0; i < THRESHOLD; i++) {
+      const r = run(
+        bashEvent({
+          stdout: "",
+          stderr: "",
+          interrupted: false,
+          returnCodeInterpretation: "No matches found",
+        }),
+        stateDir,
+      );
+      expect(r.counter).toBe(0);
+      expect(r.sentinel).toBeNull();
+    }
+  });
+
+  // PR #1188 review S3: user-initiated interrupt is not a wedge.
+  it("interrupted:true does NOT increment the counter", () => {
+    for (let i = 0; i < THRESHOLD; i++) {
+      const r = run(bashEvent({ stdout: "", stderr: "", interrupted: true }), stateDir);
+      expect(r.counter).toBe(0);
+      expect(r.sentinel).toBeNull();
+    }
+  });
+
+  it("mixed-shape sequence: grep (annotated) then real wedge — counter only counts the wedge", () => {
+    // Three annotated grep-style empties — should NOT count.
+    for (let i = 0; i < 3; i++) {
+      const r = run(
+        bashEvent({ stdout: "", stderr: "", interrupted: false, noOutputExpected: true }),
+        stateDir,
+      );
+      expect(r.counter).toBe(0);
+    }
+    // Now THRESHOLD raw empties — should reach threshold cleanly.
+    for (let i = 1; i <= THRESHOLD; i++) {
+      const r = run(bashEvent(EMPTY), stateDir);
+      expect(r.counter).toBe(i);
+    }
+    const sentinelPath = join(stateDir, "wedge-detected.json");
+    expect(existsSync(sentinelPath)).toBe(true);
+  });
+
+  it("string-form response with noOutputExpected:true does NOT count", () => {
+    const stringForm =
+      '{"stdout":"","stderr":"","interrupted":false,"noOutputExpected":true,"isImage":false}';
+    for (let i = 0; i < THRESHOLD; i++) {
+      const r = run(
+        {
+          session_id: "sess-test",
+          tool_use_id: `t-str-${i}`,
+          tool_name: "Bash",
+          tool_response: stringForm,
+        },
+        stateDir,
+      );
+      expect(r.counter).toBe(0);
+    }
   });
 });

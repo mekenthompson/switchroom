@@ -2800,12 +2800,22 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
           // long/interrupted command, every subsequent Bash call returns
           // exit-1 with empty stdout/stderr — even `true`. This hook
           // counts consecutive empty Bash results and writes a sentinel
-          // + logs to stderr after THRESHOLD (=3) in a row, plus injects
-          // a one-line nudge via additionalContext so the agent tries
+          // + logs to stderr after THRESHOLD in a row, plus injects a
+          // one-line nudge via additionalContext so the agent tries
           // KillBash or asks for `switchroom agent restart` rather than
           // retrying the wedged shell in a loop. Bash-only matcher
           // because the wedge is shell-specific; counter resets on any
           // other tool firing.
+          //
+          // Plugin-gated even though the wedge is a Claude-Code-runtime
+          // defect (not a telegram-plugin feature) because the hook
+          // depends on $TELEGRAM_STATE_DIR for counter / sentinel files
+          // and on the gateway surface to act on the sentinel. Operators
+          // running with `channels.telegram.plugin: official` won't get
+          // the hook, but they also don't have the gateway surface that
+          // would act on it. The hook's fail-silent / no-op-without-
+          // state-dir contract makes it safe to enable unconditionally
+          // in a future iteration if a non-plugin surface is added.
           matcher: "^Bash$",
           hooks: [
             {

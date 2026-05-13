@@ -83,15 +83,81 @@ export const GetStatusRequestSchema = z.object({
   }),
 });
 
+// ─── Phase 2 verbs (#1175 RFC §10) ─────────────────────────────────────────
+
+/** Re-used name validator. Matches the kebab-case ASCII rule the
+ *  agent_restart verb established. */
+const AgentNameSchema = z
+  .string()
+  .regex(/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/, "agent name must be kebab-case ASCII");
+
+export const UpdateCheckRequestSchema = z.object({
+  ...RequestEnvelope,
+  op: z.literal("update_check"),
+  args: z.object({}).optional(),
+});
+
+export const UpdateApplyRequestSchema = z.object({
+  ...RequestEnvelope,
+  op: z.literal("update_apply"),
+  args: z
+    .object({
+      /** Skip the `docker compose pull` step at the start of update.
+       *  Mirrors `switchroom update --skip-images`. Useful when the
+       *  local images are already at the desired tag and the operator
+       *  only wants the scaffold + recreate parts. */
+      skip_images: z.boolean().optional(),
+      /** Source-checkout users: also run `git pull && npm run build`
+       *  before the compose recreate. Mirrors `switchroom update --rebuild`. */
+      rebuild: z.boolean().optional(),
+    })
+    .optional(),
+});
+
+export const ApplyRequestSchema = z.object({
+  ...RequestEnvelope,
+  op: z.literal("apply"),
+  args: z.object({}).optional(),
+});
+
+export const AgentStartRequestSchema = z.object({
+  ...RequestEnvelope,
+  op: z.literal("agent_start"),
+  args: z.object({
+    name: AgentNameSchema,
+  }),
+});
+
+export const AgentStopRequestSchema = z.object({
+  ...RequestEnvelope,
+  op: z.literal("agent_stop"),
+  args: z.object({
+    name: AgentNameSchema,
+    /** When true, skip the drain-mid-turn wait and SIGTERM immediately.
+     *  Mirrors `switchroom agent stop --force`. */
+    force: z.boolean().optional(),
+  }),
+});
+
 export const RequestSchema = z.discriminatedUnion("op", [
   AgentRestartRequestSchema,
   UpgradeStatusRequestSchema,
   GetStatusRequestSchema,
+  UpdateCheckRequestSchema,
+  UpdateApplyRequestSchema,
+  ApplyRequestSchema,
+  AgentStartRequestSchema,
+  AgentStopRequestSchema,
 ]);
 
 export type AgentRestartRequest = z.infer<typeof AgentRestartRequestSchema>;
 export type UpgradeStatusRequest = z.infer<typeof UpgradeStatusRequestSchema>;
 export type GetStatusRequest = z.infer<typeof GetStatusRequestSchema>;
+export type UpdateCheckRequest = z.infer<typeof UpdateCheckRequestSchema>;
+export type UpdateApplyRequest = z.infer<typeof UpdateApplyRequestSchema>;
+export type ApplyRequest = z.infer<typeof ApplyRequestSchema>;
+export type AgentStartRequest = z.infer<typeof AgentStartRequestSchema>;
+export type AgentStopRequest = z.infer<typeof AgentStopRequestSchema>;
 export type HostdRequest = z.infer<typeof RequestSchema>;
 
 /** All verb names that pass discriminated-union validation. New verbs

@@ -418,3 +418,216 @@ describe("hostd server — audit log", () => {
     expect(audit).toContain('"caller":{"kind":"agent","name":"klanker"}');
   });
 });
+
+// ──────────────────────────────────────────────────────────────────────
+// Phase 2 verbs — RFC §10 (update_check, update_apply, apply,
+// agent_start, agent_stop). Same shape as the Phase 1 tests above:
+// in-process HostdServer, stub `switchroom` binary, drive each verb
+// via hostdRequest and assert the response shape + gate behaviour.
+// ──────────────────────────────────────────────────────────────────────
+
+describe("hostd server — Phase 2 read-only verbs", () => {
+  it("update_check: returns completed and stdout_tail (any caller allowed)", async () => {
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/bob/sock"))!; // bob is NOT admin — proves any-caller gate
+    const resp = await hostdRequest(
+      { socketPath: sock },
+      { v: 1, op: "update_check", request_id: "uc-1" },
+    );
+    expect(resp.result).toBe("completed");
+    expect(resp.exit_code).toBe(0);
+    expect(resp.stdout_tail).toContain("stub: update --check");
+  });
+});
+
+describe("hostd server — Phase 2 per-agent verbs", () => {
+  it("agent_start: self-target allowed even for non-admin", async () => {
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/bob/sock"))!;
+    const resp = await hostdRequest(
+      { socketPath: sock },
+      { v: 1, op: "agent_start", request_id: "as-1", args: { name: "bob" } },
+    );
+    expect(resp.result).toBe("completed");
+    expect(resp.stdout_tail).toContain("stub: agent start bob");
+  });
+
+  it("agent_start: cross-agent denied for non-admin caller", async () => {
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/bob/sock"))!;
+    const resp = await hostdRequest(
+      { socketPath: sock },
+      { v: 1, op: "agent_start", request_id: "as-2", args: { name: "klanker" } },
+    );
+    expect(resp.result).toBe("denied");
+    expect(resp.error).toMatch(/cross-agent requires admin/);
+  });
+
+  it("agent_stop: cross-agent allowed for admin caller, force flag plumbed", async () => {
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/klanker/sock"))!; // klanker IS admin
+    const resp = await hostdRequest(
+      { socketPath: sock },
+      {
+        v: 1,
+        op: "agent_stop",
+        request_id: "ast-1",
+        args: { name: "bob", force: true },
+      },
+    );
+    expect(resp.result).toBe("completed");
+    // --force should appear in the spawned argv via the stub's echo.
+    expect(resp.stdout_tail).toContain("stub: agent stop bob --force");
+  });
+});
+
+describe("hostd server — Phase 2 fleet mutations + lock", () => {
+  it("update_apply: requires admin (denied for non-admin caller)", async () => {
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/bob/sock"))!;
+    const resp = await hostdRequest(
+      { socketPath: sock },
+      { v: 1, op: "update_apply", request_id: "ua-deny", args: {} },
+    );
+    expect(resp.result).toBe("denied");
+    expect(resp.error).toMatch(/update_apply requires admin/);
+  });
+
+  it("apply: returns started for admin caller; flags plumbed via argv", async () => {
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/klanker/sock"))!;
+    const resp = await hostdRequest(
+      { socketPath: sock },
+      { v: 1, op: "apply", request_id: "ap-1", args: {} },
+    );
+    expect(resp.result).toBe("started");
+    expect(resp.exit_code).toBeNull();
+
+    // Poll get_status to confirm the async spawn completed against
+    // the stub. 100ms cushion is enough — the stub exits immediately.
+    await new Promise((r) => setTimeout(r, 100));
+    const poll = await hostdRequest(
+      { socketPath: sock },
+      {
+        v: 1,
+        op: "get_status",
+        request_id: "ap-poll",
+        args: { target_request_id: "ap-1" },
+      },
+    );
+    expect(poll.result).toBe("completed");
+    expect(poll.stdout_tail).toContain("stub: apply --non-interactive");
+  });
+
+  it("update_apply: while one is in flight, second is denied with the in-flight request_id", async () => {
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/klanker/sock"))!;
+
+    // Stub a slow `switchroom` so the first call's spawn doesn't
+    // finish before the second arrives. Write a stub that sleeps 1s
+    // then exits 0, then point the server at it for this test only.
+    const slowStub = join(tmp, "switchroom-slow-stub.sh");
+    writeFileSync(
+      slowStub,
+      `#!/bin/sh\nsleep 1\necho "slow stub: $@"\nexit 0\n`,
+    );
+    chmodSync(slowStub, 0o755);
+
+    // Stand up a fresh server pointing at the slow stub. The shared
+    // `server` keeps the fast stub for the rest of the suite.
+    await server.stop();
+    server = new (await import("../../src/host-control/server.js")).HostdServer({
+      homeDir: tmp,
+      agentUids: { klanker: 10001, bob: 10002 },
+      config: { agents: { klanker: { admin: true }, bob: {} } },
+      switchroomBin: slowStub,
+      auditLogPath: join(tmp, "audit.log"),
+      allowNonLinux: true,
+    });
+    await server.start();
+    const fresh = server.getBoundPaths().find((p) => p.endsWith("/klanker/sock"))!;
+
+    try {
+      // Fire #1 (will sleep 1s in the spawned stub).
+      const first = await hostdRequest(
+        { socketPath: fresh },
+        { v: 1, op: "update_apply", request_id: "ua-lock-1", args: {} },
+      );
+      expect(first.result).toBe("started");
+
+      // Fire #2 immediately — lock should still be held.
+      const second = await hostdRequest(
+        { socketPath: fresh },
+        { v: 1, op: "update_apply", request_id: "ua-lock-2", args: {} },
+      );
+      expect(second.result).toBe("denied");
+      expect(second.error).toMatch(/fleet-mutation lock held/);
+      // The denial message names the in-flight request_id so the
+      // caller can poll get_status on it.
+      expect(second.error).toMatch(/ua-lock-1/);
+
+      // A different fleet-mutation verb is ALSO blocked by the same
+      // lock (update_apply + apply share it).
+      const cross = await hostdRequest(
+        { socketPath: fresh },
+        { v: 1, op: "apply", request_id: "ua-lock-3", args: {} },
+      );
+      expect(cross.result).toBe("denied");
+      expect(cross.error).toMatch(/fleet-mutation lock held/);
+
+      // Wait out the first call so the lock releases. 1.5s = 1s
+      // sleep + 0.5s slack for the .finally() to fire.
+      await new Promise((r) => setTimeout(r, 1500));
+
+      // Now a fresh fleet mutation succeeds.
+      const after = await hostdRequest(
+        { socketPath: fresh },
+        { v: 1, op: "apply", request_id: "ua-lock-4", args: {} },
+      );
+      expect(after.result).toBe("started");
+    } finally {
+      // afterEach in the next describe restores the standard server.
+      // Nothing else to clean up here.
+    }
+  });
+
+  it("per-agent verbs (agent_start/agent_stop) are NOT gated by the fleet lock", async () => {
+    // Re-create the standard server with the fast stub (the prior
+    // test left us on the slow stub). beforeEach should also reset
+    // it but make this test self-sufficient.
+    await server.stop();
+    server = new (await import("../../src/host-control/server.js")).HostdServer({
+      homeDir: tmp,
+      agentUids: { klanker: 10001, bob: 10002 },
+      config: { agents: { klanker: { admin: true }, bob: {} } },
+      switchroomBin: stubBin,
+      auditLogPath: join(tmp, "audit.log"),
+      allowNonLinux: true,
+    });
+    await server.start();
+    const sock = server.getBoundPaths().find((p) => p.endsWith("/klanker/sock"))!;
+
+    // Fire an apply (acquires the fleet lock briefly — the fast
+    // stub completes near-instantly but we send the per-agent verb
+    // immediately to assert there's no FLEET-lock blocking it).
+    const fleet = await hostdRequest(
+      { socketPath: sock },
+      { v: 1, op: "apply", request_id: "lock-mix-1", args: {} },
+    );
+    expect(fleet.result).toBe("started");
+
+    // Per-agent verb fires without denial regardless of lock state.
+    const peragent = await hostdRequest(
+      { socketPath: sock },
+      { v: 1, op: "agent_start", request_id: "lock-mix-2", args: { name: "bob" } },
+    );
+    expect(peragent.result).toBe("completed");
+  });
+});

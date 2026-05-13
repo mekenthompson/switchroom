@@ -108,6 +108,7 @@ type ErrorCode =
   | "E_NOT_FOUND"
   | "E_RECONCILE_FAILED"
   | "E_SLUG_COLLISION"
+  | "E_OPERATOR_ONLY"
   | "E_INTERNAL";
 
 /**
@@ -135,6 +136,8 @@ function exitCodeFor(code: ErrorCode): number {
     case "E_NOT_FOUND":
     case "E_INTERNAL":
       return 1;
+    case "E_OPERATOR_ONLY":
+      return 7;
     case "E_RECONCILE_FAILED":
       return 10;
   }
@@ -600,7 +603,7 @@ export function registerAgentConfigWriteCommands(program: Command): void {
   function requireOperatorContext(verb: string): void {
     const r = checkOperatorContext(verb);
     if (!r.ok) {
-      emitError("E_NOT_FOUND", r.message);
+      emitError("E_OPERATOR_ONLY", r.message);
       process.exit(7);
     }
   }

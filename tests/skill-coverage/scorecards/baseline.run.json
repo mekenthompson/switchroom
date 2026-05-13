@@ -1,6 +1,6 @@
 {
-  "startedAt": "2026-05-13T23:16:58.200Z",
-  "finishedAt": "2026-05-13T23:16:58.200Z",
+  "startedAt": "2026-05-13T23:18:02.883Z",
+  "finishedAt": "2026-05-13T23:18:02.883Z",
   "seed": 1,
   "agentName": "claude-cli",
   "results": [
@@ -955,6 +955,110 @@
         "switchroom-status"
       ],
       "turnDurationMs": 12850,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-74",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-manage",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-status"
+      ],
+      "turnDurationMs": 7753,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-75",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-manage",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-install"
+      ],
+      "turnDurationMs": 9724,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-76",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-manage",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 8581,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-77",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-manage",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-status"
+      ],
+      "turnDurationMs": 8640,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-78",
+        "kind": "typo",
+        "targetSkill": "switchroom-manage",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 5998,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-79",
+        "kind": "typo",
+        "targetSkill": "switchroom-manage",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-install"
+      ],
+      "turnDurationMs": 9669,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-80",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-secure-delivery",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 8077,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-81",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-secure-delivery",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 5101,
       "timedOut": false,
       "agentName": "claude-cli"
     }

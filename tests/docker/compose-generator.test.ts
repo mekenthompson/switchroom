@@ -377,6 +377,75 @@ describe("generateCompose", () => {
     }
   });
 
+  it("emits a :ro mount for the bundled-skills pool dir (dangling-skill fix)", async () => {
+    // reconcileAgentDefaultSkills creates symlinks under
+    // <agent>/.claude/skills/<key> pointing at the absolute host path
+    // <poolDir>/<key>. Without mounting <poolDir> into the container,
+    // those targets dangle (boot card shows "N/M dangling: skill-creator,
+    // mcp-builder, ...").
+    const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "compose-pool-"));
+    const poolDir = join(tmp, "skills-pool");
+    mkdirSync(poolDir, { recursive: true });
+    try {
+      const out = generateCompose({
+        config: makeConfig({ a: {} }),
+        homeDir: tmp,
+        bundledSkillsPoolDir: poolDir,
+      });
+      expect(out).toContain(`${poolDir}:${poolDir}:ro`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("omits the bundled-skills pool mount when the dir doesn't exist", async () => {
+    // Skip emission gracefully — docker compose `up` hard-fails on
+    // missing `:ro` sources, and there are exotic test setups where the
+    // pool path simply doesn't resolve to a real dir.
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "compose-no-pool-"));
+    try {
+      const out = generateCompose({
+        config: makeConfig({ a: {} }),
+        homeDir: tmp,
+        bundledSkillsPoolDir: join(tmp, "does-not-exist"),
+      });
+      expect(out).not.toContain(`${tmp}/does-not-exist`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the bundled-skills pool mount when it's already inside ~/.switchroom/skills", async () => {
+    // If an operator has placed their bundled pool under
+    // ~/.switchroom/skills (e.g. a custom packaging), the existing
+    // operator-skills mount already covers it — emitting a second
+    // identical-path entry would be a duplicate volume.
+    const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "compose-pool-overlap-"));
+    const opSkills = join(tmp, ".switchroom", "skills");
+    const nestedPool = join(opSkills, "_builtin");
+    mkdirSync(nestedPool, { recursive: true });
+    try {
+      const out = generateCompose({
+        config: makeConfig({ a: {} }),
+        homeDir: tmp,
+        bundledSkillsPoolDir: nestedPool,
+      });
+      expect(out).toContain(`${opSkills}:${opSkills}:ro`);
+      expect(out).not.toContain(`${nestedPool}:${nestedPool}:ro`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("omits skills/credentials mounts when host dirs are absent (#907)", async () => {
     // docker compose `up` hard-fails if a `:ro` source path is missing.
     // Many operators keep all secrets in vault and never create
@@ -996,7 +1065,7 @@ describe("agent bind_mounts (#1164)", () => {
   });
 
   it("accepts sources whose path merely starts with '/' (not the literal root)", () => {
-    // Sanity that the BIND_MOUNT_DENYLIST '/' entry doesn't poison
+    // Sanity that the BIND_MOUNT_SOURCE_DENYLIST '/' entry doesn't poison
     // every legitimate absolute path.
     const out = generateCompose({
       config: makeConfig({
@@ -1007,6 +1076,169 @@ describe("agent bind_mounts (#1164)", () => {
       }),
     });
     expect(out).toContain("/home/me/code/switchroom:/home/me/code/switchroom:ro");
+  });
+
+  // ── follow-up hardening (post-#1166 reviewer nits) ────────────────
+
+  it("normalizes collapsed-slash sources before applying the denylist (//etc → /etc)", () => {
+    // fails when: the textual denylist check is applied to the raw
+    // source instead of the normalized form. Without normalization
+    // `//etc` (which Linux/Docker collapse to `/etc` at mount time)
+    // would pass the textual check despite being a clear attempt to
+    // mount /etc. Admin-only blast radius, but the fix is one regex.
+    for (const bad of [
+      "//etc",
+      "//etc/passwd",
+      "//proc",
+      "/etc//passwd",
+    ]) {
+      expect(() =>
+        generateCompose({
+          config: makeConfig({
+            klanker: {
+              admin: true,
+              bind_mounts: [{ source: bad }],
+            },
+          }),
+        }),
+        `should refuse normalized source "${bad}"`,
+      ).toThrow(/denylisted system path/);
+    }
+  });
+
+  it("normalizes '.' segments before applying the denylist (/etc/. → /etc)", () => {
+    // fails when: `.` segments aren't stripped before the denylist
+    // prefix-match. An input like `/etc/.` resolves to `/etc` at mount
+    // time but bypasses the textual check.
+    for (const bad of ["/etc/.", "/./etc", "/etc/./passwd"]) {
+      expect(() =>
+        generateCompose({
+          config: makeConfig({
+            klanker: {
+              admin: true,
+              bind_mounts: [{ source: bad }],
+            },
+          }),
+        }),
+        `should refuse normalized source "${bad}"`,
+      ).toThrow(/denylisted system path/);
+    }
+  });
+
+  it("emits normalized paths in the generated compose (byte-stability)", () => {
+    // Two textually-different inputs that normalize to the same canonical
+    // form should produce byte-identical compose lines. Catches the
+    // would-be regression of emitting the raw source verbatim.
+    const a = generateCompose({
+      config: makeConfig({
+        klanker: { admin: true, bind_mounts: [{ source: "/home/me/proj" }] },
+      }),
+    });
+    const b = generateCompose({
+      config: makeConfig({
+        klanker: { admin: true, bind_mounts: [{ source: "//home/me/proj/" }] },
+      }),
+    });
+    // The bind-mount line itself should be identical, even if other
+    // bytes differ (e.g. analytics IDs not present in tests).
+    expect(a).toContain("- /home/me/proj:/home/me/proj:ro");
+    expect(b).toContain("- /home/me/proj:/home/me/proj:ro");
+    expect(b).not.toContain("//home/me/proj");
+  });
+
+  it("rejects targets that shadow switchroom-owned container paths", () => {
+    // fails when: an admin agent can declare a target under /state,
+    // /run/switchroom, /opt/switchroom, or /var/log/switchroom and
+    // shadow the runtime mounts. Self-harm only (admin-trusted), but
+    // the surprise mode (agent boots and silently misbehaves) is
+    // worse than a clear error at compose-generation time.
+    for (const bad of [
+      "/state",
+      "/state/agent",
+      "/state/.claude",
+      "/run/switchroom",
+      "/run/switchroom/broker",
+      "/opt/switchroom",
+      "/opt/switchroom/switchroom.js",
+      "/var/log/switchroom",
+    ]) {
+      expect(() =>
+        generateCompose({
+          config: makeConfig({
+            klanker: {
+              admin: true,
+              bind_mounts: [{ source: "/home/me/dummy", target: bad }],
+            },
+          }),
+        }),
+        `should refuse switchroom-owned target "${bad}"`,
+      ).toThrow(/denylisted container path/);
+    }
+  });
+
+  it("rejects targets that shadow OS paths inside the container", () => {
+    // Admin-only blast radius, but mounting host-anything at /etc
+    // inside the container is almost certainly a misconfig — refuse
+    // up front rather than letting the agent boot with surprising state.
+    for (const bad of [
+      "/etc",
+      "/etc/passwd",
+      "/bin",
+      "/sbin",
+      "/usr/bin",
+      "/usr/sbin",
+      "/lib",
+      "/lib64",
+      "/usr/lib",
+      "/proc",
+      "/sys",
+      "/dev",
+      "/boot",
+    ]) {
+      expect(() =>
+        generateCompose({
+          config: makeConfig({
+            klanker: {
+              admin: true,
+              bind_mounts: [{ source: "/home/me/dummy", target: bad }],
+            },
+          }),
+        }),
+        `should refuse OS-shadow target "${bad}"`,
+      ).toThrow(/denylisted container path/);
+    }
+  });
+
+  it("rejects targets containing '..'", () => {
+    expect(() =>
+      generateCompose({
+        config: makeConfig({
+          klanker: {
+            admin: true,
+            bind_mounts: [
+              { source: "/home/me/x", target: "/state/../etc/passwd" },
+            ],
+          },
+        }),
+      }),
+    ).toThrow(/target.*contains '\.\.'/);
+  });
+
+  it("accepts well-formed targets outside the denylist", () => {
+    // Sanity check — common operator targets must still work.
+    const out = generateCompose({
+      config: makeConfig({
+        klanker: {
+          admin: true,
+          bind_mounts: [
+            { source: "/home/me/shared", target: "/home/agent/shared", mode: "ro" },
+            { source: "/home/me/notes", mode: "rw" },
+          ],
+        },
+      }),
+    });
+    expect(out).toContain("- /home/me/shared:/home/agent/shared:ro");
+    expect(out).toContain("- /home/me/notes:/home/me/notes\n");
   });
 });
 

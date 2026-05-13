@@ -608,6 +608,20 @@ export function mergeAgentConfig(
     (merged as { reactions?: Record<string, unknown> }).reactions = combined;
   }
 
+  // --- resources: shallow per-key merge, agent wins ---
+  //
+  // Same shape as `experimental` below — operators may set a subset of
+  // {memory, memory_reservation, pids_limit, cpus} at any cascade layer
+  // and the resolved tip is the field-wise union with agent overriding
+  // on conflict. Compose generator (src/agents/compose.ts) reads this
+  // and falls back to per-profile hard-coded defaults for any field
+  // still unset at the tip.
+  if (defaults.resources || merged.resources) {
+    const d = defaults.resources ?? {};
+    const a = merged.resources ?? {};
+    merged.resources = { ...d, ...a };
+  }
+
   // --- experimental: shallow per-key merge, agent wins ---
   //
   // The schema declares `experimental` at every cascade layer

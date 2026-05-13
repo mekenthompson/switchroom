@@ -29,6 +29,7 @@ import {
   deniedResponse,
   errorResponse,
   IDEMPOTENCY_WINDOW_MS,
+  MAX_FRAME_BYTES,
   type HostdRequest,
   type HostdResponse,
   type Result,
@@ -113,33 +114,44 @@ export class HostdServer {
       return;
     }
 
-    for (const name of agentNames) {
-      const dir = join(hostdDir, name);
-      const sockPath = join(dir, "sock");
-      await mkdir(dir, { recursive: true });
-      await chmod(dir, 0o700).catch(() => undefined);
-      if (existsSync(sockPath)) await unlink(sockPath).catch(() => undefined);
+    // Partial-bind safety: if listen() rejects for agent N, the
+    // sockets bound for agents 0..N-1 are still live. Without
+    // cleanup the daemon would leave half its sockets in service
+    // and main.ts would exit with the exception, stranding the
+    // bound paths on disk. Wrap each iteration; on first failure,
+    // tear down everything we've bound and rethrow.
+    try {
+      for (const name of agentNames) {
+        const dir = join(hostdDir, name);
+        const sockPath = join(dir, "sock");
+        await mkdir(dir, { recursive: true });
+        await chmod(dir, 0o700).catch(() => undefined);
+        if (existsSync(sockPath)) await unlink(sockPath).catch(() => undefined);
 
-      const server = createServer((socket) =>
-        this.onConnection(socket, sockPath),
-      );
-      server.on("error", (err) => {
-        process.stderr.write(`hostd: server error on ${sockPath}: ${err.message}\n`);
-      });
-
-      await new Promise<void>((resolve, reject) => {
-        server.listen(sockPath, () => resolve());
-        server.once("error", reject);
-      });
-      await chmod(sockPath, 0o660).catch(() => undefined);
-      if (process.platform === "linux" && !this.opts.allowNonLinux) {
-        await chown(sockPath, this.opts.agentUids[name]!, -1).catch((err) => {
-          process.stderr.write(
-            `hostd: chown(${sockPath}, uid=${this.opts.agentUids[name]}): ${(err as Error).message}\n`,
-          );
+        const server = createServer((socket) =>
+          this.onConnection(socket, sockPath),
+        );
+        server.on("error", (err) => {
+          process.stderr.write(`hostd: server error on ${sockPath}: ${err.message}\n`);
         });
+
+        await new Promise<void>((resolve, reject) => {
+          server.listen(sockPath, () => resolve());
+          server.once("error", reject);
+        });
+        await chmod(sockPath, 0o660).catch(() => undefined);
+        if (process.platform === "linux" && !this.opts.allowNonLinux) {
+          await chown(sockPath, this.opts.agentUids[name]!, -1).catch((err) => {
+            process.stderr.write(
+              `hostd: chown(${sockPath}, uid=${this.opts.agentUids[name]}): ${(err as Error).message}\n`,
+            );
+          });
+        }
+        this.servers.set(sockPath, server);
       }
-      this.servers.set(sockPath, server);
+    } catch (err) {
+      await this.stop();
+      throw err;
     }
   }
 
@@ -183,6 +195,20 @@ export class HostdServer {
     let buf = "";
     socket.on("data", (chunk) => {
       buf += chunk.toString("utf8");
+      // DoS guard: a malicious caller can stream bytes without ever
+      // sending a newline and OOM the daemon if we just keep
+      // appending. Cap the buffer at 2x MAX_FRAME_BYTES (same shape
+      // as the client's incoming cap at client.ts) — one valid frame
+      // plus a half-frame slack before we hard-close. The cap is
+      // checked on every chunk, before the newline-search, so the
+      // attacker can't slip past by chunk-aligning.
+      if (Buffer.byteLength(buf, "utf8") > MAX_FRAME_BYTES * 2) {
+        process.stderr.write(
+          `hostd: closing connection — request exceeded ${MAX_FRAME_BYTES * 2} bytes without a newline\n`,
+        );
+        socket.destroy();
+        return;
+      }
       const nl = buf.indexOf("\n");
       if (nl === -1) return;
       const line = buf.slice(0, nl);
@@ -204,8 +230,21 @@ export class HostdServer {
     try {
       req = decodeRequest(line);
     } catch (err) {
+      // Echo the caller's request_id when we can extract one (helps
+      // them correlate the denial to their request); fall back to a
+      // literal sentinel when the line wasn't even valid JSON or
+      // didn't carry the field.
+      let echoId = "malformed-request";
+      try {
+        const obj = JSON.parse(line) as { request_id?: unknown };
+        if (typeof obj.request_id === "string" && obj.request_id.length > 0) {
+          echoId = obj.request_id;
+        }
+      } catch {
+        // Non-JSON line — keep the sentinel.
+      }
       socket.write(
-        encodeResponse(deniedResponse("malformed-request", `bad request: ${(err as Error).message}`)),
+        encodeResponse(deniedResponse(echoId, `bad request: ${(err as Error).message}`)),
       );
       socket.end();
       return;
@@ -216,7 +255,12 @@ export class HostdServer {
     this.evictExpiredIdempotency(now);
     const prior = this.idempotencyKeys.get(idempotencyKey);
     if (prior && now - prior.ts < IDEMPOTENCY_WINDOW_MS) {
-      // Reuse the prior response if available.
+      // Reuse the prior response if available. Note: only mutating
+      // verbs (agent_restart) call recordStatus(), so the lookup
+      // only hits a cached status for those. Read-only verbs
+      // (upgrade_status, get_status) flow through here and re-run —
+      // intentional: idempotency is about *mutation* safety, not
+      // bandwidth saving on read-only queries.
       const cached = this.statusByRequestId.get(prior.request_id);
       if (cached) {
         socket.write(encodeResponse(this.statusEntryToResponse(req.request_id, cached)));

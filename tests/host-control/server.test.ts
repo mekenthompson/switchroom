@@ -279,6 +279,103 @@ describe("hostd server — idempotency", () => {
   });
 });
 
+describe("hostd server — DoS guard", () => {
+  it("closes the connection if the request exceeds 2x MAX_FRAME_BYTES without a newline", async () => {
+    const { connect } = await import("node:net");
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/klanker/sock"))!;
+    const client = connect(sock);
+    // EPIPE is expected once the server destroys the socket and
+    // we keep writing; suppress so the test runner doesn't treat
+    // it as an unhandled error.
+    client.on("error", () => undefined);
+    // Write more than 128 KiB (2x MAX_FRAME_BYTES) with no newline.
+    // Wait for connect, then write in chunks until either we hit
+    // the cap (server closes) or we've exceeded the budget.
+    await new Promise<void>((resolve) =>
+      client.once("connect", () => resolve()),
+    );
+    const chunk = "x".repeat(8192);
+    let written = 0;
+    const closed = new Promise<void>((resolve) =>
+      client.once("close", () => resolve()),
+    );
+    for (let i = 0; i < 32; i++) {
+      if (client.destroyed) break;
+      try {
+        client.write(chunk);
+        written += chunk.length;
+      } catch {
+        break;
+      }
+    }
+    await closed;
+    expect(written).toBeGreaterThan(0);
+    // We may not have written all 256 KiB before the server
+    // destroyed the socket — that's the point. Just verify the
+    // server closed us out.
+    expect(client.destroyed).toBe(true);
+  });
+});
+
+describe("hostd server — malformed request handling", () => {
+  it("echoes the caller's request_id when present, even on schema failure", async () => {
+    const { connect } = await import("node:net");
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/klanker/sock"))!;
+    const client = connect(sock);
+    let buf = "";
+    const got = new Promise<string>((resolve) => {
+      client.on("data", (chunk) => {
+        buf += chunk.toString("utf8");
+        const nl = buf.indexOf("\n");
+        if (nl !== -1) resolve(buf.slice(0, nl));
+      });
+    });
+    await new Promise<void>((resolve) =>
+      client.once("connect", () => resolve()),
+    );
+    // Valid JSON, wrong schema (missing required `args`).
+    client.write(
+      JSON.stringify({
+        v: 1,
+        op: "agent_restart",
+        request_id: "caller-echoes-this",
+      }) + "\n",
+    );
+    const line = await got;
+    expect(line).toContain('"request_id":"caller-echoes-this"');
+    expect(line).toContain('"result":"denied"');
+    client.destroy();
+  });
+
+  it("falls back to a sentinel request_id on non-JSON input", async () => {
+    const { connect } = await import("node:net");
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/klanker/sock"))!;
+    const client = connect(sock);
+    let buf = "";
+    const got = new Promise<string>((resolve) => {
+      client.on("data", (chunk) => {
+        buf += chunk.toString("utf8");
+        const nl = buf.indexOf("\n");
+        if (nl !== -1) resolve(buf.slice(0, nl));
+      });
+    });
+    await new Promise<void>((resolve) =>
+      client.once("connect", () => resolve()),
+    );
+    client.write("not json at all\n");
+    const line = await got;
+    expect(line).toContain('"request_id":"malformed-request"');
+    expect(line).toContain('"result":"denied"');
+    client.destroy();
+  });
+});
+
 describe("hostd server — audit log", () => {
   it("appends a row per request", async () => {
     const sock = server

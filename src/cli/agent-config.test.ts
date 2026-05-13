@@ -197,9 +197,17 @@ function buildProgram(): Command {
 describe("registered commands", () => {
   let stdout = "";
   let stderr = "";
-  let outSpy: ReturnType<typeof vi.spyOn>;
-  let errSpy: ReturnType<typeof vi.spyOn>;
-  let exitSpy: ReturnType<typeof vi.spyOn>;
+  // `vi.spyOn` returns a narrowly-typed MockInstance whose generic param
+  // matches the spied method's signature. The bare `ReturnType<typeof
+  // vi.spyOn>` defaults the generic to `(this: unknown, ...args:
+  // unknown[]) => unknown` which is incompatible with the specific
+  // `process.stdout.write` / `process.exit` overloads. Use `unknown` and
+  // narrow at use-site via the spy methods (`.mockImplementation`,
+  // `.mockRestore`) which are available on every MockInstance flavour.
+  // (#1200 fix — TS2322.)
+  let outSpy: unknown;
+  let errSpy: unknown;
+  let exitSpy: unknown;
   let prevAuditHome: string | undefined;
   let tmpHome: string;
 
@@ -234,9 +242,13 @@ describe("registered commands", () => {
   });
 
   afterEach(() => {
-    outSpy.mockRestore();
-    errSpy.mockRestore();
-    exitSpy.mockRestore();
+    // outSpy/errSpy/exitSpy are typed `unknown` to dodge the
+    // MockInstance generic-default incompatibility (see beforeEach
+    // declaration). `mockRestore` exists on every MockInstance —
+    // narrow via a minimal interface cast.
+    (outSpy as { mockRestore: () => void }).mockRestore();
+    (errSpy as { mockRestore: () => void }).mockRestore();
+    (exitSpy as { mockRestore: () => void }).mockRestore();
     if (prevAuditHome) process.env.HOME = prevAuditHome;
     delete process.env.SWITCHROOM_AGENT_NAME;
     try {

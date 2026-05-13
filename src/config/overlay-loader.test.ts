@@ -32,10 +32,14 @@ import type { SwitchroomConfig } from "./schema.js";
 function makeConfig(
   agents: Record<string, { schedule?: unknown[] }>,
 ): SwitchroomConfig {
+  // `agents` lives at the TOP level of `SwitchroomConfig`, alongside
+  // `switchroom`, `telegram`, `defaults`, `profiles` — NOT inside the
+  // inner `switchroom:` block. Pre-#1200 the fixture put it under
+  // `switchroom.agents` (matching the bug in overlay-loader.ts:113
+  // which read `config.switchroom?.agents`), so the test silently
+  // passed against a no-op loader. Both halves fixed together.
   return {
-    switchroom: {
-      agents: agents as Record<string, never>,
-    },
+    agents: agents as Record<string, never>,
   } as unknown as SwitchroomConfig;
 }
 
@@ -72,7 +76,7 @@ describe("applyAgentOverlays", () => {
     });
     const { warnings } = applyAgentOverlays(cfg);
     expect(warnings).toEqual([]);
-    expect(cfg.switchroom.agents.foo.schedule).toHaveLength(1);
+    expect(cfg.agents.foo.schedule).toHaveLength(1);
   });
 
   it("is a no-op when the overlay directory exists but is empty", () => {
@@ -80,7 +84,7 @@ describe("applyAgentOverlays", () => {
     const cfg = makeConfig({ foo: { schedule: [] } });
     const { warnings } = applyAgentOverlays(cfg);
     expect(warnings).toEqual([]);
-    expect(cfg.switchroom.agents.foo.schedule).toEqual([]);
+    expect(cfg.agents.foo.schedule).toEqual([]);
   });
 
   it("appends overlay schedule entries AFTER main-config entries (precedence)", () => {
@@ -94,7 +98,7 @@ describe("applyAgentOverlays", () => {
     });
     const { warnings } = applyAgentOverlays(cfg);
     expect(warnings).toEqual([]);
-    const sched = cfg.switchroom.agents.foo.schedule as Array<{ prompt: string }>;
+    const sched = cfg.agents.foo.schedule as Array<{ prompt: string }>;
     expect(sched).toHaveLength(2);
     expect(sched[0].prompt).toBe("main-entry");
     expect(sched[1].prompt).toBe("overlay-entry");
@@ -107,7 +111,7 @@ describe("applyAgentOverlays", () => {
     writeFileSync(join(dir, "a-first.yaml"), "schedule:\n  - cron: '0 1 * * *'\n    prompt: first\n");
     const cfg = makeConfig({ foo: { schedule: [] } });
     applyAgentOverlays(cfg);
-    const sched = cfg.switchroom.agents.foo.schedule as Array<{ prompt: string }>;
+    const sched = cfg.agents.foo.schedule as Array<{ prompt: string }>;
     expect(sched.map((e) => e.prompt)).toEqual(["first", "second"]);
   });
 
@@ -119,7 +123,7 @@ describe("applyAgentOverlays", () => {
     const cfg = makeConfig({ foo: { schedule: [] } });
     const { warnings } = applyAgentOverlays(cfg);
     expect(warnings).toEqual([]);
-    expect(cfg.switchroom.agents.foo.schedule).toHaveLength(1);
+    expect(cfg.agents.foo.schedule).toHaveLength(1);
   });
 
   it("accepts both .yaml and .yml extensions", () => {
@@ -127,7 +131,7 @@ describe("applyAgentOverlays", () => {
     writeFileSync(join(dir, "a.yml"), "schedule:\n  - cron: '0 1 * * *'\n    prompt: from-yml\n");
     const cfg = makeConfig({ foo: { schedule: [] } });
     applyAgentOverlays(cfg);
-    expect(cfg.switchroom.agents.foo.schedule).toHaveLength(1);
+    expect(cfg.agents.foo.schedule).toHaveLength(1);
   });
 
   it("emits a warning and isolates the file when YAML is malformed", () => {
@@ -140,7 +144,7 @@ describe("applyAgentOverlays", () => {
     expect(warnings[0].file).toMatch(/broken\.yaml$/);
     expect(warnings[0].reason).toMatch(/parse error|schema/i);
     // Good file still loaded.
-    expect(cfg.switchroom.agents.foo.schedule).toHaveLength(1);
+    expect(cfg.agents.foo.schedule).toHaveLength(1);
     expect(warnSpy).toHaveBeenCalled();
   });
 
@@ -166,7 +170,7 @@ describe("applyAgentOverlays", () => {
     const { warnings } = applyAgentOverlays(cfg);
     expect(warnings).toHaveLength(1);
     expect(warnings[0].reason).toMatch(/schema rejection/);
-    expect(cfg.switchroom.agents.foo.schedule).toEqual([]);
+    expect(cfg.agents.foo.schedule).toEqual([]);
   });
 
   it("drops overlay entries that declare secrets, with a warning", () => {
@@ -185,7 +189,7 @@ describe("applyAgentOverlays", () => {
     const { warnings } = applyAgentOverlays(cfg);
     expect(warnings).toHaveLength(1);
     expect(warnings[0].reason).toMatch(/secrets/);
-    const sched = cfg.switchroom.agents.foo.schedule as Array<{ prompt: string }>;
+    const sched = cfg.agents.foo.schedule as Array<{ prompt: string }>;
     expect(sched).toHaveLength(1);
     expect(sched[0].prompt).toBe("clean-entry");
   });
@@ -201,7 +205,7 @@ describe("applyAgentOverlays", () => {
     });
     const { warnings } = applyAgentOverlays(cfg);
     expect(warnings.some((w) => w.agent === "agent-x")).toBe(true);
-    expect(cfg.switchroom.agents["agent-y"].schedule).toHaveLength(1);
+    expect(cfg.agents["agent-y"].schedule).toHaveLength(1);
   });
 
   it("handles agents with no schedule (treats undefined as empty)", () => {
@@ -209,7 +213,7 @@ describe("applyAgentOverlays", () => {
     writeFileSync(join(dir, "a.yaml"), "schedule:\n  - cron: '0 1 * * *'\n    prompt: only\n");
     const cfg = makeConfig({ foo: {} });
     applyAgentOverlays(cfg);
-    expect(cfg.switchroom.agents.foo.schedule).toHaveLength(1);
+    expect(cfg.agents.foo.schedule).toHaveLength(1);
   });
 
   it("stamps overlay-sourced entries with the OVERLAY_SOURCE symbol (non-enumerable)", () => {
@@ -219,7 +223,7 @@ describe("applyAgentOverlays", () => {
       foo: { schedule: [{ cron: "0 0 * * *", prompt: "main", secrets: [] }] },
     });
     applyAgentOverlays(cfg);
-    const sched = cfg.switchroom.agents.foo.schedule as Array<Record<symbol, unknown>>;
+    const sched = cfg.agents.foo.schedule as Array<Record<symbol, unknown>>;
     // Main entry not stamped.
     expect(sched[0][OVERLAY_SOURCE]).toBeUndefined();
     // Overlay entry stamped.
@@ -235,7 +239,7 @@ describe("applyAgentOverlays", () => {
     const cfg = makeConfig({ foo: { schedule: [] } });
     const { warnings } = applyAgentOverlays(cfg);
     expect(warnings).toEqual([]);
-    expect(cfg.switchroom.agents.foo.schedule).toEqual([]);
+    expect(cfg.agents.foo.schedule).toEqual([]);
   });
 
   it("returns the config object it was given (mutates in place)", () => {

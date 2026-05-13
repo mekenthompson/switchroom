@@ -479,6 +479,13 @@ const DEFAULT_READ_ONLY_PREAPPROVED_TOOLS = [
   "Task",
   "TodoWrite",
   "ExitPlanMode",
+  // Skill itself just loads instruction context — the side-effecting
+  // tools the skill body invokes (Bash, Write, etc) retain their own
+  // approval gates. Pre-approving Skill lets routine "/loop", "/init",
+  // and the bundled-skill invocations land without a prompt, which
+  // matters for the skill-coverage UAT runner (every probe would
+  // otherwise stall on an approval).
+  "Skill",
 ];
 
 /**

@@ -32,21 +32,41 @@ Each probe is a real Claude Code turn against the user's Claude Pro/Max subscrip
 
 ## Live run
 
+**Preferred path — MTCute UAT runner** (`telegram-plugin/uat/runners/skill-coverage.ts`). Drives a real Telegram user account against the agent's bot via mtcute and extracts skill invocations from the progress-card label stream (`running skill <name>` per `tool-labels.ts:247`). No agent-uid perms dance, no JSONL tailing, no inject_inbound socket — Telegram is both the inbound channel and the observation surface.
+
+Prereqs for this path are the standard UAT prereqs (see `telegram-plugin/uat/SETUP.md`):
+
+- `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_UAT_DRIVER_SESSION` in the repo-root `.env`.
+- Test bot is wired to the target agent and reachable via the username you'll pass to `--agent`.
+- Target agent's `channels.telegram.progress_card.delay_ms` is set small (0 is fine) in `switchroom.yaml` so the progress card surfaces during short turns. Defaults to 45s which suppresses the card entirely on fast probes.
+- Target agent has been restarted since this branch landed so `Skill` lives in `permissions.allow` (see "Skill pre-approval" below).
+
 ```bash
 cd /path/to/switchroom
 
-# Full run, every in-scope skill, deterministic seed:
+# Full run, deterministic corpus:
+bun telegram-plugin/uat/runners/skill-coverage.ts \
+  --agent test-harness:@your_test_bot
+
+# Slice for sanity-check first (recommended):
+bun telegram-plugin/uat/runners/skill-coverage.ts \
+  --agent test-harness:@your_test_bot \
+  --skills switchroom-cli,switchroom-status,docx \
+  --limit-per-skill 2
+```
+
+**Fallback path — inject_inbound runner** (`tests/skill-coverage/cli.ts`). Original design; works but requires agent-uid read on `~/.switchroom/agents/<name>/.claude/projects/`. Use one of the three modes (A/B/C above) to satisfy perms.
+
+```bash
 bun tests/skill-coverage/cli.ts <agent-name> \
   --agent-cwd=$HOME/.switchroom/agents/<agent-name> \
   --gateway-socket=$HOME/.switchroom/agents/<agent-name>/telegram/gateway.sock \
   --go
-
-# Slice to a few skills first to sanity-check:
-bun tests/skill-coverage/cli.ts <agent-name> \
-  --skills=switchroom-cli,switchroom-status,docx \
-  --limit-per-skill=4 \
-  --agent-cwd=... --gateway-socket=... --go
 ```
+
+### Skill pre-approval
+
+Probes will stall if the agent's `permissions.allow` doesn't include the bare `Skill` tool — every Skill invocation otherwise hits an approval prompt that the harness can't dismiss. The scaffold's `DEFAULT_READ_ONLY_PREAPPROVED_TOOLS` includes `Skill` since the same PR that introduced the MTCute runner; for older agents either `switchroom agent restart <name>` to refresh the scaffold or hand-edit `~/.switchroom/agents/<name>/.claude/settings.json` to add `"Skill"` to `permissions.allow`.
 
 The runner emits three artifacts at `tests/skill-coverage/out/skill-coverage.{run.json,scorecard.json,scorecard.md}` (override the base with `--out=<path>`):
 

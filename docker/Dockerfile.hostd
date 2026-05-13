@@ -77,8 +77,13 @@ COPY dist/cli/switchroom.js /opt/switchroom/dist/cli/switchroom.js
 COPY dist/host-control/main.js /opt/switchroom/dist/host-control/main.js
 
 # Tiny wrapper so `switchroom <verb>` invocations from hostd resolve
-# to the bundled CLI. Mirrors the host's ~/.bun/bin/switchroom shim.
-RUN printf '#!/bin/sh\nexec node /opt/switchroom/dist/cli/switchroom.js "$@"\n' \
+# to the bundled CLI. Uses `bun` (not `node`) because the CLI bundle
+# imports bun-specific modules (bun:sqlite, bun:test, etc. — produced
+# by scripts/build.mjs's bundling pass that marks bun: imports as
+# externals). Node throws ERR_UNSUPPORTED_ESM_URL_SCHEME on load.
+# Mirrors the host's ~/.bun/bin/switchroom shim and the broker image's
+# CMD which also runs under bun.
+RUN printf '#!/bin/sh\nexec bun /opt/switchroom/dist/cli/switchroom.js "$@"\n' \
     > /usr/local/bin/switchroom \
  && chmod 0755 /usr/local/bin/switchroom
 

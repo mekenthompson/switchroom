@@ -205,7 +205,7 @@ export function commitPendingScheduleEntry(opts: {
   agent: string;
   stageId: string;
   root?: string;
-}): { committed: true; path: string; slug: string } | { committed: false; reason: "not_found" } {
+}): { committed: true; path: string; slug: string } | { committed: false; reason: "not_found" | "slug_collision" } {
   const entries = listPendingScheduleEntries(opts.agent, { root: opts.root });
   const match = entries.find((e) => e.stageId === opts.stageId);
   if (!match) return { committed: false, reason: "not_found" };
@@ -215,6 +215,12 @@ export function commitPendingScheduleEntry(opts: {
   const slug = match.meta.entry.name ?? match.stageId;
   const paths = overlayPathsFor(opts.agent, { root: opts.root });
   const finalPath = join(paths.scheduleDir, `${slug}.yaml`);
+  // Reject collisions instead of silently clobbering — the agent
+  // controls `entry.name`, so a rename-over-existing would be a
+  // write-anywhere primitive once the operator approves.
+  if (existsSync(finalPath)) {
+    return { committed: false, reason: "slug_collision" };
+  }
   renameSync(match.yamlPath, finalPath);
   unlinkSync(match.metaPath);
   return { committed: true, path: finalPath, slug };

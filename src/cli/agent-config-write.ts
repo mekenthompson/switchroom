@@ -71,6 +71,7 @@ type ErrorCode =
   | "E_INVALID_PROMPT"
   | "E_NOT_FOUND"
   | "E_RECONCILE_FAILED"
+  | "E_SLUG_COLLISION"
   | "E_INTERNAL";
 
 /**
@@ -91,6 +92,7 @@ function exitCodeFor(code: ErrorCode): number {
     case "E_CRON_TOO_FREQUENT":
     case "E_QUOTA_EXCEEDED":
     case "E_WRITE_REQUIRES_RECREATE":
+    case "E_SLUG_COLLISION":
       return 9;
     case "E_INVALID_CRON":
     case "E_INVALID_PROMPT":
@@ -558,12 +560,38 @@ export function registerAgentConfigWriteCommands(program: Command): void {
     .command("pending")
     .description("Manage agent-requested schedule entries awaiting operator approval");
 
+  /**
+   * Privilege boundary: the `pending` verbs are operator-only. The
+   * canonical signal that a process is INSIDE an agent container is
+   * `$SWITCHROOM_AGENT_NAME` being set (compose pins it). If it's
+   * present, refuse the verb — otherwise an agent could self-approve
+   * its own staged entry by shelling out to the CLI. Operator host
+   * never has this env set; `SWITCHROOM_OPERATOR=1` is an explicit
+   * override for unusual host configs (CI, recovery shells).
+   */
+  function requireOperatorContext(verb: string): void {
+    if (process.env.SWITCHROOM_OPERATOR === "1") return;
+    const agentEnv = process.env.SWITCHROOM_AGENT_NAME;
+    if (agentEnv && agentEnv.length > 0) {
+      emitError(
+        "E_NOT_FOUND",
+        `schedule pending ${verb} is operator-only; refusing because $SWITCHROOM_AGENT_NAME=${agentEnv} (set SWITCHROOM_OPERATOR=1 to override on a trusted host)`,
+      );
+      process.exit(7);
+    }
+  }
+
   pending
     .command("list")
     .description("List entries staged by the agent and awaiting approval")
-    .option("--agent <name>", "Target agent (defaults to $SWITCHROOM_AGENT_NAME)")
-    .action(async (opts: { agent?: string }) => {
-      const agent = resolveTargetAgent(opts.agent);
+    .requiredOption("--agent <name>", "Target agent")
+    .action(async (opts: { agent: string }) => {
+      requireOperatorContext("list");
+      // Bypass resolveTargetAgent — that helper enforces the
+      // env-pin equality check used by agent-authored writes. The
+      // pending verbs are operator-only (see requireOperatorContext)
+      // and explicitly take any agent name on the host.
+      const agent = opts.agent;
       const entries = listPendingScheduleEntries(agent);
       process.stdout.write(
         JSON.stringify({
@@ -585,11 +613,20 @@ export function registerAgentConfigWriteCommands(program: Command): void {
   pending
     .command("commit <stageId>")
     .description("Approve a staged entry — moves it into the live schedule.d/ and reconciles")
-    .option("--agent <name>", "Target agent (defaults to $SWITCHROOM_AGENT_NAME)")
-    .action(async (stageId: string, opts: { agent?: string }) => {
-      const agent = resolveTargetAgent(opts.agent);
+    .requiredOption("--agent <name>", "Target agent")
+    .action(async (stageId: string, opts: { agent: string }) => {
+      requireOperatorContext("commit");
+      const agent = opts.agent;
       const r = commitPendingScheduleEntry({ agent, stageId });
       if (!r.committed) {
+        if (r.reason === "slug_collision") {
+          emitError(
+            "E_SLUG_COLLISION",
+            `pending entry ${stageId} cannot be committed — a live schedule.d entry with the same slug already exists`,
+          );
+          appendAudit(agent, "schedule.pending.commit", { stage_id: stageId, ok: false, reason: r.reason }, 9);
+          process.exit(9);
+        }
         emitError("E_NOT_FOUND", `pending entry ${stageId} not found for agent ${agent}`);
         appendAudit(agent, "schedule.pending.commit", { stage_id: stageId, ok: false }, 1);
         process.exit(1);
@@ -607,9 +644,10 @@ export function registerAgentConfigWriteCommands(program: Command): void {
   pending
     .command("deny <stageId>")
     .description("Discard a staged entry without committing")
-    .option("--agent <name>", "Target agent (defaults to $SWITCHROOM_AGENT_NAME)")
-    .action(async (stageId: string, opts: { agent?: string }) => {
-      const agent = resolveTargetAgent(opts.agent);
+    .requiredOption("--agent <name>", "Target agent")
+    .action(async (stageId: string, opts: { agent: string }) => {
+      requireOperatorContext("deny");
+      const agent = opts.agent;
       const r = denyPendingScheduleEntry({ agent, stageId });
       if (!r.denied) {
         emitError("E_NOT_FOUND", `pending entry ${stageId} not found for agent ${agent}`);

@@ -4,7 +4,9 @@ import {
   existsSync,
   readFileSync,
   readdirSync,
+  statSync,
   writeFileSync,
+  mkdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -101,6 +103,24 @@ describe("listPendingScheduleEntries", () => {
   });
 });
 
+describe("staged file permissions", () => {
+  it("writes yaml + meta at 0600", () => {
+    const r = stagePendingScheduleEntry({
+      agent: "alice",
+      yamlText: "schedule:\n  - cron: '0 9 * * *'\n    prompt: x\n",
+      reason: "secrets_requires_approval",
+      summary: "s",
+      entry: { cron: "0 9 * * *", prompt: "x" },
+      root,
+      stageId: "cap_perm",
+    });
+    const yamlMode = statSync(r.yamlPath).mode & 0o777;
+    const metaMode = statSync(r.metaPath).mode & 0o777;
+    expect(yamlMode).toBe(0o600);
+    expect(metaMode).toBe(0o600);
+  });
+});
+
 describe("commitPendingScheduleEntry", () => {
   it("moves the yaml into schedule.d and removes meta", () => {
     const staged = stagePendingScheduleEntry({
@@ -126,6 +146,31 @@ describe("commitPendingScheduleEntry", () => {
     expect(r.committed).toBe(false);
     if (r.committed) return;
     expect(r.reason).toBe("not_found");
+  });
+
+  it("refuses to clobber a live schedule.d entry with the same slug", () => {
+    // Pre-seed a live entry under the chosen name
+    const live = join(root, "alice", "schedule.d");
+    mkdirSync(live, { recursive: true });
+    writeFileSync(join(live, "morning.yaml"), "schedule:\n  - cron: '0 8 * * *'\n    prompt: live\n");
+    stagePendingScheduleEntry({
+      agent: "alice",
+      yamlText: "schedule:\n  - cron: '0 9 * * *'\n    prompt: staged\n",
+      reason: "secrets_requires_approval",
+      summary: "s",
+      entry: { cron: "0 9 * * *", prompt: "staged", name: "morning" },
+      root,
+      stageId: "cap_collide",
+    });
+    const r = commitPendingScheduleEntry({ agent: "alice", stageId: "cap_collide", root });
+    expect(r.committed).toBe(false);
+    if (r.committed) return;
+    expect(r.reason).toBe("slug_collision");
+    // Live file untouched
+    const livePath = join(live, "morning.yaml");
+    expect(readFileSync(livePath, "utf-8")).toContain("prompt: live");
+    // Staged entry should still be there (operator can rename + retry)
+    expect(existsSync(join(live, ".pending", "cap_collide.yaml"))).toBe(true);
   });
 
   it("falls back to stage_id as slug when entry has no name", () => {
@@ -197,6 +242,20 @@ describe("scheduleAddOrStage", () => {
     expect(existsSync(r.yaml_path)).toBe(true);
     const meta = JSON.parse(readFileSync(r.yaml_path.replace(/\.yaml$/, ".meta.json"), "utf-8"));
     expect(meta.entry.secrets).toEqual(["v/k"]);
+  });
+
+  it("stages quota_exceeded entries instead of rejecting", () => {
+    // Hit the cap (20) with vanilla adds, then a 21st should stage.
+    for (let i = 0; i < 20; i++) {
+      const r = scheduleAddOrStage({ cronExpr: `${i % 60} 9 * * *`, prompt: `p${i}`, root });
+      expect(r.ok).toBe(true);
+    }
+    const r = scheduleAddOrStage({ cronExpr: "0 10 * * *", prompt: "overflow", root });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    if (!("staged" in r)) throw new Error("expected staged result");
+    expect(r.reason).toBe("quota_exceeded");
+    expect(r.stage_id).toMatch(/^cap_/);
   });
 
   it("stages too-frequent crons instead of rejecting", () => {

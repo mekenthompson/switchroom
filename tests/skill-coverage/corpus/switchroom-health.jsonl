@@ -1,0 +1,19 @@
+{"id":"b7f8cab4d168ac58","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"Can you something's wrong?","source":"paraphrase-template"}
+{"id":"fb1e4cccf4f28f9d","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"What's wrong with my agents, please.","source":"paraphrase-template"}
+{"id":"485f1d2e84cd94ae","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"Could you what's wrong with my agents for me?","source":"paraphrase-template"}
+{"id":"deda1e8dd0e019ce","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"Help me can you check my setup.","source":"paraphrase-template"}
+{"id":"66b9aa06afbbd5c8","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"Help me run a health check.","source":"paraphrase-template"}
+{"id":"19ae75ba03e39342","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"I'd like to my agent keeps failing.","source":"paraphrase-template"}
+{"id":"d0bf37f7ec4d3c8e","targetSkill":"switchroom-health","kind":"typo","phrase":"diagnose my switchroom setup","source":"typo-rule"}
+{"id":"cebd942e715fa175","targetSkill":"switchroom-health","kind":"typo","phrase":"diagnose y switchroom setup","source":"typo-rule"}
+{"id":"e68562abdbcf0e1b","targetSkill":"switchroom-health","kind":"typo","phrase":"my agets are broken","source":"typo-rule"}
+{"id":"bb029a5a04dea3a0","targetSkill":"switchroom-health","kind":"slang","phrase":"hey, can you check my setup?","source":"slang-template"}
+{"id":"1d8c230d3f8df09e","targetSkill":"switchroom-health","kind":"slang","phrase":"hey, something's wrong?","source":"slang-template"}
+{"id":"1627e55885422bde","targetSkill":"switchroom-health","kind":"slang","phrase":"any way to run a health check?","source":"slang-template"}
+{"id":"e26f71def7db7a92","targetSkill":"switchroom-health","kind":"indirect","phrase":"things feel off","source":"indirect-template"}
+{"id":"fbe0aa9c6d9be867","targetSkill":"switchroom-health","kind":"indirect","phrase":"the fleet is sluggish","source":"indirect-template"}
+{"id":"646b3688f040a2dd","targetSkill":"switchroom-health","kind":"indirect","phrase":"my agents are acting weird","source":"indirect-template"}
+{"id":"e9e83bceac9354b0","targetSkill":null,"kind":"negative","phrase":"sync my config","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-cli"}
+{"id":"804e347cfe9edb0a","targetSkill":null,"kind":"negative","phrase":"report this issue on GitHub","source":"negative-from-adjacent","expectedOtherSkill":"file-bug"}
+{"id":"842dae820114650a","targetSkill":null,"kind":"negative","phrase":"show me the logs","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-cli"}
+{"id":"282e000b65a17b9a","targetSkill":null,"kind":"negative","phrase":"raise a ticket","source":"negative-from-adjacent","expectedOtherSkill":"file-bug"}

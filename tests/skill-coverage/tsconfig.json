@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "noEmit": true,
+    "declaration": false
+  },
+  "include": [
+    "./**/*.ts",
+    "../../telegram-plugin/session-tail.ts",
+    "../../telegram-plugin/gateway/ipc-protocol.ts"
+  ]
+}

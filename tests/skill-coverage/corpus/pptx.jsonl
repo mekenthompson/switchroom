@@ -1,0 +1,19 @@
+{"id":"438fc70881ebd7be","targetSkill":"pptx","kind":"paraphrase","phrase":"I need to combine slide files.","source":"paraphrase-template"}
+{"id":"7f885a9e7e30f05e","targetSkill":"pptx","kind":"paraphrase","phrase":"I need to work from a slide template.","source":"paraphrase-template"}
+{"id":"54e44ade1af44d39","targetSkill":"pptx","kind":"paraphrase","phrase":"Help me split this deck.","source":"paraphrase-template"}
+{"id":"17a25fb6eff1dec6","targetSkill":"pptx","kind":"paraphrase","phrase":"I'd like to edit this presentation.","source":"paraphrase-template"}
+{"id":"c7218e40112b6f99","targetSkill":"pptx","kind":"paraphrase","phrase":"I need to split this deck.","source":"paraphrase-template"}
+{"id":"fbab4ca23b480465","targetSkill":"pptx","kind":"paraphrase","phrase":"Let's edit this presentation.","source":"paraphrase-template"}
+{"id":"7a09c948ba4af4df","targetSkill":"pptx","kind":"typo","phrase":"build a pitch deck","source":"typo-rule"}
+{"id":"b234046d1c78d6d0","targetSkill":"pptx","kind":"typo","phrase":"update the sepaker notes","source":"typo-rule"}
+{"id":"325689ccbc01af4a","targetSkill":"pptx","kind":"typo","phrase":"combin slide files","source":"typo-rule"}
+{"id":"8d11f5eebfe6d42c","targetSkill":"pptx","kind":"slang","phrase":"gonna need to update the speaker notes","source":"slang-template"}
+{"id":"8771fe3d0195970d","targetSkill":"pptx","kind":"slang","phrase":"hey, work from a slide template?","source":"slang-template"}
+{"id":"3f10264f90ab9a99","targetSkill":"pptx","kind":"slang","phrase":"pls combine slide files","source":"slang-template"}
+{"id":"f52e22704aa223a0","targetSkill":"pptx","kind":"indirect","phrase":"I need slides for tomorrow","source":"indirect-template"}
+{"id":"ae212f436afa2f63","targetSkill":"pptx","kind":"indirect","phrase":"this deck looks terrible","source":"indirect-template"}
+{"id":"656859c1188ae57f","targetSkill":"pptx","kind":"indirect","phrase":"the presentation needs polishing","source":"indirect-template"}
+{"id":"521389eecca02b78","targetSkill":null,"kind":"negative","phrase":"add a table of contents","source":"negative-from-adjacent","expectedOtherSkill":"docx"}
+{"id":"fb08ccbac9d141d4","targetSkill":null,"kind":"negative","phrase":"fill a PDF form","source":"negative-from-adjacent","expectedOtherSkill":"pdf"}
+{"id":"08b4703c4a03072a","targetSkill":null,"kind":"negative","phrase":"leave comments on a Word doc","source":"negative-from-adjacent","expectedOtherSkill":"docx"}
+{"id":"f5009eb78b6837c1","targetSkill":null,"kind":"negative","phrase":"encrypt this PDF","source":"negative-from-adjacent","expectedOtherSkill":"pdf"}

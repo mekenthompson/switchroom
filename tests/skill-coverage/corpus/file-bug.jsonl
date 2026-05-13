@@ -1,0 +1,18 @@
+{"id":"e5e200db581b3c0f","targetSkill":"file-bug","kind":"paraphrase","phrase":"Can you report this issue on GitHub?","source":"paraphrase-template"}
+{"id":"58b5ca0d02679dbf","targetSkill":"file-bug","kind":"paraphrase","phrase":"Please raise a ticket.","source":"paraphrase-template"}
+{"id":"0b9cb9e8dc2bdece","targetSkill":"file-bug","kind":"paraphrase","phrase":"I need to this needs a real ticket.","source":"paraphrase-template"}
+{"id":"0bba8694d8a59bfc","targetSkill":"file-bug","kind":"paraphrase","phrase":"I need to file a bug.","source":"paraphrase-template"}
+{"id":"99affec2309baedb","targetSkill":"file-bug","kind":"paraphrase","phrase":"Report this issue on GitHub, please.","source":"paraphrase-template"}
+{"id":"330296938579d027","targetSkill":"file-bug","kind":"paraphrase","phrase":"Please file a bug.","source":"paraphrase-template"}
+{"id":"bf2051fe756e7573","targetSkill":"file-bug","kind":"typo","phrase":"raise a  ticket","source":"typo-rule"}
+{"id":"ea4d88853fa3250e","targetSkill":"file-bug","kind":"typo","phrase":"file aa bug","source":"typo-rule"}
+{"id":"1b5a4d976754c79e","targetSkill":"file-bug","kind":"typo","phrase":"log this  as a bug","source":"typo-rule"}
+{"id":"d36c711d41b5d180","targetSkill":"file-bug","kind":"slang","phrase":"gonna need to report this issue on GitHub","source":"slang-template"}
+{"id":"485d35615e0a28eb","targetSkill":"file-bug","kind":"slang","phrase":"quick q — can i open an issue","source":"slang-template"}
+{"id":"52eddde76b3ba9f0","targetSkill":"file-bug","kind":"indirect","phrase":"remember this for later","source":"indirect-template"}
+{"id":"665adcd7968daa05","targetSkill":"file-bug","kind":"indirect","phrase":"this needs to be tracked somewhere","source":"indirect-template"}
+{"id":"e3d9d6a51b270a28","targetSkill":"file-bug","kind":"indirect","phrase":"I want a paper trail for this","source":"indirect-template"}
+{"id":"3a94f9490a4268ab","targetSkill":null,"kind":"negative","phrase":"troubleshoot the fleet","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-health"}
+{"id":"ed644e48dda4283b","targetSkill":null,"kind":"negative","phrase":"reboot this agent","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-cli"}
+{"id":"85ad14d64092e3ec","targetSkill":null,"kind":"negative","phrase":"run a health check","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-health"}
+{"id":"2c39ff7ac6919250","targetSkill":null,"kind":"negative","phrase":"update the agents","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-cli"}

@@ -1,0 +1,19 @@
+{"id":"f712350649eae0b9","targetSkill":"buildkite-test-engine","kind":"paraphrase","phrase":"Help me detect flaky tests.","source":"paraphrase-template"}
+{"id":"a0e649c04d026859","targetSkill":"buildkite-test-engine","kind":"paraphrase","phrase":"Can you parallelize test suite?","source":"paraphrase-template"}
+{"id":"b5d71554e6a2a26a","targetSkill":"buildkite-test-engine","kind":"paraphrase","phrase":"Can you configure test collectors?","source":"paraphrase-template"}
+{"id":"1f53d05da54d7bef","targetSkill":"buildkite-test-engine","kind":"paraphrase","phrase":"Let's speed up tests.","source":"paraphrase-template"}
+{"id":"153e359bac1a1407","targetSkill":"buildkite-test-engine","kind":"paraphrase","phrase":"Can you speed up tests?","source":"paraphrase-template"}
+{"id":"c86d604f649f9d48","targetSkill":"buildkite-test-engine","kind":"paraphrase","phrase":"I need to configure test collectors.","source":"paraphrase-template"}
+{"id":"a9ed16234b615fb0","targetSkill":"buildkite-test-engine","kind":"typo","phrase":"parallelize  test suite","source":"typo-rule"}
+{"id":"0b63896d557b40ed","targetSkill":"buildkite-test-engine","kind":"typo","phrase":"set up test splitting","source":"typo-rule"}
+{"id":"a098a423cddce06b","targetSkill":"buildkite-test-engine","kind":"typo","phrase":"set up tes tsplitting","source":"typo-rule"}
+{"id":"9513ea2d612bdfa1","targetSkill":"buildkite-test-engine","kind":"slang","phrase":"gonna need to configure test collectors","source":"slang-template"}
+{"id":"3cfef95577b7b4a9","targetSkill":"buildkite-test-engine","kind":"slang","phrase":"yo, how do i speed up tests","source":"slang-template"}
+{"id":"e50984ba8485c812","targetSkill":"buildkite-test-engine","kind":"slang","phrase":"quick q — can i configure test collectors","source":"slang-template"}
+{"id":"cbd31409ad8b601e","targetSkill":"buildkite-test-engine","kind":"indirect","phrase":"can you take a look at the buildkite-test-engine situation","source":"indirect-template"}
+{"id":"ed497058ad30cc0d","targetSkill":"buildkite-test-engine","kind":"indirect","phrase":"something is going on with buildkite-test-engine","source":"indirect-template"}
+{"id":"eba316639e22dddd","targetSkill":"buildkite-test-engine","kind":"indirect","phrase":"the buildkite-test-engine thing is weird","source":"indirect-template"}
+{"id":"60999319a31298a0","targetSkill":null,"kind":"negative","phrase":"write a pipeline","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-pipelines"}
+{"id":"b5a204ad1a189609","targetSkill":null,"kind":"negative","phrase":"work with artifacts in pipeline YAML","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-pipelines"}
+{"id":"d96f5c7ba99f4a00","targetSkill":null,"kind":"negative","phrase":"show test failures in the build page","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-pipelines"}
+{"id":"2a3061c9e9a4fc2c","targetSkill":null,"kind":"negative","phrase":"add plugins","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-pipelines"}

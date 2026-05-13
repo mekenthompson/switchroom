@@ -1,0 +1,19 @@
+{"id":"f2a504ff86c255b6","targetSkill":"pdf","kind":"paraphrase","phrase":"Let's rotate PDF pages.","source":"paraphrase-template"}
+{"id":"7d4bdaa90212e0d9","targetSkill":"pdf","kind":"paraphrase","phrase":"I need to watermark a PDF.","source":"paraphrase-template"}
+{"id":"6aa8261e06309f4d","targetSkill":"pdf","kind":"paraphrase","phrase":"Can you rotate PDF pages?","source":"paraphrase-template"}
+{"id":"2ea2d61882976e1c","targetSkill":"pdf","kind":"paraphrase","phrase":"Can you fill a PDF form?","source":"paraphrase-template"}
+{"id":"163a184620d54b5b","targetSkill":"pdf","kind":"paraphrase","phrase":"Extract text from a PDF, please.","source":"paraphrase-template"}
+{"id":"1e145bedb4d1e800","targetSkill":"pdf","kind":"paraphrase","phrase":"Could you watermark a PDF for me?","source":"paraphrase-template"}
+{"id":"90748550720a0b2c","targetSkill":"pdf","kind":"typo","phrase":"merge PDFs","source":"typo-rule"}
+{"id":"12c271d1a4e22dcf","targetSkill":"pdf","kind":"typo","phrase":"fill a PDF form","source":"typo-rule"}
+{"id":"cc9aeee98e217cec","targetSkill":"pdf","kind":"typo","phrase":"fill  PDF form","source":"typo-rule"}
+{"id":"608419416d79a913","targetSkill":"pdf","kind":"slang","phrase":"pls rotate PDF pages","source":"slang-template"}
+{"id":"9478b23da6c1dac8","targetSkill":"pdf","kind":"slang","phrase":"any way to rotate PDF pages?","source":"slang-template"}
+{"id":"b25565c2a2f1b7e1","targetSkill":"pdf","kind":"slang","phrase":"gonna need to OCR a scanned PDF","source":"slang-template"}
+{"id":"3a62f436174afbd6","targetSkill":"pdf","kind":"indirect","phrase":"I have this pdf I can't deal with","source":"indirect-template"}
+{"id":"78ce872a8096f7ef","targetSkill":"pdf","kind":"indirect","phrase":"can you help me with this scan","source":"indirect-template"}
+{"id":"eacb16d142c41846","targetSkill":"pdf","kind":"indirect","phrase":"the form won't let me type into it","source":"indirect-template"}
+{"id":"a113419f817d8314","targetSkill":null,"kind":"negative","phrase":"produce a report as a Word file","source":"negative-from-adjacent","expectedOtherSkill":"docx"}
+{"id":"7a4da9ce9af61362","targetSkill":null,"kind":"negative","phrase":"compute formulas in Excel","source":"negative-from-adjacent","expectedOtherSkill":"xlsx"}
+{"id":"7754d6600d201cbd","targetSkill":null,"kind":"negative","phrase":"write a letter as a Word doc","source":"negative-from-adjacent","expectedOtherSkill":"docx"}
+{"id":"f74de1fc34a92037","targetSkill":null,"kind":"negative","phrase":"convert CSV to xlsx","source":"negative-from-adjacent","expectedOtherSkill":"xlsx"}

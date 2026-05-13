@@ -1,0 +1,19 @@
+{"id":"d11b5f7b565a657c","targetSkill":"switchroom-install","kind":"paraphrase","phrase":"Please what are the switchroom prerequisites.","source":"paraphrase-template"}
+{"id":"cc7ee6aa5599c3b6","targetSkill":"switchroom-install","kind":"paraphrase","phrase":"I need to get switchroom running.","source":"paraphrase-template"}
+{"id":"4756d898f4bba025","targetSkill":"switchroom-install","kind":"paraphrase","phrase":"Can you bootstrap switchroom from scratch?","source":"paraphrase-template"}
+{"id":"34d19aae5bca3e47","targetSkill":"switchroom-install","kind":"paraphrase","phrase":"Help me what are the switchroom prerequisites.","source":"paraphrase-template"}
+{"id":"1f2f01f2bc3d26f6","targetSkill":"switchroom-install","kind":"paraphrase","phrase":"Can you how do I get started with switchroom?","source":"paraphrase-template"}
+{"id":"35ec2ad337fcf836","targetSkill":"switchroom-install","kind":"paraphrase","phrase":"Help me how do I get started with switchroom.","source":"paraphrase-template"}
+{"id":"f14c42038a1f5820","targetSkill":"switchroom-install","kind":"typo","phrase":"bootstrap switchrroom from scratch","source":"typo-rule"}
+{"id":"621579e9441b1c4a","targetSkill":"switchroom-install","kind":"typo","phrase":"I'm new to switchromo, where do I begin","source":"typo-rule"}
+{"id":"1b92ddebd87dcb0d","targetSkill":"switchroom-install","kind":"typo","phrase":"what are teh switchroom prerequisites","source":"typo-rule"}
+{"id":"74a19a1e59e8940f","targetSkill":"switchroom-install","kind":"slang","phrase":"gonna need to how do I get started with switchroom","source":"slang-template"}
+{"id":"2c441662d610ab7a","targetSkill":"switchroom-install","kind":"slang","phrase":"pls set up switchroom for the first time","source":"slang-template"}
+{"id":"ee0a9639cb084a68","targetSkill":"switchroom-install","kind":"slang","phrase":"quick q — can i set up switchroom for the first time","source":"slang-template"}
+{"id":"baa35d44f3fa4b9b","targetSkill":"switchroom-install","kind":"indirect","phrase":"the switchroom-install thing is weird","source":"indirect-template"}
+{"id":"da5bcbfa19534bee","targetSkill":"switchroom-install","kind":"indirect","phrase":"can you take a look at the switchroom-install situation","source":"indirect-template"}
+{"id":"1610d6ac0a23f680","targetSkill":"switchroom-install","kind":"indirect","phrase":"something is going on with switchroom-install","source":"indirect-template"}
+{"id":"5863d0584fbae4cd","targetSkill":null,"kind":"negative","phrase":"tear down this agent","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-manage"}
+{"id":"e66f4ed7e3a7e8f0","targetSkill":null,"kind":"negative","phrase":"switchroom internals","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-architecture"}
+{"id":"35b3358b56c3e968","targetSkill":null,"kind":"negative","phrase":"reinstall my agents","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-manage"}
+{"id":"4e583f72f0342843","targetSkill":null,"kind":"negative","phrase":"switchroom design","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-architecture"}

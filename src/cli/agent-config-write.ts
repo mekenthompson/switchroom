@@ -51,6 +51,13 @@ import {
   type ReconcileBridgeResult,
   type ReconcileBridgeError,
 } from "./reconcile-bridge.js";
+import {
+  stagePendingScheduleEntry,
+  listPendingScheduleEntries,
+  commitPendingScheduleEntry,
+  denyPendingScheduleEntry,
+  type PendingReasonCode,
+} from "./agent-config-pending.js";
 import { existsSync, readFileSync } from "node:fs";
 
 const MAX_ENTRIES_PER_AGENT = 20;
@@ -134,6 +141,22 @@ export interface ScheduleErrorResult {
   code: ErrorCode;
   message: string;
   exit: number;
+}
+
+/**
+ * Returned by {@link scheduleAddOrStage} when a security gate trips
+ * and the entry has been staged for operator approval (instead of
+ * hard-rejected). Exit code is 0 — the agent's call SUCCEEDED, the
+ * commit is just pending.
+ */
+export interface ScheduleStagedResult {
+  ok: true;
+  staged: true;
+  stage_id: string;
+  reason: PendingReasonCode;
+  summary: string;
+  /** Operator-facing path on disk. */
+  yaml_path: string;
 }
 
 /**
@@ -283,6 +306,73 @@ export function scheduleAdd(opts: AddOpts): ScheduleAddResult | ScheduleErrorRes
   };
 }
 
+/**
+ * Stage-or-add wrapper used by the CLI / MCP path. Calls
+ * {@link scheduleAdd}; if it rejects with one of the three
+ * approval-gated codes, stages the entry under `.pending/` and
+ * returns a {@link ScheduleStagedResult} (exit 0 — the request was
+ * recorded, not denied). All other failures pass through unchanged.
+ *
+ * Why this lives next to `scheduleAdd` rather than inside it: the
+ * direct write path is used by tests + the legacy operator CLI where
+ * a reject should remain a reject. The MCP path explicitly wants
+ * the approval flow.
+ */
+export function scheduleAddOrStage(
+  opts: AddOpts,
+): ScheduleAddResult | ScheduleStagedResult | ScheduleErrorResult {
+  const r = scheduleAdd(opts);
+  if (r.ok) return r;
+  let stageReason: PendingReasonCode | null = null;
+  if (r.code === "E_OVERLAY_SECRETS_REQUIRES_APPROVAL") stageReason = "secrets_requires_approval";
+  else if (r.code === "E_CRON_TOO_FREQUENT") stageReason = "cron_too_frequent";
+  else if (r.code === "E_QUOTA_EXCEEDED") stageReason = "quota_exceeded";
+  if (stageReason === null) return r;
+
+  const agent = resolveTargetAgent(opts.agent);
+  const entry: { cron: string; prompt: string; secrets?: string[]; name?: string } = {
+    cron: opts.cronExpr,
+    prompt: opts.prompt,
+  };
+  if (opts.secrets && opts.secrets.length > 0) entry.secrets = opts.secrets;
+  if (opts.name) entry.name = opts.name;
+
+  // Reconstruct the YAML body we WOULD have written. Mirrors the
+  // scheduleAdd doc-build (filter `name` out of the schedule entry;
+  // stash agent-facing name in a leading comment for round-trip).
+  const doc: Record<string, unknown> = {
+    schedule: [
+      Object.fromEntries(Object.entries(entry).filter(([k]) => k !== "name")),
+    ],
+  };
+  const yamlText =
+    (opts.name ? `# name: ${opts.name}\n` : "") + yamlStringify(doc);
+
+  const summary = (() => {
+    const parts: string[] = [`cron=${opts.cronExpr}`];
+    if (opts.secrets?.length) parts.push(`secrets=[${opts.secrets.join(",")}]`);
+    parts.push(`prompt=${opts.prompt.slice(0, 60)}${opts.prompt.length > 60 ? "…" : ""}`);
+    return parts.join(" ");
+  })();
+
+  const staged = stagePendingScheduleEntry({
+    agent,
+    yamlText,
+    reason: stageReason,
+    summary,
+    entry,
+    root: opts.root,
+  });
+  return {
+    ok: true,
+    staged: true,
+    stage_id: staged.stageId,
+    reason: stageReason,
+    summary,
+    yaml_path: staged.yamlPath,
+  };
+}
+
 export interface ScheduleRemoveResult {
   ok: true;
   slug: string;
@@ -381,12 +471,17 @@ export function registerAgentConfigWriteCommands(program: Command): void {
     .option("--agent <name>", "Target agent (defaults to $SWITCHROOM_AGENT_NAME)")
     .option("--secrets <list>", "Comma-separated vault keys (REJECTED for agent-authored overlays)")
     .option("--name <slug>", "Optional human-readable name (a-z 0-9 -)")
+    .option(
+      "--stage-on-reject",
+      "When a security gate trips (secrets/quota/min-interval), stage the entry under .pending/ for operator approval instead of rejecting with exit 9. Used by the MCP path; operator CLI defaults to off.",
+    )
     .action(async (opts: {
       agent?: string;
       cron: string;
       prompt: string;
       secrets?: string;
       name?: string;
+      stageOnReject?: boolean;
     }) => {
       const secrets = opts.secrets
         ? opts.secrets.split(",").map((s) => s.trim()).filter(Boolean)
@@ -398,10 +493,11 @@ export function registerAgentConfigWriteCommands(program: Command): void {
         } catch { /* ignore */ }
         process.exit(1);
       }
-      let r: ScheduleAddResult | ScheduleErrorResult;
+      let r: ScheduleAddResult | ScheduleStagedResult | ScheduleErrorResult;
       let resolvedAgent = opts.agent ?? "<unknown>";
       try {
-        r = scheduleAdd({
+        const addFn = opts.stageOnReject ? scheduleAddOrStage : scheduleAdd;
+        r = addFn({
           agent: opts.agent,
           cronExpr: opts.cron,
           prompt: opts.prompt,
@@ -426,6 +522,23 @@ export function registerAgentConfigWriteCommands(program: Command): void {
         );
         process.exit(r.exit);
       }
+      if ("staged" in r) {
+        process.stdout.write(JSON.stringify({
+          ok: true,
+          staged: true,
+          stage_id: r.stage_id,
+          reason: r.reason,
+          summary: r.summary,
+          yaml_path: r.yaml_path,
+        }) + "\n");
+        appendAudit(
+          resolvedAgent,
+          "schedule.add",
+          { cron: opts.cron, prompt: opts.prompt, name: opts.name, staged: true, stage_id: r.stage_id, reason: r.reason },
+          0,
+        );
+        return;
+      }
       process.stdout.write(JSON.stringify({
         ok: true,
         slug: r.slug,
@@ -439,6 +552,72 @@ export function registerAgentConfigWriteCommands(program: Command): void {
         { cron: opts.cron, prompt: opts.prompt, name: opts.name, cron_hash: r.cron_hash, would_recreate: false },
         0,
       );
+    });
+
+  const pending = schedule
+    .command("pending")
+    .description("Manage agent-requested schedule entries awaiting operator approval");
+
+  pending
+    .command("list")
+    .description("List entries staged by the agent and awaiting approval")
+    .option("--agent <name>", "Target agent (defaults to $SWITCHROOM_AGENT_NAME)")
+    .action(async (opts: { agent?: string }) => {
+      const agent = resolveTargetAgent(opts.agent);
+      const entries = listPendingScheduleEntries(agent);
+      process.stdout.write(
+        JSON.stringify({
+          ok: true,
+          agent,
+          count: entries.length,
+          entries: entries.map((e) => ({
+            stage_id: e.stageId,
+            staged_at: e.meta.staged_at,
+            reason: e.meta.reason,
+            summary: e.meta.summary,
+            entry: e.meta.entry,
+            yaml_path: e.yamlPath,
+          })),
+        }) + "\n",
+      );
+    });
+
+  pending
+    .command("commit <stageId>")
+    .description("Approve a staged entry — moves it into the live schedule.d/ and reconciles")
+    .option("--agent <name>", "Target agent (defaults to $SWITCHROOM_AGENT_NAME)")
+    .action(async (stageId: string, opts: { agent?: string }) => {
+      const agent = resolveTargetAgent(opts.agent);
+      const r = commitPendingScheduleEntry({ agent, stageId });
+      if (!r.committed) {
+        emitError("E_NOT_FOUND", `pending entry ${stageId} not found for agent ${agent}`);
+        appendAudit(agent, "schedule.pending.commit", { stage_id: stageId, ok: false }, 1);
+        process.exit(1);
+      }
+      const rr = reconcileAgentCronOnly(agent);
+      if (!rr.ok) {
+        emitError("E_RECONCILE_FAILED", `committed but reconcile failed: ${rr.error}`);
+        appendAudit(agent, "schedule.pending.commit", { stage_id: stageId, slug: r.slug, ok: false, reconcile: rr.error }, 10);
+        process.exit(10);
+      }
+      process.stdout.write(JSON.stringify({ ok: true, stage_id: stageId, slug: r.slug, path: r.path }) + "\n");
+      appendAudit(agent, "schedule.pending.commit", { stage_id: stageId, slug: r.slug }, 0);
+    });
+
+  pending
+    .command("deny <stageId>")
+    .description("Discard a staged entry without committing")
+    .option("--agent <name>", "Target agent (defaults to $SWITCHROOM_AGENT_NAME)")
+    .action(async (stageId: string, opts: { agent?: string }) => {
+      const agent = resolveTargetAgent(opts.agent);
+      const r = denyPendingScheduleEntry({ agent, stageId });
+      if (!r.denied) {
+        emitError("E_NOT_FOUND", `pending entry ${stageId} not found for agent ${agent}`);
+        appendAudit(agent, "schedule.pending.deny", { stage_id: stageId, ok: false }, 1);
+        process.exit(1);
+      }
+      process.stdout.write(JSON.stringify({ ok: true, stage_id: stageId, denied: true }) + "\n");
+      appendAudit(agent, "schedule.pending.deny", { stage_id: stageId }, 0);
     });
 
   schedule

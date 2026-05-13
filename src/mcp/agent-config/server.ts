@@ -247,7 +247,19 @@ export function dispatchTool(
       if (!a.cron_expr || !a.prompt) {
         return errorText("schedule_add: cron_expr and prompt are required");
       }
-      const base = ["schedule", "add", "--cron", a.cron_expr, "--prompt", a.prompt];
+      // MCP path: stage instead of hard-reject when a security gate
+      // trips. The operator approves from the host CLI (`switchroom
+      // schedule pending commit <stage_id>`) or — once #1163 Phase 2
+      // lands the card — from Telegram.
+      const base = [
+        "schedule",
+        "add",
+        "--cron",
+        a.cron_expr,
+        "--prompt",
+        a.prompt,
+        "--stage-on-reject",
+      ];
       if (a.agent) base.push("--agent", a.agent);
       if (a.name) base.push("--name", a.name);
       if (a.secrets && a.secrets.length > 0) base.push("--secrets", a.secrets.join(","));

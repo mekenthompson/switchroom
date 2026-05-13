@@ -284,6 +284,7 @@ describe("getBuiltinDefaultSkillEntries", () => {
       "skill-creator",
       "switchroom-cli",
       "switchroom-health",
+      "switchroom-runtime",
       "switchroom-status",
       "webapp-testing",
       "xlsx",
@@ -297,6 +298,7 @@ describe("getBuiltinDefaultSkillEntries", () => {
     expect(switchroomEntries.sort()).toEqual([
       "switchroom-cli",
       "switchroom-health",
+      "switchroom-runtime",
       "switchroom-status",
     ]);
   });

@@ -1362,8 +1362,10 @@ describe("agent service network (v0.7.4 — host networking)", () => {
   // http://127.0.0.1:18888 for hindsight) and operator LAN IPs (HA,
   // smart-home gear). The default bridge network reaches none of those.
   // network_mode: host puts the agent on the host's network namespace,
-  // matching the v0.6 systemd-era behavior so existing scaffolds Just
-  // Work without a regen of every start.sh / settings.json.
+  // so existing scaffolds with absolute hostnames Just Work without
+  // a regen of every start.sh / settings.json. Tradeoff: no
+  // inter-agent network isolation (the trust model assumed shared-
+  // host operation anyway).
   it("emits network_mode: host on every agent service", () => {
     const out = generateCompose({
       config: makeConfig({ alice: {}, bob: {} }),

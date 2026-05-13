@@ -1,20 +1,23 @@
 /**
  * switchroom-hostd entrypoint.
  *
- * Phase 1 minimal binary: loads switchroom.yaml, derives the agent
- * UID map, instantiates HostdServer, starts it, waits for SIGTERM.
+ * Designed to run as a host-side docker container (image
+ * `ghcr.io/switchroom/switchroom-hostd`) sitting OUTSIDE the
+ * switchroom compose project — same docker-first deployment shape
+ * as the broker, kernel, and agent images, but in its own compose
+ * project (`switchroom-hostd`) so the switchroom project's
+ * `compose up -d --remove-orphans` cycle cannot recreate it mid-
+ * update. See `docs/rfcs/host-control-daemon.md` § 5.1.
  *
- * Phase 1.5 follow-up will land:
- *   - `switchroom hostd install` (writes the systemd user unit)
- *   - `switchroom hostd status` / `start` / `stop` wrappers
- *   - logrotate.d fragment for the audit log
- *
- * Phase 2 follow-up adds the gateway integration that actually
- * routes verbs through the daemon (replacing spawnSwitchroomDetached
- * callsites). Until then, this entrypoint can be invoked by an
- * operator who's opted into `host_control.enabled: true` but
- * behaviour is observation-only — the daemon binds sockets and
- * audits incoming calls, but no gateway code path produces them.
+ * Phase 1 (this file) is supervisor-agnostic — it just instantiates
+ * HostdServer, starts it, and waits for SIGTERM. Phase 1.5 adds the
+ * Dockerfile + image build target + `switchroom hostd install`
+ * verb that writes the sibling compose file. Phase 2 swaps the
+ * gateway's spawnSwitchroomDetached callsites to talk to the daemon.
+ * Until then, this entrypoint can be invoked by an operator who's
+ * opted into `host_control.enabled: true` but behaviour is
+ * observation-only — the daemon binds sockets and audits incoming
+ * calls, but no gateway code path produces them yet.
  */
 
 import { homedir } from "node:os";
@@ -61,8 +64,9 @@ async function main(): Promise<void> {
     `hostd: ready — bound ${paths.length} agent socket(s): ${paths.join(", ")}\n`,
   );
 
-  // Wait for SIGTERM / SIGINT. systemd's standard stop signal is
-  // SIGTERM; Ctrl-C in dev sends SIGINT. Both shut down gracefully.
+  // Wait for SIGTERM / SIGINT. `docker stop` sends SIGTERM after
+  // tini relays it; Ctrl-C in dev sends SIGINT. Both shut down
+  // gracefully.
   let stopping = false;
   async function shutdown(reason: string): Promise<void> {
     if (stopping) return;

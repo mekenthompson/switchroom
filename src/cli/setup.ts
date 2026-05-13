@@ -1102,7 +1102,7 @@ async function runForemanSetup(opts: { nonInteractive?: boolean; userId?: string
 
   console.log(
     chalk.bold("\n  switchroom setup --foreman\n") +
-      chalk.gray("  Sets up the foreman admin bot and installs its systemd unit.\n"),
+      chalk.gray("  Sets up the foreman admin bot (token + access.json). The bot runs as a docker compose service under the switchroom project.\n"),
   );
 
   const foremanDir = join(homedir(), ".switchroom", "foreman");

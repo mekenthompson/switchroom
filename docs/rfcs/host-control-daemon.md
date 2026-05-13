@@ -1,6 +1,6 @@
 # RFC C: Host-control daemon (`switchroom-hostd`)
 
-Status: Draft v2 (incorporates first-round review)
+Status: Draft v3 (docker-first correction)
 Author: Ken (via Claude pair-design)
 Date: 2026-05-13
 
@@ -16,8 +16,8 @@ admin-gated verbs, peercred for audit attribution, no wire-payload
 identity. The gateway's existing `spawnSwitchroomDetached` shell-out
 goes away for the verbs the daemon supports; the docker-availability
 guard (#926) is replaced by an unconditional daemon-availability check
-that points the operator at `systemctl status switchroom-hostd` on the
-unhappy path.
+that points the operator at `docker compose -p switchroom-hostd ps`
+on the unhappy path.
 
 This closes the long-tracked "true self-modification" gap from #1164:
 an in-container agent can stage a code change in its own worktree
@@ -38,11 +38,16 @@ synchronous shell-outs** the gateway issues per session, all targeting
    touch the running fleet.
 
 2. **Per-agent self-restart** (`/restart`, `/new`, `/reset` → `agent
-   restart <self>`). Today: detached spawn via `spawnSwitchroomDetached`,
-   `systemd-run --user --scope` cgroup-escape, restart marker + sweep.
-   These work on systemd hosts but the cgroup-escape is a load-bearing
-   prerequisite that won't translate to non-systemd installs. Docker
-   hosts get partial coverage; everything else falls through.
+   restart <self>`). Today: detached spawn via
+   `spawnSwitchroomDetached`, restart marker + sweep. The gateway
+   runs *inside* the agent container in v0.7+, so the legacy
+   cgroup-escape branch in `spawnSwitchroomDetached` (a v0.6 holdover)
+   never executes — the detached child is just `spawn(..., {detached:
+   true}).unref()` and the agent container's restart policy
+   (`--restart unless-stopped` on the compose service) cleans up if
+   the parent dies. Workable today but couples agent-restart UX to
+   the in-container gateway's process tree and gives the operator no
+   single audited surface for fleet-mutation.
 
 3. **Fleet mutation** (`update --apply`, `apply`, `agent restart <other>`,
    `agent start/stop`, future: `vault rotate`, `image refresh`). Needs
@@ -61,11 +66,16 @@ Two adjacent forces:
   is *deploy* its merged change. That's a host-control problem, not a
   filesystem-reach problem. See §13 for the rectification.
 
-- **The cgroup-escape pattern is fragile.** `systemd-run --scope` is
-  a Linux-systemd-specific workaround for a structural problem
-  (gateway-child lifecycle coupling). A daemon that owns its own
-  process supervision (its own systemd unit, or a separate compose
-  service with `restart: unless-stopped`) eliminates the workaround.
+- **The "self-restart from inside" pattern is fragile.** The gateway
+  asking docker (via `switchroom agent restart`) to restart its own
+  container is a circular dependency — the parent issuing the
+  restart is killed by the restart it requested. Today's
+  `spawnSwitchroomDetached` + restart-marker dance navigates around
+  this, but it ties self-restart UX to the gateway's process tree.
+  Moving the verb out of the agent container entirely (to a
+  separately-supervised daemon) breaks the cycle: the agent asks the
+  daemon, the daemon talks to docker, the agent gets recreated, the
+  daemon survives.
 
 ## 3. Goals and non-goals
 
@@ -126,36 +136,97 @@ It does **not** defend against:
 ### 5.1 Process model
 
 `switchroom-hostd` is a **Bun-runnable Node module** at
-`src/host-control/server.ts`, bundled to
-`dist/host-control/server.js`. It runs as a long-lived process owned
-by the operator UID.
+`src/host-control/main.ts`, bundled to `dist/host-control/main.js`,
+and packaged as a docker image (`docker/Dockerfile.hostd`) for
+distribution alongside the existing `switchroom-broker`,
+`switchroom-kernel`, and `switchroom-agent` images.
 
-**v1 supports systemd hosts only.** The daemon is installed as a
-`switchroom-hostd.service` user unit by `switchroom setup`
-(idempotent, additive). `ExecStart=/usr/bin/env bun
-/path/to/dist/host-control/server.js`. Restart=on-failure.
+**Deployment shape: host-side docker container, outside the
+switchroom compose project.** Matches the v0.7+ docker-first
+ethos — every other component (broker, kernel, agent) is a docker
+container; the daemon follows suit. The container runs with
+`network_mode: host` (so its UDS paths land on the operator's
+filesystem at `~/.switchroom/hostd/`), `--restart unless-stopped`,
+and the docker socket bind-mounted in. Operators bring it up
+either via a one-line `docker run` or a sibling
+`~/.switchroom/hostd/docker-compose.yml` file — **a separate
+compose project** from `switchroom` itself.
 
-**Why not a compose sidecar in v1.** Reviewer-flagged
-(load-bearing): if the daemon runs as part of the same compose
-project as the agents, then `update_apply` → `docker compose up -d
---remove-orphans` recreates the daemon mid-flight and the in-progress
-update gets killed. That's the same cgroup-escape problem
-`gateway.ts:6919–6976` works around with `systemd-run --scope`, just
-moved one layer up. A compose-only mode also can't satisfy `switchroom
-apply`'s `sudo` self-elevation (per CLAUDE.md "Operator update" §) —
-there is no host `sudo` inside a container. v1 therefore declares
-compose-only hosts **out of scope** and the gateway falls back to the
-existing detached-spawn path with a clear stderr note. A v2
-host-helper (a detached host-side process spawned by the daemon that
-survives the compose recreate, talking back to the daemon over a
-second UDS) is the path to compose-mode support, but it lands its own
-RFC.
+**Why a separate compose project, not a sibling service in the
+main compose file.** If the daemon were part of the switchroom
+compose project, then `update_apply` → `docker compose up -d
+--remove-orphans` would recreate the daemon mid-flight and kill
+the in-progress update. By running it under its own project name
+(`switchroom-hostd`), the main project's `compose up` /
+`compose down` cycle cannot touch it. The daemon outlives the
+fleet it controls.
 
-The daemon does not depend on docker being present; it shells out to
-the `switchroom` CLI on the host. On a non-docker install the daemon
-still works (it just can't do `update --apply`'s docker-image-pull
-step; that path returns a clean error pointing at `switchroom update
---rebuild` instead).
+**On the `sudo` argument that gated v2.** An earlier draft cited
+"`switchroom apply` self-elevates via `sudo` and there is no
+host `sudo` inside a container" as a second blocker for any
+in-container deployment. That argument doesn't survive the
+docker-first v0.7+ design: `apply`'s privilege need is to chown
+per-agent state dirs and bind the broker socket across UIDs,
+both of which are container capabilities (`CAP_CHOWN`,
+`CAP_FOWNER`, `CAP_DAC_OVERRIDE`) rather than host-`sudo` calls.
+The daemon container declares those caps explicitly (see the
+`cap_add` block below); no `sudo` round-trip required.
+
+**Same release surface as everything else.** The daemon ships
+from `ghcr.io/switchroom/switchroom-hostd:<tag>`, pulled on
+`switchroom update` like the other images. Operators don't manage
+yet-another-supervisor system — they `docker pull`, `docker run`,
+`docker logs`, `docker stop`. No systemd dependency. No Linux-
+specific deployment paths. Works on macOS dev hosts the same way
+it works on production Linux. `switchroom hostd install` (Phase
+1.5) writes the sibling compose file or prints the equivalent
+`docker run` command.
+
+**Container capabilities + mounts.**
+
+```yaml
+# ~/.switchroom/hostd/docker-compose.yml (separate project)
+name: switchroom-hostd
+services:
+  hostd:
+    image: ghcr.io/switchroom/switchroom-hostd:${TAG:-latest}
+    container_name: switchroom-hostd
+    restart: unless-stopped
+    user: "${OPERATOR_UID}:${OPERATOR_GID}"
+    cap_add: [CHOWN, FOWNER, DAC_OVERRIDE]   # chown per-agent sockets
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock     # to drive compose
+      - ${HOME}/.switchroom:${HOME}/.switchroom        # state + sockets
+      - ${HOME}/.switchroom/switchroom.yaml:/state/config/switchroom.yaml:ro
+    environment:
+      SWITCHROOM_CONFIG: /state/config/switchroom.yaml
+    healthcheck:
+      test: ["CMD-SHELL", "ls ${HOME}/.switchroom/hostd/*/sock 2>/dev/null | head -1 | grep -q ."]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+```
+
+Notes on the compose shape:
+
+- **No `network_mode: host`.** The daemon's only ingress is the
+  per-agent UDS, which is a filesystem object (bind-mounted from
+  `~/.switchroom/hostd/<agent>/`). Host networking would buy
+  nothing and is correctly omitted.
+- **`${HOME}` works because compose interpolates env vars when
+  the operator runs `docker compose up`.** The equivalent
+  `docker run` one-liner the install verb prints uses a shell-
+  expanded path (`$HOME` outside quotes) so it works without
+  compose's env interpolation. Both forms land at the same
+  absolute path.
+
+The daemon shells out to a `switchroom` CLI invocation inside its
+own container — the image bakes in the same bundle as the agent
+images (`/opt/switchroom/switchroom.js`). Mounting the docker
+socket lets the in-container CLI's `apply` / `update` paths reach
+the host's docker daemon. `--restart unless-stopped` means a daemon
+crash is auto-recovered without operator intervention.
 
 ### 5.2 Socket layout (mirrors broker)
 
@@ -345,40 +416,57 @@ greeting-card plumbing takes over.
 
 The `isDockerReachable()` guard is replaced by `isHostdReachable()`:
 probe `/run/switchroom/hostd/<self>/sock` for socket-presence. On
-miss, the error message points operators at `systemctl --user status
-switchroom-hostd` (systemd) or `docker compose ps switchroom-hostd`
-(compose) instead of "use the host shell".
+miss, the error message points operators at
+`docker compose -p switchroom-hostd ps` and
+`docker logs switchroom-hostd` instead of "use the host shell".
 
 ## 6. Compose / installer changes
 
-`src/agents/compose.ts`:
+Two compose surfaces are touched: the existing switchroom compose
+project (per-agent socket bind mounts on admin agents) and a new
+sibling project (the daemon itself).
 
-- **Per-agent socket-volume emission only.** A volume
-  `hostd-<name>-sock` per admin agent, alongside `broker-` and
-  `kernel-`. Mounted into the agent at `/run/switchroom/hostd/<name>/sock`.
-  No singleton container is emitted in v1 — the daemon runs as a
-  systemd user unit on the host (see §5.1), not inside compose,
-  so the volumes are bound on the host filesystem at
-  `~/.switchroom/hostd/<name>/sock` and the agent end of the bind
-  references the host path.
-- The daemon (running on the host) requires `CAP_CHOWN` and
-  `CAP_FOWNER` equivalents to bind per-agent sockets and chown them
-  to the agent UID — running as the operator UID handles this on a
-  typical desktop install (operator owns `~/.switchroom`), but the
-  systemd unit declares `AmbientCapabilities=CAP_CHOWN
-  CAP_FOWNER` so a non-root operator can still chown across UIDs.
-  Mirrors the broker's `cap_add: [CHOWN, FOWNER, DAC_READ_SEARCH,
-  DAC_OVERRIDE]` declared at `src/agents/compose.ts:549-552`.
-- Healthcheck (compose-level, for the per-agent socket-presence
-  invariant the broker / kernel already pin): `ls
-  ~/.switchroom/hostd/*/sock 2>/dev/null | head -1 | grep -q .`,
-  emitted on the agent service itself (the daemon has no compose
-  service in v1).
+**Existing switchroom compose (`src/agents/compose.ts`):**
 
-`switchroom setup` grows a one-shot step that installs the systemd
-unit on systemd hosts. Idempotent; safe to re-run. On non-systemd
-hosts (rare), setup prints a clean error pointing at the v2 RFC and
-leaves `host_control.enabled` false — existing behavior unchanged.
+- Per-agent host-path bind mount on admin agents:
+  `~/.switchroom/hostd/<name>/` (host) → `/run/switchroom/hostd/<name>/`
+  (agent container). Gated on `host_control.enabled` AND the host
+  directory existing (same `existsSync` guard pattern as the
+  vault-audit.log mount — docker compose `up` hard-fails on a
+  missing bind source).
+- Both ends of the bind are on the host filesystem; no named volume
+  is needed (the daemon container also bind-mounts the same host
+  path, so they share the file directly).
+- No compose service for the daemon itself in the switchroom
+  project — see §5.1 for why (would get recreated on
+  `update_apply`).
+
+**New sibling project (`~/.switchroom/hostd/docker-compose.yml`):**
+
+- Single service: `switchroom-hostd` per §5.1. Separate project
+  name (`name: switchroom-hostd`) so the switchroom project's
+  recreate cycle can never touch it.
+- The daemon's container declares `cap_add: [CHOWN, FOWNER,
+  DAC_OVERRIDE]` so it can bind and chown the per-agent sockets
+  across UIDs — mirrors the broker's caps declared at
+  `src/agents/compose.ts:549-552`.
+- Healthcheck: same socket-presence shape the broker and kernel
+  use today.
+
+**New `docker/Dockerfile.hostd`:**
+
+- Same base image and bun runtime as the broker/kernel.
+- `COPY dist/host-control/main.js /opt/switchroom/host-control/main.js`.
+- Bakes the same switchroom CLI bundle at
+  `/opt/switchroom/switchroom.js` (the daemon shells out to it for
+  every verb), with the CLI symlinked onto PATH.
+- `CMD ["bun", "run", "/opt/switchroom/host-control/main.js"]`.
+
+**`switchroom setup`** grows a one-shot step that drops the sibling
+compose file at `~/.switchroom/hostd/docker-compose.yml` and prints
+the `docker compose -p switchroom-hostd up -d` command. Idempotent;
+safe to re-run. Works identically on Linux and macOS — no
+host-specific install path.
 
 ## 7. Migration / cutover
 
@@ -390,8 +478,8 @@ Phased, behind `host_control.enabled` config flag (default
    - **`enabled: true`** → all supported verbs go through the
      daemon. **No silent fallback.** If the daemon is unreachable
      the call returns a clean operator-visible error
-     ("`switchroom-hostd` unreachable; check `systemctl --user
-     status switchroom-hostd`"). This preserves the §5.5 audit
+     ("`switchroom-hostd` unreachable; check `docker compose -p
+     switchroom-hostd ps`"). This preserves the §5.5 audit
      guarantee — every privileged call lands in the daemon's audit
      log or fails loudly, never quietly routes around it.
    - **`enabled: false`** (default) → gateway uses the existing
@@ -480,30 +568,48 @@ phase 3 makes downgrade harder.
 
 ## 10. Verdict / next steps
 
-If accepted:
+Already landed in #1175 (Phase 1 — library + opt-in flag + per-agent
+compose bind mounts):
 
-1. Implement `src/host-control/server.ts` + `src/host-control/client.ts`
-   + `src/host-control/protocol.ts`, mirroring the broker's file
-   layout.
-2. Wire compose: emit per-agent `hostd-<name>-sock` bind mounts on
-   admin-flagged agents (host source: `~/.switchroom/hostd/<name>/`;
-   container target: `/run/switchroom/hostd/<name>/`). **No** compose
-   singleton — the daemon is a systemd user unit on the host. Earlier
-   draft step said "new singleton + per-agent socket volumes"; the
-   singleton half is struck for v1 (see §5.1 for why; compose-mode
-   support is deferred to a v2 host-helper RFC).
-3. Replace the six `spawnSwitchroomDetached` callsites in the
-   gateway behind the `host_control.enabled` flag.
-4. Add `switchroom audit hostd` verb + Telegram `/audit hostd`.
-5. Tests: unit (verb gates, idempotency, allowlist), integration
-   (host daemon + in-agent client round-trip with a fake CLI binary),
-   e2e (admin agent triggers `update_apply`, verifies the deploy lands).
+1. ✅ `src/host-control/{protocol,peercred,server,client,main}.ts`
+2. ✅ Per-agent host-path bind mounts on admin agents behind
+   `host_control.enabled`
+3. ✅ Schema field `host_control.enabled`
+4. ✅ Tests (protocol round-trip, peercred path-as-identity, verb
+   gates, get_status visibility, idempotency, DoS cap, audit log)
 
-Effort estimate: **~180–240 agent minutes** for v1 (skinny verb
-set, opt-in flag, hard-fail-when-enabled, `get_status` query verb,
-systemd-host only). v2 (compose-mode support via a host-helper +
-streamed-progress frames if poll UX is choppy): another **~60–90
-agent minutes**.
+**Remaining work to make the daemon actually deployable:**
+
+1. **Phase 1.5 — packaging.** Add `docker/Dockerfile.hostd`; extend
+   `scripts/build.mjs` to bake the image (mirroring how
+   `Dockerfile.broker` is handled). Drop a sibling
+   `~/.switchroom/hostd/docker-compose.yml` template. Add
+   `switchroom hostd install` verb that writes/refreshes that
+   file. Publish to `ghcr.io/switchroom/switchroom-hostd:<tag>`.
+2. **Phase 2 — gateway integration.** Replace the
+   `spawnSwitchroomDetached` callsites in `telegram-plugin/gateway/`
+   with `await hostd("agent_restart", …)` etc., gated on
+   `host_control.enabled`. Fail-closed when the daemon is
+   unreachable (§7 Phase 1 behaviour). Add the remaining verbs
+   (`update_apply`, `apply`, `agent_start`, `agent_stop`,
+   `reconcile`, `update_check`) — `update_apply` and `apply`
+   need the broker passphrase-attestation client.
+3. **Phase 2.5 — Telegram surface.** `switchroom audit hostd` verb
+   + `/audit hostd` admin command.
+4. **Phase 3 — legacy removal.** Once the daemon is the default,
+   delete the legacy `triggerSelfRestart()` v0.6 systemctl path
+   and the `resolveSystemdRunPath()` cgroup-escape branch in
+   `spawnSwitchroomDetached`. Both are dead-code-inside-docker
+   today (the docker branch is taken first and `systemd-run` is
+   absent in containers), but they're still callable on v0.6
+   installs — removal lands when those are no longer supported.
+
+Effort estimate: **~120 agent minutes** for Phase 1.5 (Dockerfile +
+image build + compose template + install verb + tests). **~180–240
+agent minutes** for Phase 2 (gateway swap + remaining verbs +
+broker-attestation client). **~30 agent minutes** for Phase 2.5
+(audit surface). Streamed-progress frames remain a possible Phase 4
+follow-up if `get_status` polling proves choppy.
 
 ## 11. Relation to #1166 (bind_mounts)
 

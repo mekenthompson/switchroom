@@ -1,0 +1,18 @@
+{"id":"956ee00987b2ab3d","targetSkill":"docx","kind":"paraphrase","phrase":"Help me accept tracked changes.","source":"paraphrase-template"}
+{"id":"085af3e287ea14e4","targetSkill":"docx","kind":"paraphrase","phrase":"Please insert page numbers.","source":"paraphrase-template"}
+{"id":"1b62dd6f6ed4f153","targetSkill":"docx","kind":"paraphrase","phrase":"I'd like to read a .docx file.","source":"paraphrase-template"}
+{"id":"eb3eed2810ebe999","targetSkill":"docx","kind":"paraphrase","phrase":"Can you produce a report as a Word file?","source":"paraphrase-template"}
+{"id":"f653434324b0d980","targetSkill":"docx","kind":"paraphrase","phrase":"Let's add a table of contents.","source":"paraphrase-template"}
+{"id":"8698e9ce7d9adf2a","targetSkill":"docx","kind":"typo","phrase":"add a tableo f contents","source":"typo-rule"}
+{"id":"adb1203d5c15259b","targetSkill":"docx","kind":"typo","phrase":"insert page numbers","source":"typo-rule"}
+{"id":"c2a9be6640cfe2fd","targetSkill":"docx","kind":"typo","phrase":"write a lettera s a Word doc","source":"typo-rule"}
+{"id":"69189fbc5d27430a","targetSkill":"docx","kind":"slang","phrase":"hey, read a .docx file?","source":"slang-template"}
+{"id":"5d8d6355dfa2d157","targetSkill":"docx","kind":"slang","phrase":"gonna need to produce a report as a Word file","source":"slang-template"}
+{"id":"1f031341e9567f28","targetSkill":"docx","kind":"slang","phrase":"yo, how do i produce a report as a Word file","source":"slang-template"}
+{"id":"81fb39e9daecc1be","targetSkill":"docx","kind":"indirect","phrase":"this letter needs to look professional","source":"indirect-template"}
+{"id":"83a55c01ca185d18","targetSkill":"docx","kind":"indirect","phrase":"the formatting in this Word file is broken","source":"indirect-template"}
+{"id":"5b47136941795a59","targetSkill":"docx","kind":"indirect","phrase":"I need to send a polished doc","source":"indirect-template"}
+{"id":"1e5f75b8aaec5004","targetSkill":null,"kind":"negative","phrase":"create a PDF from scratch","source":"negative-from-adjacent","expectedOtherSkill":"pdf"}
+{"id":"167796822e148cf3","targetSkill":null,"kind":"negative","phrase":"create a spreadsheet from scratch","source":"negative-from-adjacent","expectedOtherSkill":"xlsx"}
+{"id":"bddea0aa678fe8cd","targetSkill":null,"kind":"negative","phrase":"split this deck","source":"negative-from-adjacent","expectedOtherSkill":"pptx"}
+{"id":"9a1b7b70cd444199","targetSkill":null,"kind":"negative","phrase":"extract text from a PDF","source":"negative-from-adjacent","expectedOtherSkill":"pdf"}

@@ -1,0 +1,19 @@
+{"id":"854545d990ef3fca","targetSkill":"skill-creator","kind":"paraphrase","phrase":"Edit an existing skill, please.","source":"paraphrase-template"}
+{"id":"3c28490199165a06","targetSkill":"skill-creator","kind":"paraphrase","phrase":"I need to create a new skill.","source":"paraphrase-template"}
+{"id":"497305ff3f6914be","targetSkill":"skill-creator","kind":"paraphrase","phrase":"Help me create a new skill.","source":"paraphrase-template"}
+{"id":"f0c1d85234cccb74","targetSkill":"skill-creator","kind":"paraphrase","phrase":"Can you improve the trigger accuracy of a skill?","source":"paraphrase-template"}
+{"id":"d21116a249988795","targetSkill":"skill-creator","kind":"paraphrase","phrase":"Can you optimize a skill description?","source":"paraphrase-template"}
+{"id":"e20d6724f58f262a","targetSkill":"skill-creator","kind":"paraphrase","phrase":"Could you edit an existing skill for me?","source":"paraphrase-template"}
+{"id":"e23976cf2b7670e4","targetSkill":"skill-creator","kind":"typo","phrase":"improve teh trigger accuracy of a skill","source":"typo-rule"}
+{"id":"71b5e2e9a5cea7c8","targetSkill":"skill-creator","kind":"typo","phrase":"optimize  skill description","source":"typo-rule"}
+{"id":"194a203e4a46d5f7","targetSkill":"skill-creator","kind":"typo","phrase":"create a new skill","source":"typo-rule"}
+{"id":"45e514cb8cb90c06","targetSkill":"skill-creator","kind":"slang","phrase":"any way to optimize a skill description?","source":"slang-template"}
+{"id":"273ff6b978681f90","targetSkill":"skill-creator","kind":"slang","phrase":"yo, how do i edit an existing skill","source":"slang-template"}
+{"id":"5b0aa7b9be225e76","targetSkill":"skill-creator","kind":"slang","phrase":"yo, how do i optimize a skill description","source":"slang-template"}
+{"id":"2271eeec053ca391","targetSkill":"skill-creator","kind":"indirect","phrase":"can you take a look at the skill-creator situation","source":"indirect-template"}
+{"id":"df02b2242ffb7522","targetSkill":"skill-creator","kind":"indirect","phrase":"something is going on with skill-creator","source":"indirect-template"}
+{"id":"afa375b8c81ab22c","targetSkill":"skill-creator","kind":"indirect","phrase":"the skill-creator thing is weird","source":"indirect-template"}
+{"id":"7b90a4aa72ad0936","targetSkill":null,"kind":"negative","phrase":"use the MCP SDK in TypeScript","source":"negative-from-adjacent","expectedOtherSkill":"mcp-builder"}
+{"id":"79ca852e340efd3f","targetSkill":null,"kind":"negative","phrase":"build an MCP server","source":"negative-from-adjacent","expectedOtherSkill":"mcp-builder"}
+{"id":"a7be2c271f408dc0","targetSkill":null,"kind":"negative","phrase":"write an MCP server for","source":"negative-from-adjacent","expectedOtherSkill":"mcp-builder"}
+{"id":"7b8f9a31b537e3b3","targetSkill":null,"kind":"negative","phrase":"wrap this API as MCP tools","source":"negative-from-adjacent","expectedOtherSkill":"mcp-builder"}

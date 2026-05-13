@@ -1,0 +1,19 @@
+{"id":"0074ba58403050cc","targetSkill":"buildkite-cli","kind":"paraphrase","phrase":"Help me retry a build.","source":"paraphrase-template"}
+{"id":"1beffbbafd0a4868","targetSkill":"buildkite-cli","kind":"paraphrase","phrase":"List builds, please.","source":"paraphrase-template"}
+{"id":"fd58df1a8a9aa083","targetSkill":"buildkite-cli","kind":"paraphrase","phrase":"Let's upload artifacts.","source":"paraphrase-template"}
+{"id":"33a5d799948bdf02","targetSkill":"buildkite-cli","kind":"paraphrase","phrase":"Let's manage secrets.","source":"paraphrase-template"}
+{"id":"3a46e5eea1cd4661","targetSkill":"buildkite-cli","kind":"paraphrase","phrase":"Help me upload artifacts.","source":"paraphrase-template"}
+{"id":"ee87f38f35534b8e","targetSkill":"buildkite-cli","kind":"paraphrase","phrase":"Could you create a pipeline for me?","source":"paraphrase-template"}
+{"id":"e01f2b982e9cbf4f","targetSkill":"buildkite-cli","kind":"typo","phrase":"list bbuilds","source":"typo-rule"}
+{"id":"3c37d215c70bd515","targetSkill":"buildkite-cli","kind":"typo","phrase":"list pieplines","source":"typo-rule"}
+{"id":"cb3de4c568f99d7c","targetSkill":"buildkite-cli","kind":"typo","phrase":"retry  abuild","source":"typo-rule"}
+{"id":"53a67912fd4434f5","targetSkill":"buildkite-cli","kind":"slang","phrase":"hey, cancel a build?","source":"slang-template"}
+{"id":"7d79299c80437a85","targetSkill":"buildkite-cli","kind":"slang","phrase":"pls list builds","source":"slang-template"}
+{"id":"219e46a9c1fdae1f","targetSkill":"buildkite-cli","kind":"slang","phrase":"quick q — can i manage secrets","source":"slang-template"}
+{"id":"50aeaab5e01a3aae","targetSkill":"buildkite-cli","kind":"indirect","phrase":"I want to do this from the terminal","source":"indirect-template"}
+{"id":"15400e55d923708b","targetSkill":"buildkite-cli","kind":"indirect","phrase":"scripting it locally would be easier","source":"indirect-template"}
+{"id":"12a56221e94e5498","targetSkill":"buildkite-cli","kind":"indirect","phrase":"I'd rather not click around the UI","source":"indirect-template"}
+{"id":"d96f5c7ba99f4a00","targetSkill":null,"kind":"negative","phrase":"show test failures in the build page","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-pipelines"}
+{"id":"9cab4663cb1d0bb1","targetSkill":null,"kind":"negative","phrase":"authenticate with the Buildkite API","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-api"}
+{"id":"6240b1b988432a88","targetSkill":null,"kind":"negative","phrase":"standardize pipelines across teams","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-agent-infrastructure"}
+{"id":"2a3061c9e9a4fc2c","targetSkill":null,"kind":"negative","phrase":"add plugins","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-pipelines"}

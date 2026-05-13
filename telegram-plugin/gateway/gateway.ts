@@ -220,6 +220,12 @@ import { type BannerState } from '../slot-banner.js'
 import { refreshBanner } from '../slot-banner-driver.js'
 import { dispatchFallbackNotification } from '../auto-fallback-dispatcher.js'
 import { loadConfig as loadSwitchroomConfig } from '../../src/config/loader.js'; import { resolveAgentConfig } from '../../src/config/merge.js'
+import {
+  tryHostdDispatch,
+  hostdRequestId,
+  hostdWillBeUsed,
+  _resetHostdEnabledCache,
+} from './hostd-dispatch.js'
 import type { AgentAudit } from '../welcome-text.js'
 import { shouldSweepChatAtBoot } from './boot-sweep-filter.js'
 
@@ -6987,6 +6993,11 @@ export function _resetDockerReachableCache(): void {
   _dockerReachable = undefined
 }
 
+// hostd dispatch lives in `hostd-dispatch.ts` (extracted for testability).
+// Re-export the cache-reset so existing test patterns that reach into
+// gateway.ts for `_resetDockerReachableCache` find a parallel hook.
+export { _resetHostdEnabledCache }
+
 function spawnSwitchroomDetached(
   args: string[],
   onFailure?: (info: { code: number; tail: string }) => void,
@@ -7776,9 +7787,32 @@ bot.command('restart', async ctx => {
     // of whatever reason the downstream CLI would default to.
     stampUserRestartReason('user: /restart from chat')
     await sweepBeforeSelfRestart()
-    spawnSwitchroomDetached(
-      ['agent', 'restart', name, '--force'],
-      notifyDetachedFailure(chatId, threadId ?? null, `restart ${name}`),
+    const hostdResp = await tryHostdDispatch(getMyAgentName(), {
+      v: 1,
+      op: 'agent_restart',
+      request_id: hostdRequestId('gw-restart'),
+      args: { name, force: true, reason: 'user: /restart from chat' },
+    })
+    if (hostdResp === 'not-configured') {
+      spawnSwitchroomDetached(
+        ['agent', 'restart', name, '--force'],
+        notifyDetachedFailure(chatId, threadId ?? null, `restart ${name}`),
+      )
+      return
+    }
+    if (hostdResp.result === 'started' || hostdResp.result === 'completed') {
+      // Dispatched via hostd. The recreate will kill this gateway
+      // shortly; the new gateway reads the marker and edits the ack.
+      return
+    }
+    // hostd was attempted but errored/denied — clear marker and surface.
+    clearRestartMarker()
+    await switchroomReply(
+      ctx,
+      `❌ <b>restart ${escapeHtmlForTg(name)} failed via hostd</b> ` +
+        `(result=${escapeHtmlForTg(hostdResp.result)}):\n` +
+        preBlock(hostdResp.error ?? '(no error message)'),
+      { html: true },
     )
     return
   }
@@ -7894,9 +7928,29 @@ async function handleNewOrResetCommand(ctx: Context, kind: 'new' | 'reset'): Pro
   // /new" / "user: /reset" rather than the downstream CLI default.
   stampUserRestartReason(`user: /${kind} from chat`)
   await sweepBeforeSelfRestart()
-  spawnSwitchroomDetached(
-    ['agent', 'restart', name, '--force'],
-    notifyDetachedFailure(chatId, threadId ?? null, `${kind} ${name}`),
+  const hostdResp = await tryHostdDispatch(getMyAgentName(), {
+    v: 1,
+    op: 'agent_restart',
+    request_id: hostdRequestId(`gw-${kind}`),
+    args: { name, force: true, reason: `user: /${kind} from chat` },
+  })
+  if (hostdResp === 'not-configured') {
+    spawnSwitchroomDetached(
+      ['agent', 'restart', name, '--force'],
+      notifyDetachedFailure(chatId, threadId ?? null, `${kind} ${name}`),
+    )
+    return
+  }
+  if (hostdResp.result === 'started' || hostdResp.result === 'completed') {
+    return
+  }
+  clearRestartMarker()
+  await switchroomReply(
+    ctx,
+    `❌ <b>${escapeHtmlForTg(kind)} ${escapeHtmlForTg(name)} failed via hostd</b> ` +
+      `(result=${escapeHtmlForTg(hostdResp.result)}):\n` +
+      preBlock(hostdResp.error ?? '(no error message)'),
+    { html: true },
   )
 }
 
@@ -7952,22 +8006,23 @@ bot.command('update', async ctx => {
   // container, which has the switchroom CLI baked in but no docker
   // binary and no /var/run/docker.sock mount. So `switchroom update`'s
   // pull-images and recreate-containers steps would fail with
-  // "docker: command not found". Without this guard, the operator
-  // sees an opaque "❌ update failed (exit 127)" via
-  // notifyDetachedFailure ~5s after the ack.
+  // "docker: command not found".
   //
-  // Surface a clean explanation instead, pointing them at the host
-  // CLI as the working path. /update (dry-run) does NOT need docker
-  // and is unaffected — only /update apply.
-  if (!isDockerReachable()) {
+  // BYPASSED when hostd is on (#1175 Phase 2 RFC C): hostd runs on the
+  // host with the docker socket mounted, so the in-container docker
+  // dependency goes away. Skip the guard so /update apply can dispatch
+  // through hostd. When hostd is NOT in play, keep the guard so the
+  // operator gets a clean explanation instead of an opaque exit-127.
+  if (!hostdWillBeUsed(getMyAgentName()) && !isDockerReachable()) {
     await switchroomReply(
       ctx,
       `❌ <b>/update apply</b> needs docker access from inside the agent ` +
       `container, but it's not available (no <code>docker</code> binary on ` +
       `PATH, no <code>/var/run/docker.sock</code> mount).\n\n` +
-      `On docker installs, run <code>switchroom update</code> from the ` +
-      `host shell instead.\n\n` +
-      `<i>Tracked as #926 — host-side update daemon would close this gap.</i>`,
+      `On docker installs, either run <code>switchroom update</code> from ` +
+      `the host shell, or enable <code>host_control.enabled</code> in ` +
+      `<code>switchroom.yaml</code> and <code>switchroom hostd install</code> ` +
+      `so this verb dispatches through the host-side daemon.`,
       { html: true },
     )
     return
@@ -8041,9 +8096,34 @@ bot.command('update', async ctx => {
   // pinned-progress-card surface is the headline feature per CLAUDE.md;
   // leaving one pinned across the recreate would surprise the operator.
   await sweepBeforeSelfRestart()
-  spawnSwitchroomDetached(
-    ['update', ...passthrough],
-    notifyDetachedFailure(chatId, threadId ?? null, 'update'),
+  const skipImages = passthrough.includes('--skip-images')
+  const rebuild = passthrough.includes('--rebuild')
+  const hostdResp = await tryHostdDispatch(getMyAgentName(), {
+    v: 1,
+    op: 'update_apply',
+    request_id: hostdRequestId('gw-update'),
+    args: {
+      ...(skipImages ? { skip_images: true } : {}),
+      ...(rebuild ? { rebuild: true } : {}),
+    },
+  })
+  if (hostdResp === 'not-configured') {
+    spawnSwitchroomDetached(
+      ['update', ...passthrough],
+      notifyDetachedFailure(chatId, threadId ?? null, 'update'),
+    )
+    return
+  }
+  if (hostdResp.result === 'started' || hostdResp.result === 'completed') {
+    return
+  }
+  clearRestartMarker()
+  await switchroomReply(
+    ctx,
+    `❌ <b>/update apply failed via hostd</b> ` +
+      `(result=${escapeHtmlForTg(hostdResp.result)}):\n` +
+      preBlock(hostdResp.error ?? '(no error message)'),
+    { html: true },
   )
 })
 

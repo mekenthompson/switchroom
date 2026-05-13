@@ -223,8 +223,17 @@ steps:
       paths:
         - "~/.bun"
         - "node_modules/"
-        - "telegram-plugin/node_modules/"
-      key: "v1-bun-{{ checksum 'bun.lock' }}-{{ checksum 'telegram-plugin/bun.lock' }}"
+        # NOTE: do NOT cache `telegram-plugin/node_modules/`. `telegram-plugin`
+        # is a workspace of the root; the hoisted root install satisfies its
+        # deps. A populated `telegram-plugin/node_modules/` (left behind by an
+        # earlier build that ran a redundant per-package install) creates a
+        # shadow `@mtcute/node`, breaking Node-style resolution from
+        # `telegram-plugin/uat/driver.ts` and causing `tests/uat-driver.test.ts`
+        # to fail every run with "Invalid session string". See the install
+        # comment block at the top of this step's command for the full
+        # diagnosis. Cache key bumped to v2 to invalidate any existing cache
+        # entry that contains the bad directory.
+      key: "v2-bun-{{ checksum 'bun.lock' }}-{{ checksum 'telegram-plugin/bun.lock' }}"
     artifact_paths:
       - "coverage/**/*"
     retry:
@@ -321,7 +330,19 @@ steps:
       export PATH="$$HOME/.bun/bin:$$PATH"
       cd telegram-plugin
       bun install --frozen-lockfile --prefer-offline --no-progress
-      bun test
+      # Scope `bun test` to the unit-test directories. The default
+      # invocation `bun test` (no args) recursively discovers every
+      # `*.test.ts` in cwd — including `uat/scenarios/`. Those are
+      # real-Telegram UAT scenarios that call `fail()` from the harness
+      # when `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` aren't set, so
+      # running them under the unit-test step produces 100+ false
+      # failures. UAT scenarios are invoked separately via
+      # `bun run test:uat` (vitest with a dedicated config + real
+      # credentials). Listing the dirs explicitly keeps the unit
+      # surface and skips the UAT one.
+      bun test \
+        admin-commands gateway registry secret-detect tests \
+        channel-envelope-safety.test.ts
     cache:
       paths:
         - "~/.bun"

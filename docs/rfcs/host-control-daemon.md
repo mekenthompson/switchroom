@@ -173,11 +173,22 @@ Same path-as-identity contract as the broker:
 `src/vault/broker/peercred.ts:84`; extend that set or add a
 host-control-local copy).
 
-Each agent container gets a per-agent named volume
-`hostd-<name>-sock` mounted at `/run/switchroom/hostd/<name>/sock`
-inside the agent and at `/run/switchroom/hostd/<name>/` inside the
-daemon. Same shape compose emits today for `broker-<name>-sock` and
-`kernel-<name>-sock` (`src/agents/compose.ts:742-743`).
+**Host vs container paths.** Two viewpoints, the same socket file:
+
+- **Host side** (where the daemon binds): `~/.switchroom/hostd/<name>/sock`,
+  parent dir mode 0700 owned by operator UID; socket mode 0660 owned
+  by the agent UID.
+- **Agent-container side** (what the in-container client opens):
+  `/run/switchroom/hostd/<name>/sock`, the canonical in-container
+  path mirroring the broker's `/run/switchroom/broker/<name>/sock`
+  shape.
+
+A compose-emitted bind mount couples the two: `~/.switchroom/hostd/<name>/`
+on the host → `/run/switchroom/hostd/<name>/` inside the agent.
+Path-as-identity parsing happens on the daemon's bind path
+(host-side), so an agent cannot forge identity by renaming its
+in-container view. Mirrors the broker pattern at
+`src/agents/compose.ts:742-743`.
 
 ### 5.3 Wire protocol
 
@@ -247,13 +258,13 @@ Three layers, layered fail-closed:
      gateway's `/upgradestatus` handler.)
    - **`admin`** — `config.agents[name].admin === true`. Reuses the
      broker's `isAdminAgent` check (`src/vault/broker/server.ts:1613-1615`).
-   - **`admin + operator-attest`** — admin AND the request carries a
-     valid operator-attestation. Reuses the broker's existing
-     passphrase-attestation pattern: gateway forwards the operator
-     passphrase (cached after `/vault unlock`) on the wire; daemon
-     compares to the broker's currently-unlocked passphrase via a
-     short broker RPC (`status` op returns a passphrase fingerprint
-     the daemon can verify against, no plaintext crossing).
+   - **`admin + operator-attest`** — admin AND the request carries
+     a valid operator-passphrase attestation. Reuses the broker's
+     existing plaintext-forward pattern verbatim (see the
+     "Attestation" paragraph immediately below, and
+     `src/vault/broker/server.ts:1668` for the existing reference
+     implementation). No new RPCs are added to the broker for the
+     daemon's needs.
 
 For `agent_restart` self-targeting (`args.name === caller.identity.name`),
 the gate downgrades to `any` — matches the gateway's current behavior
@@ -474,13 +485,19 @@ If accepted:
 1. Implement `src/host-control/server.ts` + `src/host-control/client.ts`
    + `src/host-control/protocol.ts`, mirroring the broker's file
    layout.
-2. Wire compose: new singleton + per-agent socket volumes.
+2. Wire compose: emit per-agent `hostd-<name>-sock` bind mounts on
+   admin-flagged agents (host source: `~/.switchroom/hostd/<name>/`;
+   container target: `/run/switchroom/hostd/<name>/`). **No** compose
+   singleton — the daemon is a systemd user unit on the host. Earlier
+   draft step said "new singleton + per-agent socket volumes"; the
+   singleton half is struck for v1 (see §5.1 for why; compose-mode
+   support is deferred to a v2 host-helper RFC).
 3. Replace the six `spawnSwitchroomDetached` callsites in the
    gateway behind the `host_control.enabled` flag.
 4. Add `switchroom audit hostd` verb + Telegram `/audit hostd`.
 5. Tests: unit (verb gates, idempotency, allowlist), integration
-   (in-docker round-trip with a real daemon), e2e (admin agent
-   triggers `update_apply`, verifies the deploy lands).
+   (host daemon + in-agent client round-trip with a fake CLI binary),
+   e2e (admin agent triggers `update_apply`, verifies the deploy lands).
 
 Effort estimate: **~180–240 agent minutes** for v1 (skinny verb
 set, opt-in flag, hard-fail-when-enabled, `get_status` query verb,

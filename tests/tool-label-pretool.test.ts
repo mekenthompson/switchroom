@@ -105,6 +105,36 @@ describe("tool-label-pretool.mjs", () => {
     expect(r.sidecarLines[0].tool_name).toBe("Read");
   });
 
+  it("Skill → 'Running skill <slug>' so the sidecar carries it for the UAT runner", () => {
+    const r = run(
+      {
+        session_id: "sess-test",
+        tool_use_id: "toolu_skill_1",
+        tool_name: "Skill",
+        tool_input: { skill: "switchroom-cli" },
+      },
+      stateDir,
+    );
+    expect(r.status).toBe(0);
+    expect(r.sidecarLines).toHaveLength(1);
+    expect(r.sidecarLines[0].label).toBe("Running skill switchroom-cli");
+    expect(r.sidecarLines[0].tool_name).toBe("Skill");
+  });
+
+  it("Skill with empty slug emits no sidecar line", () => {
+    const r = run(
+      {
+        session_id: "sess-test",
+        tool_use_id: "toolu_skill_empty",
+        tool_name: "Skill",
+        tool_input: { skill: "" },
+      },
+      stateDir,
+    );
+    expect(r.status).toBe(0);
+    expect(r.sidecarLines).toHaveLength(0);
+  });
+
   it("Edit / Write / NotebookEdit produce matching verbs", () => {
     const cases: Array<[string, Record<string, unknown>, string]> = [
       ["Edit", { file_path: "/x/foo.ts" }, "Editing foo.ts"],

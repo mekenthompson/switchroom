@@ -111,6 +111,17 @@ export function computeLabel(toolName, input) {
     case 'KillBash':
     case 'KillShell':
       return 'Stopping background process'
+    case 'Skill': {
+      // The Skill tool's input is `{ skill: "<slug>", args?: "..." }`.
+      // We emit `Running skill <slug>` so downstream observers
+      // (notably the skill-coverage UAT runner at
+      // telegram-plugin/uat/runners/skill-coverage.ts) can tail the
+      // sidecar JSONL and recover which skill fired per turn —
+      // the progress card path that used to surface this was retired
+      // when `progressDriver` was nulled out in #1122 PR3.
+      const slug = clip(String(i.skill ?? ''), 64)
+      return slug ? `Running skill ${slug}` : null
+    }
   }
 
   // MCP allowlist.

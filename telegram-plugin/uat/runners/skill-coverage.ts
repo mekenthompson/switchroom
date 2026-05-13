@@ -9,20 +9,18 @@
  * everything through Telegram itself, so no host-side JSONL access
  * is required.
  *
- * **Skill detection.** The gateway's progress card includes the
- * literal substring `running skill <name>` for every Skill tool
- * invocation (see `telegram-plugin/tool-labels.ts:247`). We
- * subscribe to the bot DM chat's message stream BEFORE sending each
- * probe, then collect every observed text fragment (initial replies,
- * edits, pinned-card edits) and grep for the label. Any skill name
- * extracted is "fired" for this probe.
+ * **Skill detection.** The PreToolUse hook
+ * `telegram-plugin/hooks/tool-label-pretool.mjs` writes one JSONL
+ * row per tool invocation to
+ * `~/.switchroom/agents/<agent>/telegram/tool-labels-<session_id>.jsonl`.
+ * Skill rows have `tool_name === "Skill"` and a label of the form
+ * `"Running skill <slug>"`. The runner tails every sidecar file
+ * that mtime-changes during a probe window and pulls the slugs out.
  *
- * **Card-suppression caveat.** The gateway's `progress_card.delay_ms`
- * (default 45s) hides the card entirely for short turns. For this
- * runner to capture skill labels reliably, the target agent must run
- * with a small `delay_ms` in its `channels.telegram` config — set 0
- * for the test-harness agent before running. See
- * `docs/skill-coverage/runbook.md` § "Live run".
+ * That sidecar dir is bind-mounted into the agent at
+ * `$TELEGRAM_STATE_DIR` AND lives at a host-readable path (owned by
+ * the agent UID but mode 0775; jsonl rows are 0644 from the hook).
+ * No gateway / progress-card dependency.
  *
  * Usage:
  *   bun telegram-plugin/uat/runners/skill-coverage.ts \
@@ -41,6 +39,7 @@
 
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { Driver, type ObservedMessage } from "../driver.js";
 import { loadUatEnv } from "../load-env.js";
@@ -70,20 +69,67 @@ export interface ProbeResult {
 // ─── Skill-label extraction ──────────────────────────────────────────
 
 /**
- * Matches the literal substring the gateway writes for a Skill tool
+ * Matches the literal label substring written by the PreToolUse hook
+ * `telegram-plugin/hooks/tool-label-pretool.mjs` for a `Skill` tool
  * invocation. Slug regex is restrictive on purpose — skill names are
  * kebab-case ASCII per `skills/<name>/SKILL.md` frontmatter.
  */
-const SKILL_LABEL_RE = /running skill\s+([a-z0-9][a-z0-9-]*)/gi;
+const SKILL_LABEL_RE = /running skill\s+([a-z0-9][a-z0-9-]*)/i;
 
-export function extractSkillsFromText(text: string): string[] {
-  const seen = new Set<string>();
-  let m: RegExpExecArray | null;
-  SKILL_LABEL_RE.lastIndex = 0;
-  while ((m = SKILL_LABEL_RE.exec(text)) !== null) {
-    seen.add(m[1]!.toLowerCase());
+export function extractSkillFromLabel(label: string): string | null {
+  const m = SKILL_LABEL_RE.exec(label);
+  return m ? m[1]!.toLowerCase() : null;
+}
+
+export interface SidecarRow {
+  ts: number;
+  tool_use_id: string;
+  agent_id: string | null;
+  label: string;
+  tool_name: string;
+}
+
+/**
+ * Read every `tool-labels-*.jsonl` file in `dir` and return rows
+ * with `tool_name === "Skill"` and `ts >= sinceMs`. The sidecar is
+ * append-only so partial-line tails are unlikely; we still defensively
+ * skip malformed lines.
+ */
+export function readSkillRowsSince(
+  dir: string,
+  sinceMs: number,
+  readdir: (p: string) => string[],
+  readFile: (p: string) => string,
+): SidecarRow[] {
+  const out: SidecarRow[] = [];
+  let entries: string[] = [];
+  try {
+    entries = readdir(dir);
+  } catch {
+    return out;
   }
-  return [...seen];
+  for (const e of entries) {
+    if (!e.startsWith("tool-labels-") || !e.endsWith(".jsonl")) continue;
+    let content: string;
+    try {
+      content = readFile(`${dir}/${e}`);
+    } catch {
+      continue;
+    }
+    for (const line of content.split("\n")) {
+      if (!line.trim()) continue;
+      let row: SidecarRow;
+      try {
+        row = JSON.parse(line) as SidecarRow;
+      } catch {
+        continue;
+      }
+      if (typeof row.ts !== "number" || row.ts < sinceMs) continue;
+      if (row.tool_name !== "Skill") continue;
+      out.push(row);
+    }
+  }
+  return out;
 }
 
 // ─── CLI parsing ─────────────────────────────────────────────────────
@@ -97,8 +143,14 @@ interface CliConfig {
   replyTimeoutMs: number;
   /** Inter-probe settle, ms. Default 6s to keep us under Telegram's rate cap. */
   settleMs: number;
-  /** Edit-window after first reply seen — collects card edits. Default 8s. */
-  editWindowMs: number;
+  /** Sidecar-drain window after reply is seen, ms. The hook writes
+   *  asynchronously; a small post-reply hold avoids missing the last
+   *  Skill row of a turn. Default 3s. */
+  sidecarDrainMs: number;
+  /** Path to the agent's TELEGRAM_STATE_DIR on the host — where
+   *  `tool-labels-<session>.jsonl` files live. Defaults to
+   *  `~/.switchroom/agents/<name>/telegram/`. */
+  agentStateDir: string;
   outBase: string;
 }
 
@@ -122,7 +174,8 @@ function parseCli(argv: readonly string[]): CliConfig {
     : null;
   let replyTimeoutMs = Number.parseInt(process.env.SKILL_COVERAGE_REPLY_TIMEOUT_MS ?? "90000", 10);
   let settleMs = Number.parseInt(process.env.SKILL_COVERAGE_SETTLE_MS ?? "6000", 10);
-  let editWindowMs = Number.parseInt(process.env.SKILL_COVERAGE_EDIT_WINDOW_MS ?? "8000", 10);
+  let sidecarDrainMs = Number.parseInt(process.env.SKILL_COVERAGE_SIDECAR_DRAIN_MS ?? "3000", 10);
+  let agentStateDir = process.env.SKILL_COVERAGE_AGENT_STATE_DIR ?? "";
   let outBase = process.env.SKILL_COVERAGE_OUT ?? DEFAULT_OUT_BASE;
 
   for (let i = 0; i < argv.length; i++) {
@@ -148,8 +201,11 @@ function parseCli(argv: readonly string[]): CliConfig {
       case "--settle-ms":
         settleMs = Number.parseInt(next(), 10);
         break;
-      case "--edit-window-ms":
-        editWindowMs = Number.parseInt(next(), 10);
+      case "--sidecar-drain-ms":
+        sidecarDrainMs = Number.parseInt(next(), 10);
+        break;
+      case "--agent-state-dir":
+        agentStateDir = next();
         break;
       case "--out":
         outBase = resolve(next());
@@ -174,6 +230,10 @@ function parseCli(argv: readonly string[]): CliConfig {
     fail(`--agent expects "<name>:@<bot-username>"; got "${agentSpec}"`);
   }
 
+  const resolvedAgentStateDir = agentStateDir
+    ? resolve(agentStateDir)
+    : join(homedir(), ".switchroom", "agents", agentName!, "telegram");
+
   return {
     agentName: agentName!,
     botUsername: botUsername!,
@@ -181,7 +241,8 @@ function parseCli(argv: readonly string[]): CliConfig {
     limitPerSkill,
     replyTimeoutMs,
     settleMs,
-    editWindowMs,
+    sidecarDrainMs,
+    agentStateDir: resolvedAgentStateDir,
     outBase,
   };
 }
@@ -198,7 +259,8 @@ Flags:
   --limit-per-skill N       Cap probes per skill.
   --reply-timeout-ms N      Per-probe budget. Default 90000.
   --settle-ms N             Inter-probe settle. Default 6000.
-  --edit-window-ms N        Window after first reply for collecting card edits. Default 8000.
+  --sidecar-drain-ms N      Post-reply hold for the last hook write. Default 3000.
+  --agent-state-dir PATH    Override sidecar location. Default ~/.switchroom/agents/<name>/telegram.
   --out PATH                Output base path. Default tests/skill-coverage/out/skill-coverage.
 `);
 }
@@ -278,7 +340,6 @@ async function runProbe(
 ): Promise<ProbeResult> {
   const startedAt = Date.now();
   const stream = driver.observeMessages(botUserId)[Symbol.asyncIterator]();
-  const skills = new Set<string>();
   const replyTexts = new Map<number, string>();
   let sentMessageId: number;
 
@@ -301,19 +362,15 @@ async function runProbe(
     };
   }
 
+  // Bot reply is the turn-completion signal — we stop reading the
+  // stream once it lands. The sidecar-drain hold below absorbs any
+  // late hook writes after the visible reply.
   const deadline = startedAt + cfg.replyTimeoutMs;
   let firstReplyAt = 0;
   try {
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
-      const winSize = firstReplyAt
-        ? Math.max(0, cfg.editWindowMs - (Date.now() - firstReplyAt))
-        : remaining;
-      if (firstReplyAt && winSize === 0) break;
-      const slice = await pullOneWithTimeout(
-        stream,
-        Math.min(remaining, Math.max(250, winSize)),
-      );
+      const slice = await pullOneWithTimeout(stream, Math.min(remaining, 2000));
       if (slice === "timeout") {
         if (firstReplyAt) break;
         continue;
@@ -322,9 +379,11 @@ async function runProbe(
       if (slice.messageId <= sentMessageId) continue;
       const t = (slice.text ?? "").trim();
       if (!t) continue;
-      for (const s of extractSkillsFromText(t)) skills.add(s);
       replyTexts.set(slice.messageId, t);
       if (!firstReplyAt) firstReplyAt = Date.now();
+      // First non-empty reply is enough — extra edits don't change
+      // which Skill labels landed in the sidecar.
+      break;
     }
   } finally {
     try {
@@ -334,20 +393,32 @@ async function runProbe(
     }
   }
 
-  const durationMs = Date.now() - startedAt;
   if (!firstReplyAt) {
     return {
       probe,
       skillsFired: [],
       replyText: "",
-      durationMs,
+      durationMs: Date.now() - startedAt,
       timedOut: true,
     };
   }
-  // Collapse the per-message-id reply texts into a single newline-
-  // joined blob. Most turns will have just one or two entries (the
-  // streaming reply plus the pinned card); ordering is by messageId
-  // so the card (later in the stream) appears after the reply.
+
+  // Drain window: hook writes are async to the assistant message
+  // landing. A small post-reply hold catches the last row.
+  await new Promise((res) => setTimeout(res, cfg.sidecarDrainMs));
+
+  const rows = readSkillRowsSince(
+    cfg.agentStateDir,
+    startedAt,
+    (p) => readdirSync(p),
+    (p) => readFileSync(p, "utf-8"),
+  );
+  const skills = new Set<string>();
+  for (const r of rows) {
+    const slug = extractSkillFromLabel(r.label);
+    if (slug) skills.add(slug);
+  }
+
   const replyText = [...replyTexts.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, t]) => t)
@@ -356,7 +427,7 @@ async function runProbe(
     probe,
     skillsFired: [...skills],
     replyText,
-    durationMs,
+    durationMs: Date.now() - startedAt,
     timedOut: false,
   };
 }

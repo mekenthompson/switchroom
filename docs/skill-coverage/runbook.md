@@ -32,14 +32,14 @@ Each probe is a real Claude Code turn against the user's Claude Pro/Max subscrip
 
 ## Live run
 
-**Preferred path — MTCute UAT runner** (`telegram-plugin/uat/runners/skill-coverage.ts`). Drives a real Telegram user account against the agent's bot via mtcute and extracts skill invocations from the progress-card label stream (`running skill <name>` per `tool-labels.ts:247`). No agent-uid perms dance, no JSONL tailing, no inject_inbound socket — Telegram is both the inbound channel and the observation surface.
+**Preferred path — MTCute UAT runner** (`telegram-plugin/uat/runners/skill-coverage.ts`). Drives a real Telegram user account against the agent's bot via mtcute, sends each probe, then reads which skills fired from the agent's host-readable `tool-labels-<session>.jsonl` sidecar (written by the PreToolUse hook at `telegram-plugin/hooks/tool-label-pretool.mjs`). Telegram is the inbound channel; the sidecar is the observation surface. No JSONL tailing of agent-uid-owned `session.jsonl`, no inject_inbound socket.
 
 Prereqs for this path are the standard UAT prereqs (see `telegram-plugin/uat/SETUP.md`):
 
 - `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_UAT_DRIVER_SESSION` in the repo-root `.env`.
 - Test bot is wired to the target agent and reachable via the username you'll pass to `--agent`.
-- Target agent's `channels.telegram.progress_card.delay_ms` is set small (0 is fine) in `switchroom.yaml` so the progress card surfaces during short turns. Defaults to 45s which suppresses the card entirely on fast probes.
-- Target agent has been restarted since this branch landed so `Skill` lives in `permissions.allow` (see "Skill pre-approval" below).
+- Target agent has been restarted since this branch landed so (a) the PreToolUse hook emits Skill sidecar rows and (b) `Skill` lives in `permissions.allow` (see "Skill pre-approval" below).
+- Agent's `~/.switchroom/agents/<name>/telegram/` directory is host-readable (the sidecar files land here at mode 0644 — readable to any host user). No agent-uid sudo dance required.
 
 ```bash
 cd /path/to/switchroom

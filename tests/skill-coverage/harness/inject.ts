@@ -14,6 +14,12 @@ import type {
   InjectInboundMessage,
 } from "../../../telegram-plugin/gateway/ipc-protocol.js";
 
+let _injectCounter = 0;
+function injectCounter(): number {
+  _injectCounter = (_injectCounter + 1) & 0xffff;
+  return _injectCounter;
+}
+
 export interface InjectOptions {
   socketPath: string;
   agentName: string;
@@ -58,12 +64,11 @@ export function injectInbound(opts: InjectOptions): Promise<InjectOutcome> {
   } = opts;
 
   const injectedAt = new Date().toISOString();
-  // Deterministic-ish ids: timestamp + agent + 6 random hex chars. The
-  // runner doesn't depend on uniqueness across runs; gateway just wants
-  // *some* message_id and ts. We use a randomised tail rather than a
-  // counter to keep this stateless.
-  const messageId = Math.floor(Date.now() & 0x7fffffff);
+  // messageId: ms timestamp + 16-bit process-local counter, masked to a
+  // positive int32. Two probes inside the same ms get distinct ids
+  // (gateway treats duplicates as replays).
   const ts = Date.now();
+  const messageId = ((ts & 0x7fff) << 16) | (injectCounter() & 0xffff);
   const inbound: InboundMessage = {
     type: "inbound",
     chatId,

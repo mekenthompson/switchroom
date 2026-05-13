@@ -15,9 +15,11 @@ export interface ProbeResult {
   /** Optional — kept only when debugMode is on; useful for forensic diffs. */
   rawEvents?: SessionEvent[];
   /** ISO timestamp at which the inject happened. */
-  injectedAt: string;
+  injectedAt?: string;
   /** Population label — agent name so multi-agent runs can be split. */
   agentName: string;
+  /** Set when the probe failed before reaching turn_end (inject or observer error). */
+  error?: string;
 }
 
 export interface RunRecord {

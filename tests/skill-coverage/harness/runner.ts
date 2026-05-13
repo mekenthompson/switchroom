@@ -98,38 +98,47 @@ export async function runProbe(
     log: opts.log,
   } satisfies ObserveTurnOptions);
 
-  await observer.start();
-  // Small priming delay isn't required — startSessionTail seeks to
-  // current file end before returning, so any events from THIS point
-  // forward are captured. The inject happens immediately.
-  const injectOpts: InjectOptions = {
-    socketPath: gatewaySocket,
-    agentName: opts.agentName,
-    text: probe.phrase,
-  };
-  const injectOutcome = await injectFn(injectOpts);
-  if (!injectOutcome.written) {
+  try {
+    await observer.start();
+    const injectOpts: InjectOptions = {
+      socketPath: gatewaySocket,
+      agentName: opts.agentName,
+      text: probe.phrase,
+    };
+    const injectOutcome = await injectFn(injectOpts);
+    if (!injectOutcome.written) {
+      observer.stop();
+      return {
+        probe,
+        skillsInvoked: [],
+        turnDurationMs: 0,
+        timedOut: true,
+        injectedAt: injectOutcome.injectedAt,
+        agentName: opts.agentName,
+      };
+    }
+    const turn = await observer.waitForTurnEnd();
+    observer.stop();
+    return {
+      probe,
+      skillsInvoked: extractSkillsInvoked(turn.events),
+      turnDurationMs: turn.durationMs,
+      timedOut: turn.timedOut,
+      rawEvents: opts.debugRawEvents ? turn.events : undefined,
+      injectedAt: injectOutcome.injectedAt,
+      agentName: opts.agentName,
+    };
+  } catch (err) {
     observer.stop();
     return {
       probe,
       skillsInvoked: [],
       turnDurationMs: 0,
       timedOut: true,
-      injectedAt: injectOutcome.injectedAt,
+      error: err instanceof Error ? err.message : String(err),
       agentName: opts.agentName,
     };
   }
-  const turn = await observer.waitForTurnEnd();
-  observer.stop();
-  return {
-    probe,
-    skillsInvoked: extractSkillsInvoked(turn.events),
-    turnDurationMs: turn.durationMs,
-    timedOut: turn.timedOut,
-    rawEvents: opts.debugRawEvents ? turn.events : undefined,
-    injectedAt: injectOutcome.injectedAt,
-    agentName: opts.agentName,
-  };
 }
 
 export async function runAll(

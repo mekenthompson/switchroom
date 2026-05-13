@@ -82,7 +82,12 @@ export function scoreRun(run: RunRecord, opts: ScoringOptions = {}): Scorecard {
         }
       } else if (fired) {
         // skillsInvoked contains this skill but it wasn't the target.
-        // That's a false positive *for this skill*. Count it.
+        // That's a false positive *for this skill*. Negative-control
+        // probes (targetSkill === null) hit this branch AND also
+        // increment negFpHits below — intentional double-accounting:
+        // the per-skill `falsePositives` measures "this skill mis-fires"
+        // while `negativeControlFpRate` measures "this skill fires on
+        // probes meant for no-one". Both are needed.
         fp++;
       }
       // Negative-control accounting — only for probes whose target

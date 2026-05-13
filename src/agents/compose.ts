@@ -45,16 +45,57 @@ export interface ResourceDefaults {
   pidsLimit?: number;
 }
 
+// Per-profile defaults. Settings:
+//   - memLimit       hard cap (cgroup memory.max)
+//   - memReservation soft floor (cgroup memory.low) — kernel protects at
+//                    least this much from reclaim under host-wide
+//                    pressure (Coolify co-tenants, build jobs, etc.).
+//                    Sized to ~10-30% of memLimit per profile — enough
+//                    to keep the agent's idle working set RAM-resident
+//                    without over-committing the host.
+//   - pidsLimit      cgroup pids.max — prevents fork bombs / runaway
+//                    test or build workers. Sized generously: a typical
+//                    agent at idle uses ~30 PIDs, `npm test`-style
+//                    workloads can spike to 200+. Caps are conservative
+//                    multiples of typical peak. klanker (the dedicated
+//                    test runner) gets the highest cap.
+//   - cpus           CPU quota (Docker `cpus`).
+//
+// These are starting points; operators override per-agent via the
+// schema's `resources` block (PR #1190). Total host commitment under
+// the canonical 9-agent fleet (1 klanker + 8 conversational): 6 + 8×1.5
+// = 18 GB hard cap; 4 + 8×0.256 = ~6 GB protected from reclaim. Well
+// under the 60 GB host capacity, leaves plenty for Coolify co-tenants.
 const RESOURCE_BY_PROFILE: Record<string, ResourceDefaults> = {
-  klanker: { memLimit: "6g", cpus: 2.0 },
+  klanker: { memLimit: "6g", memReservation: "4g", pidsLimit: 2000, cpus: 2.0 },
   // Conversational profiles — clerk, finn, carrie, coach, etc.
-  conversational: { memLimit: "1.5g", cpus: 1.0 },
+  conversational: {
+    memLimit: "1.5g",
+    memReservation: "256m",
+    pidsLimit: 500,
+    cpus: 1.0,
+  },
   // Lightweight profiles.
-  lightweight: { memLimit: "1g", cpus: 0.5 },
+  lightweight: {
+    memLimit: "1g",
+    memReservation: "128m",
+    pidsLimit: 500,
+    cpus: 0.5,
+  },
   // Coding/worker/researcher.
-  coding: { memLimit: "2g", cpus: 2.0 },
+  coding: {
+    memLimit: "2g",
+    memReservation: "512m",
+    pidsLimit: 1000,
+    cpus: 2.0,
+  },
   // Catch-all default.
-  default: { memLimit: "1.5g", cpus: 1.0 },
+  default: {
+    memLimit: "1.5g",
+    memReservation: "256m",
+    pidsLimit: 500,
+    cpus: 1.0,
+  },
 };
 
 /**

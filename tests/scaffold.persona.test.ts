@@ -124,16 +124,17 @@ describe("scaffoldAgent — persona (Phase 2)", () => {
     // work from inside a sandbox — RCA: gymbro silently fell back to
     // estimates on VAULT-BROKER-DENIED instead of requesting a grant).
     // Raised again 32000 → 33000 for PR1 of the voice/architecture
-    // cleanup (#TBD): unified AI-tells ban-list into SOUL.md "Never"
-    // and added a procedural "Execution Bias" section to CLAUDE.md
-    // (verify mutable facts, final answer needs evidence, weak tool
-    // result is not a conclusion). Net add ~700 chars. PR2 of the
-    // same cleanup will hoist ~1.8KB of operational protocol (resume,
-    // wake-audit, ! interrupt, restart diagnostics) out of
-    // telegram-style.md.hbs into a runtime skill; the cap should
-    // drop back below 32000 after that lands.
+    // cleanup (#1177): unified AI-tells ban-list into SOUL.md "Never"
+    // and added a procedural "Execution Bias" section to CLAUDE.md.
+    // LOWERED 33000 → 28000 in PR2 of the same cleanup (#TBD):
+    // hoisted resume protocol, wake audit, "why did you restart" debug
+    // commands, `!` interrupt implementation detail, and "status?"
+    // UX-failure signal procedures out of telegram-style.md.hbs into
+    // a new bundled `switchroom-runtime` skill. Always-loaded prompt
+    // now points at the skill via short triggers; procedural detail
+    // loads on demand. ~5KB removed from every-turn context.
     // Each block is load-bearing. Future bumps should justify themselves
     // similarly.
-    expect(claudeMd.length).toBeLessThan(33000); // generous cap; target is lean but not 3KB
+    expect(claudeMd.length).toBeLessThan(28000); // tightened post-hoist; target is lean but not 3KB
   });
 });

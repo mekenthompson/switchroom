@@ -170,6 +170,11 @@ const serverEntries = [
   // The host-side singleton scheduler bundle (`dist/scheduler/index.js`)
   // and Dockerfile.scheduler were removed in Phase 4.
   { src: "src/agent-scheduler/index.ts", out: "dist/agent-scheduler/index.js" },
+  // RFC C Phase 1: host-control daemon. Bundled as a node-target
+  // file the operator launches via a systemd user unit (see RFC
+  // C §5.1). NOT baked into any docker image — the daemon runs
+  // on the host, not inside a container.
+  { src: "src/host-control/main.ts", out: "dist/host-control/main.js" },
 ];
 for (const entry of serverEntries) {
   const srcAbs = resolve(root, entry.src);

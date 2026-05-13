@@ -76,12 +76,17 @@ const SOCKET_PATH_AGENT_SUBDIR_RE =
 
 /**
  * Reserved names that look like an agent name in the path-derivation regex
- * but are claimed by other identity kinds. Today: "operator" — used for
- * the host-shell-reachable operator socket. An agent literally named
- * "operator" would collide with that path; the agent allocator must
- * refuse the name to avoid a forged-identity hazard.
+ * but are claimed by other identity kinds. The agent allocator must refuse
+ * these names to avoid a forged-identity hazard.
+ *
+ *   - "operator" — used for the host-shell-reachable operator socket.
+ *   - "hostd"    — used by the host-control daemon's broker client socket
+ *                  (RFC C §5.4). Phase 2 will mount the daemon's broker
+ *                  client at `/run/switchroom/broker/hostd/sock`; reserving
+ *                  the name now keeps allocateAgentUid from giving "hostd"
+ *                  to a real agent the moment Phase 2 lands.
  */
-const RESERVED_AGENT_NAMES = new Set(["operator"]);
+const RESERVED_AGENT_NAMES = new Set(["operator", "hostd"]);
 
 /**
  * Identity of the listener that accepted a connection.

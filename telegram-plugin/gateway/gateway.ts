@@ -11591,8 +11591,20 @@ bot.on('callback_query:data', async ctx => {
       // if the yaml edit failed, the operator clearly meant "yes" so
       // we honour the immediate decision and surface the failure as
       // a hint in the chat.
+      //
+      // #1138: also carry the resolved `rule` so the bridge can cache
+      // it for the rest of the session and auto-allow matching tool
+      // calls from sub-agents (Task tool) and the parent without
+      // re-popping the prompt. Only set when the yaml edit succeeded —
+      // otherwise the rule may be unsafe to honour at scale and we
+      // fall back to single-use allow.
       synthInbound: () => {
-        ipcServer.broadcast({ type: 'permission', requestId: request_id, behavior: 'allow' })
+        ipcServer.broadcast({
+          type: 'permission',
+          requestId: request_id,
+          behavior: 'allow',
+          ...(grantOk ? { rule: rule.rule } : {}),
+        })
       },
     })
     return

@@ -88,6 +88,32 @@ describe('validateGatewayMessage', () => {
     it('rejects missing requestId', () => {
       expect(validateGatewayMessage({ type: 'permission', behavior: 'allow' })).toBe(false)
     })
+
+    // #1138: optional `rule` field on Always-allow broadcasts. Must be
+    // accepted when present + non-empty, accepted when absent, rejected
+    // when present-but-malformed (the bridge stashes the value verbatim
+    // into a Set<string> — empty strings or wrong types would poison
+    // the matcher).
+    it('accepts an optional rule when behavior is allow', () => {
+      expect(validateGatewayMessage({
+        type: 'permission', requestId: 'r', behavior: 'allow', rule: 'Edit',
+      })).toBe(true)
+      expect(validateGatewayMessage({
+        type: 'permission', requestId: 'r', behavior: 'allow', rule: 'Skill(mail)',
+      })).toBe(true)
+    })
+
+    it('rejects an empty-string rule', () => {
+      expect(validateGatewayMessage({
+        type: 'permission', requestId: 'r', behavior: 'allow', rule: '',
+      })).toBe(false)
+    })
+
+    it('rejects a non-string rule', () => {
+      expect(validateGatewayMessage({
+        type: 'permission', requestId: 'r', behavior: 'allow', rule: 42,
+      })).toBe(false)
+    })
   })
 
   describe('status', () => {

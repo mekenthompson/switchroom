@@ -131,3 +131,54 @@ function skillBasenameFromPath(input: Record<string, unknown>): string | null {
   const trimmed = path.replace(/\/SKILL\.md$/i, "").replace(/\/$/, "");
   return basename(trimmed) || null;
 }
+
+/**
+ * Inverse of `resolveAlwaysAllowRule` — does a stored allow-rule cover a
+ * fresh `permission_request`? Used by the bridge's session-scoped
+ * always-allow cache (issue #1138) to short-circuit prompts when the
+ * operator has already tapped "🔁 Always allow" for an equivalent tool
+ * call earlier in the same session.
+ *
+ * Matching rules (mirrors what `resolveAlwaysAllowRule` produces):
+ *
+ *   - Bare tool name (`Edit`, `Bash`, `Write`, …) ⇒ matches any
+ *     invocation of that tool. This is consistent with how
+ *     `tools.allow: [Edit]` works in `.claude/settings.json` — there's
+ *     no arg matching at this layer.
+ *   - `Skill(<name>)` ⇒ matches only `Skill` invocations whose resolved
+ *     skill name (via the same field-fallback chain as the resolver)
+ *     equals `<name>`.
+ *   - `mcp__<server>__<tool>` ⇒ matches the exact namespaced MCP tool
+ *     name.
+ *
+ * Returns `false` for any malformed rule rather than throwing — the
+ * caller (bridge) is on the hot permission path and should fall through
+ * to the gateway prompt on bad input.
+ */
+export function matchesAllowRule(
+  rule: string,
+  toolName: string,
+  inputPreview: string | undefined,
+): boolean {
+  if (!rule || !toolName) return false;
+
+  // Skill(name) — extract the parenthesized argument and compare against
+  // the resolved skill identifier from the request.
+  const skillMatch = /^Skill\(([^)]+)\)$/.exec(rule);
+  if (skillMatch) {
+    if (toolName !== "Skill") return false;
+    const ruleSkill = skillMatch[1];
+    const input = parseInput(inputPreview);
+    if (!input) return false;
+    const reqSkill =
+      readString(input, "skill") ??
+      readString(input, "skill_name") ??
+      readString(input, "skillName") ??
+      readString(input, "name") ??
+      skillBasenameFromPath(input);
+    return reqSkill === ruleSkill;
+  }
+
+  // Bare tool name or namespaced MCP tool — exact string compare.
+  return rule === toolName;
+}

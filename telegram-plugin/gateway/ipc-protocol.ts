@@ -18,6 +18,24 @@ export interface PermissionEvent {
   type: "permission";
   requestId: string;
   behavior: "allow" | "deny";
+  /**
+   * Session-scoped always-allow rule. Only set when the operator taps
+   * "🔁 Always allow" — the gateway already persists the rule to
+   * switchroom.yaml + settings.json via `switchroom agent grant`, but
+   * those writes only kick in on the NEXT agent boot. This field carries
+   * the rule to the running bridge so it can short-circuit future
+   * `permission_request` notifications (from the parent claude AND any
+   * sub-agents dispatched via the Task tool, which share the same MCP
+   * server / bridge process) within the current session.
+   *
+   * Issue #1138: without this, a sub-agent dispatched after the operator
+   * tapped "Always allow" still hit the popup, because Claude Code reads
+   * `.claude/settings.json` once at boot.
+   *
+   * Format matches `resolveAlwaysAllowRule`'s output: bare tool name
+   * (`Edit`), `Skill(<name>)`, or `mcp__<server>__<tool>`.
+   */
+  rule?: string;
 }
 
 export interface StatusEvent {

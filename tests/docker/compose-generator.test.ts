@@ -653,6 +653,22 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
     }
   });
 
+  it("sets TINI_KILL_PROCESS_GROUP=1 so SIGTERM reaches the gateway sidecar", () => {
+    // Without this env, tini forwards SIGTERM only to its direct child
+    // (tmux at PID 7); the gateway/scheduler/autoaccept sidecars share
+    // PGID=7 but are NOT direct children of tini, so they get SIGKILL'd
+    // at stop_grace_period without running the shutdown handler. The
+    // handler writes clean-shutdown.json — without it, every graceful
+    // container stop boots as 'crash recovery' on the next start.
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    for (const a of ["alice", "bob"]) {
+      const env = envBlockFor(out, a);
+      expect(env).toMatch(/TINI_KILL_PROCESS_GROUP:\s*"1"/);
+    }
+  });
+
   it("sets SWITCHROOM_KERNEL_SOCKET to the agent-perspective socket path", () => {
     // The agent mounts `kernel-<name>-sock` at `/run/switchroom/kernel`
     // (compose.ts line ~608 — directly at the parent dir, not at a

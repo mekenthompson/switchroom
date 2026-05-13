@@ -1,0 +1,86 @@
+{
+  "generatedAt": "2026-05-13T23:10:51.025Z",
+  "seed": 1,
+  "totalProbes": 30,
+  "rows": [
+    {
+      "skill": "buildkite-api",
+      "sampleSize": 0,
+      "truePositives": 0,
+      "falseNegatives": 0,
+      "falsePositives": 1,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "execSuccess": 0,
+      "negativeControlFpRate": 0.125
+    },
+    {
+      "skill": "buildkite-cli",
+      "sampleSize": 8,
+      "truePositives": 0,
+      "falseNegatives": 8,
+      "falsePositives": 0,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "execSuccess": 0,
+      "negativeControlFpRate": 0
+    },
+    {
+      "skill": "buildkite-pipelines",
+      "sampleSize": 0,
+      "truePositives": 0,
+      "falseNegatives": 0,
+      "falsePositives": 3,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "execSuccess": 0,
+      "negativeControlFpRate": 0.25
+    },
+    {
+      "skill": "file-bug",
+      "sampleSize": 0,
+      "truePositives": 0,
+      "falseNegatives": 0,
+      "falsePositives": 1,
+      "precision": 0,
+      "recall": 0,
+      "f1": 0,
+      "execSuccess": 0,
+      "negativeControlFpRate": 0.125
+    },
+    {
+      "skill": "mcp-builder",
+      "sampleSize": 6,
+      "truePositives": 2,
+      "falseNegatives": 4,
+      "falsePositives": 0,
+      "precision": 1,
+      "recall": 0.3333333333333333,
+      "f1": 0.5,
+      "execSuccess": 1,
+      "negativeControlFpRate": 0
+    },
+    {
+      "skill": "switchroom-runtime",
+      "sampleSize": 8,
+      "truePositives": 1,
+      "falseNegatives": 7,
+      "falsePositives": 0,
+      "precision": 1,
+      "recall": 0.125,
+      "f1": 0.2222222222222222,
+      "execSuccess": 1,
+      "negativeControlFpRate": 0
+    }
+  ],
+  "aggregate": {
+    "medianF1": 0.2222222222222222,
+    "skillsBelowF1Threshold": 3,
+    "skillsBelowExecThreshold": 1,
+    "f1Threshold": 0.9,
+    "execThreshold": 0.95
+  }
+}

@@ -308,6 +308,7 @@ import {
   LATEST_PR,
   COMMITS_AHEAD_OF_TAG,
 } from '../../src/build-info.js'
+import { composeBootVersionString } from './boot-version.js'
 import { classifyRejection } from './unhandled-rejection-policy.js'
 import {
   statusViaBroker,
@@ -425,41 +426,34 @@ function triggerSelfRestart(
   }
 }
 
-/**
- * Format the version string shown in the boot-card ack line. Two shapes
- * matching the deleted greeting card's behavior:
- *   - on a tag (commits_ahead = 0 or null):   "v0.2.0 · #44 · 2h ago"
- *     (omit "#44 ·" when no PR was parsed)
- *   - ahead of a tag (commits_ahead > 0):     "v0.2.0+3 · db6de9e · 2m ago"
- *     (always show short SHA when ahead, omit PR)
- * Age segment is omitted if no commit date is available (npm consumer).
- */
-function formatBootVersion(): string {
-  const ago = formatRelativeAgo(COMMIT_DATE)
-  const onTag = COMMITS_AHEAD_OF_TAG === 0 || COMMITS_AHEAD_OF_TAG === null
-
-  if (onTag) {
-    const parts: string[] = [`v${VERSION}`]
-    if (LATEST_PR != null) parts.push(`#${LATEST_PR}`)
-    if (ago) parts.push(ago)
-    return parts.join(' · ')
+// Cached lazily — the claude CLI binary doesn't change inside a running
+// gateway process; on `switchroom update` the gateway restarts, refreshing this.
+let cachedClaudeCliVersion: string | null | undefined = undefined
+function getClaudeCliVersion(): string | null {
+  if (cachedClaudeCliVersion !== undefined) return cachedClaudeCliVersion
+  try {
+    const out = execSync('claude --version 2>/dev/null', {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000,
+    }).trim()
+    const m = out.match(/^(\S+)/)
+    cachedClaudeCliVersion = m ? m[1] : (out || null)
+  } catch {
+    cachedClaudeCliVersion = null
   }
-
-  const parts: string[] = [`v${VERSION}+${COMMITS_AHEAD_OF_TAG}`]
-  if (COMMIT_SHA) parts.push(COMMIT_SHA)
-  if (ago) parts.push(ago)
-  return parts.join(' · ')
+  return cachedClaudeCliVersion
 }
 
-function formatRelativeAgo(iso: string | null): string | null {
-  if (!iso) return null
-  const t = Date.parse(iso)
-  if (Number.isNaN(t)) return null
-  const diffSec = Math.max(0, Math.floor((Date.now() - t) / 1000))
-  if (diffSec < 60) return `${diffSec}s ago`
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`
-  return `${Math.floor(diffSec / 86400)}d ago`
+function formatBootVersion(): string {
+  return composeBootVersionString({
+    version: VERSION,
+    commitSha: COMMIT_SHA,
+    commitDate: COMMIT_DATE,
+    latestPr: LATEST_PR,
+    commitsAheadOfTag: COMMITS_AHEAD_OF_TAG,
+    claudeCliVersion: getClaudeCliVersion(),
+  })
 }
 
 try {

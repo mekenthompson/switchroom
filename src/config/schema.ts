@@ -1562,6 +1562,30 @@ export const QuotaConfigSchema = z.object({
     .describe("Monthly USD spend budget. If unset, the greeting shows raw usage only."),
 });
 
+/**
+ * Host-control daemon (`switchroom-hostd`) — opt-in Phase 1 surface
+ * defined in `docs/rfcs/host-control-daemon.md`. When enabled, the
+ * compose generator emits per-agent UDS bind mounts for admin agents
+ * so the daemon (a systemd user unit on the host) can dispatch a
+ * closed set of operator verbs reached from inside the containers.
+ */
+export const HostControlConfigSchema = z.object({
+  enabled: z
+    .boolean()
+    .optional()
+    .describe(
+      "Opt-in to the host-control daemon. Default: false (Phase 1). " +
+      "When true, the compose generator emits per-agent bind mounts " +
+      "at `~/.switchroom/hostd/<name>/sock` for every admin-flagged " +
+      "agent. The daemon itself is installed by `switchroom setup` " +
+      "as a systemd user unit. systemd hosts only — compose-mode " +
+      "support is deferred to a v2 RFC (see RFC C §5.1 for why). " +
+      "Gateway integration (swap of spawnSwitchroomDetached callsites) " +
+      "lands in a Phase 2 follow-up PR; setting enabled: true in " +
+      "Phase 1 ships the daemon but does not change gateway behavior.",
+    ),
+});
+
 export const SwitchroomConfigSchema = z.object({
   switchroom: z.object({
     version: z.literal(1).describe("Config schema version"),
@@ -1613,6 +1637,11 @@ export const SwitchroomConfigSchema = z.object({
     "Optional weekly/monthly USD spend budgets rendered in the session " +
     "greeting. Usage is read from ccusage at runtime; no network calls.",
   ),
+  host_control: HostControlConfigSchema.optional().describe(
+    "Optional host-control daemon configuration. See RFC C " +
+    "(docs/rfcs/host-control-daemon.md) and the field-level help on " +
+    "`enabled` for the Phase 1 scope.",
+  ),
   defaults: AgentDefaultsSchema.describe(
     "Implicit bottom-of-cascade profile applied to every agent before " +
     "per-agent config and `extends:` resolution. Tools, mcp_servers, and " +
@@ -1656,6 +1685,7 @@ export type DriveConfig = z.infer<typeof DriveConfigSchema>;
 export type AgentDriveConfig = z.infer<typeof AgentDriveConfigSchema>;
 export type VaultBrokerConfig = z.infer<typeof VaultConfigSchema>["broker"];
 export type QuotaConfig = z.infer<typeof QuotaConfigSchema>;
+export type HostControlConfig = z.infer<typeof HostControlConfigSchema>;
 export type CodeRepoEntry = z.infer<typeof CodeRepoEntrySchema>;
 export type AgentBindMount = z.infer<typeof AgentBindMountSchema>;
 export type AgentRepoEntry = NonNullable<z.infer<typeof AgentSchema>["repos"]>[string];

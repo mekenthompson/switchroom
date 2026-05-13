@@ -30,7 +30,7 @@ import {
 } from "../../src/agents/compose.js";
 import type { SwitchroomConfig } from "../../src/config/schema.js";
 
-function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Record<string, unknown>; admin?: boolean; env?: Record<string, string> }>): SwitchroomConfig {
+function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Record<string, unknown>; admin?: boolean; env?: Record<string, string>; bind_mounts?: Array<{ source: string; target?: string; mode?: "ro" | "rw" }> }>): SwitchroomConfig {
   return {
     switchroom: { version: 1, agents_dir: "~/.switchroom/agents", skills_dir: "~/.switchroom/skills" },
     telegram: { bot_token: "x" },
@@ -44,6 +44,7 @@ function makeConfig(agents: Record<string, { extends?: string; settings_raw?: Re
           settings_raw: cfg.settings_raw,
           admin: cfg.admin,
           env: cfg.env,
+          bind_mounts: cfg.bind_mounts,
           schedule: [],
           tools: { allow: [], deny: [] },
           hooks: undefined,
@@ -811,6 +812,197 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
       expect(env).toMatch(/PIP_USER:\s*"1"/);
       expect(env).toMatch(/PIP_BREAK_SYSTEM_PACKAGES:\s*"1"/);
     }
+  });
+});
+
+describe("agent bind_mounts (#1164)", () => {
+  // Admin-gated escalation: admin agents can declare extra host paths
+  // to bind-mount into the container, on top of the standard dual-mount
+  // baseline. Use case: dogfooding switchroom from a switchroom agent.
+
+  it("emits a single :ro bind_mount under an admin agent's volumes", () => {
+    const out = generateCompose({
+      config: makeConfig({
+        klanker: {
+          admin: true,
+          bind_mounts: [{ source: "/home/me/code/switchroom" }],
+        },
+      }),
+    });
+    // Default mode is ro; default target is the same as source.
+    expect(out).toMatch(
+      /agent-klanker:[\s\S]*?- \/home\/me\/code\/switchroom:\/home\/me\/code\/switchroom:ro/,
+    );
+  });
+
+  it("emits :rw when mode is rw, and omits the suffix (docker default)", () => {
+    const out = generateCompose({
+      config: makeConfig({
+        klanker: {
+          admin: true,
+          bind_mounts: [{ source: "/home/me/code/switchroom", mode: "rw" }],
+        },
+      }),
+    });
+    expect(out).toMatch(
+      /- \/home\/me\/code\/switchroom:\/home\/me\/code\/switchroom\n/,
+    );
+    // The :ro suffix must not appear on the rw entry.
+    expect(out).not.toMatch(
+      /- \/home\/me\/code\/switchroom:\/home\/me\/code\/switchroom:ro/,
+    );
+  });
+
+  it("honours an explicit target distinct from source", () => {
+    const out = generateCompose({
+      config: makeConfig({
+        klanker: {
+          admin: true,
+          bind_mounts: [
+            { source: "/host/path", target: "/in/container", mode: "ro" },
+          ],
+        },
+      }),
+    });
+    expect(out).toMatch(/- \/host\/path:\/in\/container:ro/);
+  });
+
+  it("emits multiple bind_mounts in declared order", () => {
+    const out = generateCompose({
+      config: makeConfig({
+        klanker: {
+          admin: true,
+          bind_mounts: [
+            { source: "/a", mode: "ro" },
+            { source: "/b", mode: "rw" },
+          ],
+        },
+      }),
+    });
+    const idxA = out.indexOf("- /a:/a:ro");
+    const idxB = out.indexOf("- /b:/b\n");
+    expect(idxA).toBeGreaterThan(-1);
+    expect(idxB).toBeGreaterThan(-1);
+    expect(idxA).toBeLessThan(idxB);
+  });
+
+  it("throws when a non-admin agent declares bind_mounts", () => {
+    // fails when: the admin gate in emitAgentService is dropped. The
+    // operator could then silently grant filesystem reach to a
+    // non-admin agent just by adding bind_mounts to that agent's
+    // block — exactly the privilege escalation #1164's gating is
+    // meant to prevent.
+    expect(() =>
+      generateCompose({
+        config: makeConfig({
+          bob: {
+            bind_mounts: [{ source: "/home/me/code/switchroom" }],
+          },
+        }),
+      }),
+    ).toThrow(/agent "bob" declares bind_mounts but is not admin: true/);
+  });
+
+  it("non-admin agents emit no bind_mounts when none are declared (no regression)", () => {
+    const out = generateCompose({
+      config: makeConfig({ bob: {} }),
+    });
+    // No host path that doesn't already exist in the baseline.
+    expect(out).not.toMatch(/- \/home\/me\/code\/switchroom/);
+  });
+
+  it("rejects denylisted system-path sources", () => {
+    for (const bad of [
+      "/etc",
+      "/etc/passwd",
+      "/proc",
+      "/proc/1/environ",
+      "/sys/fs/cgroup",
+      "/dev",
+      "/run/foo",
+      "/var/run/whatever",
+      "/boot",
+      "/var/lib/docker/volumes",
+    ]) {
+      expect(() =>
+        generateCompose({
+          config: makeConfig({
+            klanker: {
+              admin: true,
+              bind_mounts: [{ source: bad }],
+            },
+          }),
+        }),
+      ).toThrow(/denylisted system path/);
+    }
+  });
+
+  it("rejects the docker socket explicitly (root-equivalent host control)", () => {
+    expect(() =>
+      generateCompose({
+        config: makeConfig({
+          klanker: {
+            admin: true,
+            bind_mounts: [{ source: "/var/run/docker.sock" }],
+          },
+        }),
+      }),
+    ).toThrow(/docker socket/);
+  });
+
+  it("rejects '/' itself as a source (would mount the entire host)", () => {
+    expect(() =>
+      generateCompose({
+        config: makeConfig({
+          klanker: {
+            admin: true,
+            bind_mounts: [{ source: "/" }],
+          },
+        }),
+      }),
+    ).toThrow(/denylisted system path/);
+  });
+
+  it("rejects relative or tilde-prefixed sources (no implicit expansion)", () => {
+    for (const bad of ["~/code/switchroom", "code/switchroom", "./foo"]) {
+      expect(() =>
+        generateCompose({
+          config: makeConfig({
+            klanker: {
+              admin: true,
+              bind_mounts: [{ source: bad }],
+            },
+          }),
+        }),
+      ).toThrow(/must be an absolute path/);
+    }
+  });
+
+  it("rejects sources containing '..'", () => {
+    expect(() =>
+      generateCompose({
+        config: makeConfig({
+          klanker: {
+            admin: true,
+            bind_mounts: [{ source: "/home/me/../etc/passwd" }],
+          },
+        }),
+      }),
+    ).toThrow(/contains '\.\.'/);
+  });
+
+  it("accepts sources whose path merely starts with '/' (not the literal root)", () => {
+    // Sanity that the BIND_MOUNT_DENYLIST '/' entry doesn't poison
+    // every legitimate absolute path.
+    const out = generateCompose({
+      config: makeConfig({
+        klanker: {
+          admin: true,
+          bind_mounts: [{ source: "/home/me/code/switchroom" }],
+        },
+      }),
+    });
+    expect(out).toContain("/home/me/code/switchroom:/home/me/code/switchroom:ro");
   });
 });
 

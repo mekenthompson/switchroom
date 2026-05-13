@@ -18,6 +18,49 @@ export const CodeRepoEntrySchema = z.object({
     .describe("Max simultaneous worktrees for this repo (default 5)"),
 });
 
+/**
+ * A single entry in an agent's bind_mounts list (#1164).
+ *
+ * Adds a host path to the agent container's bind-mount set, on top of the
+ * standard dual-mount baseline (agent state dir, .claude project dir, logs,
+ * read-only skills + credentials). Intended use case: dogfooding /
+ * self-modification — an admin agent that needs to read or edit the
+ * switchroom source tree at `~/code/switchroom`, or another repo not
+ * covered by the default mount policy.
+ *
+ * Admin-gated: the compose generator refuses to emit bind_mounts for an
+ * agent without `admin: true`. The denylist (`/`, `/etc`, `/proc`, `/sys`,
+ * `/dev`, `/run`, `/var/run`, `/boot`, `/var/lib/docker`, and the docker
+ * socket) is enforced in `src/agents/compose.ts`.
+ */
+export const AgentBindMountSchema = z.object({
+  source: z
+    .string()
+    .describe(
+      "Absolute host path to bind-mount into the container. Tilde-expansion " +
+      "is not performed — use the literal absolute path (e.g. " +
+      "'/home/me/code/switchroom'). The compose generator refuses sources " +
+      "under system paths (/, /etc, /proc, /sys, /dev, /run, /var/run, " +
+      "/boot, /var/lib/docker) and the docker socket.",
+    ),
+  target: z
+    .string()
+    .optional()
+    .describe(
+      "Container path the source mounts to. Must be absolute. Defaults to " +
+      "the same path as `source` (matches switchroom's existing dual-mount " +
+      "convention so absolute paths in scaffolded scripts Just Work).",
+    ),
+  mode: z
+    .enum(["ro", "rw"])
+    .optional()
+    .describe(
+      "Read-only (default) or read-write. Use `rw` only when the agent " +
+      "must mutate the host path (e.g. editing switchroom source). " +
+      "Default: 'ro'.",
+    ),
+});
+
 export const ScheduleEntrySchema = z.object({
   cron: z.string().describe("Cron expression (e.g., '0 8 * * *')"),
   prompt: z.string().describe("Prompt to send at the scheduled time"),
@@ -1251,7 +1294,24 @@ export const AgentSchema = z.object({
       "Additional filesystem paths the agent's tools can access. Passed " +
       "as repeated --add-dir <path> on the claude invocation. Use to grant " +
       "an agent reach into shared dirs (e.g. '/share/collab') without " +
-      "scaffold hacks. Per-agent only — paths are persona-specific. See #199."
+      "scaffold hacks. Per-agent only — paths are persona-specific. See #199. " +
+      "Note: this only adjusts the claude CLI's --add-dir tool-reach allowlist. " +
+      "If the path is not already inside the agent's container, also declare " +
+      "it in `bind_mounts:` (admin agents only) — otherwise the path doesn't " +
+      "exist inside the sandbox and --add-dir is a no-op."
+    ),
+  bind_mounts: z
+    .array(AgentBindMountSchema)
+    .optional()
+    .describe(
+      "Extra host paths bind-mounted into this agent's container, on top of " +
+      "the standard dual-mount baseline. ADMIN-ONLY: the compose generator " +
+      "refuses to emit bind_mounts unless `admin: true` is also set on the " +
+      "same agent. Use to dogfood / self-modify switchroom or another repo " +
+      "(see issue #1164). Pair with `add_dirs:` so claude's tool-reach " +
+      "allowlist also covers the mounted path. System paths (/, /etc, " +
+      "/proc, /sys, /dev, /run, /var/run, /boot, /var/lib/docker, " +
+      "/var/run/docker.sock) are denylisted regardless of mode."
     ),
   allowed_tools: z
     .array(z.string())
@@ -1597,4 +1657,5 @@ export type AgentDriveConfig = z.infer<typeof AgentDriveConfigSchema>;
 export type VaultBrokerConfig = z.infer<typeof VaultConfigSchema>["broker"];
 export type QuotaConfig = z.infer<typeof QuotaConfigSchema>;
 export type CodeRepoEntry = z.infer<typeof CodeRepoEntrySchema>;
+export type AgentBindMount = z.infer<typeof AgentBindMountSchema>;
 export type AgentRepoEntry = NonNullable<z.infer<typeof AgentSchema>["repos"]>[string];

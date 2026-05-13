@@ -10,11 +10,16 @@
  *   - `get_status`     (lookup of prior async mutations; gate matches
  *                      the original verb)
  *
- * Deferred to Phase 2: `update_check`, `update_apply`, `apply`,
- * `agent_start`, `agent_stop`, `reconcile`. Those need
- * operator-passphrase attestation (delegated to the broker) and a
- * non-trivial gateway integration; landing them in this PR would
- * balloon scope past one reviewable unit.
+ * Shipped in Phase 2 (#1208): `update_check`, `update_apply`,
+ * `apply`, `agent_start`, `agent_stop`. See RFC C §10 for the full
+ * verb table. `update_apply` and `apply` share a new fleet-mutation
+ * lock (this file's `fleetMutationInFlight`). `reconcile` was
+ * dropped from the original list — no underlying CLI verb exists;
+ * `apply` covers the intent.
+ *
+ * Still deferred: gateway integration (replacing
+ * `spawnSwitchroomDetached` callsites in telegram-plugin/gateway/
+ * with hostd RPC). Separate PR.
  */
 
 import { createServer, type Server, type Socket } from "node:net";
@@ -620,14 +625,16 @@ export class HostdServer {
     };
   }
 
-  /** Synchronous: `switchroom agent stop <name>` (with `--force` for
-   *  skip-drain). Same posture as agent_start. */
+  /** Synchronous: `switchroom agent stop <name>`. Same posture as
+   *  agent_start. Note: the CLI does NOT accept `--force` today
+   *  (verified via `src/cli/agent.ts` registration). If drain-skip
+   *  semantics arrive, plumb the flag here in lockstep with the
+   *  schema's `args.force` field. */
   private async handleAgentStop(
     req: Extract<HostdRequest, { op: "agent_stop" }>,
     started: number,
   ): Promise<HostdResponse> {
     const args = ["agent", "stop", req.args.name];
-    if (req.args.force) args.push("--force");
     const res = await this.runSwitchroom(args);
     return {
       v: 1,

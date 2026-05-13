@@ -14,9 +14,15 @@
  *                       mutation by request_id (paired-with the
  *                       async `started`-result pattern).
  *
- * Verbs deferred to a follow-up PR (per RFC C, Phase 1 scope):
- *   `update_check`, `update_apply`, `apply`, `agent_start`, `agent_stop`,
- *   `reconcile`.
+ * v2 (Phase 2, #1208) extends the verb set with:
+ *   - `update_check`  (read-only `switchroom update --check` proxy)
+ *   - `update_apply`  (mutating; fleet-mutation-locked)
+ *   - `apply`         (mutating; fleet-mutation-locked)
+ *   - `agent_start`   (per-service; self OR admin)
+ *   - `agent_stop`    (per-service; self OR admin)
+ * `reconcile` was dropped from the original deferral list — no
+ * underlying `switchroom reconcile` CLI verb exists; `apply` covers
+ * the intent.
  *
  * See docs/rfcs/host-control-daemon.md for the full verb table and
  * trust posture.
@@ -133,9 +139,13 @@ export const AgentStopRequestSchema = z.object({
   op: z.literal("agent_stop"),
   args: z.object({
     name: AgentNameSchema,
-    /** When true, skip the drain-mid-turn wait and SIGTERM immediately.
-     *  Mirrors `switchroom agent stop --force`. */
-    force: z.boolean().optional(),
+    // Note: `switchroom agent stop` does NOT currently accept a
+    // `--force` flag (src/cli/agent.ts has no such option). An earlier
+    // draft of this schema exposed it; PR #1208 review (B1) flagged
+    // that plumbing `--force` to the spawned CLI would cause commander
+    // to reject the unknown option and the verb to exit non-zero. If
+    // drain-skip semantics get added to the CLI later, reintroduce the
+    // field here in lockstep.
   }),
 });
 

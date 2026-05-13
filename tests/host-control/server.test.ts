@@ -466,7 +466,7 @@ describe("hostd server — Phase 2 per-agent verbs", () => {
     expect(resp.error).toMatch(/cross-agent requires admin/);
   });
 
-  it("agent_stop: cross-agent allowed for admin caller, force flag plumbed", async () => {
+  it("agent_stop: cross-agent allowed for admin caller", async () => {
     const sock = server
       .getBoundPaths()
       .find((p) => p.endsWith("/klanker/sock"))!; // klanker IS admin
@@ -476,12 +476,17 @@ describe("hostd server — Phase 2 per-agent verbs", () => {
         v: 1,
         op: "agent_stop",
         request_id: "ast-1",
-        args: { name: "bob", force: true },
+        args: { name: "bob" },
       },
     );
     expect(resp.result).toBe("completed");
-    // --force should appear in the spawned argv via the stub's echo.
-    expect(resp.stdout_tail).toContain("stub: agent stop bob --force");
+    expect(resp.stdout_tail).toContain("stub: agent stop bob");
+    // PR #1208 review (B1): an earlier draft plumbed `args.force →
+    // --force`, but `switchroom agent stop` doesn't accept that
+    // flag. Assert it isn't there — if a future change reintroduces
+    // it, this test catches it and the CLI side gets the flag
+    // added in lockstep.
+    expect(resp.stdout_tail).not.toContain("--force");
   });
 });
 

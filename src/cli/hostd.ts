@@ -89,9 +89,17 @@ services:
     volumes:
       # Bind-mounts the entire ~/.switchroom dir so the daemon can:
       #   - create ~/.switchroom/hostd/<agent>/sock per admin agent
-      #   - read ~/.switchroom/switchroom.yaml (via SWITCHROOM_CONFIG)
       #   - append to ~/.switchroom/host-control-audit.log
       - ${hostHome}/.switchroom:/host-home/.switchroom:rw
+      # ~/.switchroom/switchroom.yaml is a symlink on many operator
+      # setups (typically into a separate config repo so it's git-
+      # tracked). The previous bind mount preserves the symlink AS a
+      # symlink inside the container with a target path that doesn't
+      # resolve there. Mounting the file directly forces docker to
+      # follow the symlink at mount time and bind the underlying file
+      # to the container path. Mirrors how the agent containers expose
+      # the config (also at /state/config/switchroom.yaml).
+      - ${hostHome}/.switchroom/switchroom.yaml:/state/config/switchroom.yaml:ro
       # docker.sock is the whole reason hostd exists — agents shouldn't
       # have it, but hostd (auditing every shell-out via run-hook.sh's
       # pattern) is the controlled chokepoint.
@@ -103,9 +111,10 @@ services:
       # (~/.switchroom/hostd/<agent>/sock) match the paths hostd binds.
       HOME: /host-home
       # Hostd's CLI shellouts (\`switchroom <verb>\`) need to pick up the
-      # same config the agent fleet's compose generator did. The config
-      # file lives at the canonical path inside the bind-mounted home.
-      SWITCHROOM_CONFIG: /host-home/.switchroom/switchroom.yaml
+      # same config the agent fleet's compose generator did. Point at
+      # the resolved /state/config bind so the agent fleet's config-path
+      # convention is also what hostd reads.
+      SWITCHROOM_CONFIG: /state/config/switchroom.yaml
       # PATH must include /usr/local/bin (for the switchroom shim)
       # and docker plugin paths (apt installs to /usr/libexec/docker/cli-plugins).
       PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -155,87 +164,85 @@ interface InstallOptions {
 }
 
 async function doInstall(opts: InstallOptions, program: Command): Promise<void> {
-  await withConfigError(async () => {
-    const cfg = getConfig(program);
-    if (cfg.host_control?.enabled !== true) {
-      console.error(
-        chalk.yellow(
-          "host_control.enabled is not true in switchroom.yaml. The daemon will exit on startup until it is.\n" +
-            "Add to switchroom.yaml:\n\n" +
-            "    host_control:\n" +
-            "      enabled: true\n\n" +
-            "Continuing anyway — the install completes (image-pinned compose file written), but \`docker compose up\` will fail-fast.",
-        ),
-      );
-    }
-
-    const adminAgents = Object.entries(cfg.agents ?? {})
-      .filter(([, a]) => a?.admin === true)
-      .map(([name]) => name);
-    if (adminAgents.length === 0) {
-      console.error(
-        chalk.yellow(
-          "No admin-flagged agents in switchroom.yaml. The daemon binds one socket per admin agent — with none, it will exit on startup.\n" +
-            "Set \`admin: true\` on at least one agent (typically the test runner or a dedicated operator agent).",
-        ),
-      );
-    }
-
-    const dir = hostdDir();
-    const composePath = hostdComposePath();
-    mkdirSync(dir, { recursive: true });
-
-    const yaml = renderHostdComposeFile({
-      hostHome: homedir(),
-      imageTag: opts.tag ?? DEFAULT_IMAGE_TAG,
-    });
-
-    if (opts.dryRun) {
-      console.log(chalk.dim(`# Would write: ${composePath}`));
-      console.log(yaml);
-      console.log(chalk.dim(`# Would run: docker compose -p ${HOSTD_COMPOSE_PROJECT} -f ${composePath} up -d`));
-      return;
-    }
-
-    const bak = backupExistingCompose();
-    if (bak) console.log(chalk.dim(`  Backed up existing compose to ${bak}`));
-
-    writeFileSync(composePath, yaml, "utf8");
-    console.log(chalk.green(`  ✓ Wrote ${composePath}`));
-    console.log(
-      chalk.dim(
-        `    admin agents: ${adminAgents.length === 0 ? "(none)" : adminAgents.join(", ")}`,
+  const cfg = getConfig(program);
+  if (cfg.host_control?.enabled !== true) {
+    console.error(
+      chalk.yellow(
+        "host_control.enabled is not true in switchroom.yaml. The daemon will exit on startup until it is.\n" +
+          "Add to switchroom.yaml:\n\n" +
+          "    host_control:\n" +
+          "      enabled: true\n\n" +
+          "Continuing anyway — the install completes (image-pinned compose file written), but \`docker compose up\` will fail-fast.",
       ),
     );
+  }
 
-    // Pull, then up. We pull explicitly so a pull failure (network
-    // glitch, GHCR throttle) surfaces before the up step rather than
-    // mid-restart-cycle. `docker compose pull` is idempotent and
-    // skips images already at the requested digest.
-    console.log(chalk.dim(`    Pulling ghcr.io/switchroom/switchroom-hostd:${opts.tag ?? DEFAULT_IMAGE_TAG}…`));
-    const pull = runDocker(["compose", "-p", HOSTD_COMPOSE_PROJECT, "-f", composePath, "pull"]);
-    if (!pull.ok) {
-      console.error(chalk.red(`  pull failed:\n${pull.stderr}`));
-      console.error(
-        chalk.yellow(
-          `  Hint: \`ghcr.io/switchroom/switchroom-hostd:${opts.tag ?? DEFAULT_IMAGE_TAG}\` may not be published yet.\n` +
-            `  Check the docker-images workflow run for #TBD and verify the tag at:\n` +
-            `      https://github.com/switchroom/switchroom/pkgs/container/switchroom-hostd`,
-        ),
-      );
-      process.exit(1);
-    }
+  const adminAgents = Object.entries(cfg.agents ?? {})
+    .filter(([, a]) => a?.admin === true)
+    .map(([name]) => name);
+  if (adminAgents.length === 0) {
+    console.error(
+      chalk.yellow(
+        "No admin-flagged agents in switchroom.yaml. The daemon binds one socket per admin agent — with none, it will exit on startup.\n" +
+          "Set \`admin: true\` on at least one agent (typically the test runner or a dedicated operator agent).",
+      ),
+    );
+  }
 
-    console.log(chalk.dim(`    Bringing up daemon…`));
-    const up = runDocker(["compose", "-p", HOSTD_COMPOSE_PROJECT, "-f", composePath, "up", "-d"]);
-    if (!up.ok) {
-      console.error(chalk.red(`  up failed:\n${up.stderr}`));
-      process.exit(1);
-    }
-    console.log(chalk.green(`  ✓ Daemon running (project: ${HOSTD_COMPOSE_PROJECT})`));
-    console.log(chalk.dim(`    Logs: docker logs switchroom-hostd --tail 50`));
-    console.log(chalk.dim(`    Verify: switchroom hostd status`));
+  const dir = hostdDir();
+  const composePath = hostdComposePath();
+  mkdirSync(dir, { recursive: true });
+
+  const yaml = renderHostdComposeFile({
+    hostHome: homedir(),
+    imageTag: opts.tag ?? DEFAULT_IMAGE_TAG,
   });
+
+  if (opts.dryRun) {
+    console.log(chalk.dim(`# Would write: ${composePath}`));
+    console.log(yaml);
+    console.log(chalk.dim(`# Would run: docker compose -p ${HOSTD_COMPOSE_PROJECT} -f ${composePath} up -d`));
+    return;
+  }
+
+  const bak = backupExistingCompose();
+  if (bak) console.log(chalk.dim(`  Backed up existing compose to ${bak}`));
+
+  writeFileSync(composePath, yaml, "utf8");
+  console.log(chalk.green(`  ✓ Wrote ${composePath}`));
+  console.log(
+    chalk.dim(
+      `    admin agents: ${adminAgents.length === 0 ? "(none)" : adminAgents.join(", ")}`,
+    ),
+  );
+
+  // Pull, then up. We pull explicitly so a pull failure (network
+  // glitch, GHCR throttle) surfaces before the up step rather than
+  // mid-restart-cycle. `docker compose pull` is idempotent and
+  // skips images already at the requested digest.
+  console.log(chalk.dim(`    Pulling ghcr.io/switchroom/switchroom-hostd:${opts.tag ?? DEFAULT_IMAGE_TAG}…`));
+  const pull = runDocker(["compose", "-p", HOSTD_COMPOSE_PROJECT, "-f", composePath, "pull"]);
+  if (!pull.ok) {
+    console.error(chalk.red(`  pull failed:\n${pull.stderr}`));
+    console.error(
+      chalk.yellow(
+        `  Hint: \`ghcr.io/switchroom/switchroom-hostd:${opts.tag ?? DEFAULT_IMAGE_TAG}\` may not be published yet.\n` +
+          `  Check the docker-images workflow run and verify the tag at:\n` +
+          `      https://github.com/switchroom/switchroom/pkgs/container/switchroom-hostd`,
+      ),
+    );
+    process.exit(1);
+  }
+
+  console.log(chalk.dim(`    Bringing up daemon…`));
+  const up = runDocker(["compose", "-p", HOSTD_COMPOSE_PROJECT, "-f", composePath, "up", "-d"]);
+  if (!up.ok) {
+    console.error(chalk.red(`  up failed:\n${up.stderr}`));
+    process.exit(1);
+  }
+  console.log(chalk.green(`  ✓ Daemon running (project: ${HOSTD_COMPOSE_PROJECT})`));
+  console.log(chalk.dim(`    Logs: docker logs switchroom-hostd --tail 50`));
+  console.log(chalk.dim(`    Verify: switchroom hostd status`));
 }
 
 function doStatus(): void {
@@ -332,11 +339,20 @@ export function registerHostdCommand(program: Command): void {
     .description("Install or refresh the hostd container (writes ~/.switchroom/hostd/docker-compose.yml + docker compose up -d)")
     .option("--tag <tag>", "Image tag (default: latest)", DEFAULT_IMAGE_TAG)
     .option("--dry-run", "Print the compose file and the docker commands without writing or running anything")
-    .action(async (opts: InstallOptions) => {
-      // Threading `program` through preserves -c/--config global flag handling
-      // — getConfig() reads optsWithGlobals().config when set.
-      await doInstall(opts, program);
-    });
+    // withConfigError is a higher-order wrapper (helpers.ts:9) — it
+    // accepts a handler and RETURNS a function that catches ConfigError
+    // and exits cleanly. The returned function is what gets registered
+    // as the action handler. The initial commit of this verb mistakenly
+    // did `await withConfigError(async () => {...})` inside doInstall —
+    // that awaits the returned wrapper (which is itself a function,
+    // not a Promise), so the body NEVER ran and `switchroom hostd
+    // install` produced zero output / exit 0. Fix: apply
+    // withConfigError at the .action() boundary like every other verb.
+    .action(
+      withConfigError(async (opts: InstallOptions) => {
+        await doInstall(opts, program);
+      }),
+    );
 
   hostd
     .command("status")

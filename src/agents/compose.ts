@@ -311,14 +311,15 @@ export function describeAgents(config: SwitchroomConfig): AgentServiceData[] {
 
 /**
  * System paths refused as bind_mount sources, regardless of mode.
- * Prefix-matched: an entry `/etc` rejects `/etc/foo` too.
+ * Prefix-matched against the *normalized* source path: an entry `/etc`
+ * rejects `/etc/foo`, `//etc`, `/etc/.`, etc.
  *
  * Mounting any of these inside an agent container is either pointless
  * (the container has its own /proc, /sys, /dev) or a privilege-escalation
  * vector (host `/etc` exposes shadow/passwd; `/var/lib/docker` and the
  * docker socket give root-equivalent host control).
  */
-const BIND_MOUNT_DENYLIST = [
+const BIND_MOUNT_SOURCE_DENYLIST = [
   "/",
   "/etc",
   "/proc",
@@ -330,8 +331,66 @@ const BIND_MOUNT_DENYLIST = [
   "/var/lib/docker",
 ];
 
-/** Exact source paths refused regardless of denylist prefix-matching. */
-const BIND_MOUNT_EXACT_DENY = new Set(["/var/run/docker.sock"]);
+/**
+ * Container paths refused as bind_mount targets.
+ *
+ * Two classes:
+ *   (1) switchroom-owned container locations — overlaying these breaks
+ *       the agent runtime (`/state/*` is the agent's state mount, `/opt/switchroom`
+ *       is the bundled CLI, `/run/switchroom/*` is the broker/kernel/hostd
+ *       socket mounts, `/var/log/switchroom` is the log mount).
+ *   (2) OS-shadow vectors — shadowing `/etc`, `/bin`, etc. inside the
+ *       container would let an admin agent surprise itself or future
+ *       agents that extend the same profile. Admin-only blast radius,
+ *       but cheap to refuse.
+ */
+const BIND_MOUNT_TARGET_DENYLIST = [
+  // switchroom-owned (must not be overridable from yaml)
+  "/state",
+  "/run/switchroom",
+  "/var/log/switchroom",
+  "/opt/switchroom",
+  // OS-shadow vectors
+  "/",
+  "/etc",
+  "/proc",
+  "/sys",
+  "/dev",
+  "/boot",
+  "/bin",
+  "/sbin",
+  "/usr/bin",
+  "/usr/sbin",
+  "/lib",
+  "/lib64",
+  "/usr/lib",
+];
+
+/** Exact source paths refused regardless of prefix-matching. */
+const BIND_MOUNT_EXACT_SOURCE_DENY = new Set(["/var/run/docker.sock"]);
+
+/**
+ * Normalize an absolute POSIX-style path for denylist comparison.
+ *   - Collapses runs of `/` to a single `/` (so `//etc` → `/etc`).
+ *   - Collapses `.` segments (so `/etc/.` → `/etc`, `/./etc` → `/etc`).
+ *   - Strips a trailing `/` (so `/etc/` → `/etc`), unless the input is
+ *     the literal `/`.
+ *
+ * Caller must reject `..` segments BEFORE calling this; we intentionally
+ * do not resolve `..` (resolving would mask the original intent — an
+ * input that pre-resolution contains `/..` should error, not silently
+ * normalize). Pure — no IO. Does NOT follow symlinks; that's a
+ * documented limitation (see docs/configuration.md § bind_mounts).
+ */
+export function normalizeBindMountPath(p: string): string {
+  // Collapse repeated slashes.
+  let out = p.replace(/\/+/g, "/");
+  // Strip "/." segments. Iteration handles `/./.` cases.
+  out = out.replace(/(\/)\.(?=\/|$)/g, "$1").replace(/\/+/g, "/");
+  // Strip trailing slash unless the whole path is the root.
+  if (out.length > 1 && out.endsWith("/")) out = out.slice(0, -1);
+  return out;
+}
 
 /**
  * Validate one entry from an agent's `bind_mounts:` list. Returns the
@@ -340,52 +399,90 @@ const BIND_MOUNT_EXACT_DENY = new Set(["/var/run/docker.sock"]);
  *
  * Callers MUST also check the owning agent's `admin === true` before
  * calling this; the admin gate is upstream (in emitAgentService).
+ *
+ * Note on symlinks: this validator is textual. If `source` points at
+ * a host path that is itself a symlink to a denylisted directory
+ * (e.g. `/home/me/proj → /etc`), the textual denylist will pass but
+ * Docker will resolve the symlink at mount time and the agent ends up
+ * with /etc anyway. Admin-trusted: the operator who set `admin: true`
+ * is the same principal who controls host filesystem layout. See the
+ * docs caveat at `docs/configuration.md` § bind_mounts.
  */
 export function resolveBindMount(
   agentName: string,
   entry: AgentBindMount,
 ): { source: string; target: string; mode: "ro" | "rw" } {
-  const source = entry.source;
-  if (typeof source !== "string" || source.length === 0) {
+  const rawSource = entry.source;
+  if (typeof rawSource !== "string" || rawSource.length === 0) {
     throw new Error(
       `compose: agent "${agentName}" bind_mount has empty source`,
     );
   }
-  if (!source.startsWith("/")) {
+  if (!rawSource.startsWith("/")) {
     throw new Error(
-      `compose: agent "${agentName}" bind_mount source "${source}" must be an absolute path ` +
+      `compose: agent "${agentName}" bind_mount source "${rawSource}" must be an absolute path ` +
       `(tilde-expansion is not performed; pass the literal absolute path)`,
     );
   }
-  if (source.includes("/../") || source.endsWith("/..") || source === "/..") {
+  // `..` rejected before normalization — see normalizeBindMountPath
+  // docstring for the rationale (we don't want to silently resolve
+  // `/etc/../foo` to `/foo`; the caller's intent was ambiguous).
+  if (
+    rawSource.includes("/../") ||
+    rawSource.endsWith("/..") ||
+    rawSource === "/.."
+  ) {
     throw new Error(
-      `compose: agent "${agentName}" bind_mount source "${source}" contains '..' — refuse ambiguous paths`,
+      `compose: agent "${agentName}" bind_mount source "${rawSource}" contains '..' — refuse ambiguous paths`,
     );
   }
-  if (BIND_MOUNT_EXACT_DENY.has(source)) {
+  const source = normalizeBindMountPath(rawSource);
+  if (BIND_MOUNT_EXACT_SOURCE_DENY.has(source)) {
     throw new Error(
-      `compose: agent "${agentName}" bind_mount source "${source}" is denylisted ` +
+      `compose: agent "${agentName}" bind_mount source "${rawSource}" is denylisted ` +
       `(host docker socket — would grant root-equivalent control of the host)`,
     );
   }
-  for (const deny of BIND_MOUNT_DENYLIST) {
+  for (const deny of BIND_MOUNT_SOURCE_DENYLIST) {
     if (source === deny || source.startsWith(deny === "/" ? "/" : deny + "/")) {
-      // "/" matches everything, so handle it separately: only refuse the
-      // literal "/" as source. A path like "/home/x" passes — it merely
-      // *starts* with "/" but the denylist intent is "the root itself".
+      // The "/" entry would otherwise match every absolute path; only
+      // refuse the literal "/" as source. A path like "/home/x" passes —
+      // it merely *starts* with "/" but the denylist intent is "the
+      // root itself".
       if (deny === "/" && source !== "/") continue;
       throw new Error(
-        `compose: agent "${agentName}" bind_mount source "${source}" is under denylisted system path "${deny}"`,
+        `compose: agent "${agentName}" bind_mount source "${rawSource}" is under denylisted system path "${deny}"`,
       );
     }
   }
-  const target = entry.target ?? source;
-  if (!target.startsWith("/")) {
+  const rawTarget = entry.target ?? rawSource;
+  if (!rawTarget.startsWith("/")) {
     throw new Error(
-      `compose: agent "${agentName}" bind_mount target "${target}" must be an absolute path`,
+      `compose: agent "${agentName}" bind_mount target "${rawTarget}" must be an absolute path`,
     );
   }
+  if (
+    rawTarget.includes("/../") ||
+    rawTarget.endsWith("/..") ||
+    rawTarget === "/.."
+  ) {
+    throw new Error(
+      `compose: agent "${agentName}" bind_mount target "${rawTarget}" contains '..' — refuse ambiguous paths`,
+    );
+  }
+  const target = normalizeBindMountPath(rawTarget);
+  for (const deny of BIND_MOUNT_TARGET_DENYLIST) {
+    if (target === deny || target.startsWith(deny === "/" ? "/" : deny + "/")) {
+      if (deny === "/" && target !== "/") continue;
+      throw new Error(
+        `compose: agent "${agentName}" bind_mount target "${rawTarget}" is under denylisted container path "${deny}" ` +
+        `(switchroom-owned mount or OS-shadow vector — pick a different target)`,
+      );
+    }
+  }
   const mode = entry.mode ?? "ro";
+  // Emit the *normalized* paths so the generated compose is byte-stable
+  // across textually-equivalent inputs (e.g. `//foo` and `/foo`).
   return { source, target, mode };
 }
 

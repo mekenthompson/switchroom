@@ -402,59 +402,99 @@ project dir, logs, read-only skills + credentials). That is the right
 default for the typical fleet — sandboxed agents stay isolated from
 the host's source trees and operator state.
 
-For the **dogfood / self-modification** case — an admin agent asked to
-fix a switchroom bug or edit a bundled skill — that isolation is the
-blocker. The agent can read `/opt/switchroom/switchroom.js` (the
-compiled bundle baked into the image) but not the TypeScript source
-on the host. `bind_mounts:` is the per-agent escape hatch.
+### Which primitive solves which problem
+
+`bind_mounts:` is the catch-all *extra host paths* escape hatch.
+Before reaching for it, check whether one of the more focused
+primitives is the right tool:
+
+- **"Agent should edit a git repo (incl. switchroom itself)."** Use
+  `repos:` (see `src/config/schema.ts` `AgentRepoEntry`). Switchroom
+  provisions a dedicated worktree at `<agentDir>/work/<slug>/` from
+  a shared bare clone — the agent edits *inside its own sandbox*,
+  not on a mounted host checkout. `bind_mounts:` is not needed and
+  doesn't help: the worktree pattern lets the agent commit + push +
+  open a PR using its own git identity without touching host state.
+- **"Admin agent should deploy a merged change (`switchroom apply`,
+  `agent restart`, `update apply`)."** That's the host-control
+  daemon's job — see `docs/rfcs/host-control-daemon.md`. `bind_mounts:`
+  does not give an agent host-side control; even with the source
+  tree mounted, the agent can't run docker commands or `sudo` on
+  the host. The daemon is the right surface.
+- **"Operator + agent need to share a host directory that isn't a
+  git repo and isn't operator config."** *That's* what `bind_mounts:`
+  is for. Examples: a shared `~/shared/notes` dir two agents
+  collaborate in; a read-only NAS path; a small operator file the
+  agent maintains.
+
+If none of the above fit and you still want filesystem reach for a
+non-admin agent, the right answer is to run a separate Claude
+session from outside switchroom (a host shell), not to relax the
+admin gate.
+
+### Shape
 
 ```yaml
 agents:
-  klanker:
+  collab-bot:
     admin: true                      # required — see "Admin gating" below
     bind_mounts:
-      - source: /home/me/code/switchroom
-        mode: rw                     # read-write, for `bun build` + commits
-      - source: /home/me/code/some-other-repo
-        mode: ro                     # read-only is the default
+      - source: /home/me/shared/notes
+        target: /home/agent/notes    # optional; defaults to `source`
+        mode: rw                     # default is `ro`
     add_dirs:
-      - /home/me/code/switchroom     # also extend claude's tool-reach allowlist
-      - /home/me/code/some-other-repo
+      - /home/me/shared/notes        # also extend claude's tool-reach
 ```
 
 Each entry takes:
 
-- **`source:`** (required) — absolute host path. Tilde-expansion is **not**
-  performed; pass the literal path. Refused if the path is under a
-  system-path denylist (`/`, `/etc`, `/proc`, `/sys`, `/dev`, `/run`,
-  `/var/run`, `/boot`, `/var/lib/docker`) or equals `/var/run/docker.sock`.
+- **`source:`** (required) — absolute host path. Tilde-expansion is
+  **not** performed; pass the literal path. Refused if the path is
+  under a system-path denylist (`/`, `/etc`, `/proc`, `/sys`, `/dev`,
+  `/run`, `/var/run`, `/boot`, `/var/lib/docker`) or equals
+  `/var/run/docker.sock`. Repeated `/`, `.` segments, and trailing
+  `/` are normalized before the denylist check, so `//etc`,
+  `/etc/.`, and `/etc/` are all refused as expected.
 - **`target:`** (optional) — container path the mount appears at.
-  Defaults to the same path as `source`, matching switchroom's existing
-  dual-mount convention so absolute paths in scaffolded scripts and tool
-  invocations Just Work.
+  Defaults to the same path as `source`, matching switchroom's
+  existing dual-mount convention so absolute paths in scaffolded
+  scripts and tool invocations Just Work. Refused if it shadows a
+  switchroom-owned container path (`/state`, `/run/switchroom`,
+  `/opt/switchroom`, `/var/log/switchroom`) or an OS path inside
+  the container (`/etc`, `/bin`, `/sbin`, `/usr/{bin,sbin,lib}`,
+  `/lib`, `/lib64`, `/proc`, `/sys`, `/dev`, `/boot`).
 - **`mode:`** (optional, default `ro`) — `ro` or `rw`.
+
+> **Note (symlinks):** the source-path denylist is *textual*. If
+> `source` points at a host path that is itself a symlink to a
+> denylisted directory (e.g. `/home/me/proj` → `/etc`), Docker
+> resolves the symlink at mount time and the agent ends up with
+> `/etc` regardless. Admin-trusted: the operator who set `admin:
+> true` is the same principal who controls host filesystem layout,
+> so the textual check is the right tradeoff against doing
+> `fs.realpathSync` in the compose generator (which would couple
+> compose generation to filesystem state). If you want defense
+> here, declare absolute paths only and avoid symlinking your
+> mount sources.
 
 ### Admin gating
 
-`bind_mounts:` requires `admin: true` on the same agent. `switchroom apply`
-hard-fails if a non-admin agent declares it — silently dropping the
-entries would mask an intended privilege grant. The two are coupled
-deliberately: the same operator who already trusts an agent with vault
-grant-management (`/grant`) and fleet-admin slash commands (`/agents`,
-`/logs`, `/update`) is the right principal for source-tree access.
-
-If you want filesystem reach without admin powers, the right answer is
-to invoke a separate Claude session from outside switchroom (a host
-shell session) — not to relax the gate.
+`bind_mounts:` requires `admin: true` on the same agent. `switchroom
+apply` hard-fails if a non-admin agent declares it — silently
+dropping the entries would mask an intended privilege grant. The two
+are coupled deliberately: the same operator who already trusts an
+agent with vault grant-management (`/grant`) and fleet-admin slash
+commands (`/agents`, `/logs`, `/update`) is the right principal for
+extra-bind-mount access.
 
 ### Pair with `add_dirs:`
 
 `bind_mounts:` makes the path **exist** inside the container.
 `add_dirs:` makes the claude CLI's tool-allowlist **include** it.
-You typically want both. Without `add_dirs:`, claude's Read/Edit tools
-will reject the path as outside the working set even though the file is
-there. Without `bind_mounts:`, the path doesn't exist in the sandbox and
-`add_dirs:` is a no-op.
+You typically want both. Without `add_dirs:`, claude's Read/Edit
+tools will reject the path as outside the working set even though
+the file is there. Without `bind_mounts:`, the path doesn't exist in
+the sandbox and `add_dirs:` is a no-op.
 
 ## Minimal Example
 

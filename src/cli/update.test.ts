@@ -26,15 +26,16 @@ function fakeRunner() {
 }
 
 describe("planUpdate", () => {
-  it("produces 6 steps in default mode (no --rebuild)", () => {
+  it("produces 7 steps in default mode (no --rebuild)", () => {
     const tmp = mkdtempSync(join(tmpdir(), "update-plan-"));
     try {
       const composePath = join(tmp, "docker-compose.yml");
       writeFileSync(composePath, "services: {}\n");
-      const steps = planUpdate({ composePath });
+      const steps = planUpdate({ composePath, hostControlEnabled: false });
       expect(steps.map((s) => s.name)).toEqual([
         "pull-images",
         "apply-config",
+        "refresh-hostd",
         "sync-bundled-skills",
         "stamp-restart-marker",
         "recreate-containers",
@@ -50,11 +51,12 @@ describe("planUpdate", () => {
     try {
       const composePath = join(tmp, "docker-compose.yml");
       writeFileSync(composePath, "services: {}\n");
-      const steps = planUpdate({ composePath, rebuild: true });
+      const steps = planUpdate({ composePath, rebuild: true, hostControlEnabled: false });
       expect(steps.map((s) => s.name)).toEqual([
         "pull-images",
         "rebuild-source",
         "apply-config",
+        "refresh-hostd",
         "sync-bundled-skills",
         "stamp-restart-marker",
         "recreate-containers",
@@ -63,6 +65,73 @@ describe("planUpdate", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  // refresh-hostd: PR ε — closes the gap that hostd lives in a separate
+  // compose project and was previously not refreshed by `update`.
+  describe("refresh-hostd step", () => {
+    function planFor(opts: Parameters<typeof planUpdate>[0]) {
+      const tmp = mkdtempSync(join(tmpdir(), "update-hostd-"));
+      const composePath = join(tmp, "docker-compose.yml");
+      writeFileSync(composePath, "services: {}\n");
+      const steps = planUpdate({ composePath, ...opts });
+      const refresh = steps.find((s) => s.name === "refresh-hostd")!;
+      rmSync(tmp, { recursive: true, force: true });
+      return { steps, refresh };
+    }
+
+    it("is placed AFTER apply-config and BEFORE sync-bundled-skills", () => {
+      const { steps } = planFor({ hostControlEnabled: true });
+      const idxApply = steps.findIndex((s) => s.name === "apply-config");
+      const idxRefresh = steps.findIndex((s) => s.name === "refresh-hostd");
+      const idxSync = steps.findIndex((s) => s.name === "sync-bundled-skills");
+      const idxRecreate = steps.findIndex((s) => s.name === "recreate-containers");
+      expect(idxApply).toBeLessThan(idxRefresh);
+      expect(idxRefresh).toBeLessThan(idxSync);
+      expect(idxRefresh).toBeLessThan(idxRecreate);
+    });
+
+    it("runs (no skipReason) when host_control.enabled is true and --skip-images is not set", () => {
+      const { refresh } = planFor({ hostControlEnabled: true });
+      expect(refresh.skipReason).toBeUndefined();
+    });
+
+    it("skips with a clear reason when host_control is disabled", () => {
+      const { refresh } = planFor({ hostControlEnabled: false });
+      expect(refresh.skipReason).toMatch(/host_control\.enabled is not true/);
+    });
+
+    it("skips when --skip-images is set even with host_control enabled", () => {
+      const { refresh } = planFor({
+        hostControlEnabled: true,
+        skipImages: true,
+      });
+      expect(refresh.skipReason).toMatch(/--skip-images/);
+    });
+
+    it("invokes `switchroom hostd install` via re-exec when run()", () => {
+      const runner = fakeRunner();
+      const { refresh } = planFor({
+        hostControlEnabled: true,
+        runner: runner.fn,
+      });
+      refresh.run();
+      expect(runner.calls).toHaveLength(1);
+      const call = runner.calls[0]!;
+      // First positional arg after process.execPath is the CLI script
+      // path (process.argv[1]). The next two are the verb + subverb.
+      expect(call.args.slice(-2)).toEqual(["hostd", "install"]);
+    });
+
+    it("throws if hostd install exits non-zero", () => {
+      const runner = fakeRunner();
+      runner.setNextStatus(1);
+      const { refresh } = planFor({
+        hostControlEnabled: true,
+        runner: runner.fn,
+      });
+      expect(() => refresh.run()).toThrow(/switchroom hostd install failed/);
+    });
   });
 
   it("stamp-restart-marker runs before recreate-containers and writes a marker per agent", () => {
@@ -383,6 +452,12 @@ describe("runUpdate", () => {
         agentNamesFn: () => ["a", "b"],
         // No-op the sync-bundled-skills filesystem effect under tests.
         syncBundledSkillsFn: () => { /* intentional no-op */ },
+        // Pin host_control as disabled so refresh-hostd is skipped —
+        // separate test below covers the enabled case. Without this
+        // override, this test would pick up the host's real
+        // switchroom.yaml and the call count would depend on whether
+        // the developer running tests has hostd enabled.
+        hostControlEnabled: false,
       });
       expect(code).toBe(0);
       // 6 calls total:
@@ -414,6 +489,39 @@ describe("runUpdate", () => {
       // [5] <execPath> doctor
       expect(runner.calls[5]?.cmd).toBe(process.execPath);
       expect(runner.calls[5]?.args).toContain("doctor");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("invokes `switchroom hostd install` between apply and stamp-marker when host_control is enabled (PR ε)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "update-hostd-on-"));
+    try {
+      const composePath = join(tmp, "docker-compose.yml");
+      writeFileSync(composePath, "services: {}\n");
+      const out: string[] = [];
+      const runner = fakeRunner();
+      const code = await runUpdate({
+        composePath,
+        stdout: (s) => out.push(s),
+        stderr: (s) => out.push(s),
+        runner: runner.fn,
+        agentNamesFn: () => ["a"],
+        syncBundledSkillsFn: () => { /* intentional no-op */ },
+        hostControlEnabled: true,
+      });
+      expect(code).toBe(0);
+      // 6 calls total:
+      //   [0] docker compose pull
+      //   [1] <execPath> apply --non-interactive --no-doctor
+      //   [2] <execPath> hostd install                 ← NEW (PR ε)
+      //   [3] docker exec switchroom-a sh -c '…'  (stamp marker)
+      //   [4] docker compose up -d --remove-orphans
+      //   [5] <execPath> doctor
+      expect(runner.calls).toHaveLength(6);
+      // hostd install lands at position 2 (right after apply).
+      expect(runner.calls[2]?.cmd).toBe(process.execPath);
+      expect(runner.calls[2]?.args.slice(-2)).toEqual(["hostd", "install"]);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

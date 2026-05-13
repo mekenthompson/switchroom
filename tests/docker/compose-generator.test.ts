@@ -169,33 +169,44 @@ describe("generateCompose", () => {
     expect(m).toBeLessThan(z);
   });
 
-  it("klanker gets 6g mem_limit + 2.0 cpus", () => {
+  it("klanker gets 6g/4g reservation, 2000 PIDs, 2.0 cpus", () => {
     const out = generateCompose({ config: makeConfig({ klanker: {} }) });
     expect(out).toMatch(/agent-klanker:[\s\S]*?mem_limit: 6g/);
+    expect(out).toMatch(/agent-klanker:[\s\S]*?mem_reservation: 4g/);
+    expect(out).toMatch(/agent-klanker:[\s\S]*?pids_limit: 2000/);
     expect(out).toMatch(/agent-klanker:[\s\S]*?cpus: 2\.0/);
   });
 
-  it("conversational profile → 1.5g / 1.0", () => {
+  it("conversational profile → 1.5g/256m, 500 PIDs, 1.0", () => {
     const out = generateCompose({ config: makeConfig({ coach: { extends: "conversational" } }) });
     expect(out).toMatch(/agent-coach:[\s\S]*?mem_limit: 1\.5g/);
+    expect(out).toMatch(/agent-coach:[\s\S]*?mem_reservation: 256m/);
+    expect(out).toMatch(/agent-coach:[\s\S]*?pids_limit: 500/);
     expect(out).toMatch(/agent-coach:[\s\S]*?cpus: 1\.0/);
   });
 
-  it("lightweight profile → 1g / 0.5", () => {
+  it("lightweight profile → 1g/128m, 500 PIDs, 0.5", () => {
     const out = generateCompose({ config: makeConfig({ ziggy: { extends: "lightweight" } }) });
     expect(out).toMatch(/agent-ziggy:[\s\S]*?mem_limit: 1g/);
+    expect(out).toMatch(/agent-ziggy:[\s\S]*?mem_reservation: 128m/);
+    expect(out).toMatch(/agent-ziggy:[\s\S]*?pids_limit: 500/);
     expect(out).toMatch(/agent-ziggy:[\s\S]*?cpus: 0\.5/);
   });
 
-  it("coding profile → 2g / 2.0", () => {
+  it("coding profile → 2g/512m, 1000 PIDs, 2.0", () => {
     const out = generateCompose({ config: makeConfig({ worker: { extends: "coding" } }) });
     expect(out).toMatch(/agent-worker:[\s\S]*?mem_limit: 2g/);
+    expect(out).toMatch(/agent-worker:[\s\S]*?mem_reservation: 512m/);
+    expect(out).toMatch(/agent-worker:[\s\S]*?pids_limit: 1000/);
     expect(out).toMatch(/agent-worker:[\s\S]*?cpus: 2\.0/);
   });
 
-  it("unknown profile → default 1.5g / 1.0", () => {
+  it("unknown profile → default 1.5g/256m, 500 PIDs, 1.0", () => {
     const out = generateCompose({ config: makeConfig({ misc: { extends: "made-up" } }) });
     expect(out).toMatch(/agent-misc:[\s\S]*?mem_limit: 1\.5g/);
+    expect(out).toMatch(/agent-misc:[\s\S]*?mem_reservation: 256m/);
+    expect(out).toMatch(/agent-misc:[\s\S]*?pids_limit: 500/);
+    expect(out).toMatch(/agent-misc:[\s\S]*?cpus: 1\.0/);
   });
 
   it("agent.resources.memory overrides the profile default", () => {
@@ -226,12 +237,16 @@ describe("generateCompose", () => {
     expect(out).toMatch(/agent-klanker:[\s\S]*?pids_limit: 2000/);
   });
 
-  it("mem_reservation and pids_limit are absent when unset (backward-compat)", () => {
-    const out = generateCompose({ config: makeConfig({ coach: { extends: "conversational" } }) });
-    const block = /agent-coach:[\s\S]*?(?=\n  agent-|\nvolumes:|$)/.exec(out)?.[0] ?? "";
-    expect(block).not.toContain("mem_reservation");
-    expect(block).not.toContain("pids_limit");
-  });
+  // NOTE: the pre-PR β "absent when unset" test was removed because every
+  // entry in RESOURCE_BY_PROFILE now ships with memReservation and
+  // pidsLimit defaults. The emission code in compose.ts is still
+  // conditional (`if (memReservation !== undefined)`) so a future
+  // profile entry that omits the fields would still emit minimal
+  // output — but constructing a config that exercises that path would
+  // require mocking the resource table, which is testing implementation
+  // not behavior. The conditional emission is implicitly covered by
+  // the agent-override tests (which set only one of the new fields and
+  // assert the other ISN'T emitted in some shape).
 
   it("defaults.resources cascades down to per-agent (per-field merge with agent winning)", () => {
     // defaults.resources sets pids_limit; agent.resources sets memory.

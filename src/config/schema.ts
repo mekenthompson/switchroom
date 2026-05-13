@@ -1665,11 +1665,13 @@ export const HostControlConfigSchema = z.object({
       "(`switchroom-hostd`), separate from the agent fleet's compose " +
       "project so `up -d --remove-orphans` cycles of the fleet " +
       "can't recreate the daemon mid-RPC. See RFC C §5.1. " +
-      "Gateway integration (swap of spawnSwitchroomDetached callsites) " +
-      "lands in a Phase 2 follow-up; setting enabled: true today ships " +
-      "the daemon and lets admin agents call hostd verbs directly, but " +
-      "the gateway's existing slash-command paths still use " +
-      "spawnSwitchroomDetached.",
+      "Since Phase 2 (#1175 PR γ) the gateway's /restart, /new, /reset, " +
+      "and /update apply slash-commands automatically dispatch through " +
+      "hostd when enabled — replacing the in-container " +
+      "`spawnSwitchroomDetached` shellout that requires docker access. " +
+      "Set enabled: true on docker-mode installs to make those verbs work " +
+      "(they otherwise fail because the agent container has no docker " +
+      "binary/socket).",
     ),
 });
 

@@ -6,9 +6,18 @@ The harness lives in `tests/skill-coverage/`. The audit + inventory in this dire
 
 ## Prereqs
 
-1. A switchroom agent container is **running** and you have host-side read access to its bind mounts:
-   - gateway socket at `~/.switchroom/agents/<name>/telegram/gateway.sock`
-   - session JSONL dir at `~/.claude/projects/<name>/` (host-side mirror of `/state/.claude/` inside the agent)
+1. A switchroom agent container is **running** and you have **agent-uid read access** to its state dir.
+
+   The agent's session JSONL lives at `~/.switchroom/agents/<name>/.claude/projects/<sanitized-cwd>/<sessionId>.jsonl`. The dir is owned by the per-agent UID (10001–10999) at mode 0775 with no group expansion — your interactive shell user (typically `kenthompson`) **cannot read it**.
+
+   Three workable invocation modes:
+
+   - **Mode A — run inside the agent.** `switchroom agent attach <name>` → from the agent's tmux session run `bun tests/skill-coverage/cli.ts <name> --go --agent-cwd=$PWD`. Highest fidelity; you ARE the agent so perms are satisfied.
+   - **Mode B — sudo from host as the agent UID.** `sudo -u "#$(stat -c %u ~/.switchroom/agents/<name>)" bun tests/skill-coverage/cli.ts <name> --go --agent-cwd=...`. Works from a host worktree if your `sudo` accepts the `#UID` lookup form. Note: `sudo-rs` (the Rust port shipped on some recent Ubuntu) rejects `#UID` with `user '#NNNN' not found`; use the C `sudo` at `/usr/bin/sudo.ws` (if installed), `su -s /bin/bash -c '...'` against a named agent user, or fall back to Mode A.
+   - **Mode C — bind-mount the projects dir host-readable** (compose change, follow-up RFC). Out of scope for this runbook; tracked as a known follow-up.
+
+   The gateway socket at `~/.switchroom/agents/<name>/telegram/gateway.sock` is also agent-uid owned but is reachable from any process that can `connect()` — only the JSONL read needs the perms dance.
+
 2. The harness corpus is current — regenerate after any edit to `fixtures/skills.json`:
    ```bash
    bun tests/skill-coverage/corpus/generate-corpus.ts --seed=1
@@ -82,3 +91,4 @@ Cap at 3 iterations per skill, then escalate.
 2. **LLM-driven paraphrase pass.** The current corpus is rule-based templates + curated YAML seeds. The trigger-poor cohort (`humanizer-calibrate`, `webapp-testing`, `mcp-builder`) needs LLM-generated paraphrases to fairly probe their NL surface — same `ProbeRecord` interface, different generator backend.
 3. **Per-skill cost budget.** No throttling today; the runner is sequential but unbounded. For a paid-quota live run, add a `--max-probes=N` cap and prioritize skills below threshold from the previous run.
 4. **Domain-gap skills.** Audit §4 named 6 gaps (vault unlock, broker socket recovery, `/restart` troubleshooting, agent-scheduler debugging, progress-card editing, hostd ops). These need authoring before they appear in a scorecard.
+5. **Host-readable session JSONL (Mode C).** Until the per-agent state dir gets a more permissive bind (or a sidecar relays session events to a host-visible NDJSON), the harness can't be run by an unprivileged host user without sudo. Cleanest fix is probably a small sidecar that fanouts `SessionEvent`s to `/var/log/switchroom/<name>/sessions.jsonl` (already host-mounted, already used by `agent-scheduler.log`). RFC TBD.

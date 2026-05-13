@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.8.1 — SOUL.md fingerprint re-render (v0.8.0 follow-up)
+
+Single fix. The v0.8.0 voice consolidation (PR #1177) moved the canonical AI-tells ban-list into `SOUL.md` "Never", but `seedWorkspaceBootstrapFiles` was seeding workspace bootstrap files via `writeIfMissing`. Once an agent had a `SOUL.md`, the template was frozen forever — same failure shape as #1122 was for `CLAUDE.md` before that fix.
+
+Result during the v0.8.0 rollout: the new "Never" rules didn't reach any existing agent. Operators had to `rm SOUL.md && switchroom apply` per agent to refresh.
+
+### Fix (#1181)
+
+`SOUL.md` now uses `rerenderWithFingerprint` — the same function `CLAUDE.md` has used since #1122. Other workspace files (`IDENTITY.md`, `TOOLS.md`, `MEMORY.md`, `HEARTBEAT.md`, `USER.md`) keep `writeIfMissing` because they're user-owned scratchpads the agent edits at runtime.
+
+`SOUL.custom.md` sidecar handling is preserved: operator additions are composed into the rendered output, and the sidecar file itself stays `writeIfMissing` so it survives re-renders untouched.
+
+Operator hand-edits to `SOUL.md` itself are backed up to `SOUL.md.before-rerender.<unix-ms>` then the file is rewritten from the new template. Legacy state (file exists, no fingerprint sidecar) migrates cleanly on the next apply — content unchanged, fingerprint installed.
+
+New regression test at `tests/scaffold.rerender-soul-md.test.ts` mirrors `scaffold.rerender-claude-md.test.ts`: first-scaffold-writes-fingerprint, no-op-on-unchanged-template, drift-without-edits, hand-edit-plus-drift, legacy-state-migration, sidecar-survives-rerender.
+
+### npm note
+
+v0.8.0 was briefly unpublished from npm during a force-republish attempt before the SOUL fix was ready. npm policy blocks same-version republish for 24h after unpublish, so v0.8.0 stays unpublished on npm. v0.8.1 carries the same content as v0.8.0 + the fix and is the version to install. GitHub `v0.8.0` tag + GHCR `:v0.8.0` images already point at the SOUL fix commit and remain available.
+
 ## v0.8.0 — voice/architecture cleanup + host-control daemon + vault posture toggle
 
 Big release. ~35 PRs since v0.7.16. Three headline themes:

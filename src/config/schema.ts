@@ -1657,15 +1657,19 @@ export const HostControlConfigSchema = z.object({
     .boolean()
     .optional()
     .describe(
-      "Opt-in to the host-control daemon. Default: false (Phase 1). " +
+      "Opt-in to the host-control daemon. Default: false. " +
       "When true, the compose generator emits per-agent bind mounts " +
       "at `~/.switchroom/hostd/<name>/sock` for every admin-flagged " +
-      "agent. The daemon itself is installed by `switchroom setup` " +
-      "as a systemd user unit. systemd hosts only — compose-mode " +
-      "support is deferred to a v2 RFC (see RFC C §5.1 for why). " +
+      "agent. Install the daemon with `switchroom hostd install` — " +
+      "it runs as a docker container in its own compose project " +
+      "(`switchroom-hostd`), separate from the agent fleet's compose " +
+      "project so `up -d --remove-orphans` cycles of the fleet " +
+      "can't recreate the daemon mid-RPC. See RFC C §5.1. " +
       "Gateway integration (swap of spawnSwitchroomDetached callsites) " +
-      "lands in a Phase 2 follow-up PR; setting enabled: true in " +
-      "Phase 1 ships the daemon but does not change gateway behavior.",
+      "lands in a Phase 2 follow-up; setting enabled: true today ships " +
+      "the daemon and lets admin agents call hostd verbs directly, but " +
+      "the gateway's existing slash-command paths still use " +
+      "spawnSwitchroomDetached.",
     ),
 });
 

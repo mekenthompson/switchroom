@@ -29,6 +29,7 @@ import { registerAgentConfigCommands } from "./agent-config.js";
 import { registerAgentConfigWriteCommands } from "./agent-config-write.js";
 import { registerAgentConfigMcpCommand } from "./mcp-agent-config.js";
 import { registerMigrateCommand } from "./migrate.js";
+import { registerHostdCommand } from "./hostd.js";
 import { captureEvent, installGlobalErrorHandlers } from "../analytics/posthog.js";
 
 installGlobalErrorHandlers();
@@ -82,3 +83,4 @@ registerAgentConfigCommands(program);
 registerAgentConfigWriteCommands(program);
 registerAgentConfigMcpCommand(program);
 registerMigrateCommand(program);
+registerHostdCommand(program);

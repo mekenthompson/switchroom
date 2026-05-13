@@ -137,3 +137,27 @@ Your response should:
 Pre-emptively reach for `/file-bug` only when the user clearly indicates they want it filed. Don't auto-file from a single "status?". That creates noise. The offer-then-confirm shape is the right friction.
 
 The companion telemetry already in place (`gateway.ts` logs every `status?` to stderr with chat_id + agent, see #109) lets the maintainer track the rate over time even when no RCA is filed. Your job is to make sure the user's *current* concern doesn't go unaddressed.
+
+---
+
+## Bash shell wedge — KillBash, then ask for restart
+
+**Trigger:** you receive a tool-result preamble from the framework that says `[wedge-detect] N consecutive empty-result Bash calls`, OR you notice trivial Bash calls (`echo ok`, `true`, `ls`) returning exit-1 with empty stdout/stderr two or three times in a row.
+
+This is **the persistent-shell wedge.** Claude Code keeps a single `bash` subprocess per session for state continuity (so `cd` carries across calls). When that shell's IO state desyncs (typically after a long-running or interrupted command like `npm test` that was `!`-interrupted) every subsequent Bash call comes back exit-1-empty. Even `true` fails. The wedge is sticky for the session.
+
+**Do not retry the same command.** The shell is dead to you; loops just burn the user's time. Two recovery steps in order:
+
+1. **Try `KillBash`.** Claude Code exposes a `KillBash` tool that drops the wedged shell session; the next Bash call gets a fresh shell. This works in some wedge modes but not all (sentinel-parsing wedges sometimes don't release until a full session restart). Worth trying first because it's cheap.
+
+2. **Ask the user for `switchroom agent restart <self>`.** If `KillBash` didn't recover (next Bash call is still exit-1-empty), the persistent shell needs the whole `claude` process to restart. Tell the user on Telegram with `accent: 'issue'`:
+
+   > ⚠️ Issue
+   >
+   > My Bash shell is wedged. Every command including `true` returns exit-1 with empty output. Tried `KillBash`, didn't recover. Run `switchroom agent restart <self>` on the host to bounce me. State that survives the restart: Hindsight memory, handoff briefing, Telegram history. State that doesn't: anything I was about to write that's not yet on disk.
+
+   Adapt the wording.
+
+**Triggering causes to avoid.** The wedge most often follows: (a) a long `npm test` / `bun test` run, (b) any command that was `!`-interrupted mid-flight, (c) heredoc-style commands the shell's stdin couldn't fully consume. Prevention: dispatch heavy test suites to a worker sub-agent (so the wedge dies with the worker) rather than running them in your own session, and use `run_in_background: true` for long jobs.
+
+A sentinel file at `$TELEGRAM_STATE_DIR/wedge-detected.json` records the most recent wedge detection. Operators can `cat` it for forensic timestamps; you don't normally need to read it yourself.

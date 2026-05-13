@@ -2793,6 +2793,31 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
             },
           ],
         },
+        {
+          // Detect a wedged persistent-bash session. Claude Code's Bash
+          // tool uses a persistent shell for state continuity (so `cd`
+          // persists). When that shell's IO state desyncs after a
+          // long/interrupted command, every subsequent Bash call returns
+          // exit-1 with empty stdout/stderr — even `true`. This hook
+          // counts consecutive empty Bash results and writes a sentinel
+          // + logs to stderr after THRESHOLD (=3) in a row, plus injects
+          // a one-line nudge via additionalContext so the agent tries
+          // KillBash or asks for `switchroom agent restart` rather than
+          // retrying the wedged shell in a loop. Bash-only matcher
+          // because the wedge is shell-specific; counter resets on any
+          // other tool firing.
+          matcher: "^Bash$",
+          hooks: [
+            {
+              type: "command",
+              command: wrap(
+                "hook:wedge-detect-posttool",
+                `node "${join(DOCKER_HOOKS_PATH, "wedge-detect-posttool.mjs")}"`,
+              ),
+              timeout: 3,
+            },
+          ],
+        },
       ]
     : [];
 

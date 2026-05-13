@@ -9448,7 +9448,27 @@ async function handleVaultRequestSaveCallback(ctx: Context, data: string): Promi
       stageId,
       startedAt: Date.now(),
     } as PendingVaultOp)
-    await ctx.answerCallbackQuery({ text: 'Send the new key name as your next message.' }).catch(() => {})
+    // #1150 audit P0: pre-fix the [Save once][Discard][Rename] keyboard
+    // stayed live after the rename tap so the operator could re-tap
+    // Save with the old key name mid-rename — a Save tap fires the
+    // write immediately, racing the rename intercept. Strip the
+    // keyboard atomically with a status line that names the rename
+    // mode + the proposed new-key prompt. No synthInbound — the
+    // agent's `vault_request_save` tool already returned "waiting
+    // for operator," and the eventual save success/failure flows
+    // its own wake-up below.
+    const sourceMsg = ctx.callbackQuery?.message
+    const baseText = sourceMsg && 'text' in sourceMsg && sourceMsg.text
+      ? escapeHtmlForTg(sourceMsg.text)
+      : ''
+    const statusLine =
+      `\n\n✏️ <b>Rename mode</b> — send the new key name as your next message. ` +
+      `The current proposed key is <code>${escapeHtmlForTg(pending.key)}</code>.`
+    await finalizeCallback(ctx, {
+      ackText: 'Send the new key name as your next message.',
+      newText: baseText ? `${baseText}${statusLine}` : statusLine,
+      parseMode: 'HTML',
+    })
     return
   }
 

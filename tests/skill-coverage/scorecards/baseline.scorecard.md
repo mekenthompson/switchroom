@@ -1,17 +1,21 @@
 # Skill coverage scorecard
 
-- generated: 2026-05-13T23:10:51.025Z
+- generated: 2026-05-13T23:16:58.201Z
 - seed: 1
-- total probes: 30
-- median F1 (among targeted skills): 0.22
-- skills below F1 0.90: **3**
-- skills below exec 0.95: **1**
+- total probes: 74
+- median F1 (among targeted skills): 0.43
+- skills below F1 0.90: **8**
+- skills below exec 0.95: **2**
 
 | skill | n | TP | FN | FP | precision | recall | F1 | exec | neg-FP |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| buildkite-api | 0 | 0 | 0 | 1 | 0.00 | 0.00 | 0.00 | 0.00 | 0.13 |
+| buildkite-api | 8 | 2 | 6 | 1 | 0.67 | 0.25 | 0.36 | 1.00 | 0.13 |
 | buildkite-cli | 8 | 0 | 8 | 0 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
-| buildkite-pipelines | 0 | 0 | 0 | 3 | 0.00 | 0.00 | 0.00 | 0.00 | 0.25 |
-| file-bug | 0 | 0 | 0 | 1 | 0.00 | 0.00 | 0.00 | 0.00 | 0.13 |
-| mcp-builder | 6 | 2 | 4 | 0 | 1.00 | 0.33 | 0.50 | 1.00 | 0.00 |
+| buildkite-pipelines | 8 | 3 | 5 | 3 | 0.50 | 0.38 | 0.43 | 1.00 | 0.25 |
+| file-bug | 8 | 3 | 5 | 1 | 0.75 | 0.38 | 0.50 | 1.00 | 0.13 |
+| mcp-builder | 8 | 3 | 5 | 0 | 1.00 | 0.38 | 0.55 | 1.00 | 0.00 |
+| switchroom-architecture | 0 | 0 | 0 | 1 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| switchroom-install | 8 | 7 | 1 | 0 | 1.00 | 0.88 | 0.93 | 1.00 | 0.00 |
+| switchroom-manage | 2 | 0 | 2 | 0 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
 | switchroom-runtime | 8 | 1 | 7 | 0 | 1.00 | 0.13 | 0.22 | 1.00 | 0.00 |
+| switchroom-status | 8 | 7 | 1 | 1 | 0.88 | 0.88 | 0.88 | 1.00 | 0.00 |

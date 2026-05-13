@@ -3,7 +3,7 @@
  *
  * Covers:
  *   - #208: probeAgentProcess — deactivating → 🟡 (not 🔴), re-probe loop
- *   - #210: probeQuota — 429 → ok-with-note + 30 s cache
+ *   - #1163: probeQuota — uses /v1/messages headers path (was /api/oauth/usage)
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test'
@@ -243,7 +243,7 @@ describe('probeAgentProcess — #208: re-probe loop resolves transient', () => {
   })
 })
 
-// ── #210: probeQuota — 429 → ok-with-note + 30s cache ────────────────────
+// ── #1163: probeQuota — /v1/messages headers path ─────────────────────────
 
 import { writeFileSync, mkdirSync } from 'fs'
 import { writeQuotaCache } from '../gateway/quota-cache.js'
@@ -273,20 +273,35 @@ afterEach(() => {
   rmSync(tmp, { recursive: true, force: true })
 })
 
-describe('probeQuota — #210: 429 returns ok-with-note', () => {
-  it('returns ok with "quota check skipped: rate limited" on 429', async () => {
+describe('probeQuota — #1163: /v1/messages headers path', () => {
+  // The `/api/oauth/usage` endpoint has been deprecated/tightened —
+  // probeQuota now uses `fetchQuota` against `/v1/messages` and reads
+  // the unified-ratelimit response headers, same path /status uses.
+  it('reports ok with utilization line on a healthy response', async () => {
+    const headers = new Headers({
+      'anthropic-ratelimit-unified-5h-utilization': '0.42',
+      'anthropic-ratelimit-unified-7d-utilization': '0.18',
+    })
     const fakeFetch: typeof fetch = async () =>
-      new Response(null, { status: 429 }) as Response
+      new Response('{}', { status: 200, headers }) as Response
 
     const result = await probeQuota(claudeDir, agentDir, fakeFetch)
     expect(result.status).toBe('ok')
     expect(result.label).toBe('Quota')
-    expect(result.detail).toBe('quota check skipped: rate limited')
-    // #247: structured field so writeQuotaCache can key TTL off it
-    expect(result.rateLimited).toBe(true)
+    expect(result.detail).toContain('42% / 5h')
+    expect(result.detail).toContain('18% / 7d')
   })
 
-  it('writing 429 ok-result to cache produces a readable 30 s entry', () => {
+  it('surfaces auth rejection with login hint on 403', async () => {
+    const fakeFetch: typeof fetch = async () =>
+      new Response(null, { status: 403 }) as Response
+
+    const result = await probeQuota(claudeDir, agentDir, fakeFetch)
+    expect(result.status).toBe('degraded')
+    expect(result.nextStep).toMatch(/switchroom auth login/)
+  })
+
+  it('writing rate-limited result to cache produces a readable 30 s entry', () => {
     // Verify the cache contract: writeQuotaCache stores rate-limit results
     // with RATE_LIMIT_TTL_MS keyed off rateLimited:true, not the detail string.
     const rateLimitResult = {

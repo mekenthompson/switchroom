@@ -11,12 +11,13 @@
  * caller as a thrown error — only as ProbeResult{ status:'fail', ... }.
  */
 
-import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from 'fs'
+import { readFileSync, readdirSync, existsSync } from 'fs'
 import { join } from 'path'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 
 import { readQuotaCache, writeQuotaCache } from './quota-cache.js'
+import { fetchQuota, formatQuotaLine } from '../quota-check.js'
 
 const execFile = promisify(execFileCb)
 
@@ -812,46 +813,50 @@ export async function probeGateway(info: GatewayRuntimeInfo): Promise<ProbeResul
 
 // ─── Probe: Quota ─────────────────────────────────────────────────────────────
 
-const QUOTA_DEBUG_FILE = 'quota-debug.json'
-
 /**
- * Attempt to read quota info via the /api/oauth/usage endpoint.
- * The response schema is undocumented — we probe defensively and
- * save the raw response to a debug file on first 2xx hit.
+ * Read quota utilization via the Pro/Max plan rate-limit headers on a
+ * `/v1/messages` probe — the same mechanism `/usage` and `/status` use.
  *
- * Result is cached for 5 min in `~/.switchroom/quota-cache.json` and
- * shared across all agents. Without the cache, every gateway boot +
- * bridge-reconnect across 4 agents hits the endpoint, triggering 429s
- * that surface as 🟡 "rate limited" in the boot card. See `quota-cache.ts`.
+ * Pre-#1163 this hit Anthropic's `/api/oauth/usage` endpoint, which has
+ * deprecated/tightened auth and now returns HTTP 403 even for healthy
+ * OAuth tokens. That produced the useless boot-card row "Quota HTTP 403
+ * — re-authenticate" while `/status` (using the unified-ratelimit
+ * headers path) reported the agent as 🟢. See `quota-check.ts` for the
+ * underlying probe and `/v1/messages` header surface.
+ *
+ * Result is cached briefly via `quota-cache.ts` so simultaneous fleet
+ * restarts (multiple agents booting at once, each with their own gateway)
+ * coalesce on the cache instead of each spending a `/v1/messages` token.
  *
  * Tests can override the cache path via SWITCHROOM_QUOTA_CACHE_PATH.
  */
 export async function probeQuota(
   claudeConfigDir: string,
-  agentDir: string,
+  _agentDir: string,
   fetchImpl: typeof fetch = fetch,
 ): Promise<ProbeResult> {
   return withTimeout('Quota', (async (): Promise<ProbeResult> => {
-    // Cache hit → return early (avoids the rate-limit cascade)
     const cached = readQuotaCache()
     if (cached) {
       return cached
     }
 
-    // Read token
-    let token: string | null = null
+    // The fallback per-agent token path is `accounts/default/.oauth-token`;
+    // fetchQuota's own resolver only checks the top-level `.oauth-token`,
+    // so prefer that, and if it's missing surface the same degraded row
+    // we did before (no live probe — that's a setup issue, not a runtime
+    // one).
+    let claudeDirForProbe: string | null = null
     for (const candidate of [
-      join(claudeConfigDir, '.oauth-token'),
-      join(claudeConfigDir, 'accounts', 'default', '.oauth-token'),
+      claudeConfigDir,
+      join(claudeConfigDir, 'accounts', 'default'),
     ]) {
-      if (existsSync(candidate)) {
-        try {
-          const raw = readFileSync(candidate, 'utf8').trim()
-          if (raw.length > 0) { token = raw; break }
-        } catch {}
+      if (existsSync(join(candidate, '.oauth-token'))) {
+        claudeDirForProbe = candidate
+        break
       }
     }
-    if (!token) {
+    if (!claudeDirForProbe) {
       return {
         status: 'degraded',
         label: 'Quota',
@@ -860,109 +865,31 @@ export async function probeQuota(
       }
     }
 
-    let resp: Response
-    try {
-      const controller = new AbortController()
-      const t = setTimeout(() => controller.abort(), 1800)
-      resp = await fetchImpl('https://api.anthropic.com/api/oauth/usage', {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/json',
-          'anthropic-version': '2023-06-01',
-          'anthropic-beta': 'oauth-2025-04-20',
-          'User-Agent': 'switchroom-boot/0.1',
-        },
-        signal: controller.signal,
-      })
-      clearTimeout(t)
-    } catch (err: unknown) {
-      return { status: 'fail', label: 'Quota', detail: `request failed: ${(err as Error).message ?? String(err)}` }
-    }
-
-    if (resp.status === 429) {
-      // A 429 from /api/oauth/usage means the endpoint is rate-limiting our
-      // probe calls — it does NOT mean the user is out of quota. Conflating
-      // the two is the root cause of the false 🟡 "rate limited" alarm
-      // reported in #210. Return ok-with-note and cache it for 30 s so
-      // simultaneous fleet restarts read the cached result instead of piling
-      // up on the same endpoint (see quota-cache.ts: RATE_LIMIT_TTL_MS).
-      //
-      // We assume 429 from /api/oauth/usage signals endpoint rate-limiting,
-      // not quota exhaustion. Anthropic uses 403 / 200-with-flag for the
-      // latter today; if that changes, revisit this 🟢 mapping.
-      const rateLimitResult: ProbeResult = {
-        status: 'ok',
-        label: 'Quota',
-        detail: 'quota check skipped: rate limited',
-        rateLimited: true,
-      }
-      writeQuotaCache(rateLimitResult)
-      return rateLimitResult
-    }
-    if (!resp.ok) {
-      const nextStep = resp.status === 401 || resp.status === 403
-        ? 'Auth rejected by Anthropic — re-authenticate with `switchroom auth login <agent>`'
-        : 'Anthropic quota endpoint returned an error — re-check after a minute; if persistent, `switchroom auth login <agent>`'
+    const probe = await fetchQuota({
+      claudeConfigDir: claudeDirForProbe,
+      fetchImpl,
+      timeoutMs: 1800,
+    })
+    if (!probe.ok) {
+      // Auth rejection from /v1/messages is a strong signal — the same
+      // endpoint claude itself uses. Other errors are surfaced verbatim
+      // so operators can see what's wrong.
+      const isAuth = /auth rejected|HTTP 401|HTTP 403/i.test(probe.reason)
       return {
         status: 'degraded',
         label: 'Quota',
-        detail: `HTTP ${resp.status}`,
-        nextStep,
+        detail: probe.reason,
+        nextStep: isAuth
+          ? 'Auth rejected by Anthropic — re-authenticate with `switchroom auth login <agent>`'
+          : 'Anthropic quota probe failed — re-check after a minute; if persistent, `switchroom auth login <agent>`',
       }
     }
 
-    let body: unknown
-    try {
-      body = await resp.json()
-    } catch {
-      return { status: 'degraded', label: 'Quota', detail: 'invalid JSON response' }
+    const result: ProbeResult = {
+      status: 'ok',
+      label: 'Quota',
+      detail: formatQuotaLine(probe.data),
     }
-
-    // Defensive schema discovery — save raw response for tightening
-    const debugPath = join(agentDir, 'telegram', QUOTA_DEBUG_FILE)
-    try {
-      // Redact token/UUID fields before saving
-      const redacted = JSON.parse(JSON.stringify(body, (k, v) => {
-        if (/token|uuid|id|key/i.test(k) && typeof v === 'string' && v.length > 10) return '[REDACTED]'
-        return v
-      }))
-      mkdirSync(join(agentDir, 'telegram'), { recursive: true })
-      writeFileSync(debugPath, JSON.stringify({ capturedAt: new Date().toISOString(), body: redacted }, null, 2))
-    } catch {}
-
-    // Try common field paths — schema not yet locked
-    const b = body as Record<string, unknown>
-    const sessionQuota =
-      (b?.['data'] as Record<string, unknown> | undefined)?.['session_quota'] ??
-      b?.['session_quota'] ??
-      (b?.['quota'] as Record<string, unknown> | undefined)?.['session'] ??
-      (b?.['usage'] as Record<string, unknown> | undefined)?.['session']
-
-    if (!sessionQuota) {
-      return {
-        status: 'degraded',
-        label: 'Quota',
-        detail: `schema unknown — first call captured (debug: ${debugPath})`,
-      }
-    }
-
-    const sq = sessionQuota as Record<string, unknown>
-    const parts: string[] = []
-    if (typeof sq['sonnet_used_pct'] === 'number') parts.push(`Sonnet ${Math.round(sq['sonnet_used_pct'] as number)}%`)
-    if (typeof sq['opus_used_pct'] === 'number') parts.push(`Opus ${Math.round(sq['opus_used_pct'] as number)}%`)
-    if (typeof sq['used_pct'] === 'number') parts.push(`${Math.round(sq['used_pct'] as number)}% used`)
-    if (typeof sq['resets_in_sec'] === 'number') {
-      const sec = sq['resets_in_sec'] as number
-      const h = Math.floor(sec / 3600)
-      const m = Math.round((sec % 3600) / 60)
-      parts.push(`resets in ${h}h ${m}m`)
-    }
-
-    if (parts.length === 0) {
-      return { status: 'degraded', label: 'Quota', detail: 'schema unknown — saving raw response' }
-    }
-    const result: ProbeResult = { status: 'ok', label: 'Quota', detail: parts.join(' · ') }
     writeQuotaCache(result)
     return result
   })())

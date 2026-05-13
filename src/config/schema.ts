@@ -944,6 +944,69 @@ const profileFields = {
       "`--append-system-prompt`. Missing files are silently skipped. " +
       "Example: ['BRIEF.md', 'CONTEXT.md'].",
     ),
+  resources: z
+    .object({
+      memory: z
+        .string()
+        .regex(
+          /^\d+(\.\d+)?[kmgKMG]?$/,
+          "memory must be a Docker size string like '6g', '512m', '1.5g'",
+        )
+        .optional()
+        .describe(
+          "Hard memory cap (Docker `mem_limit` → cgroup memory.max). When the " +
+          "container exceeds this, the kernel OOM-kills processes in the cgroup. " +
+          "Format: '6g', '1.5g', '512m'. When unset at every cascade layer the " +
+          "compose generator falls back to the hard-coded per-profile defaults " +
+          "in src/agents/compose.ts (klanker 6g, coding 2g, conversational 1.5g, " +
+          "lightweight 1g, default 1.5g).",
+        ),
+      memory_reservation: z
+        .string()
+        .regex(
+          /^\d+(\.\d+)?[kmgKMG]?$/,
+          "memory_reservation must be a Docker size string like '4g', '256m'",
+        )
+        .optional()
+        .describe(
+          "Soft memory floor (Docker `mem_reservation` → cgroup memory.low). " +
+          "Under host-wide memory pressure, the kernel protects at least this " +
+          "much from being reclaimed from the cgroup. Must be ≤ memory. Use to " +
+          "keep an agent RAM-resident when the host has other tenants that " +
+          "might push the box (Coolify apps, build jobs). Default: unset.",
+        ),
+      pids_limit: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe(
+          "Max processes the cgroup can spawn (cgroup pids.max). Prevents " +
+          "fork bombs and runaway test runners. Counts every process in the " +
+          "cgroup including bash subprocesses, claude itself, sidecars, and " +
+          "any test/build worker. A typical agent at idle uses ~30 PIDs; " +
+          "`npm test`-style workloads can spike to 200+. Set generously " +
+          "(2000 is a comfortable cap for test-running agents). Default: " +
+          "unset (no cgroup pid cap).",
+        ),
+      cpus: z
+        .number()
+        .positive()
+        .optional()
+        .describe(
+          "CPU quota (Docker `cpus`). Fractional values OK (e.g. 0.5, 2.0). " +
+          "When unset at every cascade layer the compose generator falls " +
+          "back to the per-profile default (klanker/coding 2.0, default 1.0, " +
+          "lightweight 0.5).",
+        ),
+    })
+    .optional()
+    .describe(
+      "Per-agent resource limits. Cascades through defaults → profile → " +
+      "per-agent with per-field merge (agent wins on each field independently). " +
+      "Any field left unset at every layer falls back to the hard-coded " +
+      "per-profile defaults in src/agents/compose.ts.",
+    ),
   experimental: z
     .object({
       legacy_pty: z

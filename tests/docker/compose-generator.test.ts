@@ -30,8 +30,17 @@ import {
 } from "../../src/agents/compose.js";
 import type { SwitchroomConfig } from "../../src/config/schema.js";
 
+interface MakeConfigAgent {
+  extends?: string;
+  settings_raw?: Record<string, unknown>;
+  admin?: boolean;
+  env?: Record<string, string>;
+  bind_mounts?: Array<{ source: string; target?: string; mode?: "ro" | "rw" }>;
+  resources?: { memory?: string; memory_reservation?: string; pids_limit?: number; cpus?: number };
+}
+
 function makeConfig(
-  agents: Record<string, { extends?: string; settings_raw?: Record<string, unknown>; admin?: boolean; env?: Record<string, string>; bind_mounts?: Array<{ source: string; target?: string; mode?: "ro" | "rw" }> }>,
+  agents: Record<string, MakeConfigAgent>,
   topLevel?: { host_control?: { enabled?: boolean } },
 ): SwitchroomConfig {
   return {
@@ -48,6 +57,7 @@ function makeConfig(
           admin: cfg.admin,
           env: cfg.env,
           bind_mounts: cfg.bind_mounts,
+          resources: cfg.resources,
           schedule: [],
           tools: { allow: [], deny: [] },
           hooks: undefined,
@@ -186,6 +196,60 @@ describe("generateCompose", () => {
   it("unknown profile → default 1.5g / 1.0", () => {
     const out = generateCompose({ config: makeConfig({ misc: { extends: "made-up" } }) });
     expect(out).toMatch(/agent-misc:[\s\S]*?mem_limit: 1\.5g/);
+  });
+
+  it("agent.resources.memory overrides the profile default", () => {
+    const out = generateCompose({
+      config: makeConfig({ tiny: { extends: "conversational", resources: { memory: "512m" } } }),
+    });
+    expect(out).toMatch(/agent-tiny:[\s\S]*?mem_limit: 512m/);
+    // cpus still falls back to the profile default (1.0 for conversational)
+    expect(out).toMatch(/agent-tiny:[\s\S]*?cpus: 1\.0/);
+  });
+
+  it("agent.resources.memory_reservation emits mem_reservation under the agent service", () => {
+    const out = generateCompose({
+      config: makeConfig({
+        klanker: { resources: { memory_reservation: "4g" } },
+      }),
+    });
+    expect(out).toMatch(/agent-klanker:[\s\S]*?mem_reservation: 4g/);
+    // and the existing mem_limit/cpus are still emitted
+    expect(out).toMatch(/agent-klanker:[\s\S]*?mem_limit: 6g/);
+    expect(out).toMatch(/agent-klanker:[\s\S]*?cpus: 2\.0/);
+  });
+
+  it("agent.resources.pids_limit emits pids_limit under the agent service", () => {
+    const out = generateCompose({
+      config: makeConfig({ klanker: { resources: { pids_limit: 2000 } } }),
+    });
+    expect(out).toMatch(/agent-klanker:[\s\S]*?pids_limit: 2000/);
+  });
+
+  it("mem_reservation and pids_limit are absent when unset (backward-compat)", () => {
+    const out = generateCompose({ config: makeConfig({ coach: { extends: "conversational" } }) });
+    const block = /agent-coach:[\s\S]*?(?=\n  agent-|\nvolumes:|$)/.exec(out)?.[0] ?? "";
+    expect(block).not.toContain("mem_reservation");
+    expect(block).not.toContain("pids_limit");
+  });
+
+  it("defaults.resources cascades down to per-agent (per-field merge with agent winning)", () => {
+    // defaults.resources sets pids_limit; agent.resources sets memory.
+    // Resolved should have BOTH applied.
+    const config = makeConfig({ coach: { extends: "conversational", resources: { memory: "768m" } } });
+    config.defaults = { ...(config.defaults ?? {}), resources: { pids_limit: 500 } };
+    const out = generateCompose({ config });
+    expect(out).toMatch(/agent-coach:[\s\S]*?mem_limit: 768m/);
+    expect(out).toMatch(/agent-coach:[\s\S]*?pids_limit: 500/);
+    expect(out).toMatch(/agent-coach:[\s\S]*?cpus: 1\.0/);
+  });
+
+  it("agent.resources.cpus overrides profile (fractional accepted)", () => {
+    const out = generateCompose({
+      config: makeConfig({ ziggy: { extends: "lightweight", resources: { cpus: 0.25 } } }),
+    });
+    expect(out).toMatch(/agent-ziggy:[\s\S]*?cpus: 0\.3/); // toFixed(1) rounds
+    expect(out).toMatch(/agent-ziggy:[\s\S]*?mem_limit: 1g/); // unchanged
   });
 
   it("strips cap_add and emits a warning", () => {

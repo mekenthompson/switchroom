@@ -261,3 +261,104 @@ describe("vault-protocol partial — agent vault discovery (#gymbro-fallback)", 
     expect(fragment.length).toBeGreaterThan(200);
   });
 });
+
+describe("agent-self-service partial — cron/skill MCP discoverability (#1163)", () => {
+  // Without this fragment, the agent has the agent-config MCP tools
+  // available in tools/list but no prompt-level awareness of WHEN to
+  // call them. Natural-language asks like "remind me to call mom at
+  // 5pm" fall back to free-styling instead of invoking schedule_add.
+  // These tests pin the contract — a regression that drops a tool
+  // name or omits a safety-rail mention would silently break the
+  // natural-language discovery path.
+
+  it("names the agent-config MCP server", async () => {
+    const { renderAgentSelfServiceFragment } = await import("./profiles.js");
+    const fragment = renderAgentSelfServiceFragment();
+    expect(fragment.toLowerCase()).toMatch(/agent-config/);
+  });
+
+  it("names every write tool exposed by the broker", async () => {
+    const { renderAgentSelfServiceFragment } = await import("./profiles.js");
+    const fragment = renderAgentSelfServiceFragment();
+    expect(fragment).toContain("schedule_add");
+    expect(fragment).toContain("schedule_remove");
+  });
+
+  it("names every read tool exposed by the broker", async () => {
+    const { renderAgentSelfServiceFragment } = await import("./profiles.js");
+    const fragment = renderAgentSelfServiceFragment();
+    expect(fragment).toContain("cron_list");
+    expect(fragment).toContain("skill_list");
+    expect(fragment).toContain("config_get");
+    expect(fragment).toContain("audit_tail");
+  });
+
+  it("calls out the 5-minute interval floor + the matching error code", async () => {
+    // The broker rejects intervals <5min with E_CRON_TOO_FREQUENT.
+    // The fragment must tell the agent BEFORE it issues the rejected
+    // write so it doesn't surprise the user with an error.
+    const { renderAgentSelfServiceFragment } = await import("./profiles.js");
+    const fragment = renderAgentSelfServiceFragment();
+    expect(fragment.toLowerCase()).toMatch(/5[- ]min/);
+    expect(fragment).toContain("E_CRON_TOO_FREQUENT");
+  });
+
+  it("calls out the 20-entry quota + the matching error code", async () => {
+    const { renderAgentSelfServiceFragment } = await import("./profiles.js");
+    const fragment = renderAgentSelfServiceFragment();
+    expect(fragment).toMatch(/20\b/);
+    expect(fragment).toContain("E_QUOTA_EXCEEDED");
+  });
+
+  it("calls out the secrets-rejection rail + the matching error code", async () => {
+    // Agents must learn NOT to bake secrets: into their own entries —
+    // the broker rejects with E_OVERLAY_SECRETS_REQUIRES_APPROVAL.
+    // Runtime vault_request_access is the right path instead.
+    const { renderAgentSelfServiceFragment } = await import("./profiles.js");
+    const fragment = renderAgentSelfServiceFragment();
+    expect(fragment).toContain("E_OVERLAY_SECRETS_REQUIRES_APPROVAL");
+    expect(fragment.toLowerCase()).toContain("vault_request_access");
+  });
+
+  it("forbids cross-agent writes (security boundary)", async () => {
+    const { renderAgentSelfServiceFragment } = await import("./profiles.js");
+    const fragment = renderAgentSelfServiceFragment();
+    expect(fragment.toLowerCase()).toMatch(/cross-agent|own schedule|other.*agent/);
+  });
+
+  it("includes natural-language → tool-call examples", async () => {
+    // The lookup table is what makes the natural-language discovery
+    // reliable. A user saying "remind me at 5pm" should map cleanly to
+    // schedule_add — pinning at least one canonical example.
+    const { renderAgentSelfServiceFragment } = await import("./profiles.js");
+    const fragment = renderAgentSelfServiceFragment();
+    expect(fragment.toLowerCase()).toMatch(/remind me|recurring|every/);
+    expect(fragment).toMatch(/0 17 \* \* 0|0 8 \* \* 1-5|cron_expr/);
+  });
+
+  it("disambiguates one-shot vs recurring (cron has no native one-shot)", async () => {
+    // Common user intent ("at 5pm tomorrow") isn't natively expressible
+    // as a cron entry — every cron recurs. The fragment must warn the
+    // agent not to claim success with a recurring entry silently.
+    const { renderAgentSelfServiceFragment } = await import("./profiles.js");
+    const fragment = renderAgentSelfServiceFragment();
+    expect(fragment.toLowerCase()).toMatch(/one-shot|one[- ]time/);
+    expect(fragment.toLowerCase()).toMatch(/recur|every/);
+  });
+
+  it("calls out the skill_list-only status (no skill_install yet)", async () => {
+    // skill_install / skill_remove aren't built yet (Phase 2). The
+    // fragment must tell the agent NOT to claim it can install skills,
+    // and to redirect the user to the operator instead.
+    const { renderAgentSelfServiceFragment } = await import("./profiles.js");
+    const fragment = renderAgentSelfServiceFragment();
+    expect(fragment.toLowerCase()).toMatch(/skill_install/);
+    expect(fragment.toLowerCase()).toMatch(/not yet|coming soon|phase 2|operator/);
+  });
+
+  it("is non-empty (file present and rendered)", async () => {
+    const { renderAgentSelfServiceFragment } = await import("./profiles.js");
+    const fragment = renderAgentSelfServiceFragment();
+    expect(fragment.length).toBeGreaterThan(500);
+  });
+});

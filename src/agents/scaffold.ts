@@ -104,6 +104,7 @@ import {
   copyProfileSkills,
   renderProfileClaudeTemplate,
   renderVaultProtocolFragment,
+  renderAgentSelfServiceFragment,
 } from "./profiles.js";
 import { getHindsightSettingsEntry, getBuiltinDefaultMcpEntries } from "../memory/scaffold-integration.js";
 import { reconcileAgentDefaultSkills } from "./reconcile-default-skills.js";
@@ -2066,6 +2067,20 @@ export function scaffoldAgent(
             const vaultProtocol = renderVaultProtocolFragment(context);
             if (vaultProtocol) {
               rendered = rendered.trimEnd() + "\n\n" + vaultProtocol + "\n";
+            }
+            // Agent-self-service fragment (#1163) — names the agent-config
+            // MCP tools (config_get / cron_list / skill_list / schedule_add
+            // / schedule_remove / audit_tail) + the safety rails. Same
+            // unconditional-append pattern as vault-protocol — every agent
+            // gets the prompt grounding because every agent gets the tools
+            // wired via .mcp.json. Without this fragment, the model has
+            // the tools available in tools/list but no awareness of when
+            // to reach for them, so natural-language asks like "remind me
+            // to call mom at 5pm" fall back to free-styling a yaml paste-
+            // block instead of calling schedule_add directly.
+            const selfService = renderAgentSelfServiceFragment(context);
+            if (selfService) {
+              rendered = rendered.trimEnd() + "\n\n" + selfService + "\n";
             }
           }
           if (dest === "CLAUDE.md" && agentConfig.claude_md_raw) {

@@ -1,5 +1,30 @@
 import { defineConfig } from "vitest/config";
 
+// Tests must produce identical results inside an agent container and on
+// the host. `src/agents/compose.ts` injects several env vars into every
+// agent container (SWITCHROOM_RUNTIME=docker, SWITCHROOM_CONTAINER=1,
+// SWITCHROOM_AGENT_NAME, broker/kernel socket paths) so `npm test`
+// invoked inside an agent inherits them. Runtime-aware code (e.g.
+// `defaultBrokerSocketPath` in src/vault/broker/client.ts, the
+// `isContainerContext()` probe in agent-config) then takes the
+// in-container branch and tests that expect default behavior fail —
+// resolve-socket-path.test.ts:77 wants the legacy fallback, but the
+// docker branch returns the operator path. Clear at the vitest process
+// root so both forked test workers and any spawnSync children they
+// launch see a clean baseline. Operators running `npm test` on a host
+// with these set legitimately for production tools won't notice — the
+// host's actual processes read the env independently from their own
+// systemd / shell context.
+for (const k of [
+  "SWITCHROOM_RUNTIME",
+  "SWITCHROOM_CONTAINER",
+  "SWITCHROOM_AGENT_NAME",
+  "SWITCHROOM_VAULT_BROKER_SOCK",
+  "SWITCHROOM_KERNEL_SOCKET",
+]) {
+  delete process.env[k];
+}
+
 // Buildkite Test Engine: only attach the collector reporter when the
 // analytics token is present. Locally (and in CI jobs without the token)
 // we fall back to vitest's default reporter so `npm test` stays quiet

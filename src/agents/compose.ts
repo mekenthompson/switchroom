@@ -29,6 +29,7 @@ import { join } from "node:path";
 import type { SwitchroomConfig, AgentConfig, AgentBindMount } from "../config/schema.js";
 import { resolveAgentConfig } from "../config/merge.js";
 import { isReservedAgentName } from "../vault/broker/peercred.js";
+import { getBundledSkillsPoolDir } from "./reconcile-default-skills.js";
 
 /** UID range reserved for agent containers. 999 slots — practical fleet limit. */
 export const AGENT_UID_MIN = 10001;
@@ -203,6 +204,26 @@ export interface ComposeGeneratorOptions {
    * pre-fix behavior. Setting it is what turns the host-shell path on.
    */
   operatorUid?: number;
+  /**
+   * Host path to the bundled-default skills pool directory. Mounted
+   * read-only at the same path inside each agent container so the
+   * symlinks created by `reconcileAgentDefaultSkills` (which point at
+   * this absolute host path — e.g. `<repo>/skills/skill-creator`) keep
+   * resolving inside the container.
+   *
+   * Without this mount, the 10 bundled-default skills (skill-creator,
+   * mcp-builder, pdf/docx/xlsx/pptx, webapp-testing, switchroom-cli/
+   * status/health) dangle inside the container because their symlink
+   * target — the source-repo or npm-package `skills/` dir — isn't
+   * mounted. probeSkills surfaces this as "N/M dangling" on the boot
+   * card.
+   *
+   * Defaults to `getBundledSkillsPoolDir()` — same resolver
+   * `reconcileAgentDefaultSkills` uses, so the symlink target and the
+   * mount source are guaranteed to agree. Tests override with a tmp
+   * path (or empty string to suppress emission).
+   */
+  bundledSkillsPoolDir?: string;
 }
 
 /** Resolve the image ref for one of the four service images. */
@@ -427,6 +448,9 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // home. Falls back to process.env.HOME when no homeDir is passed.
   const hostHomeForChecks = opts.homeDir ?? process.env.HOME ?? "";
   const switchroomConfigPath = opts.switchroomConfigPath;
+  // Bundled-skills pool dir. Default to the live resolver so production
+  // calls Just Work; tests pass an explicit path (or "") to override.
+  const bundledSkillsPoolDir = opts.bundledSkillsPoolDir ?? getBundledSkillsPoolDir();
 
   // Resolve the host's analytics distinct ID once per generator call. The
   // CLI persists this at ~/.switchroom/analytics-id (see
@@ -733,6 +757,7 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
         posthogKeyOverride,
         posthogHostOverride,
       },
+      bundledSkillsPoolDir,
     );
   }
 
@@ -772,6 +797,7 @@ function emitAgentService(
   switchroomConfigPath: string | undefined,
   containerNamePrefix: string,
   posthog: PosthogRuntimeEnv,
+  bundledSkillsPoolDir: string,
 ): void {
   lines.push(`  agent-${a.name}:`);
   emitImageOrBuild(lines, "agent", imageTag, buildMode, buildContext);
@@ -1042,6 +1068,21 @@ function emitAgentService(
   }
   if (existsSync(`${hostHomeForChecks}/.switchroom/credentials`)) {
     lines.push(`      - ${homePrefix}/.switchroom/credentials:${homePrefix}/.switchroom/credentials:ro`);
+  }
+  // Bundled-skills pool: mount at the same absolute host path so the
+  // symlinks created by reconcileAgentDefaultSkills (which target the
+  // source-repo or npm-package skills/ dir — e.g.
+  // `<repo>/skills/skill-creator`) resolve inside the container.
+  // Guard with existsSync because the resolved path may not exist in
+  // exotic test setups and docker compose `up` hard-fails on missing
+  // `:ro` sources. Skip when the pool path is already covered by the
+  // operator skills mount above (no duplicate volume entries).
+  if (
+    bundledSkillsPoolDir &&
+    existsSync(bundledSkillsPoolDir) &&
+    !bundledSkillsPoolDir.startsWith(`${hostHomeForChecks}/.switchroom/skills`)
+  ) {
+    lines.push(`      - ${bundledSkillsPoolDir}:${bundledSkillsPoolDir}:ro`);
   }
   // switchroom.yaml file mount (read-only) — the in-container gateway
   // daemon needs `--config $SWITCHROOM_CONFIG` to talk to the

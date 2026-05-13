@@ -1,0 +1,535 @@
+{
+  "startedAt": "2026-05-13T23:48:36.422Z",
+  "finishedAt": "2026-05-13T23:48:36.422Z",
+  "seed": 1,
+  "agentName": "claude-cli",
+  "results": [
+    {
+      "probe": {
+        "id": "partial-0",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-runtime",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 6401,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-1",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-runtime",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 4971,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-2",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-runtime",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 5360,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-3",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-runtime",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 5565,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-4",
+        "kind": "negative",
+        "targetSkill": null,
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 5889,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-5",
+        "kind": "negative",
+        "targetSkill": null,
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 6603,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-6",
+        "kind": "negative",
+        "targetSkill": null,
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "file-bug"
+      ],
+      "turnDurationMs": 8592,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-7",
+        "kind": "negative",
+        "targetSkill": null,
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 5921,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-8",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-cli",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 5856,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-9",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-cli",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "buildkite-cli"
+      ],
+      "turnDurationMs": 10602,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-10",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-cli",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 8859,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-11",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-cli",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 5028,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-12",
+        "kind": "paraphrase",
+        "targetSkill": "mcp-builder",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 5676,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-13",
+        "kind": "paraphrase",
+        "targetSkill": "mcp-builder",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "mcp-builder"
+      ],
+      "turnDurationMs": 9061,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-14",
+        "kind": "paraphrase",
+        "targetSkill": "mcp-builder",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "mcp-builder"
+      ],
+      "turnDurationMs": 10760,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-15",
+        "kind": "paraphrase",
+        "targetSkill": "mcp-builder",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 14482,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-16",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-install",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-install"
+      ],
+      "turnDurationMs": 23503,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-17",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-install",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-install"
+      ],
+      "turnDurationMs": 8984,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-18",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-install",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-install"
+      ],
+      "turnDurationMs": 9969,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-19",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-install",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-install"
+      ],
+      "turnDurationMs": 9096,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-20",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-api",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 5787,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-21",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-api",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 9721,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-22",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-api",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 7273,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-23",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-api",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 9405,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-24",
+        "kind": "paraphrase",
+        "targetSkill": "file-bug",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 5333,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-25",
+        "kind": "paraphrase",
+        "targetSkill": "file-bug",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 6702,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-26",
+        "kind": "paraphrase",
+        "targetSkill": "file-bug",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 6487,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-27",
+        "kind": "paraphrase",
+        "targetSkill": "file-bug",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "file-bug"
+      ],
+      "turnDurationMs": 6464,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-28",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-status",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-status",
+        "switchroom-cli"
+      ],
+      "turnDurationMs": 6671,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-29",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-status",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 7342,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-30",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-status",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-status"
+      ],
+      "turnDurationMs": 13225,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-31",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-status",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-status"
+      ],
+      "turnDurationMs": 8776,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-32",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-pipelines",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "buildkite-pipelines"
+      ],
+      "turnDurationMs": 9492,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-33",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-pipelines",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 12434,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-34",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-pipelines",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 9716,
+      "timedOut": true,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-35",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-pipelines",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "buildkite-pipelines"
+      ],
+      "turnDurationMs": 10661,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-36",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-manage",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-manage",
+        "switchroom-status"
+      ],
+      "turnDurationMs": 12722,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-37",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-manage",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 7655,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-38",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-manage",
+        "phrase": ""
+      },
+      "skillsInvoked": [
+        "switchroom-status",
+        "switchroom-cli"
+      ],
+      "turnDurationMs": 8534,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-39",
+        "kind": "paraphrase",
+        "targetSkill": "switchroom-manage",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 7036,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    },
+    {
+      "probe": {
+        "id": "partial-40",
+        "kind": "paraphrase",
+        "targetSkill": "buildkite-secure-delivery",
+        "phrase": ""
+      },
+      "skillsInvoked": [],
+      "turnDurationMs": 7341,
+      "timedOut": false,
+      "agentName": "claude-cli"
+    }
+  ]
+}

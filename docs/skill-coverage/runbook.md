@@ -13,7 +13,7 @@ The harness lives in `tests/skill-coverage/`. The audit + inventory in this dire
    Three workable invocation modes:
 
    - **Mode A — run inside the agent.** `switchroom agent attach <name>` → from the agent's tmux session run `bun tests/skill-coverage/cli.ts <name> --go --agent-cwd=$PWD`. Highest fidelity; you ARE the agent so perms are satisfied.
-   - **Mode B — sudo from host as the agent UID.** `sudo -u "#$(stat -c %u ~/.switchroom/agents/<name>) " bun tests/skill-coverage/cli.ts <name> --go --agent-cwd=...`. Works from a host worktree.
+   - **Mode B — sudo from host as the agent UID.** `sudo -u "#$(stat -c %u ~/.switchroom/agents/<name>)" bun tests/skill-coverage/cli.ts <name> --go --agent-cwd=...`. Works from a host worktree if your `sudo` accepts the `#UID` lookup form. Note: `sudo-rs` (the Rust port shipped on some recent Ubuntu) rejects `#UID` with `user '#NNNN' not found`; use the C `sudo` at `/usr/bin/sudo.ws` (if installed), `su -s /bin/bash -c '...'` against a named agent user, or fall back to Mode A.
    - **Mode C — bind-mount the projects dir host-readable** (compose change, follow-up RFC). Out of scope for this runbook; tracked as a known follow-up.
 
    The gateway socket at `~/.switchroom/agents/<name>/telegram/gateway.sock` is also agent-uid owned but is reachable from any process that can `connect()` — only the JSONL read needs the perms dance.

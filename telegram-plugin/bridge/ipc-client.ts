@@ -23,7 +23,10 @@ export function validateGatewayMessage(msg: unknown): msg is GatewayToClient {
       return typeof m.chatId === "string" && typeof m.text === "string";
     case "permission":
       return typeof m.requestId === "string"
-        && (m.behavior === "allow" || m.behavior === "deny");
+        && (m.behavior === "allow" || m.behavior === "deny")
+        // `rule` is optional (only sent on "🔁 Always allow"); when present
+        // it must be a non-empty string. #1138 wire extension.
+        && (m.rule === undefined || (typeof m.rule === "string" && m.rule.length > 0));
     case "status":
       return typeof m.status === "string";
     case "tool_call_result":

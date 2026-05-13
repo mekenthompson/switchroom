@@ -28,6 +28,7 @@ import {
 } from '../pty-tail.js'
 import { createIpcClient, type IpcClientHandle } from './ipc-client.js'
 import type { InboundMessage, PermissionEvent, StatusEvent } from '../gateway/ipc-protocol.js'
+import { matchesAllowRule } from '../permission-rule.js'
 
 installPluginLogger()
 
@@ -488,6 +489,22 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 // approval. Forward them to the gateway which renders inline keyboard
 // buttons in the user's Telegram chat. The gateway sends the decision
 // back as a PermissionEvent which we relay to Claude Code (see onPermission).
+//
+// #1138: session-scoped always-allow cache. When the operator taps
+// "🔁 Always allow" the gateway calls `switchroom agent grant` which
+// updates settings.json on disk, but the running claude process won't
+// re-read that file — so a sub-agent (Task tool) dispatched later in
+// the same session still hits the popup. To close that gap the gateway
+// also broadcasts the resolved `rule` on the `permission` event and we
+// stash it here; subsequent `permission_request` notifications whose
+// (tool_name, input_preview) match a cached rule are auto-allowed
+// without a round-trip to Telegram. The cache lives for the bridge's
+// lifetime — which is the claude session's lifetime — so on the next
+// boot the now-persisted `tools.allow` entry takes over and this cache
+// is rebuilt as the operator approves things again. Parent claude and
+// every Task-tool sub-agent share the same bridge process, so a rule
+// added by either is honoured by all.
+const sessionAllowRules = new Set<string>()
 
 mcp.setNotificationHandler(
   z.object({
@@ -500,6 +517,28 @@ mcp.setNotificationHandler(
     }),
   }),
   async ({ params }) => {
+    // Cache hit? Auto-allow without bothering the gateway. We deliver
+    // the same `notifications/claude/channel/permission` shape claude
+    // would otherwise receive after a Telegram tap, so the call site
+    // is indistinguishable. We still notify the gateway out-of-band
+    // (via a permission_request that the gateway short-circuits on
+    // its side would be ideal, but for now skipping the forward is
+    // safe: pendingPermissions is a gateway-side bookkeeping map only,
+    // and nothing else depends on seeing this request_id).
+    for (const rule of sessionAllowRules) {
+      if (matchesAllowRule(rule, params.tool_name, params.input_preview)) {
+        process.stderr.write(
+          `telegram bridge: session-cached allow for ${params.tool_name} ` +
+          `(rule="${rule}", request_id=${params.request_id})\n`,
+        )
+        onPermission({
+          type: 'permission',
+          requestId: params.request_id,
+          behavior: 'allow',
+        })
+        return
+      }
+    }
     if (!ipc || !ipc.isConnected()) {
       process.stderr.write('telegram bridge: permission_request received but not connected to gateway\n')
       return
@@ -513,6 +552,7 @@ mcp.setNotificationHandler(
     })
   },
 )
+
 
 // ─── IPC client ──────────────────────────────────────────────────────────
 
@@ -532,6 +572,16 @@ function onInbound(msg: InboundMessage): void {
 }
 
 function onPermission(msg: PermissionEvent): void {
+  // #1138: stash the rule the gateway resolved on "Always allow" so we
+  // can short-circuit later matching permission_request notifications
+  // (from the parent claude or any Task-dispatched sub-agent in the
+  // same session). The gateway only sets `rule` when it has also
+  // persisted the rule to settings.json, so a process restart will
+  // pick up the same set of rules from disk — the cache is purely a
+  // mid-session bridge between the disk write and the next agent boot.
+  if (msg.rule) {
+    sessionAllowRules.add(msg.rule)
+  }
   mcp.notification({
     method: 'notifications/claude/channel/permission',
     params: {

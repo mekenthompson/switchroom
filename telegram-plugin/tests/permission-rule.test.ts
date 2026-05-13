@@ -12,7 +12,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { resolveAlwaysAllowRule } from '../permission-rule.js'
+import { resolveAlwaysAllowRule, matchesAllowRule } from '../permission-rule.js'
 
 describe('resolveAlwaysAllowRule — Skill', () => {
   it('returns Skill(name) for a typical skill input', () => {
@@ -117,5 +117,84 @@ describe('resolveAlwaysAllowRule — fallback', () => {
   it('returns null for unknown tools', () => {
     expect(resolveAlwaysAllowRule('UnknownTool', undefined)).toBeNull()
     expect(resolveAlwaysAllowRule('', undefined)).toBeNull()
+  })
+})
+
+describe('matchesAllowRule — bare tool names', () => {
+  // The whole point of #1138: a cached `Edit` rule covers every Edit
+  // call from the parent claude AND from sub-agents dispatched via the
+  // Task tool, no matter the file path.
+  it('matches any invocation of the same tool', () => {
+    expect(matchesAllowRule('Edit', 'Edit', undefined)).toBe(true)
+    expect(matchesAllowRule('Edit', 'Edit', JSON.stringify({ file_path: '/tmp/a' }))).toBe(true)
+    expect(matchesAllowRule('Edit', 'Edit', JSON.stringify({ file_path: '/etc/passwd' }))).toBe(true)
+  })
+
+  it('does not bleed into other tools', () => {
+    expect(matchesAllowRule('Edit', 'Write', undefined)).toBe(false)
+    expect(matchesAllowRule('Read', 'Edit', undefined)).toBe(false)
+    expect(matchesAllowRule('Bash', 'BashOutput', undefined)).toBe(false)
+  })
+
+  it.each(['Bash', 'Read', 'Write', 'MultiEdit', 'Glob', 'Grep', 'WebFetch', 'TodoWrite'])(
+    'roundtrips through resolve → match for %s',
+    (tool) => {
+      const resolved = resolveAlwaysAllowRule(tool, undefined)
+      expect(resolved).not.toBeNull()
+      expect(matchesAllowRule(resolved!.rule, tool, undefined)).toBe(true)
+    },
+  )
+})
+
+describe('matchesAllowRule — Skill(name)', () => {
+  it('matches only the specific skill', () => {
+    expect(matchesAllowRule('Skill(mail)', 'Skill', JSON.stringify({ skill: 'mail' }))).toBe(true)
+    expect(matchesAllowRule('Skill(mail)', 'Skill', JSON.stringify({ skill: 'calendar' }))).toBe(false)
+  })
+
+  it('uses the same field fallback chain as the resolver', () => {
+    expect(matchesAllowRule('Skill(mail)', 'Skill', JSON.stringify({ skill_name: 'mail' }))).toBe(true)
+    expect(matchesAllowRule('Skill(mail)', 'Skill', JSON.stringify({ skillName: 'mail' }))).toBe(true)
+    expect(matchesAllowRule('Skill(mail)', 'Skill', JSON.stringify({ name: 'mail' }))).toBe(true)
+    expect(matchesAllowRule(
+      'Skill(coolify)',
+      'Skill',
+      JSON.stringify({ path: 'skills/coolify/SKILL.md' }),
+    )).toBe(true)
+  })
+
+  it('does not match a different tool with the same arg', () => {
+    expect(matchesAllowRule('Skill(mail)', 'Bash', JSON.stringify({ skill: 'mail' }))).toBe(false)
+  })
+
+  it('returns false on malformed Skill input', () => {
+    expect(matchesAllowRule('Skill(mail)', 'Skill', undefined)).toBe(false)
+    expect(matchesAllowRule('Skill(mail)', 'Skill', 'not-json')).toBe(false)
+    expect(matchesAllowRule('Skill(mail)', 'Skill', JSON.stringify({ unrelated: 'x' }))).toBe(false)
+  })
+})
+
+describe('matchesAllowRule — MCP tools', () => {
+  it('matches the exact namespaced tool', () => {
+    expect(matchesAllowRule(
+      'mcp__switchroom-telegram__reply',
+      'mcp__switchroom-telegram__reply',
+      undefined,
+    )).toBe(true)
+  })
+
+  it('does not match a different MCP tool on the same server', () => {
+    expect(matchesAllowRule(
+      'mcp__switchroom-telegram__reply',
+      'mcp__switchroom-telegram__stream_reply',
+      undefined,
+    )).toBe(false)
+  })
+})
+
+describe('matchesAllowRule — defensive', () => {
+  it('returns false for empty inputs', () => {
+    expect(matchesAllowRule('', 'Edit', undefined)).toBe(false)
+    expect(matchesAllowRule('Edit', '', undefined)).toBe(false)
   })
 })

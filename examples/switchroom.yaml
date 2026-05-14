@@ -15,7 +15,9 @@ switchroom:
 
 telegram:
   bot_token: "vault:telegram-bot-token"
-  forum_chat_id: "-1001234567890"
+  # DM-only sentinel; v0.7+ defaults to per-agent DM-pair topology.
+  # Legacy forum-mode installs keep a real chat id here.
+  forum_chat_id: "0"
 
 memory:
   backend: hindsight

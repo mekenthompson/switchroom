@@ -9,6 +9,7 @@
   "main": "./dist/cli/switchroom.js",
   "files": [
     "dist",
+    "examples",
     "profiles",
     "skills",
     "telegram-plugin",

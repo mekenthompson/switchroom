@@ -21,13 +21,31 @@
  * approval_lookup (RFC §10) to discover the outcome and proceed.
  */
 
-import type { Context } from "grammy";
+import { type Context, InlineKeyboard } from "grammy";
 import { parseApprovalCallback, ttlMsFromToken } from "./approval-card.js";
 import {
   approvalConsume,
   approvalRecord,
 } from "../../src/vault/approvals/client.js";
 import type { ApprovalDecisionMode } from "../../src/vault/approvals/schema.js";
+import { scopeToOpenInDriveButton } from "../../src/drive/deep-links.js";
+
+/**
+ * Build the post-tap keyboard for a granted decision. Today this is
+ * just the `[ 📖 Open in Drive ]` button when the granted scope names
+ * a specific Drive doc or folder (RFC E §4.3 — granted-card
+ * confirmations gain the deep-link). Returns `undefined` when no
+ * post-tap keyboard applies, which the gateway translates into
+ * `reply_markup: undefined` to strip the original action buttons.
+ *
+ * Pure / scope-driven — no kernel I/O — so it stays unit-testable
+ * without mocking grammy's Context.
+ */
+export function buildGrantedKeyboard(scope: string): InlineKeyboard | undefined {
+  const btn = scopeToOpenInDriveButton(scope);
+  if (btn === null) return undefined;
+  return new InlineKeyboard().url(btn.text, btn.url);
+}
 
 export async function handleApprovalCallback(
   ctx: Context,
@@ -109,7 +127,10 @@ export async function handleApprovalCallback(
     return;
   }
 
-  // Edit the original card to its post-tap state and drop the keyboard.
+  // Edit the original card to its post-tap state. Drop the original
+  // action keyboard either way; on a successful grant for a Drive
+  // scope, surface `[ 📖 Open in Drive ]` so the user can jump
+  // straight from "agent has access" to the doc (RFC E §4.3).
   const icon = granted ? "✅" : "🚫";
   const newBody =
     `${icon} ${displayMode}` +
@@ -117,8 +138,15 @@ export async function handleApprovalCallback(
       ? ` · /approvals revoke <code>${decision_id}</code>`
       : "");
 
+  const postTapKeyboard = granted && consumed.scope
+    ? buildGrantedKeyboard(consumed.scope)
+    : undefined;
+
   try {
-    await ctx.editMessageText(newBody, { parse_mode: "HTML", reply_markup: undefined });
+    await ctx.editMessageText(newBody, {
+      parse_mode: "HTML",
+      reply_markup: postTapKeyboard,
+    });
   } catch {
     // Best-effort: card may have been edited or deleted under us.
   }

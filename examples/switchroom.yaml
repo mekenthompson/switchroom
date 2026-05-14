@@ -45,12 +45,17 @@ defaults:
       format: html
   tools:
     allow: [all]
-  env:
-    SWITCHROOM_AUDIT_URL: "https://audit.example"
-  hooks:
-    PreToolUse:
-      - command: "/opt/switchroom-audit.sh"
-        timeout: 5
+  # Example: custom hooks. Uncomment + drop a script of your own at the
+  # referenced path to log every tool call before it runs. Left commented
+  # because the placeholder script doesn't ship — without one, Claude
+  # surfaces a non-blocking hook error on every tool call (noisy but
+  # harmless). Install-validation finding #29.
+  # env:
+  #   SWITCHROOM_AUDIT_URL: "https://audit.example"
+  # hooks:
+  #   PreToolUse:
+  #     - command: "/opt/switchroom-audit.sh"
+  #       timeout: 5
   # Bundled skills that ship with switchroom. `humanizer` removes AI-writing
   # patterns from agent replies before they reach Telegram (29 patterns from
   # Wikipedia's "Signs of AI writing" guide). `humanizer-calibrate` is its

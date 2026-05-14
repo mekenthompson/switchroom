@@ -305,9 +305,8 @@ function pad(s: string, width: number): string {
 // ────────────────────────────────────────────────────────────────────────
 // RFC G Phase 3b.3 — `auth google account add | remove | list`
 // Thin clients over the auth-broker (RFC H), with provider="google"
-// passed through. Storage path itself lives in the broker — Phase 3b.2c
-// wires it via the vault-broker per RFC G v3 §4.4. Today these verbs
-// produce clear errors pointing operators at the next-PR deferral.
+// passed through. add + remove are functional end-to-end; list awaits
+// a `list-google-accounts` broker op (tracked follow-up).
 // ────────────────────────────────────────────────────────────────────────
 
 function registerAccountAdd(accountParent: Command): void {

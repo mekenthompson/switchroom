@@ -10,7 +10,7 @@
  * builder.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { InlineKeyboard } from "grammy";
 import { buildGrantedKeyboard } from "./approval-callback.js";
 

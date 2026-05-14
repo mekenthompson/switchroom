@@ -1,7 +1,7 @@
 # Operator install — Docker fleet from GHCR
 
 Switchroom publishes its container images to GitHub Container Registry
-(GHCR) at `ghcr.io/switchroom/switchroom-{base,agent,broker,kernel,scheduler}`.
+(GHCR) at `ghcr.io/switchroom/switchroom-{base,agent,broker,kernel}`.
 The supported install path on Linux pulls those images and brings the
 fleet up via `docker compose`. No `docker build` on the operator's host.
 
@@ -64,7 +64,6 @@ The generated compose pins each service to a tagged GHCR ref:
 ```
 ghcr.io/switchroom/switchroom-broker:latest
 ghcr.io/switchroom/switchroom-kernel:latest
-ghcr.io/switchroom/switchroom-scheduler:latest
 ghcr.io/switchroom/switchroom-agent:latest
 ```
 

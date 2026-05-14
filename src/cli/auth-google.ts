@@ -58,7 +58,7 @@ export function registerAuthGoogleSubcommands(
   const account = google
     .command("account")
     .description(
-      "Manage Google account credentials (RFC G Phase 3b.3 — broker storage path lands in 3b.2c)",
+      "Manage Google account credentials in the auth-broker (add / remove / list).",
     );
   registerAccountAdd(account);
   registerAccountRemove(account);
@@ -305,50 +305,224 @@ function pad(s: string, width: number): string {
 // ────────────────────────────────────────────────────────────────────────
 // RFC G Phase 3b.3 — `auth google account add | remove | list`
 // Thin clients over the auth-broker (RFC H), with provider="google"
-// passed through. Storage path itself lives in the broker — Phase 3b.2c
-// wires it via the vault-broker per RFC G v3 §4.4. Today these verbs
-// produce clear errors pointing operators at the next-PR deferral.
+// passed through. add + remove are functional end-to-end; list awaits
+// a `list-google-accounts` broker op (tracked follow-up).
 // ────────────────────────────────────────────────────────────────────────
 
 function registerAccountAdd(accountParent: Command): void {
   accountParent
     .command("add <account>")
     .description(
-      "Mint a Google OAuth refresh token for <account> and register it with the auth-broker. Phase 3b.3 ships the CLI shape; OAuth flow extraction lives in Phase 3b.2c. For now use `switchroom drive connect <agent>` (the v0.6.0 verb).",
+      "Mint a Google OAuth refresh token for <account> and register it with the auth-broker. Three-tier OAuth: device-code → OOB-paste → desktop-loopback (RFC D §3, RFC G §4.5).",
+    )
+    .option(
+      "--replace",
+      "Overwrite existing credentials for <account> (default refuses if account already registered)",
+      false,
     )
     .action(
-      withConfigError(async (account: string) => {
+      withConfigError(async (account: string, opts: { replace?: boolean }) => {
         const normalizedAccount = validateAndNormalizeAccountEmail(account);
+
+        // Lazy-import the OAuth flow + vault resolver — they pull in
+        // sizeable trees (Drive scaffolding, AES vault) that the
+        // sibling enable/disable/list verbs don't need.
+        const [
+          { runDriveOAuthFlow, DRIVE_READONLY_SCOPES },
+          { selectInitialTier },
+          { brokerCall },
+          { loadConfig, resolvePath },
+          { getSecret },
+          { isVaultReference, parseVaultReference },
+        ] = await Promise.all([
+          import("./drive.js"),
+          import("../drive/oauth.js"),
+          import("./broker-call.js"),
+          import("../config/loader.js"),
+          import("../vault/vault.js"),
+          import("../vault/resolver.js"),
+        ]);
+
+        const config = loadConfig();
+        const gw = config.google_workspace;
+        if (!gw) {
+          throw new Error(
+            "switchroom.yaml is missing a `google_workspace:` block. Add `google_workspace: { google_client_id: ..., google_client_secret: ... }` (vault:<key> refs supported) before connecting accounts.",
+          );
+        }
+
+        // Resolve OAuth client id + secret. Env wins over config (one-
+        // off overrides during operator debugging). vault:<key> refs
+        // require the vault passphrase.
+        let clientIdRaw =
+          process.env.SWITCHROOM_GOOGLE_CLIENT_ID ?? gw.google_client_id;
+        let clientSecretRaw =
+          process.env.SWITCHROOM_GOOGLE_CLIENT_SECRET ??
+          gw.google_client_secret;
+        if (!clientIdRaw || !clientSecretRaw) {
+          throw new Error(
+            "Missing Google OAuth client credentials. Set google_workspace.google_client_id + google_client_secret in switchroom.yaml, or env SWITCHROOM_GOOGLE_CLIENT_ID + SWITCHROOM_GOOGLE_CLIENT_SECRET.",
+          );
+        }
+
+        const needsVault =
+          isVaultReference(clientIdRaw) || isVaultReference(clientSecretRaw);
+        if (needsVault) {
+          const vaultPath = resolvePath(
+            config.vault?.path ?? "~/.switchroom/vault.enc",
+          );
+          const passphrase =
+            process.env.SWITCHROOM_VAULT_PASSPHRASE ??
+            (await readHiddenLine("Vault passphrase: "));
+          const resolveRef = (raw: string, label: string): string => {
+            if (!isVaultReference(raw)) return raw;
+            const key = parseVaultReference(raw);
+            const entry = getSecret(passphrase, vaultPath, key);
+            if (!entry) {
+              throw new Error(
+                `${label} references vault key '${key}' but no such secret in vault.`,
+              );
+            }
+            if (entry.kind !== "string") {
+              throw new Error(
+                `${label} vault entry '${key}' is not a string (kind=${entry.kind}).`,
+              );
+            }
+            return entry.value;
+          };
+          clientIdRaw = resolveRef(clientIdRaw, "google_client_id");
+          clientSecretRaw = resolveRef(clientSecretRaw, "google_client_secret");
+        }
+
+        const oauthCfg = {
+          client_id: clientIdRaw,
+          client_secret: clientSecretRaw,
+          scopes: DRIVE_READONLY_SCOPES,
+        };
+        // OAuthEnv is a shaped subset of process.env — picking the
+        // fields the selector reads (rather than passing process.env
+        // wholesale) keeps the call typed.
+        const oauthEnv = {
+          DISPLAY: process.env.DISPLAY,
+          WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY,
+          SSH_CONNECTION: process.env.SSH_CONNECTION,
+          SSH_TTY: process.env.SSH_TTY,
+          SWITCHROOM_DRIVE_OAUTH_TIER:
+            process.env.SWITCHROOM_DRIVE_OAUTH_TIER,
+        };
+        const initialTier = selectInitialTier(oauthEnv);
+
         console.log();
         console.log(
-          chalk.yellow(
-            `  ⚠  Phase 3b.3 ships the CLI shape only; the OAuth flow extraction + broker storage path land in Phase 3b.2c.`,
+          chalk.bold(
+            `Connecting Google account ${chalk.cyan(normalizedAccount)} to switchroom auth-broker.`,
+          ),
+        );
+        console.log(
+          chalk.gray(
+            `  OAuth tier: ${initialTier} (will fall through if Google rejects)`,
           ),
         );
         console.log();
-        console.log(`  For now, use the v0.6.0 verb to mint the token:`);
-        console.log(
-          chalk.cyan(`    switchroom drive connect <agent-with-google-config>`),
+
+        const tokens = await runDriveOAuthFlow(
+          oauthCfg,
+          initialTier,
+          process.env,
         );
+
+        if (!tokens.refresh_token) {
+          throw new Error(
+            "Google did not return a refresh_token. Re-run after revoking prior consent at https://myaccount.google.com/permissions, or set OAUTH_PROMPT=consent in the environment.",
+          );
+        }
+
+        const googleCreds = buildGoogleCredentials({
+          tokens,
+          clientId: clientIdRaw,
+          accountEmail: normalizedAccount,
+          fallbackScope: DRIVE_READONLY_SCOPES.join(" "),
+        });
+
+        await brokerCall(async (client) => {
+          await client.addAccount(
+            normalizedAccount,
+            googleCreds,
+            opts.replace ?? false,
+            "google",
+          );
+        });
+
         console.log();
         console.log(
-          `  Once the broker storage path lands, this verb will:`,
+          chalk.green(
+            `  ✓ Registered Google account ${chalk.bold(normalizedAccount)} with auth-broker.`,
+          ),
         );
+        console.log();
+        console.log(`  Next: enable on one or more agents:`);
         console.log(
-          chalk.gray(`    1. Run the OAuth device-code / OOB-paste / loopback flow`),
-        );
-        console.log(
-          chalk.gray(`    2. Exchange code for refresh + access tokens`),
-        );
-        console.log(
-          chalk.gray(`    3. Call auth-broker.add-account({provider: "google", account: ${normalizedAccount}, credentials: {...}})`),
-        );
-        console.log(
-          chalk.gray(`    4. Operator runs \`auth google enable ${normalizedAccount} <agents>\` to enable on agents`),
+          chalk.cyan(
+            `    switchroom auth google enable ${normalizedAccount} <agent> [...]`,
+          ),
         );
         console.log();
       }),
     );
+}
+
+/**
+ * Read a single line from stdin without echoing characters. Mirrors
+ * the inline implementations in drive.ts:121 and telegram.ts:584
+ * exactly — manual `'data'` accumulation under setRawMode (so
+ * keystrokes never reach stdout), `rl.question(prompt, …)` fallback
+ * for the non-TTY/pipe case where echo isn't a concern.
+ *
+ * Extraction of the three duplicates into a shared module is its own
+ * cleanup PR (would touch unrelated callsites).
+ */
+async function readHiddenLine(prompt: string): Promise<string> {
+  const { createInterface } = await import("node:readline");
+  return await new Promise<string>((resolve, reject) => {
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    if (process.stdin.isTTY) {
+      process.stdout.write(prompt);
+      const stdin = process.stdin;
+      stdin.setRawMode(true);
+      stdin.resume();
+      let input = "";
+      const onData = (data: Buffer) => {
+        const char = data.toString("utf8");
+        if (char === "\n" || char === "\r") {
+          stdin.setRawMode(false);
+          stdin.removeListener("data", onData);
+          rl.close();
+          process.stdout.write("\n");
+          resolve(input);
+        } else if (char === "") {
+          // Ctrl-C
+          stdin.setRawMode(false);
+          stdin.removeListener("data", onData);
+          rl.close();
+          process.stdout.write("\n");
+          reject(new Error("Aborted"));
+        } else if (char === "" || char === "\b") {
+          if (input.length > 0) input = input.slice(0, -1);
+        } else {
+          input += char;
+        }
+      };
+      stdin.on("data", onData);
+    } else {
+      rl.question(prompt, (answer) => {
+        rl.close();
+        resolve(answer);
+      });
+    }
+  });
 }
 
 function registerAccountRemove(accountParent: Command): void {
@@ -384,51 +558,99 @@ function registerAccountList(accountParent: Command): void {
   accountParent
     .command("list")
     .description(
-      "List Google accounts known to the auth-broker. Distinct from `auth google list` (which shows the YAML google_accounts × agents matrix).",
+      "List Google accounts stored in the auth-broker. Distinct from `auth google list` (which shows the YAML google_accounts × agents matrix).",
     )
     .option("--json", "Emit raw JSON instead of a table")
     .action(
-      withConfigError(async (opts: { json?: boolean }) => {
-        const { brokerCall } = await import("./broker-call.js");
-        // Phase 3b.3 — broker doesn't yet surface per-provider lists.
-        // For Google specifically the broker doesn't yet store accounts
-        // (Phase 3b.2c lands the storage path); the call below succeeds
-        // but only Anthropic accounts come back in `state.accounts`.
-        // Verb is scoped to Google — we DON'T leak Anthropic state into
-        // the output. JSON mode emits an empty list with the deferral
-        // note; human mode prints the deferral + a pointer at the
-        // sibling `auth google list` for the YAML matrix view.
-        await brokerCall(async (client) => {
-          // Trip the broker connection (validates the socket is
-          // reachable) but discard the Anthropic-only result — Google
-          // listing lands in Phase 3b.2c.
-          await client.listState();
-        });
-        if (opts.json) {
-          console.log(
-            JSON.stringify(
-              {
-                google_accounts: [],
-                note: "Phase 3b.2c will surface Google accounts stored in the broker. Today the broker stores Anthropic only; this verb returns an empty list.",
-              },
-              null,
-              2,
-            ),
-          );
-          return;
-        }
-        console.log();
-        console.log(
-          chalk.gray(
-            `  Google accounts surfaced via the broker land in Phase 3b.2c.`,
+      withConfigError(async (_opts: { json?: boolean }) => {
+        // The broker stores Google credentials per-account today
+        // (#1272 / opGoogleAddAccount → google-storage.ts) but doesn't
+        // yet expose a `list-google-accounts` op. Rather than return
+        // a misleading empty list (which scripts would silently treat
+        // as "no accounts"), refuse with NOT_IMPLEMENTED + a pointer
+        // at the on-disk source of truth and the sibling YAML matrix
+        // verb. A `list-google-accounts` broker op + this verb's
+        // wiring is tracked as a follow-up.
+        console.error();
+        console.error(
+          chalk.yellow(
+            `  ⚠  \`auth google account list\` is not yet implemented — the broker has no list-google-accounts op.`,
           ),
         );
-        console.log(
-          `  For the YAML google_accounts × agents matrix, use: ${chalk.bold("switchroom auth google list")}`,
+        console.error();
+        console.error(`  To inspect Google accounts the broker holds:`);
+        console.error(
+          chalk.gray(`    ls ~/.switchroom/state/auth-broker/google/`),
         );
-        console.log();
+        console.error();
+        console.error(`  For the YAML google_accounts × agents matrix:`);
+        console.error(
+          chalk.cyan(`    switchroom auth google list`),
+        );
+        console.error();
+        process.exit(1);
       }),
     );
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Pure helpers — extracted for unit testing
+// ────────────────────────────────────────────────────────────────────────
+
+interface BuildGoogleCredentialsArgs {
+  tokens: {
+    access_token: string;
+    refresh_token?: string;
+    expires_in: number;
+    scope?: string;
+  };
+  clientId: string;
+  accountEmail: string;
+  /** Joined-with-spaces scope to fall back to if Google omits scope. */
+  fallbackScope: string;
+  /** Test seam — defaults to Date.now(). */
+  now?: () => number;
+}
+
+interface GoogleAddAccountCredentialsLike {
+  googleOauth: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number;
+    scope: string;
+    clientId: string;
+    accountEmail: string;
+    tokenType: "Bearer";
+  };
+}
+
+/**
+ * Construct the GoogleAddAccountCredentials payload the auth-broker
+ * expects from a Google token-exchange response. Pure — easy to unit
+ * test and reason about. Refuses tokens missing refresh_token (Google
+ * only returns it on first consent or `prompt=consent` re-consent).
+ */
+export function buildGoogleCredentials(
+  args: BuildGoogleCredentialsArgs,
+): GoogleAddAccountCredentialsLike {
+  const { tokens, clientId, accountEmail, fallbackScope, now } = args;
+  if (!tokens.refresh_token) {
+    throw new Error(
+      "Google token-exchange did not return a refresh_token — re-consent required.",
+    );
+  }
+  const epochMs = (now ?? Date.now)();
+  return {
+    googleOauth: {
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token,
+      expiresAt: epochMs + tokens.expires_in * 1000,
+      scope: tokens.scope ?? fallbackScope,
+      clientId,
+      accountEmail,
+      tokenType: "Bearer",
+    },
+  };
 }
 
 // Re-export for tests.
@@ -436,5 +658,6 @@ export const _testing = {
   validateAndNormalizeAccountEmail,
   getEnabledAgentsBefore,
   expandAllAgents,
+  buildGoogleCredentials,
 };
 

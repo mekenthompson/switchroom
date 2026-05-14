@@ -562,35 +562,72 @@ function registerAccountList(accountParent: Command): void {
     )
     .option("--json", "Emit raw JSON instead of a table")
     .action(
-      withConfigError(async (_opts: { json?: boolean }) => {
-        // The broker stores Google credentials per-account today
-        // (#1272 / opGoogleAddAccount → google-storage.ts) but doesn't
-        // yet expose a `list-google-accounts` op. Rather than return
-        // a misleading empty list (which scripts would silently treat
-        // as "no accounts"), refuse with NOT_IMPLEMENTED + a pointer
-        // at the on-disk source of truth and the sibling YAML matrix
-        // verb. A `list-google-accounts` broker op + this verb's
-        // wiring is tracked as a follow-up.
-        console.error();
-        console.error(
-          chalk.yellow(
-            `  ⚠  \`auth google account list\` is not yet implemented — the broker has no list-google-accounts op.`,
-          ),
+      withConfigError(async (opts: { json?: boolean }) => {
+        const { brokerCall } = await import("./broker-call.js");
+        const data = await brokerCall(async (client) =>
+          client.listGoogleAccounts(),
         );
-        console.error();
-        console.error(`  To inspect Google accounts the broker holds:`);
-        console.error(
-          chalk.gray(`    ls ~/.switchroom/state/auth-broker/google/`),
+
+        if (opts.json) {
+          console.log(JSON.stringify(data, null, 2));
+          return;
+        }
+
+        console.log();
+        if (data.accounts.length === 0) {
+          console.log(chalk.gray("  No Google accounts stored in broker."));
+          console.log(
+            `  Add one: ${chalk.bold("switchroom auth google account add <email>")}`,
+          );
+          console.log();
+          return;
+        }
+
+        const accountColWidth = Math.max(
+          ...data.accounts.map((a) => a.account.length),
+          "ACCOUNT".length,
         );
-        console.error();
-        console.error(`  For the YAML google_accounts × agents matrix:`);
-        console.error(
-          chalk.cyan(`    switchroom auth google list`),
+        const expiresColWidth = "EXPIRES".length + 2;
+        console.log(
+          `${pad("ACCOUNT", accountColWidth)}  ${pad("EXPIRES", expiresColWidth)}  SCOPE`,
         );
-        console.error();
-        process.exit(1);
+        console.log(
+          `${pad("-".repeat(7), accountColWidth)}  ${pad("-".repeat(7), expiresColWidth)}  ${"-".repeat(5)}`,
+        );
+        const now = Date.now();
+        for (const a of data.accounts) {
+          const remainingMs = a.expiresAt - now;
+          const expiresLabel = formatExpiry(remainingMs);
+          // Compress scope display — operators don't need the full URL
+          // prefix on every list. Keep enough to distinguish read-only
+          // from writable scopes.
+          const scopes = a.scope
+            .split(" ")
+            .map((s) => s.replace(/^https:\/\/www\.googleapis\.com\/auth\//, ""))
+            .filter(Boolean)
+            .join(", ");
+          console.log(
+            `${pad(a.account, accountColWidth)}  ${pad(expiresLabel, expiresColWidth)}  ${scopes}`,
+          );
+        }
+        console.log();
       }),
     );
+}
+
+/**
+ * Format a millisecond duration as a short relative time. Negative
+ * durations render as "expired" — the broker's refresh-tick keeps
+ * stored creds within the 60-min threshold so this should be rare.
+ */
+function formatExpiry(remainingMs: number): string {
+  if (remainingMs <= 0) return chalk.red("expired");
+  const minutes = Math.round(remainingMs / 60_000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  const days = Math.round(hours / 24);
+  return `${days}d`;
 }
 
 // ────────────────────────────────────────────────────────────────────────

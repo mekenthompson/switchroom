@@ -321,7 +321,10 @@ function loadCredentialsFromAgent(agentName: string): AddAccountCredentials {
     );
     process.exit(1);
   }
-  if (typeof parsed?.claudeAiOauth?.accessToken !== "string") {
+  if (
+    !("claudeAiOauth" in parsed) ||
+    typeof parsed.claudeAiOauth?.accessToken !== "string"
+  ) {
     console.error(
       chalk.red(`  credentials.json missing claudeAiOauth.accessToken`),
     );
@@ -342,7 +345,10 @@ function loadCredentialsFromFile(path: string): AddAccountCredentials {
     console.error(chalk.red(`  Failed to parse ${path}: ${(err as Error).message}`));
     process.exit(1);
   }
-  if (typeof parsed?.claudeAiOauth?.accessToken !== "string") {
+  if (
+    !("claudeAiOauth" in parsed) ||
+    typeof parsed.claudeAiOauth?.accessToken !== "string"
+  ) {
     console.error(chalk.red(`  ${path} is missing claudeAiOauth.accessToken`));
     process.exit(1);
   }

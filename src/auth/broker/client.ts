@@ -44,6 +44,7 @@ import {
   encodeRequest,
   decodeResponse,
   type ErrorCode,
+  type ProviderName,
   type Request,
   type Response,
 } from "./protocol.js";
@@ -179,8 +180,8 @@ export interface SetOverrideData {
   account: string | null;
 }
 
-/** Credentials payload for `addAccount`. */
-export interface AddAccountCredentials {
+/** Anthropic-shaped credentials payload for `addAccount`. */
+export interface AnthropicAddAccountCredentials {
   claudeAiOauth: {
     accessToken: string;
     refreshToken?: string;
@@ -190,6 +191,29 @@ export interface AddAccountCredentials {
     rateLimitTier?: string;
   };
 }
+
+/**
+ * Google-shaped credentials payload for `addAccount`. Phase 3b.2a
+ * shipped the protocol-side schema (`GoogleCredentialsSchema`); this
+ * is the client-side TS type. Phase 3b.3 callers (CLI verbs) construct
+ * this from a Google OAuth token-exchange response.
+ */
+export interface GoogleAddAccountCredentials {
+  googleOauth: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number;
+    scope: string;
+    clientId: string;
+    accountEmail: string;
+    tokenType: "Bearer";
+  };
+}
+
+/** Discriminated union of credentials shapes for `addAccount`. */
+export type AddAccountCredentials =
+  | AnthropicAddAccountCredentials
+  | GoogleAddAccountCredentials;
 
 // ─── Client ───────────────────────────────────────────────────────────────
 
@@ -290,34 +314,40 @@ export class AuthBrokerClient {
     label: string,
     credentials: AddAccountCredentials,
     replace?: boolean,
+    provider?: ProviderName,
   ): Promise<AddAccountData> {
-    const req: Request = replace
-      ? {
-          v: PROTOCOL_VERSION,
-          id: randomUUID(),
-          op: "add-account",
-          label,
-          credentials,
-          replace: true,
-        }
-      : {
-          v: PROTOCOL_VERSION,
-          id: randomUUID(),
-          op: "add-account",
-          label,
-          credentials,
-        };
+    // Build the request inline — Request is a discriminated union and
+    // the conditional `replace` field plus optional `provider` field
+    // need to be attached in a way that satisfies the schema.
+    const base = {
+      v: PROTOCOL_VERSION,
+      id: randomUUID(),
+      op: "add-account" as const,
+      label,
+      credentials,
+    };
+    const withReplace = replace ? { ...base, replace: true } : base;
+    const req: Request = (provider !== undefined
+      ? { ...withReplace, provider }
+      : withReplace) as Request;
     const data = await this.send(req);
     return data as AddAccountData;
   }
 
-  async rmAccount(label: string): Promise<RmAccountData> {
-    const data = await this.send({
+  async rmAccount(
+    label: string,
+    provider?: ProviderName,
+  ): Promise<RmAccountData> {
+    const base = {
       v: PROTOCOL_VERSION,
       id: randomUUID(),
-      op: "rm-account",
+      op: "rm-account" as const,
       label,
-    });
+    };
+    const req: Request = (provider !== undefined
+      ? { ...base, provider }
+      : base) as Request;
+    const data = await this.send(req);
     return data as RmAccountData;
   }
 

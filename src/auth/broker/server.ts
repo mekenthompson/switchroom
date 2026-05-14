@@ -313,6 +313,21 @@ export class AuthBroker {
       this.refreshTimer.unref();
     }
 
+    // Boot fanout — write per-agent .credentials.json mirrors for every
+    // agent whose effective account exists on disk. Without this, a fresh
+    // boot leaves agents without a mirror until the next setActive() RPC
+    // or threshold-driven refreshTick(): with a far-future expiresAt the
+    // refresh tick no-ops indefinitely, and `switchroom update` fleets
+    // come back logged-out because the new RFC-H runtime reads the file,
+    // not the env var the legacy path injected. fanoutAll is a no-op when
+    // auth.active and per-agent overrides are both unset (returns 0).
+    const fanned = this.fanoutAll();
+    if (fanned.length > 0) {
+      process.stdout.write(
+        `auth-broker: boot fanout wrote ${fanned.length} mirror(s) — ${fanned.join(", ")}\n`,
+      );
+    }
+
     // Healthy marker — docker healthcheck reads this.
     if (!this.opts.skipHealthyMarker) {
       try {

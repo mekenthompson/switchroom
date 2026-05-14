@@ -177,6 +177,55 @@ describe("AuthBroker — startup + listeners", () => {
     broker.stop();
   });
 
+  // Boot fanout — without this, `switchroom update` fleets come back
+  // logged-out: the new RFC-H runtime reads .credentials.json from disk,
+  // refreshTick() no-ops while expiresAt is far in the future, and
+  // there's no setActive() call after recreate. So the only opportunity
+  // to write the per-agent mirror is at boot. fanoutAll() honours the
+  // same effective-account rule (auth.override ?? auth.active) so it's
+  // safe regardless of how the operator pinned accounts.
+  it("writes per-agent .credentials.json mirrors at boot when auth.active is set", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      agents: { ziggy: {}, clerk: {} },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "ziggy"), { recursive: true });
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const ziggyMirror = join(h.agentsDir, "ziggy", ".claude", ".credentials.json");
+    const clerkMirror = join(h.agentsDir, "clerk", ".claude", ".credentials.json");
+    expect(existsSync(ziggyMirror)).toBe(true);
+    expect(existsSync(clerkMirror)).toBe(true);
+    expect(readFileSync(ziggyMirror, "utf-8")).toContain("at-default");
+    broker.stop();
+  });
+
+  it("boot fanout is a no-op when auth.active and per-agent overrides are both unset", async () => {
+    const h = makeHarness();
+    // No `active` set — exactly the misconfiguration this fanout guards.
+    const config = makeConfig(h, { agents: { ziggy: {} } });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "ziggy"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const ziggyMirror = join(h.agentsDir, "ziggy", ".claude", ".credentials.json");
+    expect(existsSync(ziggyMirror)).toBe(false);
+    broker.stop();
+  });
+
   it("refuses to start with a consumer named like an agent", () => {
     const h = makeHarness();
     const config = makeConfig(h, {

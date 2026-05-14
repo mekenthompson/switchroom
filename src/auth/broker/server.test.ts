@@ -882,6 +882,154 @@ describe("AuthBroker — Google provider registration (Phase 3b.2b)", () => {
     broker.stop();
   });
 
+  it("Phase 3b.4 — get-credentials with provider:google returns the stored Google creds when agent is in enabled_for[]", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { klanker: {}, clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    (config.agents.klanker as unknown as Record<string, unknown>).google_workspace = {
+      account: "alice@example.com",
+    };
+    (config as unknown as Record<string, unknown>).google_accounts = {
+      "alice@example.com": { enabled_for: ["klanker"] },
+    };
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "klanker"), { recursive: true });
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const addedCreds = {
+      googleOauth: {
+        accessToken: "at-cur",
+        refreshToken: "rt-cur",
+        expiresAt: 88888,
+        scope: "drive",
+        clientId: "cid",
+        accountEmail: "alice@example.com",
+        tokenType: "Bearer" as const,
+      },
+    };
+    await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "1", op: "add-account", label: "alice@example.com",
+      provider: "google", credentials: addedCreds,
+    });
+    const resp = await rpc(join(h.socketRoot, "klanker", "sock"), {
+      v: 1, id: "2", op: "get-credentials", provider: "google",
+    }) as { ok: boolean; data?: { account: string; credentials: typeof addedCreds; expiresAt?: number } };
+    expect(resp.ok).toBe(true);
+    expect(resp.data?.account).toBe("alice@example.com");
+    expect(resp.data?.credentials).toEqual(addedCreds);
+    expect(resp.data?.expiresAt).toBe(88888);
+    broker.stop();
+  });
+
+  it("Phase 3b.4 — get-credentials google returns FORBIDDEN when agent NOT in enabled_for[]", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { klanker: {}, clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    (config.agents.klanker as unknown as Record<string, unknown>).google_workspace = {
+      account: "alice@example.com",
+    };
+    (config as unknown as Record<string, unknown>).google_accounts = {
+      "alice@example.com": { enabled_for: ["gymbro"] },
+    };
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "klanker"), { recursive: true });
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const resp = await rpc(join(h.socketRoot, "klanker", "sock"), {
+      v: 1, id: "1", op: "get-credentials", provider: "google",
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("FORBIDDEN");
+    expect(resp.error?.message).toContain("not in google_accounts");
+    expect(resp.error?.message).toContain("auth google enable");
+    broker.stop();
+  });
+
+  it("Phase 3b.4 — get-credentials google returns ACCOUNT_NOT_FOUND when agent has no google_workspace.account", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { klanker: {}, clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "klanker"), { recursive: true });
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const resp = await rpc(join(h.socketRoot, "klanker", "sock"), {
+      v: 1, id: "1", op: "get-credentials", provider: "google",
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("ACCOUNT_NOT_FOUND");
+    expect(resp.error?.message).toContain("google_workspace.account");
+    broker.stop();
+  });
+
+  it("Phase 3b.4 — get-credentials WITHOUT provider field still routes to Anthropic (back-compat)", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { klanker: {}, clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "klanker"), { recursive: true });
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const resp = await rpc(join(h.socketRoot, "klanker", "sock"), {
+      v: 1, id: "1", op: "get-credentials",
+    }) as { ok: boolean; data?: { account: string } };
+    expect(resp.ok).toBe(true);
+    expect(resp.data?.account).toBe("default");
+    broker.stop();
+  });
+
   it("Phase 3b.2c — rm-account succeeds after add when no agents are enabled", async () => {
     const h = makeHarness();
     const config = makeConfig(h, {

@@ -527,9 +527,38 @@ export class AuthBroker {
 
     try {
       switch (req.op) {
-        case "get-credentials":
-          await this.opGetCredentials(socket, reqId, identity);
+        case "get-credentials": {
+          // Phase 3b.4 — provider field routes between Anthropic
+          // (existing path-as-identity flow) and Google (per-agent
+          // google_workspace.account + per-account ACL gate).
+          const provider: ProviderName = req.provider ?? "anthropic";
+          if (!this.providers.has(provider)) {
+            socket.write(
+              encodeError(
+                reqId,
+                "INVALID_ARGS",
+                `provider '${provider}' is not registered with this broker (only ${this.providers.names().join(", ")} available)`,
+              ),
+            );
+            break;
+          }
+          if (provider === "anthropic") {
+            await this.opGetCredentials(socket, reqId, identity);
+            break;
+          }
+          if (provider === "google") {
+            await this.opGoogleGetCredentials(socket, reqId, identity);
+            break;
+          }
+          socket.write(
+            encodeError(
+              reqId,
+              "INTERNAL",
+              `unhandled provider '${provider}' in get-credentials dispatch`,
+            ),
+          );
           break;
+        }
         case "list-state":
           await this.opListState(socket, reqId, identity);
           break;
@@ -981,6 +1010,85 @@ export class AuthBroker {
    *     it's needed — likely Phase 3b.2d alongside the refresh tick
    *     wiring).
    */
+  /**
+   * RFC G Phase 3b.4 — Google get-credentials.
+   *
+   * Identity comes from path-as-identity (the agent's bind socket).
+   * Account comes from the agent's `google_workspace.account` config
+   * field (NOT from the wire — agent can't ask for someone else's
+   * Google account). ACL is enforced via
+   * `google_accounts.<account>.enabled_for[]` containing the agent.
+   *
+   * Operator and consumer identities are not (yet) supported for Google
+   * get-credentials — the Google ACL model is per-agent, and operators
+   * + consumers have different identity models. Return INVALID_ARGS
+   * with a clear message until Phase 3b.4b extends the contract if
+   * needed.
+   */
+  private async opGoogleGetCredentials(
+    socket: net.Socket,
+    id: string,
+    identity: Identity,
+  ): Promise<void> {
+    if (identity.kind !== "agent") {
+      socket.write(
+        encodeError(
+          id,
+          "INVALID_ARGS",
+          `Google get-credentials is per-agent only (caller kind '${identity.kind}' not supported); use the agent's per-agent socket bind`,
+        ),
+      );
+      return;
+    }
+    const agentName = identity.name;
+    const agent = (this.config.agents ?? {})[agentName] as
+      | { google_workspace?: { account?: string } }
+      | undefined;
+    const account = agent?.google_workspace?.account;
+    if (!account) {
+      this.audit({ op: "get-credentials", identity, ok: false, error: "no-google-account-configured" });
+      socket.write(
+        encodeError(
+          id,
+          "ACCOUNT_NOT_FOUND",
+          `agent '${agentName}' has no google_workspace.account configured in switchroom.yaml`,
+        ),
+      );
+      return;
+    }
+    // ACL: agent must be in google_accounts.<account>.enabled_for[].
+    const ga = (this.config as { google_accounts?: Record<string, { enabled_for?: string[] }> })
+      .google_accounts;
+    const enabledFor = ga?.[account]?.enabled_for ?? [];
+    if (!enabledFor.includes(agentName)) {
+      this.audit({ op: "get-credentials", identity, account, ok: false, error: "acl-deny" });
+      socket.write(
+        encodeError(
+          id,
+          "FORBIDDEN",
+          `agent '${agentName}' not in google_accounts['${account}'].enabled_for[] — operator must run \`switchroom auth google enable ${account} ${agentName}\``,
+        ),
+      );
+      return;
+    }
+    // Storage read.
+    const creds = readGoogleAccountCredentials(this.stateDir, account);
+    if (!creds) {
+      this.audit({ op: "get-credentials", identity, account, ok: false, error: "missing-credentials" });
+      socket.write(
+        encodeError(
+          id,
+          "ACCOUNT_NOT_FOUND",
+          `no Google credentials for account '${account}' — operator must run \`switchroom auth google account add ${account}\``,
+        ),
+      );
+      return;
+    }
+    const expiresAt = creds.googleOauth?.expiresAt;
+    this.audit({ op: "get-credentials", identity, account, ok: true });
+    socket.write(encodeSuccess(id, { account, credentials: creds, expiresAt }));
+  }
+
   private async opGoogleAddAccount(
     socket: net.Socket,
     id: string,

@@ -571,6 +571,38 @@ describe("AgentGoogleWorkspaceConfigSchema (RFC G per-agent override)", () => {
     ).toThrow();
   });
 
+  it("RFC G Phase 2: google_accounts rejects emails containing a colon (broker key-parser footgun)", () => {
+    expect(() =>
+      SwitchroomConfigSchema.parse({
+        switchroom: { version: 1 },
+        telegram: { bot_token: "x", forum_chat_id: "1" },
+        google_accounts: {
+          // Colon in local-part would write a slot the broker can't
+          // reverse-parse with its `^google:([^:]+):([a-z_]+)$` regex.
+          "alice:risky@example.com": { enabled_for: ["klanker"] },
+        },
+        agents: {},
+      }),
+    ).toThrow();
+  });
+
+  it("RFC G Phase 2: google_accounts normalizes mixed-case email keys to lowercase at parse time", () => {
+    // Without schema-side normalization, `Alice@Example.com` would write
+    // a slot under `alice@example.com` (per normalizeGoogleAccount) but
+    // the broker lookup against `google_accounts['alice@example.com']`
+    // would miss. Schema transform closes that gap.
+    const result = SwitchroomConfigSchema.parse({
+      switchroom: { version: 1 },
+      telegram: { bot_token: "x", forum_chat_id: "1" },
+      google_accounts: {
+        "Alice@Example.COM": { enabled_for: ["klanker"] },
+      },
+      agents: {},
+    });
+    expect(Object.keys(result.google_accounts ?? {})).toEqual(["alice@example.com"]);
+    expect(result.google_accounts?.["alice@example.com"].enabled_for).toEqual(["klanker"]);
+  });
+
   it("RFC G Phase 2: google_accounts.enabled_for accepts an empty array (means dormant)", () => {
     const result = SwitchroomConfigSchema.parse({
       switchroom: { version: 1 },

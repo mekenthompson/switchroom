@@ -1823,13 +1823,26 @@ export const SwitchroomConfigSchema = z.object({
   ),
   google_accounts: z
     .record(
-      // Google account email — case-insensitive on Google's side, but we
-      // normalize to lowercase at write time. Loose validation: must
-      // contain @ and a dot. Strict email validation belongs at the CLI
-      // layer where we can give a useful error.
-      z.string().regex(/^[^@\s]+@[^@\s]+\.[^@\s]+$/, {
-        message: "Account key must be a Google account email like 'alice@example.com'",
-      }),
+      // Google account email — case-insensitive on Google's side, so we
+      // normalize via z.string().toLowerCase().trim() so the schema-level
+      // key matches the lowercase form vault slots are written under.
+      // Without this, a config key `Alice@Example.com` would write its
+      // slot at `google:alice@example.com:refresh_token` per
+      // normalizeGoogleAccount() but the broker's google_accounts[]
+      // lookup would miss (broker normalizes the slot-key side, not the
+      // config-key side). Schema-level normalization closes that gap.
+      //
+      // Validation: must contain @ + dot, must NOT contain `:` (the
+      // broker's slot-key parser uses `:` as the field separator —
+      // a colon in the local-part would write a slot the broker can't
+      // reverse-parse, silently rendering it unreachable). Strict email
+      // validation (RFC 5321 etc.) belongs at the CLI layer where we
+      // can give an actionable error; this is the load-bearing minimum.
+      z.string()
+        .regex(/^[^@\s:]+@[^@\s:]+\.[^@\s:]+$/, {
+          message: "Account key must be a Google account email like 'alice@example.com' (colons not allowed)",
+        })
+        .transform((v) => v.trim().toLowerCase()),
       z.object({
         enabled_for: z
           .array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,50}$/, {

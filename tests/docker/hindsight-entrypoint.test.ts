@@ -31,6 +31,16 @@ const ENTRYPOINT = resolve(
   "docker",
   "hindsight-entrypoint.sh",
 );
+/** The Dockerfile copies the fetcher to /usr/local/lib/switchroom/ at
+ *  build time; the entrypoint resolves the path via env. For host
+ *  tests we point at the source file directly. */
+const FETCHER = resolve(
+  __dirname,
+  "..",
+  "..",
+  "docker",
+  "hindsight-fetch-creds.cjs",
+);
 
 interface FakeBrokerOpts {
   /** What to send back on `get-credentials`. */
@@ -116,6 +126,7 @@ function runEntrypoint(opts: {
   credDir: string;
   cmd: string[];
   waitS?: number;
+  refreshS?: number;
 }): Promise<{ status: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     // Use async spawn (NOT spawnSync) because the fake auth-broker runs
@@ -127,6 +138,16 @@ function runEntrypoint(opts: {
         SWITCHROOM_AUTH_BROKER_SOCKET: opts.socketPath,
         SWITCHROOM_HINDSIGHT_CRED_DIR: opts.credDir,
         SWITCHROOM_HINDSIGHT_WAIT_S: String(opts.waitS ?? 5),
+        // Tests default to disabling the refresh loop (REFRESH_S=0)
+        // because most tests run `cmd: ["true"]` / `["env"]` and exit
+        // immediately — leaving a background loop dangling would
+        // confuse vitest's afterEach teardown. The refresh-specific
+        // test explicitly sets refreshS=1 to exercise it.
+        SWITCHROOM_HINDSIGHT_REFRESH_S: String(opts.refreshS ?? 0),
+        // Tell the entrypoint where to find the extracted fetcher
+        // (the Dockerfile installs it to /usr/local/lib/switchroom/
+        // at build time; for host tests we point at the source file).
+        SWITCHROOM_HINDSIGHT_FETCHER: FETCHER,
       },
     });
     let stdout = "";
@@ -296,5 +317,98 @@ describe("hindsight-entrypoint.sh (#1245)", () => {
     // And the dotfile form MUST appear at least once (defense against
     // someone gutting the file).
     expect(raw).toMatch(/\.credentials\.json/);
+  });
+
+  it("refresh loop re-fetches credentials so the tmpfs copy never goes stale", async () => {
+    // Stale-credentials regression: the entrypoint used to fetch once
+    // at boot and exec; after the broker's first 60-min refresh, the
+    // hindsight tmpfs copy would diverge from the broker's canonical
+    // creds and the access token would expire with no recovery path.
+    // RFC H §4.8 step 6 prescribes a refresh loop — this test pins it.
+    //
+    // The fake broker returns a different accessToken on each call
+    // (suffix = the per-connection counter). We run the entrypoint
+    // with REFRESH_S=1 and a long-running CMD, wait ~2.5s for the
+    // sidecar to tick at least once, then read the dotfile and verify
+    // its accessToken changed from the boot value.
+    let counter = 0;
+    stopBroker = await startFakeBroker(socketPath, {
+      response: (id) => {
+        counter += 1;
+        return JSON.stringify({
+          v: 1,
+          id,
+          ok: true,
+          data: {
+            account: "test@example.com",
+            credentials: {
+              claudeAiOauth: {
+                accessToken: `test-access-token-tick-${counter}`,
+                refreshToken: `test-refresh-token-tick-${counter}`,
+                expiresAt: 1799999999000,
+              },
+            },
+          },
+        }) + "\n";
+      },
+    });
+    const dotfile = join(credDir, ".credentials.json");
+    // CMD = `sleep 5` so the entrypoint stays resident long enough
+    // for the refresh sidecar to tick. We kill the child after 2.5s.
+    const child = spawn("sh", [ENTRYPOINT, "sleep", "5"], {
+      env: {
+        ...process.env,
+        SWITCHROOM_AUTH_BROKER_SOCKET: socketPath,
+        SWITCHROOM_HINDSIGHT_CRED_DIR: credDir,
+        SWITCHROOM_HINDSIGHT_WAIT_S: "5",
+        SWITCHROOM_HINDSIGHT_REFRESH_S: "1",
+        SWITCHROOM_HINDSIGHT_FETCHER: FETCHER,
+      },
+    });
+    let stderr = "";
+    child.stderr.on("data", (d) => (stderr += d.toString("utf8")));
+    try {
+      // Wait for boot fetch to land.
+      await new Promise<void>((res, rej) => {
+        const start = Date.now();
+        const iv = setInterval(() => {
+          if (existsSync(dotfile)) {
+            clearInterval(iv);
+            res();
+          } else if (Date.now() - start > 5000) {
+            clearInterval(iv);
+            rej(new Error("boot fetch never wrote the dotfile"));
+          }
+        }, 50);
+      });
+      const bootCreds = JSON.parse(readFileSync(dotfile, "utf-8"));
+      expect(bootCreds.claudeAiOauth.accessToken).toBe("test-access-token-tick-1");
+
+      // Wait for at least one refresh tick (interval=1s; give 2.5s).
+      await new Promise((r) => setTimeout(r, 2500));
+
+      const refreshedCreds = JSON.parse(readFileSync(dotfile, "utf-8"));
+      // Counter must have advanced — i.e. the refresh sidecar fetched
+      // again at least once. We don't pin the exact value (the sleep is
+      // imprecise) but it must be > 1.
+      const match = refreshedCreds.claudeAiOauth.accessToken.match(/tick-(\d+)$/);
+      expect(match).not.toBeNull();
+      expect(parseInt(match![1], 10)).toBeGreaterThan(1);
+      expect(stderr).toMatch(/credential refresh loop started/);
+    } finally {
+      try { child.kill("SIGKILL"); } catch { /* ignore */ }
+    }
+  }, 10_000);
+
+  it("Dockerfile pins UID 11000 to match HINDSIGHT_DEFAULT_UID", () => {
+    // The broker chowns the per-consumer socket to consumer.uid (mode 0600).
+    // If the runtime UID inside hindsight didn't match what the operator
+    // wrote in auth.consumers[hindsight].uid (default 11000), the entrypoint
+    // would EACCES on connect.
+    const dockerfilePath = resolve(__dirname, "..", "..", "docker", "Dockerfile.hindsight");
+    const raw = readFileSync(dockerfilePath, "utf-8");
+    // Numerically pinned, not just relying on the upstream user.
+    expect(raw).toMatch(/NEW_UID=11000/);
+    expect(raw).toMatch(/usermod -u\s+["']?\$NEW_UID["']?\s+hindsight/);
   });
 });

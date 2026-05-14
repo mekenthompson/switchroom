@@ -267,12 +267,33 @@ auth:
 
 On the next `switchroom apply`, the broker binds
 `/run/switchroom/auth-broker/hindsight/sock`, chowned to the
-declared UID. The hindsight compose project (SEPARATE from
-switchroom's compose project — needs its own `docker compose -p
-hindsight`) bind-mounts the named volume into its own container
-at `/run/switchroom/auth-broker/`, then runs an entrypoint shim
-that calls `get-credentials` and writes the result to a tmpfs
-dotfile before exec'ing the hindsight server.
+declared UID (mode 0600). The hindsight compose project
+(SEPARATE from switchroom's compose project — needs its own
+`docker compose -p hindsight`) bind-mounts the named volume into
+its own container at `/run/switchroom/auth-broker/`, then runs an
+entrypoint shim that calls `get-credentials`, writes the result
+to a tmpfs dotfile, **spawns a background refresh sidecar**, and
+exec's the hindsight server.
+
+> **The consumer container's runtime UID must match
+> `auth.consumers[<name>].uid`.** The broker chowns the socket to
+> that UID at mode 0600; if the hindsight container ran as a
+> different UID, the entrypoint would EACCES on connect. The
+> bundled `switchroom-hindsight` image pins UID 11000 in its
+> Dockerfile (`usermod -u 11000 hindsight`) to match the
+> `HINDSIGHT_DEFAULT_UID` constant in `src/setup/hindsight.ts`
+> and the default value the setup wizard writes. Custom consumer
+> images must do the same pin or operators must set
+> `auth.consumers[].uid` to whatever the container runs as.
+
+The entrypoint refresh sidecar is required because the broker
+refreshes its canonical credentials every ~60 min, and the
+consumer's tmpfs copy is divorced from that file. Without a
+refresh loop, the tmpfs `.credentials.json` would go stale on
+the broker's first refresh and hindsight would 401 after the
+access token expired (~5h later). The sidecar re-runs the same
+NDJSON fetcher every `SWITCHROOM_HINDSIGHT_REFRESH_S` seconds
+(default 1800 = 30 min, ahead of the broker's 60-min cadence).
 
 The bundled `switchroom-hindsight` image (built from
 `docker/Dockerfile.hindsight`, published to

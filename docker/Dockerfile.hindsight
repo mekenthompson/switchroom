@@ -46,10 +46,35 @@ RUN npm install -g @anthropic-ai/claude-code@latest \
 RUN /app/api/.venv/bin/pip install --no-cache-dir claude-agent-sdk \
  && /app/api/.venv/bin/python -c "from claude_agent_sdk import query; print('claude-agent-sdk ok')" >&2
 
-# Entrypoint shim — fetches credentials from the auth-broker over UDS
-# on every boot (and on token-aged-out re-fetch by upstream code paths
-# that re-invoke claude). The shim is copied executable; see the file
-# header for the wire-protocol details and fail-loud guards.
+# Pin the upstream `hindsight` user to UID 11000 to match
+# `HINDSIGHT_DEFAULT_UID` in src/setup/hindsight.ts (and the
+# `auth.consumers[hindsight].uid` value the operator writes in
+# switchroom.yaml). The auth-broker chowns the per-consumer socket
+# to that UID at mode 0600; if the runtime UID inside this
+# container didn't match, the entrypoint would EACCES on the
+# socket connect.
+#
+# `usermod -u` rewrites every file under the user's HOME and any
+# explicitly-listed dir we know they own, but the upstream image
+# scatters python venvs across /app and /opt — find any file owned
+# by the old UID and chown it to the new one (idempotent: re-runs
+# of the same build with the same target UID are no-ops).
+RUN OLD_UID=$(id -u hindsight) && NEW_UID=11000 \
+ && if [ "$OLD_UID" != "$NEW_UID" ]; then \
+      usermod -u "$NEW_UID" hindsight \
+   && groupmod -g "$NEW_UID" hindsight 2>/dev/null || true \
+   && find / -xdev -uid "$OLD_UID" ! -path '/proc/*' -exec chown -h "$NEW_UID":"$NEW_UID" {} + ; \
+    fi \
+ && id hindsight >&2
+
+# Credential fetcher — small Node program reused by both the boot
+# fetch and the background refresh loop. Pulled out of the entrypoint
+# so both code paths exercise the exact same wire shape.
+COPY --chmod=0644 docker/hindsight-fetch-creds.cjs /usr/local/lib/switchroom/hindsight-fetch-creds.cjs
+
+# Entrypoint shim — runs the fetcher at boot, spawns a refresh sidecar,
+# then execs the upstream CMD. See the file header for the boot/refresh
+# flow + env knobs + fail-loud guards.
 COPY --chmod=0755 docker/hindsight-entrypoint.sh /usr/local/bin/switchroom-hindsight-entrypoint.sh
 
 USER hindsight

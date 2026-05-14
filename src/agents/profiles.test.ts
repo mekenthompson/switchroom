@@ -176,9 +176,9 @@ describe("renderProfileClaudeTemplate", () => {
     if (process.getuid && process.getuid() === 0) return;
 
     const tmp = mkdtempSync(join(tmpdir(), "switchroom-profile-render-readonly-"));
+    const profileName = "test-profile";
+    const profileDir = join(tmp, profileName);
     try {
-      const profileName = "test-profile";
-      const profileDir = join(tmp, profileName);
       mkdirSync(profileDir, { recursive: true });
       writeFileSync(join(profileDir, "CLAUDE.md.hbs"), "v1 {{profile}}");
       chmodSync(profileDir, 0o555); // read+execute, no write
@@ -189,7 +189,7 @@ describe("renderProfileClaudeTemplate", () => {
       expect(result.path).toBe(join(profileDir, "CLAUDE.md"));
     } finally {
       // Restore writable mode so rmSync can clean up.
-      try { chmodSync(resolve(tmp, "test-profile"), 0o755); } catch {}
+      try { chmodSync(profileDir, 0o755); } catch {}
       rmSync(tmp, { recursive: true, force: true });
     }
   });

@@ -239,7 +239,7 @@ export function renderAgentSelfServiceFragment(
  * `/usr/local/lib/node_modules/switchroom/profiles/` and run as a
  * non-root user). In the read-only case, the rendered output isn't
  * consumed by anything downstream — the per-agent scaffold renders
- * its own CLAUDE.md from the same .hbs source at `scaffold.ts:2123`
+ * its own CLAUDE.md from the same .hbs source at `scaffold.ts:2127`
  * — so a graceful skip with a warning is correct here.
  */
 export function renderProfileClaudeTemplate(

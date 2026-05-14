@@ -152,7 +152,7 @@ describe("reconcileAgent — persona (Phase 3)", () => {
     expect(afterReconcile).toContain("User-added content");
   });
 
-  it("aborts reconcile with warning when CLAUDE.md has hand-edits and no sidecar exists", () => {
+  it("regenerates CLAUDE.md silently when on-disk drifts from template (no abort)", () => {
     const config = makeAgentConfig({
       soul: { name: "Agent", style: "default" },
     });
@@ -160,14 +160,19 @@ describe("reconcileAgent — persona (Phase 3)", () => {
     const result = scaffoldAgent("test-agent", config, tmpDir, telegramConfig);
     const claudeMdPath = join(result.agentDir, "CLAUDE.md");
 
-    // User edits CLAUDE.md (simulating hand-edits)
+    // Simulate template drift (or stray hand-edits) — bytes don't match
+    // what re-rendering the template would produce, no sidecar exists.
     const original = readFileSync(claudeMdPath, "utf-8");
     const edited = original + "\n\n## My Custom Section\n\nUser-added content.";
     writeFileSync(claudeMdPath, edited, "utf-8");
 
-    // Reconcile should abort with exit(1)
+    // Reconcile must NOT abort; it should regenerate from template.
     expect(() => {
       reconcileAgent("test-agent", config, tmpDir, telegramConfig, switchroomConfig);
-    }).toThrow(); // process.exit(1) will throw in test environment
+    }).not.toThrow();
+
+    // Drift is gone — file matches what scaffold would have written fresh.
+    const afterReconcile = readFileSync(claudeMdPath, "utf-8");
+    expect(afterReconcile).not.toContain("## My Custom Section");
   });
 });

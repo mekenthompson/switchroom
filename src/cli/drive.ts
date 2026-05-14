@@ -71,10 +71,15 @@ const EXIT_ABORTED = 130;
 
 // Default Drive read-only scopes used by the wrapper. Keep in sync with
 // onboarding's "Allow my Drive (read-only)" copy.
-const DEFAULT_SCOPES = [
+//
+// Re-exported as `DRIVE_READONLY_SCOPES` for the new
+// `auth google account add` verb (RFC G Phase 3b.3 de-stub) which
+// shares the same OAuth flow.
+export const DRIVE_READONLY_SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
   "https://www.googleapis.com/auth/drive.metadata.readonly",
 ];
+const DEFAULT_SCOPES = DRIVE_READONLY_SCOPES;
 
 export interface DriveCliDeps {
   /** Test seam: substitute the OAuth flow runner. */
@@ -181,6 +186,23 @@ async function defaultGetPassphrase(): Promise<string> {
  * extension; today we surface a helpful error if the headless detection
  * ruled out the only remaining tier.
  */
+/**
+ * Run the three-tier OAuth flow (device-code → OOB-paste →
+ * desktop-loopback) interactively, prompting the operator and
+ * returning the resulting TokenResponse.
+ *
+ * Exported (was private to drive.ts) so the new `auth google account
+ * add` verb (RFC G Phase 3b.3 de-stub) can reuse the same flow
+ * without duplicating it.
+ */
+export async function runDriveOAuthFlow(
+  cfg: OAuthClientConfig,
+  tier: OAuthTier,
+  env: Record<string, string | undefined>,
+): Promise<TokenResponse> {
+  return defaultRunOAuth(cfg, tier, env);
+}
+
 async function defaultRunOAuth(
   cfg: OAuthClientConfig,
   tier: OAuthTier,

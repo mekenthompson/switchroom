@@ -24,6 +24,7 @@ import {
 import { getAgentStatus, restartAgent } from "../agents/lifecycle.js";
 import { withConfigError, getConfig } from "./helpers.js";
 import { registerAuthAccountSubcommands } from "./auth-accounts.js";
+import { registerAuthGoogleSubcommands } from "./auth-google.js";
 
 function printAuthTable(
   headers: string[],
@@ -293,6 +294,13 @@ export function registerAuthCommand(program: Command): void {
   // `auth account ...` subcommand tree exists before the per-agent
   // legacy verbs hang off the same parent.
   registerAuthAccountSubcommands(program, auth);
+
+  // RFC G Phase 3a — `auth google enable|disable|list` for Google
+  // Workspace per-account ACL management. See
+  // docs/rfcs/google-workspace-generalization.md §4.5. Phase 3b adds
+  // `account add`, `account remove`, `share`, `connect` (wizard alias),
+  // and the apply-time legacy-slot detector.
+  registerAuthGoogleSubcommands(program, auth);
 
   // switchroom auth login <name>
   auth

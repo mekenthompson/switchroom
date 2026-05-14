@@ -21,14 +21,19 @@ RFC H rather than the deleted `auth account ...` shape:
   `auth google disable` now prunes the entry; full teardown via
   `auth google account remove`. See §4.5 + §4.4.
 - **OAuth refresh moves into the auth-broker** as a provider plugin
-  (Phase 3b). RFC H ships `auth.consumers[]` in v1 (decision #1)
-  precisely for non-agent peers needing OAuth credentials — Google
-  accounts are structurally consumers. Rebuilding a parallel
-  refresher in `src/drive/` would duplicate flock leases, sha-index
-  drift detection, and audit log machinery. The vault-broker stays
-  as the durable token-storage layer; auth-broker becomes the
-  single OAuth refresher for both Anthropic AND Google. See §4.4
-  + §7 Phase 3b.
+  (Phase 3b). **Honest framing:** RFC H ships a single-provider
+  broker (Anthropic only). `auth.consumers[]` per RFC H §4.8 is
+  for *non-agent peers needing an Anthropic-account socket*
+  (hindsight is the in-tree consumer), NOT for non-Anthropic OAuth
+  providers. Phase 3b.1 introduces a provider abstraction RFC H
+  deliberately deferred — this is a real architectural addition,
+  not a config-flag wiring exercise. The motivation stands:
+  rebuilding a parallel refresher in `src/drive/` would duplicate
+  flock leases, sha-index drift detection, and audit log machinery
+  the broker already implements. The vault-broker stays as the
+  durable token-storage layer; auth-broker grows a provider
+  abstraction so it becomes the single OAuth refresher for both
+  Anthropic AND Google. See §4.4 + §7 Phase 3b.
 - **MCP wrapper credential-read pivots to `auth-broker.get-credentials
   { provider: "google" }`** over UDS, mirroring the same path-as-
   identity pattern Anthropic uses post-RFC-H. Replaces direct
@@ -231,10 +236,15 @@ manifest; unknown tool names fail fast with the suggestion list.
   at `vault:google:<account>:refresh_token`. The vault file is the
   single source of truth at rest.
 - **auth-broker** (RFC H) — sole OAuth refresher and credentials
-  writer. Owns the refresh loop for both Anthropic AND Google
-  accounts via the provider abstraction added in Phase 3b. Reads
-  refresh tokens from vault-broker, runs the refresh tick, exposes
-  short-lived access tokens to consumers via UDS.
+  writer. As shipped by RFC H, supports Anthropic only.
+  Phase 3b.1 of *this* RFC adds the provider abstraction the
+  broker needs to host Google as a second provider — RFC H
+  deliberately scoped the broker to Anthropic-only ("speaks OAuth
+  and only OAuth" per RFC H §3); the multi-provider extension
+  is RFC G's contribution, not RFC H's. Once 3b.1 lands the
+  broker reads refresh tokens from vault-broker for both providers,
+  runs per-provider refresh ticks, exposes short-lived access
+  tokens to consumers via UDS.
 
 **Vault slot key shape** (Phase 2, already merged):
 
@@ -555,32 +565,54 @@ merged first.
 Five sub-phases, each shippable as its own PR. Total ~3.5h agent
 time. **Prerequisite: RFC H (PR #1254) merged to main.**
 
-#### 3b.1 — Provider abstraction in auth-broker (~45 min)
+#### 3b.1 — Provider abstraction in auth-broker (~90-120 min)
 
-Add `provider:` field to broker's `add-account`, `remove-account`,
-`get-credentials`, `list-state`, `mark-exhausted` verbs. Defaults
-to `"anthropic"` (back-compat with Phase 1 of RFC H). Accepts
-`"google"`. Define provider interface (token endpoint, scope set,
-refresh-request shape, scope-to-grant mapping) in
-`src/auth/broker/provider.ts`.
+This is real architectural work, not a config-flag wiring exercise.
+Scope:
 
-**Load-bearing for everything that follows.** Without this, the
-broker has no concept of multiple OAuth identities-per-account
-shape (Anthropic is one-set-of-scopes; Google has tier-driven
-scope expansion).
+- New `src/auth/broker/provider.ts` defining the provider interface:
+  token endpoint, refresh-request shape, scope set, scope-to-grant
+  mapping, error mapping (provider-specific OAuth error codes →
+  broker's `invalid_grant` / `network` / `quota_exceeded`).
+- Provider plugin loading at broker startup (mirrors how the
+  vault-broker loads ACL config) — providers ship as files under
+  `src/auth/broker/<vendor>-provider.ts`.
+- Per-provider refresh tick — RFC H's existing flock-protected
+  lease primitive needs to key on `(provider, account)`, not just
+  `account`, since two accounts named the same string under
+  different providers must be independent.
+- Per-provider scope-set storage — Anthropic's scopes are
+  one-fixed-set; Google's are tier-driven and expand on re-OAuth.
+  Storage shape needs to handle both.
+- `provider:` field on every relevant verb (`add-account`,
+  `remove-account`, `get-credentials`, `list-state`,
+  `mark-exhausted`). Defaults to `"anthropic"` (back-compat with
+  RFC H Phase 1). Accepts `"google"`.
+- Test surface: every existing broker test that exercises the
+  verbs needs a Google variant; new tests for provider isolation
+  (account `"x@y.z"` in Anthropic provider does NOT collide with
+  account `"x@y.z"` in Google provider).
 
-#### 3b.2 — Google provider implementation (~60 min)
+**Load-bearing for everything that follows.** Without this, 3b.2
+through 3b.5 cannot be cleanly built.
+
+#### 3b.2 — Google provider implementation (~90 min)
 
 Extract OAuth flow from `src/cli/drive.ts:runConnect` (lines
-259-620 in v0.6.0) into `src/auth/broker/google-provider.ts`.
-Implements the provider interface from 3b.1: device-code,
-OOB-paste, desktop-loopback tier-selection (preserves RFC D §3
-semantics); refresh-token exchange against Google OAuth endpoint;
-scope-set-validation against Workspace tier per RFC G Phase 1.
+259-620 in v0.6.0, ~360 LOC) into
+`src/auth/broker/google-provider.ts`. Implements the provider
+interface from 3b.1:
 
-The auth-broker loads provider plugins at startup (similar to how
-the vault-broker loads ACL config). New providers ship as new
-files under `src/auth/broker/<vendor>-provider.ts`.
+- Device-code, OOB-paste, desktop-loopback tier-selection
+  (preserves RFC D §3 semantics).
+- Refresh-token exchange against Google OAuth endpoint.
+- Scope-set-validation against Workspace tier per RFC G Phase 1.
+- Google-specific error mapping (Google returns `invalid_grant`
+  for scope-revocation AND for password-change AND for
+  app-revocation; broker error contract needs to surface these
+  distinctly so 3b.4 can drive the right user message).
+- Test surface: replay-style tests against captured Google OAuth
+  responses for each error class.
 
 #### 3b.3 — `auth google account add | remove` CLI (~30 min)
 
@@ -621,12 +653,27 @@ Mirrors RFC H §6 ("rewrite once, refuse second run") rather than
 the v2 "warn and continue" design — RFC H showed loud-fail is the
 honest default for installed-base migrations.
 
+#### 3b.6 — Setup wizard pivot to two-step `account add` + `enable` (~10 min)
+
+The shipped Phase 4 (`src/cli/setup.ts:1112-1200`) explicitly
+anticipates `auth google connect <agent>` as a future surfaced
+command — but v3 §4.5 deletes that verb. Phase 3b.6 rewrites the
+`connectCmd` constant + the surrounding comment block in
+`stepGoogleWorkspace` to surface the two-step shape per §4.6:
+
+```
+switchroom auth google account add <your-email>
+switchroom auth google enable <your-email> <agent>
+```
+
+Small, isolated, can ship alongside 3b.3 if convenient.
+
 ### Phase 3b sequencing
 
-3b.1 → 3b.2 → 3b.3 → 3b.4 → 3b.5. Each PR independently reviewable;
-each builds on the prior. No interleave shortcuts because the broker
-provider abstraction (3b.1) is genuinely prerequisite to everything
-else.
+3b.1 → 3b.2 → 3b.3 → 3b.4 → 3b.5 (with 3b.6 piggybacking on 3b.3).
+Each PR independently reviewable; each builds on the prior. No
+interleave shortcuts because the broker provider abstraction
+(3b.1) is genuinely prerequisite to everything else.
 
 ## 8. Effort estimate
 
@@ -648,14 +695,18 @@ Per CLAUDE.md, in **agent minutes**.
 
 | Sub-phase | Item | Estimate |
 |---|---|---|
-| 3b.1 | Provider abstraction in auth-broker (provider: field on add/remove/get/list verbs + provider interface) | ~45 min |
-| 3b.2 | Google provider implementation (extract OAuth from drive.ts:runConnect → google-provider.ts) | ~60 min |
+| 3b.1 | Provider abstraction in auth-broker (interface + plugin loading + per-(provider,account) refresh leases + verb extension + isolation tests) | ~90-120 min |
+| 3b.2 | Google provider implementation (extract OAuth from drive.ts:runConnect, ~360 LOC + Google-specific error mapping + replay tests) | ~90 min |
 | 3b.3 | `auth google account add / remove` CLI (thin clients over broker) | ~30 min |
 | 3b.4 | MCP wrapper credential-read pivot (vault-broker → auth-broker UDS) | ~30 min |
-| 3b.5 | Apply-time legacy-slot migration tool + hard-refusal | ~60 min |
+| 3b.5 | Apply-time legacy-slot migration tool + hard-refusal (interactive prompts for account-attribution per legacy slot) | ~60 min |
+| 3b.6 | Setup wizard pivot to two-step `account add` + `enable` (rewrite connectCmd in setup.ts) | ~10 min |
 | — | Doc updates (`docs/google-workspace.md` new file, RFC cross-refs) | ~30 min |
 
-**~4.25h agent time** for Phase 3b. Total RFC G end-to-end: ~8h.
+**~5.75-6.5h agent time** for Phase 3b. Total RFC G end-to-end:
+~9.5-10.25h. (v3-initial estimate of ~4.25h was too aggressive
+per reviewer — provider abstraction is real architectural work,
+not a config-flag wiring exercise.)
 
 ## 9. Risks and open questions
 
@@ -688,9 +739,25 @@ Per CLAUDE.md, in **agent minutes**.
   The migration tool needs to ask the operator "which Google
   account does each per-agent slot belong to?" — there's no
   programmatic way to know (the slot key is per-agent, not
-  per-account). Mitigation: migration tool prompts interactively;
-  operator with N agents on M accounts answers M times. Falls back
-  to "skip and re-OAuth" if operator can't remember.
+  per-account). Mitigation: migration tool prompts interactively
+  AND surfaces the legacy slot's cached scope set + last-refresh
+  timestamp in the prompt — these are the only on-disk hints
+  for identifying which Google account is which. Falls back to
+  "skip and re-OAuth" if operator can't remember.
+
+- **Inheritance of RFC H known-blocker class.** PR #1254 (RFC H)
+  was reviewed with three blockers, including: *"`auth use` does
+  not persist `auth.active` to YAML — the broker mutates
+  in-memory only, so on any restart it re-reads YAML and the
+  swap reverts."* Phase 3b.3 (`auth google account add / remove`)
+  writes `google_accounts:` to YAML and expects the broker to
+  pick up the new account. If RFC H ships with the YAML-persist
+  bug unfixed, Phase 3b.3 inherits the same SIGHUP/reload
+  assumption. Mitigation: **Phase 3b.3 blocks on the
+  CLI-writes-YAML-first contract being enforced in #1254**.
+  Confirm before starting 3b.3 that `auth use` (and any
+  comparable verb) writes YAML before notifying the broker, then
+  mirror the same pattern in `auth google account add / remove`.
 
 - **Tier change after connect.** Going from `core` to `extended`
   doesn't expand granted OAuth scopes — Google's consent already
@@ -733,9 +800,11 @@ Per CLAUDE.md, in **agent minutes**.
 
 - [ ] Phase 3b.1 — Provider abstraction in auth-broker
 - [ ] Phase 3b.2 — Google provider implementation
-- [ ] Phase 3b.3 — `auth google account add / remove` CLI
+- [ ] Phase 3b.3 — `auth google account add / remove` CLI (blocks
+      on RFC H's CLI-writes-YAML-first contract — see §9)
 - [ ] Phase 3b.4 — MCP wrapper credential-read pivot to auth-broker UDS
 - [ ] Phase 3b.5 — Apply-time legacy-slot migration tool + hard-refusal
+- [ ] Phase 3b.6 — Setup wizard pivot in `setup.ts:stepGoogleWorkspace`
 - [ ] Cross-cutting — `docs/google-workspace.md` user guide
 
 ### Pairs with

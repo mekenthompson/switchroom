@@ -214,6 +214,40 @@ export function readAccountCredentials(
   }
 }
 
+/**
+ * Default scopes and subscription for accounts written without them.
+ *
+ * Pre-RFC-H, claude-code's env-var path (`CLAUDE_CODE_OAUTH_TOKEN`)
+ * synthesised these fields at runtime — every Anthropic call from a
+ * subscription-tier OAuth token saw `scopes: ["user:inference"]` and
+ * `subscriptionType: "max"` regardless of what the on-disk creds said.
+ * RFC-H deletes the env-var path; claude now reads `.credentials.json`
+ * verbatim. Files written by the legacy slot setup ({accessToken,
+ * expiresAt, scopes: []}) are rejected as "not logged in" because the
+ * empty scopes list and missing subscriptionType don't pass the
+ * post-RFC-H file-shape gate.
+ *
+ * Enrichment here closes the gap at the write side: any account
+ * credentials we persist always carry the fields claude expects, even
+ * if the OAuth handshake didn't return them.
+ */
+const DEFAULT_SCOPES = ["user:inference"] as const;
+const DEFAULT_SUBSCRIPTION_TYPE = "max";
+
+function enrichClaudeCreds(value: AccountCredentials): AccountCredentials {
+  const oauth = value.claudeAiOauth;
+  if (!oauth) return value;
+  const scopes =
+    oauth.scopes !== undefined && oauth.scopes.length > 0
+      ? oauth.scopes
+      : [...DEFAULT_SCOPES];
+  const subscriptionType = oauth.subscriptionType ?? DEFAULT_SUBSCRIPTION_TYPE;
+  return {
+    ...value,
+    claudeAiOauth: { ...oauth, scopes, subscriptionType },
+  };
+}
+
 export function writeAccountCredentials(
   label: string,
   value: AccountCredentials,
@@ -221,7 +255,7 @@ export function writeAccountCredentials(
 ): void {
   validateAccountLabel(label);
   mkdirSync(accountDir(label, home), { recursive: true });
-  atomicWriteJson(accountCredentialsPath(label, home), value);
+  atomicWriteJson(accountCredentialsPath(label, home), enrichClaudeCreds(value));
 }
 
 /* ── Meta read/write ─────────────────────────────────────────────────── */

@@ -471,21 +471,90 @@ export class AuthBroker {
         case "list-state":
           await this.opListState(socket, reqId, identity);
           break;
-        case "set-active":
+        case "set-active": {
+          // Phase 3b.1: provider field is carried for protocol uniformity
+          // but `set-active` is fleet-wide active-account swap, an
+          // Anthropic-only concept. Reject non-default until/unless a
+          // fleet-wide-active Google concept exists.
+          const provider = req.provider ?? "anthropic";
+          if (provider !== "anthropic") {
+            socket.write(
+              encodeError(
+                reqId,
+                "INVALID_ARGS",
+                `set-active is Anthropic-only — Google's account-active model is per-agent via google_accounts.enabled_for[]`,
+              ),
+            );
+            break;
+          }
           await this.opSetActive(socket, reqId, identity, req.account);
           break;
+        }
         case "mark-exhausted":
           await this.opMarkExhausted(socket, reqId, identity, req.until);
           break;
-        case "refresh-account":
+        case "refresh-account": {
+          const provider = req.provider ?? "anthropic";
+          if (provider !== "anthropic") {
+            socket.write(
+              encodeError(
+                reqId,
+                "INVALID_ARGS",
+                `provider '${provider}' not yet implemented in broker server (Phase 3b.1b will add provider dispatch)`,
+              ),
+            );
+            break;
+          }
           await this.opRefreshAccount(socket, reqId, identity, req.account);
           break;
-        case "add-account":
-          await this.opAddAccount(socket, reqId, identity, req.label, req.credentials, req.replace ?? false);
+        }
+        case "add-account": {
+          // Phase 3b.1: protocol now accepts an optional `provider:` field
+          // and a discriminated `credentials:` union. Until 3b.1b refactors
+          // the server to dispatch through providers, the server is
+          // Anthropic-only and rejects non-default providers.
+          const provider = req.provider ?? "anthropic";
+          if (provider !== "anthropic") {
+            socket.write(
+              encodeError(
+                reqId,
+                "INVALID_ARGS",
+                `provider '${provider}' not yet implemented in broker server (Phase 3b.1b will add provider dispatch)`,
+              ),
+            );
+            break;
+          }
+          // Validate the credentials variant matches the provider.
+          if (!("claudeAiOauth" in req.credentials)) {
+            socket.write(
+              encodeError(
+                reqId,
+                "INVALID_ARGS",
+                `provider 'anthropic' requires credentials in claudeAiOauth shape`,
+              ),
+            );
+            break;
+          }
+          // Type narrows: variant is AnthropicCredentialsShape; assignable to AccountCredentials.
+          const anthropicCreds = req.credentials as { claudeAiOauth: AccountCredentials["claudeAiOauth"] };
+          await this.opAddAccount(socket, reqId, identity, req.label, anthropicCreds, req.replace ?? false);
           break;
-        case "rm-account":
+        }
+        case "rm-account": {
+          const provider = req.provider ?? "anthropic";
+          if (provider !== "anthropic") {
+            socket.write(
+              encodeError(
+                reqId,
+                "INVALID_ARGS",
+                `provider '${provider}' not yet implemented in broker server (Phase 3b.1b will add provider dispatch)`,
+              ),
+            );
+            break;
+          }
           await this.opRmAccount(socket, reqId, identity, req.label);
           break;
+        }
         case "set-override":
           await this.opSetOverride(socket, reqId, identity, req.agent, req.account);
           break;

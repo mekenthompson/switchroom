@@ -390,6 +390,173 @@ describe("AuthBroker — add-account / rm-account", () => {
   });
 });
 
+// ────────────────────────────────────────────────────────────────────────
+// RFC G Phase 3b.1 — provider field gating
+// Server still Anthropic-only; non-default provider rejects with INVALID_ARGS.
+// ────────────────────────────────────────────────────────────────────────
+describe("AuthBroker — provider field gating (Phase 3b.1)", () => {
+  it("set-active rejects provider: 'google' with operator-actionable message", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "set-active",
+      account: "alice@example.com",
+      provider: "google",
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("INVALID_ARGS");
+    expect(resp.error?.message).toContain("Anthropic-only");
+    broker.stop();
+  });
+
+  it("refresh-account rejects provider: 'google' with Phase 3b.1b deferral message", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "refresh-account",
+      account: "alice@example.com",
+      provider: "google",
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("INVALID_ARGS");
+    expect(resp.error?.message).toContain("Phase 3b.1b");
+    broker.stop();
+  });
+
+  it("add-account rejects provider: 'google' with Phase 3b.1b deferral message", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "add-account",
+      label: "alice@example.com",
+      provider: "google",
+      credentials: {
+        googleOauth: {
+          accessToken: "at",
+          refreshToken: "rt",
+          expiresAt: 1234,
+          scope: "x",
+          clientId: "cid",
+          accountEmail: "alice@example.com",
+          tokenType: "Bearer",
+        },
+      },
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("INVALID_ARGS");
+    expect(resp.error?.message).toContain("Phase 3b.1b");
+    broker.stop();
+  });
+
+  it("add-account with NO provider field still works (back-compat with RFC H clients)", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { ziggy: {}, clerk: {} },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "ziggy"), { recursive: true });
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "add-account",
+      label: "newone",
+      // no provider field — defaults to "anthropic"
+      credentials: {
+        claudeAiOauth: {
+          accessToken: "at-new",
+          refreshToken: "rt-new",
+          expiresAt: 5000,
+        },
+      },
+    }) as { ok: boolean };
+    expect(resp.ok).toBe(true);
+    broker.stop();
+  });
+
+  it("rm-account rejects provider: 'google' with Phase 3b.1b deferral message", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "rm-account",
+      label: "alice@example.com",
+      provider: "google",
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("INVALID_ARGS");
+    broker.stop();
+  });
+});
+
 describe("AuthBroker — list-state", () => {
   it("returns active, fallback_order, accounts, agents, consumers", async () => {
     const h = makeHarness();

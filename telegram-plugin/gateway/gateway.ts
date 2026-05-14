@@ -8525,16 +8525,15 @@ bot.command("auth", async ctx => {
   const currentAgent = getMyAgentName()
   // Post-unification admin gating: admin authority is sourced from each
   // agent's own `admin: true` flag (the same flag that gates /agents,
-  // /restart, /update etc. per PR #1258). The gateway-side check is
-  // for clean UX; the broker enforces server-side from the same source.
-  let adminAgents: string[] | undefined
+  // /restart, /update etc. per PR #1258). The gateway looks itself up
+  // and passes a boolean through — handler-side code does not consult
+  // any list. The broker enforces server-side from the same source.
+  let isAdmin = false
   try {
     const cfg = loadSwitchroomConfig()
-    const agentsMap = (cfg as unknown as { agents?: Record<string, { admin?: boolean }> })?.agents ?? {}
-    adminAgents = Object.entries(agentsMap)
-      .filter(([, a]) => a?.admin === true)
-      .map(([name]) => name)
-  } catch { /* best-effort */ }
+    const me = (cfg as unknown as { agents?: Record<string, { admin?: boolean }> })?.agents?.[currentAgent]
+    isAdmin = me?.admin === true
+  } catch { /* best-effort — non-admin is the safe default */ }
 
   // `/auth add` and `/auth cancel` are gateway-routed (drive a
   // scratch-dir-backed `claude setup-token` lifecycle the broker
@@ -8542,7 +8541,7 @@ bot.command("auth", async ctx => {
   // handleAuthCommand which only needs the narrow broker surface.
   const chatId = String(ctx.chat?.id ?? '')
   if (parsed.kind === 'add' || parsed.kind === 'cancel') {
-    if (!isAuthAdmin({ agentName: currentAgent, adminAgents })) {
+    if (!isAuthAdmin({ isAdmin })) {
       await switchroomReply(
         ctx,
         `<b>Not authorized.</b> <code>/auth ${parsed.kind}</code> is admin-only.\n` +
@@ -8608,7 +8607,7 @@ bot.command("auth", async ctx => {
   }
   const reply = await handleAuthCommand(parsed, {
     agentName: currentAgent,
-    adminAgents,
+    isAdmin,
     client,
     chatId,
   })

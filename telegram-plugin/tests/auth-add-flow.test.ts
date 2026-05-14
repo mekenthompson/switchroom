@@ -214,21 +214,12 @@ describe('validateAuthAddLabel', () => {
 /* ── 2. Admin gating ──────────────────────────────────────────────────── */
 
 describe('isAuthAdmin', () => {
-  it('returns false when admin_agents is undefined', () => {
-    expect(isAuthAdmin({ agentName: 'foo', adminAgents: undefined })).toBe(false)
+  it('returns false when isAdmin is false', () => {
+    expect(isAuthAdmin({ isAdmin: false })).toBe(false)
   })
 
-  it('returns false when admin_agents is empty', () => {
-    expect(isAuthAdmin({ agentName: 'foo', adminAgents: [] })).toBe(false)
-  })
-
-  it('returns true when the current agent is in admin_agents', () => {
-    expect(isAuthAdmin({ agentName: 'clerk', adminAgents: ['clerk'] })).toBe(true)
-    expect(isAuthAdmin({ agentName: 'clerk', adminAgents: ['ken', 'clerk'] })).toBe(true)
-  })
-
-  it('returns false when the current agent is NOT in admin_agents', () => {
-    expect(isAuthAdmin({ agentName: 'other', adminAgents: ['clerk'] })).toBe(false)
+  it('returns true when isAdmin is true', () => {
+    expect(isAuthAdmin({ isAdmin: true })).toBe(true)
   })
 })
 
@@ -238,7 +229,7 @@ describe('handleAuthCommand — add/cancel are gateway-routed (defensive contrac
       { kind: 'add', label: 'foo' },
       {
         agentName: 'clerk',
-        adminAgents: ['clerk'],
+        isAdmin: true,
         client: { listState: async () => { throw new Error('unreachable') }, setActive: async () => { throw new Error('unreachable') } },
       },
     )
@@ -250,7 +241,7 @@ describe('handleAuthCommand — add/cancel are gateway-routed (defensive contrac
       { kind: 'add', label: 'foo' },
       {
         agentName: 'other',
-        adminAgents: ['clerk'],
+        isAdmin: false,
         client: { listState: async () => { throw new Error('unreachable') }, setActive: async () => { throw new Error('unreachable') } },
       },
     )
@@ -558,7 +549,7 @@ describe('help text discoverability', () => {
     expect(parsed?.kind).toBe('help')
     const reply = await handleAuthCommand(parsed!, {
       agentName: 'x',
-      adminAgents: ['x'],
+      isAdmin: true,
       client: { listState: async () => { throw new Error('n/a') }, setActive: async () => { throw new Error('n/a') } },
     })
     expect(reply.text).toMatch(/\/auth add/i)

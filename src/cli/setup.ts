@@ -139,7 +139,10 @@ export function registerSetupCommand(program: Command): void {
         // ── Step 10: Agent onboarding guidance ───────────────────
         await stepOnboardingGuidance(config, nonInteractive);
 
-        // ── Step 11: Verification ────────────────────────────────
+        // ── Step 11: Optional Google Workspace connection (RFC G §4.6) ─
+        await stepGoogleWorkspace(config, nonInteractive);
+
+        // ── Step 12: Verification ────────────────────────────────
         await stepVerification(config, nonInteractive);
 
         await captureEvent("setup_completed", {
@@ -1077,13 +1080,103 @@ async function stepOnboardingGuidance(
   }
 }
 
-// ─── Step 11: Verification ───────────────────────────────────────────────────
+// ─── Step 11: Optional Google Workspace connection (RFC G §4.6) ────────────
+
+/**
+ * Inline opt-in for Google Workspace connect, offered after the first
+ * agent + bot are working. Default Y (advertised, not opt-out). Per
+ * RFC G §4.6 + the principles.md "defaults test" — opinionated default,
+ * easy decline.
+ *
+ * Phase 4 (this step) prompts and surfaces the connect command. Phase
+ * 3b will swap the surfaced command from `switchroom drive connect
+ * <agent>` to `switchroom auth google connect <agent>` (the wizard
+ * alias added in 3b that does account add + enable in one shot).
+ *
+ * This step never runs the connect flow inline — connect needs an
+ * OAuth tap that breaks the linear setup script. Instead it prints
+ * the next-step command and continues. Operators can run it
+ * immediately after setup completes if they tapped Y, or any time
+ * later if they tapped N.
+ */
+async function stepGoogleWorkspace(
+  config: SwitchroomConfig,
+  nonInteractive: boolean,
+): Promise<void> {
+  stepHeader(11, "Optional: Google Workspace", STEP_ACTIVE);
+
+  if (nonInteractive) {
+    console.log(chalk.gray("  Skipping in non-interactive mode."));
+    return;
+  }
+
+  const agentNames = Object.keys(config.agents);
+  if (agentNames.length === 0) {
+    console.log(chalk.gray("  Skipping (no agents to connect)."));
+    return;
+  }
+  const firstName = agentNames[0];
+
+  console.log(
+    chalk.gray(
+      `  Your agent (${chalk.cyan(firstName)}) can read and (with approval)`,
+    ),
+  );
+  console.log(
+    chalk.gray(
+      "  write to your Google Drive, Docs, Sheets, and Calendar.",
+    ),
+  );
+  console.log(
+    chalk.gray(
+      "  Tools appear as approval-gated requests in Telegram.",
+    ),
+  );
+
+  const wantConnect = await askYesNo(
+    `\n  ${chalk.bold("Connect Google Workspace now?")}`,
+    true,
+  );
+
+  // The verb that completes the flow. Today (pre-Phase-3b) it's the
+  // shipped `drive connect`. Phase 3b will introduce
+  // `auth google connect <agent>` as the wizard alias and swap this
+  // string. Both end up at the same OAuth flow.
+  const connectCmd = `switchroom drive connect ${firstName}`;
+
+  if (wantConnect) {
+    console.log(
+      chalk.green(`  ${STEP_DONE} Ready to connect`),
+    );
+    console.log();
+    console.log(
+      chalk.gray("  After setup completes, run:"),
+    );
+    console.log(
+      chalk.cyan(`    ${connectCmd}`),
+    );
+    console.log(
+      chalk.gray(
+        "  to start the OAuth flow (device-code on headless hosts, browser otherwise).",
+      ),
+    );
+  } else {
+    console.log(
+      chalk.gray(`  ${STEP_DONE} Skipped — connect later with:`),
+    );
+    console.log(
+      chalk.cyan(`    ${connectCmd}`),
+    );
+  }
+}
+
+// ─── Step 12: Verification ───────────────────────────────────────────────────
 
 async function stepVerification(
   config: SwitchroomConfig,
   nonInteractive: boolean,
 ): Promise<void> {
-  stepHeader(11, "Verification", STEP_ACTIVE);
+  stepHeader(12, "Verification", STEP_ACTIVE);
 
   const agentNames = Object.keys(config.agents);
   const firstName = agentNames[0];

@@ -11484,7 +11484,21 @@ bot.on('callback_query:data', async ctx => {
   // open / enter / back / refresh re-render the card in place;
   // grant writes an allow_always kernel decision at
   // doc:gdrive:folder/<id>/** and edits the card to a confirmation.
+  //
+  // Auth gate: the picker grant is an OPERATOR action (mirrors the
+  // `op:`/`vd:`/`vg:` family, not the `apv:` agent-approval shape).
+  // Mirror those patterns — refuse callbacks from anyone outside
+  // `access.allowFrom`. Without this, a group member who isn't in
+  // the operator allowlist could still tap [✅ Allow "<folder>"] on
+  // a card that landed in the group and write an `allow_always`
+  // decision attributed to themselves.
   if (data.startsWith('drvpick:')) {
+    const access = loadAccess()
+    const senderId = String(ctx.from?.id ?? '')
+    if (!access.allowFrom.includes(senderId)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' })
+      return
+    }
     await handleFolderPickerCallback(ctx, data, buildFolderPickerDeps())
     return
   }

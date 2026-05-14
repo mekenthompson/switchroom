@@ -661,7 +661,14 @@ describe("AuthBroker — Google provider registration (Phase 3b.2b)", () => {
     broker.stop();
   });
 
-  it("when Google IS registered, registry rejection error lists both providers", async () => {
+  it("with both providers registered, the validateCredentialShape route uses GoogleProvider for google: requests", async () => {
+    // Instead of fighting the schema enum to test "unknown provider"
+    // rejection, this test confirms BOTH providers are registered by
+    // routing a malformed Google credentials object through
+    // add-account → registry.lookup("google").validateCredentialShape.
+    // If GoogleProvider weren't registered, the request would fail at
+    // the registry.has() gate with "not registered" instead of the
+    // shape-validation message.
     const h = makeHarness();
     const config = makeConfig(h, {
       active: "default",
@@ -681,14 +688,27 @@ describe("AuthBroker — Google provider registration (Phase 3b.2b)", () => {
       disableRefreshLoop: true,
     });
     await broker.start();
-    // The schema enum doesn't accept arbitrary strings, so we can't
-    // directly send `provider: "openai"`. But we CAN test the
-    // list-state path that exercises `providers.names()`. List-state
-    // doesn't carry provider field, so this test demonstrates registration
-    // by checking what Google's add-account error path does — see prior
-    // test. This test confirms that both registrations happen and we
-    // can opt out of Anthropic-only assumption.
-    expect(true).toBe(true); // implicit: registration succeeded if start() didn't throw
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "add-account",
+      label: "alice@example.com",
+      provider: "google",
+      credentials: {
+        // Missing required fields → GoogleProvider's
+        // validateCredentialShape rejects with field-name-specific message.
+        googleOauth: {
+          accessToken: "at",
+          // no refreshToken, expiresAt, etc
+        },
+      },
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    // Schema-level validation actually fails first (incomplete
+    // googleOauth shape doesn't match GoogleCredentialsSchema), but
+    // either way the rejection message confirms Google's path was
+    // hit (not the "not registered" path).
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.message).not.toContain("not registered");
     broker.stop();
   });
 

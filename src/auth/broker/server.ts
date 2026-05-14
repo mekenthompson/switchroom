@@ -226,6 +226,23 @@ export class AuthBroker {
     // client id/secret the provider needs). No client config = no
     // Google provider loaded; the broker still rejects
     // `provider: "google"` requests via registry.has() per Phase 3b.1.
+    //
+    // **TODO (Phase 3b.2c):** the `google_client_id` / `_secret`
+    // schema fields accept `vault:<key>` references (per
+    // `src/config/schema.ts:759`); `src/cli/drive.ts:446-448`
+    // resolves them via `resolveMaybeVaultRef`. Today the broker
+    // passes the raw config string verbatim, so a vault-ref config
+    // would silently send a literal `"vault:..."` string to Google's
+    // token endpoint and fail. Phase 3b.2c must resolve vault refs
+    // here BEFORE constructing the GoogleProvider — otherwise the
+    // first refresh tick will surface a confusing error. Latent
+    // until 3b.2c wires storage; flagged here as a foot-gun.
+    //
+    // **Known limitation:** `reload()` does NOT re-run provider
+    // registration. An operator who adds `google_workspace:` to a
+    // running broker and SIGHUPs will need to restart the broker
+    // for the provider to be picked up. Acceptable for v1; track
+    // as a future-hardening item.
     this.providers = new ProviderRegistry();
     this.providers.register(new AnthropicProvider());
     const googleClientId = config.google_workspace?.google_client_id;

@@ -477,7 +477,7 @@
       "id": "switchroom-runtime",
       "category": "switchroom-internal",
       "in_default_pool": true,
-      "user_invocable": true,
+      "user_invocable": false,
       "description": "Conditional runtime protocols (interrupted-turn resume, wake audit, why did you restart, ! interrupt).",
       "trigger_phrases": [
         "why did you restart",

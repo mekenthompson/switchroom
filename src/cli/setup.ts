@@ -209,10 +209,14 @@ async function stepConfigFile(
     return { config, configPath: resolve(existingConfig) };
   }
 
-  if (nonInteractive) {
-    throw new ConfigError("No switchroom.yaml found and running in non-interactive mode");
-  }
-
+  // No config found. Bootstrap from the bundled example. In interactive
+  // mode this prompts for which example; in non-interactive it picks
+  // the default ("switchroom") deterministically. The previous
+  // behaviour — throwing ConfigError in non-interactive mode — made it
+  // impossible to drive `switchroom setup --non-interactive` from a
+  // fresh install, which was a P0 blocker for any scripted/CI install
+  // (the same code path that works interactively works fine
+  // non-interactively; nothing about the bootstrap requires a TTY).
   return await copyExampleConfig(cwd, nonInteractive);
 }
 
@@ -704,6 +708,7 @@ async function stepScaffoldAgents(
   const topicState = loadTopicState();
 
   let scaffolded = 0;
+  let scaffoldFailed = 0;
   for (const name of agentNames) {
     const agentConfig = config.agents[name];
     const botInfo = agentBots[name];
@@ -740,6 +745,7 @@ async function stepScaffoldAgents(
       console.error(
         chalk.red(`  x ${name}: ${(err as Error).message}`),
       );
+      scaffoldFailed++;
     }
   }
 
@@ -747,11 +753,20 @@ async function stepScaffoldAgents(
   // file is regenerated + brought up by `switchroom apply`. We don't
   // run that automatically from the setup wizard — the operator may
   // want to inspect switchroom.yaml first.
-  console.log(
-    chalk.green(
-      `  ${STEP_DONE} ${scaffolded} agent(s) scaffolded`,
-    ),
+  //
+  // #12: don't paint a green checkmark on a step that failed. If any
+  // agent scaffold threw, surface it as a hard failure so the final
+  // "Setup complete!" line never lies about reality.
+  const summary = `${scaffolded} agent(s) scaffolded` + (
+    scaffoldFailed > 0 ? `, ${scaffoldFailed} failed` : ""
   );
+  if (scaffoldFailed > 0) {
+    console.log(chalk.red(`  x ${summary}`));
+    throw new Error(
+      `${scaffoldFailed} agent scaffold(s) failed during setup — see errors above.`,
+    );
+  }
+  console.log(chalk.green(`  ${STEP_DONE} ${summary}`));
   console.log(
     chalk.gray(
       "  Next: switchroom apply  (regenerates docker-compose.yml + brings agents up)",

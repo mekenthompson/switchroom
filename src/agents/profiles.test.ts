@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { sep as pathSep, resolve } from "node:path";
-import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync, readFileSync, existsSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -166,6 +166,30 @@ describe("renderProfileClaudeTemplate", () => {
       const content = readFileSync(result.path, "utf-8");
       expect(content).toBe("v1 test-profile");
     } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("gracefully skips with wrote=false when target dir is read-only (EACCES)", () => {
+    // Skip when running as root — chmod 0555 doesn't actually block root,
+    // so the EACCES path can't be exercised. CI usually runs as non-root.
+    if (process.getuid && process.getuid() === 0) return;
+
+    const tmp = mkdtempSync(join(tmpdir(), "switchroom-profile-render-readonly-"));
+    try {
+      const profileName = "test-profile";
+      const profileDir = join(tmp, profileName);
+      mkdirSync(profileDir, { recursive: true });
+      writeFileSync(join(profileDir, "CLAUDE.md.hbs"), "v1 {{profile}}");
+      chmodSync(profileDir, 0o555); // read+execute, no write
+
+      const result = renderProfileClaudeTemplate(profileName, tmp);
+
+      expect(result.wrote).toBe(false);
+      expect(result.path).toBe(join(profileDir, "CLAUDE.md"));
+    } finally {
+      // Restore writable mode so rmSync can clean up.
+      try { chmodSync(resolve(tmp, "test-profile"), 0o755); } catch {}
       rmSync(tmp, { recursive: true, force: true });
     }
   });

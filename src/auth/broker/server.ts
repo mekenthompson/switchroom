@@ -48,6 +48,7 @@ import {
   type AccountRefreshOptions,
 } from "../account-refresh.js";
 import { AnthropicProvider } from "./anthropic-provider.js";
+import { GoogleProvider } from "./google-provider.js";
 import { ProviderRegistry, type ProviderName } from "./provider.js";
 import {
   accountCredentialsPath,
@@ -220,11 +221,24 @@ export class AuthBroker {
     this.socketRoot = opts.socketRoot ?? AUTH_BROKER_ROOT;
 
     // Phase 3b.1b — register the Anthropic provider unconditionally.
-    // Phase 3b.2 will conditionally register Google when the
-    // `google_accounts:` config block is non-empty (no point loading
-    // a Google OAuth provider in installs that don't use it).
+    // Phase 3b.2b — conditionally register Google when the
+    // `google_workspace:` config block is set (carries the OAuth
+    // client id/secret the provider needs). No client config = no
+    // Google provider loaded; the broker still rejects
+    // `provider: "google"` requests via registry.has() per Phase 3b.1.
     this.providers = new ProviderRegistry();
     this.providers.register(new AnthropicProvider());
+    const googleClientId = config.google_workspace?.google_client_id;
+    const googleClientSecret = config.google_workspace?.google_client_secret;
+    if (googleClientId !== undefined && googleClientSecret !== undefined) {
+      this.providers.register(
+        new GoogleProvider({
+          clientId: googleClientId,
+          clientSecret: googleClientSecret,
+          fetcher: opts.fetcher as typeof fetch | undefined,
+        }),
+      );
+    }
 
     this.assertConfigConsistent(config);
   }
@@ -542,7 +556,7 @@ export class AuthBroker {
             encodeError(
               reqId,
               "INVALID_ARGS",
-              `refresh-account dispatch through provider '${provider}' lands in Phase 3b.2`,
+              `refresh-account dispatch through provider '${provider}' storage path lands in Phase 3b.2c (vault-broker-mediated, not direct-to-disk like Anthropic)`,
             ),
           );
           break;
@@ -594,7 +608,7 @@ export class AuthBroker {
             encodeError(
               reqId,
               "INVALID_ARGS",
-              `add-account storage path for provider '${provider}' lands in Phase 3b.2`,
+              `add-account storage path for provider '${provider}' lands in Phase 3b.2c (vault-broker-mediated, not direct-to-disk like Anthropic)`,
             ),
           );
           break;
@@ -619,7 +633,7 @@ export class AuthBroker {
             encodeError(
               reqId,
               "INVALID_ARGS",
-              `rm-account storage path for provider '${provider}' lands in Phase 3b.2`,
+              `rm-account storage path for provider '${provider}' lands in Phase 3b.2c (vault-broker-mediated, not direct-to-disk like Anthropic)`,
             ),
           );
           break;

@@ -70,14 +70,35 @@ export class BrokerCredentialsExpiredError extends Error {
  * `google_accounts.<account>.enabled_for[]`) or ACCOUNT_NOT_FOUND
  * (agent has no `google_workspace.account` configured, or the
  * referenced account isn't stored in the broker).
+ *
+ * Specifically NOT thrown for other broker error codes like
+ * INVALID_ARGS or INTERNAL — those rethrow as `BrokerCallFailedError`
+ * so the gateway can distinguish "ACL says no" (operator runs
+ * `auth google enable` or `account add`) from "broker bug" (page
+ * the operator).
  */
 export class BrokerAccessDeniedError extends Error {
   constructor(
-    public readonly brokerCode: string,
+    public readonly brokerCode: "FORBIDDEN" | "ACCOUNT_NOT_FOUND",
     public readonly brokerMessage: string,
   ) {
     super(`auth-broker denied get-credentials: ${brokerCode}: ${brokerMessage}`);
     this.name = "BrokerAccessDeniedError";
+  }
+}
+
+/**
+ * Catch-all for broker errors that aren't ACL-shaped. Wraps the
+ * broker's error code + message so callers can branch (e.g. retry
+ * vs surface).
+ */
+export class BrokerCallFailedError extends Error {
+  constructor(
+    public readonly brokerCode: string,
+    public readonly brokerMessage: string,
+  ) {
+    super(`auth-broker get-credentials failed: ${brokerCode}: ${brokerMessage}`);
+    this.name = "BrokerCallFailedError";
   }
 }
 
@@ -146,7 +167,14 @@ export async function loadFromAuthBroker(
       return null;
     }
     if (err instanceof AuthBrokerError) {
-      throw new BrokerAccessDeniedError(err.code, err.message);
+      // Only the ACL-shaped codes get the AccessDenied wrapper —
+      // everything else (INVALID_ARGS, INTERNAL, etc.) routes through
+      // BrokerCallFailedError so the gateway can distinguish "operator
+      // misconfig" from "broker bug."
+      if (err.code === "FORBIDDEN" || err.code === "ACCOUNT_NOT_FOUND") {
+        throw new BrokerAccessDeniedError(err.code, err.message);
+      }
+      throw new BrokerCallFailedError(err.code, err.message);
     }
     throw err;
   }

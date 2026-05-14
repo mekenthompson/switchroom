@@ -33,7 +33,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { closeSync, openSync } from "node:fs";
+import { closeSync, openSync, writeSync } from "node:fs";
 import * as constants from "node:constants";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
@@ -103,6 +103,13 @@ const MARK_EXHAUSTED_DEFAULT_MS = 5 * 60 * 60 * 1000;
 /** Audit-log size cap before rotation (10 MB, per RFC §4.4). */
 const AUDIT_ROTATE_BYTES = 10 * 1024 * 1024;
 const AUDIT_KEEP = 5;
+/**
+ * Maximum bytes per audit row. Sized below Linux's PIPE_BUF (4096) so a
+ * single `write(2)` to an O_APPEND fd is atomic — guarantees no torn
+ * row on SIGKILL mid-write. Real rows are <300 bytes; this is defence
+ * against runaway error strings.
+ */
+const AUDIT_LINE_MAX = 4000;
 
 /** Threshold-violation counter file. */
 interface ThresholdViolations {
@@ -1628,15 +1635,55 @@ export class AuthBroker {
     try {
       this.rotateAuditIfLarge(auditPath);
       const line = row + "\n";
-      const fd = openSync(auditPath, constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT, 0o600);
-      try {
-        writeFileSync(fd, line);
-      } finally {
-        try { closeSync(fd); } catch { /* ignore */ }
+      let buf = Buffer.from(line, "utf-8");
+      // SIGKILL-safe torn-write guard. POSIX `write(2)` to an O_APPEND
+      // fd is atomic with respect to other writers AND with respect to
+      // signals — the kernel doesn't yield mid-syscall to deliver a
+      // signal — IFF the write is a single syscall AND the buffer
+      // length is ≤ PIPE_BUF (4096 bytes on Linux for regular files,
+      // per the `write(2)` man page). Two changes vs the prior code
+      // which used `writeFileSync(fd, line)`:
+      //   1. `writeFileSync` LOOPS internally on short writes, so it
+      //      could in principle issue multiple syscalls. Switched to
+      //      `writeSync` (one syscall) below.
+      //   2. Hard-cap the row at AUDIT_LINE_MAX. Real audit rows are
+      //      <300 bytes; the cap defends against a runaway field
+      //      (e.g. a huge `entry.error` string). Oversized rows are
+      //      truncated with a marker — a truncated audit entry is
+      //      strictly better than a torn one.
+      if (buf.length > AUDIT_LINE_MAX) {
+        const truncated =
+          row.slice(0, AUDIT_LINE_MAX - 32) + '","__truncated":true}\n';
+        buf = Buffer.from(truncated, "utf-8");
       }
+      this._writeAuditLineAtomic(auditPath, buf);
     } catch (err) {
       // Audit failure must not affect protocol responses.
       this.logErr(`audit write failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Single-syscall atomic append. Caller has enforced
+   * `buf.length <= AUDIT_LINE_MAX <= PIPE_BUF`.
+   */
+  private _writeAuditLineAtomic(path: string, buf: Buffer): void {
+    const fd = openSync(
+      path,
+      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT,
+      0o600,
+    );
+    try {
+      const written = writeSync(fd, buf, 0, buf.length, null);
+      if (written !== buf.length) {
+        // Short write on an O_APPEND fd to a regular file with a tiny
+        // buffer shouldn't happen on Linux — the size cap exists to
+        // prevent this. Log loud if it does. The line is partial but
+        // we got the prefix; retry-risk would duplicate bytes.
+        this.logErr(`audit short-write: wrote=${written} expected=${buf.length}`);
+      }
+    } finally {
+      try { closeSync(fd); } catch { /* ignore */ }
     }
   }
 

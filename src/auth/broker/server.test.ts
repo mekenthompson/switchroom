@@ -18,6 +18,7 @@ import { join } from "node:path";
 import * as net from "node:net";
 
 import { AuthBroker } from "./server.js";
+import type { Identity } from "./peercred.js";
 import { decodeResponse, encodeRequest } from "./protocol.js";
 import type { SwitchroomConfig } from "../../config/schema.js";
 import { writeAccountCredentials } from "../account-store.js";
@@ -1372,6 +1373,116 @@ describe("AuthBroker — refresh tick + threshold-violation", () => {
     await broker._tick();
     expect(broker._state().thresholdViolations["default"]).toBeGreaterThanOrEqual(1);
     broker.stop();
+  });
+});
+
+describe("AuthBroker — audit-log torn-write hardening", () => {
+  // Real audit rows are <300 bytes and land in a single write(2) syscall
+  // to an O_APPEND fd, which Linux guarantees is atomic vs other writers
+  // AND vs signal delivery (the kernel doesn't yield mid-syscall to
+  // deliver SIGKILL — see write(2) man page). The size cap defends
+  // against a runaway field that would push past PIPE_BUF (4096).
+
+  it("writes a normal-sized audit row in a single syscall", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    // Trigger an audited op.
+    await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "list-state",
+    });
+    broker.stop();
+    // Audit file exists and contains a parseable JSONL row.
+    const auditPath = join(h.stateDir, "audit.jsonl");
+    const lines = readFileSync(auditPath, "utf-8").trim().split("\n");
+    expect(lines.length).toBeGreaterThan(0);
+    const row = JSON.parse(lines[lines.length - 1]);
+    expect(row.op).toBe("list-state");
+    expect(row.ok).toBe(true);
+    expect(row.__truncated).toBeUndefined();
+    // Row well under the cap.
+    expect(Buffer.byteLength(lines[lines.length - 1] + "\n", "utf-8"))
+      .toBeLessThan(500);
+  });
+
+  it("structural pin: audit writer uses writeSync (single syscall), not writeFileSync (looping)", async () => {
+    // SIGKILL-safety pin. writeFileSync to a fd loops on short writes,
+    // could in principle issue multiple syscalls, breaks the O_APPEND
+    // atomicity guarantee. writeSync issues exactly one. A refactor
+    // that swaps back to writeFileSync(fd, ...) fails here first.
+    const fs = await import("node:fs");
+    const url = await import("node:url");
+    const path = await import("node:path");
+    const here = path.dirname(url.fileURLToPath(import.meta.url));
+    const serverSrc = fs.readFileSync(path.join(here, "server.ts"), "utf-8");
+    // The audit-write helper exists.
+    expect(serverSrc).toMatch(/_writeAuditLineAtomic\b/);
+    // And uses writeSync, not writeFileSync.
+    expect(serverSrc).toMatch(/_writeAuditLineAtomic[\s\S]{0,400}writeSync\(/);
+    expect(serverSrc).not.toMatch(/_writeAuditLineAtomic[\s\S]{0,400}writeFileSync\(/);
+    // O_APPEND flag is set.
+    expect(serverSrc).toMatch(/_writeAuditLineAtomic[\s\S]{0,400}O_APPEND/);
+  });
+
+  it("truncates an oversized audit row instead of risking a torn write", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    // Drive a refresh-account that we know will fail with a synthetic
+    // huge error string. We don't have a clean injection point on
+    // the broker's public surface; instead reach into the private
+    // audit() method directly via the broker instance.
+    const broker_ = broker as unknown as {
+      audit: (entry: {
+        op: string;
+        identity: Identity;
+        account?: string;
+        ok: boolean;
+        error?: string;
+      }) => void;
+    };
+    const hugeError = "X".repeat(8000);
+    broker_.audit({
+      op: "refresh-account",
+      identity: { kind: "operator" },
+      account: "default",
+      ok: false,
+      error: hugeError,
+    });
+    broker.stop();
+    // The row landed in audit.jsonl, truncated to fit under the cap.
+    const auditPath = join(h.stateDir, "audit.jsonl");
+    const text = readFileSync(auditPath, "utf-8");
+    const lastLine = text.trimEnd().split("\n").pop()!;
+    expect(Buffer.byteLength(lastLine + "\n", "utf-8")).toBeLessThanOrEqual(4000);
+    // Truncation marker present.
+    expect(lastLine).toContain('"__truncated":true');
   });
 });
 

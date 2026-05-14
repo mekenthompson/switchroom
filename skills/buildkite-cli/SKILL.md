@@ -19,7 +19,9 @@ description: >
   Do NOT use when authoring `.buildkite/pipeline.yml`, standardizing pipelines
   across teams, adding plugins, or showing test failures on the build page —
   those are `buildkite-pipelines`. Do NOT use for scripted programmatic access
-  or REST/GraphQL calls — that's `buildkite-api`.
+  or REST/GraphQL calls — that's `buildkite-api`. Do NOT use for cluster
+  admin tasks like "create a queue", "configure SSO", "manage cluster
+  secrets", "set up hosted agents" — those are `buildkite-agent-infrastructure`.
 ---
 
 # Buildkite CLI

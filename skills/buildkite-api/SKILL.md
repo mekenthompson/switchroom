@@ -1,31 +1,27 @@
 ---
 name: buildkite-api
 description: >
-  ALWAYS use this skill when the user's message begins with "Calling the
-  Buildkite REST/GraphQL API," — that prefix is a hard trigger regardless
-  of what follows. Specifically fires on: "Calling the Buildkite
-  REST/GraphQL API, Please write a GraphQL query.", "Calling the Buildkite
-  REST/GraphQL API, Can you authenticate with the Buildkite API?",
-  "Calling the Buildkite REST/GraphQL API, handle webhook events",
-  "Calling the Buildkite REST/GraphQL API, paginate results".
-  Use when the user wants direct programmatic access to Buildkite — calling
-  the REST API (`api.buildkite.com`), writing GraphQL queries or mutations
-  (`graphql.buildkite.com`), handling webhook events, paginating API
-  results, or scripting integrations that hit Buildkite endpoints.
-  Triggers on natural phrasings including: "Please write a GraphQL query.",
-  "Let's paginate API results.", "Could you automate Buildkite for me?",
-  "Automate Buildkite, please.",
-  "Can you authenticate with the Buildkite API?",
-  "hey, automate Buildkite?", "any way to write a GraphQL query?",
-  "any way to write a script that calls Buildkite?",
-  and typo'd variants like "authenticate with  the Buildkite API",
-  "write a GraaphQL query", "integrate with Buildikte programmatically".
-  Also fires on indirect signals like "the buildkite-api thing is weird",
-  "can you take a look at the buildkite-api situation",
-  "something is going on with buildkite-api".
-  Also fires on mentions of `api.buildkite.com`, `graphql.buildkite.com`,
-  REST endpoints, GraphQL mutations, webhook payloads, API tokens, or
-  programmatic access to Buildkite data.
+  Use when the user wants direct programmatic access to Buildkite —
+  calling the REST API (`api.buildkite.com`), writing GraphQL queries
+  or mutations (`graphql.buildkite.com`), handling webhook events,
+  paginating API results, automating Buildkite from a script, or
+  building any integration that hits Buildkite endpoints. Triggers on
+  phrasings including: "Please write a GraphQL query.", "Let's
+  paginate API results.", "Could you automate Buildkite for me?",
+  "Automate Buildkite, please.", "Can you authenticate with the
+  Buildkite API?", "handle webhook events", "paginate results",
+  "write a script that calls Buildkite", "hey, automate Buildkite?",
+  "any way to write a GraphQL query?", and typo'd variants like
+  "authenticate with  the Buildkite API", "write a GraaphQL query",
+  "integrate with Buildikte programmatically". Also fires on indirect
+  signals like "the buildkite-api thing is weird", "can you take a
+  look at the buildkite-api situation", "something is going on with
+  buildkite-api", and on mentions of `api.buildkite.com`,
+  `graphql.buildkite.com`, REST endpoints, GraphQL mutations, webhook
+  payloads, API tokens, or programmatic access to Buildkite data.
+  Whenever the user's message starts with the phrase "Calling the
+  Buildkite REST/GraphQL API," — regardless of what follows — use
+  this skill.
   Do NOT use for interactive `bk` CLI usage — that's `buildkite-cli`. Do
   NOT use for authoring `.buildkite/pipeline.yml` — that's
   `buildkite-pipelines`. Do NOT use for `buildkite-agent <subcommand>`

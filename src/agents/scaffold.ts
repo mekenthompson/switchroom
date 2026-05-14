@@ -3440,26 +3440,14 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
         composed = composed.trimEnd() + "\n\n" + agentConfig.claude_md_raw + "\n";
       }
 
-      // Migration detection: if on-disk differs and no sidecar exists, warn + abort
-      if (existsSync(claudeMdDest)) {
-        const onDisk = readFileSync(claudeMdDest, "utf-8");
-        if (onDisk !== composed && !existsSync(claudeCustomPath)) {
-          console.error(
-            chalk.red(
-              `CLAUDE.md has hand-edits that will be overwritten by reconcile.\n\n` +
-              `Options:\n` +
-              `  1. Move your custom content to ${claudeCustomPath} and re-run reconcile.\n` +
-              `     The sidecar is appended to the regenerated CLAUDE.md and never overwritten.\n` +
-              `  2. Pass --preserve-claude-md to keep your current CLAUDE.md as-is (no template updates).\n` +
-              `  3. Accept the regeneration and lose hand-edits.\n\n` +
-              `Aborting this reconcile. Re-run with one of the above options.`
-            )
-          );
-          process.exit(1);
-        }
-      }
-
-      // Write if changed
+      // CLAUDE.md is template-owned: every reconcile regenerates it from
+      // CLAUDE.md.hbs + workspace/CLAUDE.custom.md sidecar. Drift between
+      // on-disk and freshly-rendered bytes is almost always template
+      // churn upstream, not operator hand-edits (operators put custom
+      // content in the sidecar). The previous abort treated those cases
+      // identically and forced --preserve-claude-md on every release.
+      // Preserve mode still exists for operators who genuinely want to
+      // freeze a CLAUDE.md (`reconcile --preserve-claude-md`).
       const before = existsSync(claudeMdDest) ? readFileSync(claudeMdDest, "utf-8") : "";
       if (composed !== before) {
         writeFileSync(claudeMdDest, composed, "utf-8");

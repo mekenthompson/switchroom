@@ -69,7 +69,12 @@ cp .env.example .env
 # Edit .env:
 #   GOOGLE_OAUTH_CLIENT_ID   ← paste from step 5 above
 #   FASTMCP_SERVER_AUTH_GOOGLE_JWT_SIGNING_KEY ← generate via:
+
+# (GNU sed — Linux)
 sed -i "s|REPLACE_WITH_HEX_FROM_OPENSSL_RAND|$(openssl rand -hex 32)|" .env
+
+# (BSD sed — macOS — use this instead)
+# sed -i '' "s|REPLACE_WITH_HEX_FROM_OPENSSL_RAND|$(openssl rand -hex 32)|" .env
 
 chmod 600 .env
 ```
@@ -131,8 +136,13 @@ Pick whichever your nerve allows.
 `compose.yaml` defaults to `--tool-tier core` (~16 tools). Change to:
 
 - `extended` (~40 tools) — adds Slides, Forms, Tasks, Chat. Re-consent
-  needed (broader OAuth scopes). Re-run `docker compose up -d` after
-  editing.
+  needed (broader OAuth scopes). Procedure:
+  1. Edit `compose.yaml` to bump `--tool-tier core` → `--tool-tier extended`.
+  2. **Delete the existing token** so the upgraded scopes get requested
+     on the next OAuth flow: `rm -rf ./credentials/`.
+  3. `docker compose up -d --force-recreate`.
+  4. Trigger a tool call from Claude Code — the OAuth URL will appear
+     inline; tap to consent at the new scopes.
 - `complete` (~60+ tools) — adds Gmail. **Not recommended yet** — Gmail's
   per-thread approval shape is unsuitable for the broad OAuth scopes
   this tier requests. Wait for a dedicated Gmail spec.

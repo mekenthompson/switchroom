@@ -53,6 +53,16 @@ export function registerAuthGoogleSubcommands(
   registerEnable(google, program);
   registerDisable(google, program);
   registerList(google, program);
+
+  // RFC G Phase 3b.3 — account-lifecycle verbs (auth-broker thin clients).
+  const account = google
+    .command("account")
+    .description(
+      "Manage Google account credentials (RFC G Phase 3b.3 — broker storage path lands in 3b.2c)",
+    );
+  registerAccountAdd(account);
+  registerAccountRemove(account);
+  registerAccountList(account);
 }
 
 function registerEnable(googleParent: Command, program: Command): void {
@@ -290,6 +300,135 @@ function expandAllAgents(agents: string[], config: SwitchroomConfig): string[] {
 
 function pad(s: string, width: number): string {
   return s.length >= width ? s : s + " ".repeat(width - s.length);
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// RFC G Phase 3b.3 — `auth google account add | remove | list`
+// Thin clients over the auth-broker (RFC H), with provider="google"
+// passed through. Storage path itself lives in the broker — Phase 3b.2c
+// wires it via the vault-broker per RFC G v3 §4.4. Today these verbs
+// produce clear errors pointing operators at the next-PR deferral.
+// ────────────────────────────────────────────────────────────────────────
+
+function registerAccountAdd(accountParent: Command): void {
+  accountParent
+    .command("add <account>")
+    .description(
+      "Mint a Google OAuth refresh token for <account> and register it with the auth-broker. Phase 3b.3 ships the CLI shape; OAuth flow extraction lives in Phase 3b.2c. For now use `switchroom drive connect <agent>` (the v0.6.0 verb).",
+    )
+    .action(
+      withConfigError(async (account: string) => {
+        const normalizedAccount = validateAndNormalizeAccountEmail(account);
+        console.log();
+        console.log(
+          chalk.yellow(
+            `  ⚠  Phase 3b.3 ships the CLI shape only; the OAuth flow extraction + broker storage path land in Phase 3b.2c.`,
+          ),
+        );
+        console.log();
+        console.log(`  For now, use the v0.6.0 verb to mint the token:`);
+        console.log(
+          chalk.cyan(`    switchroom drive connect <agent-with-google-config>`),
+        );
+        console.log();
+        console.log(
+          `  Once the broker storage path lands, this verb will:`,
+        );
+        console.log(
+          chalk.gray(`    1. Run the OAuth device-code / OOB-paste / loopback flow`),
+        );
+        console.log(
+          chalk.gray(`    2. Exchange code for refresh + access tokens`),
+        );
+        console.log(
+          chalk.gray(`    3. Call auth-broker.add-account({provider: "google", account: ${normalizedAccount}, credentials: {...}})`),
+        );
+        console.log(
+          chalk.gray(`    4. Operator runs \`auth google enable ${normalizedAccount} <agents>\` to enable on agents`),
+        );
+        console.log();
+      }),
+    );
+}
+
+function registerAccountRemove(accountParent: Command): void {
+  accountParent
+    .command("remove <account>")
+    .alias("rm")
+    .description(
+      "Revoke + delete the Google OAuth credentials for <account>. Refused if any agent is still enabled on the account (run `auth google disable <account> all` first).",
+    )
+    .action(
+      withConfigError(async (account: string) => {
+        const normalizedAccount = validateAndNormalizeAccountEmail(account);
+        // Use the shared brokerCall helper so error UX matches every
+        // other broker-touching verb (operator-actionable
+        // "broker unreachable" hint, exit code 2; broker error code
+        // + message to stderr, exit code 1).
+        const { brokerCall } = await import("./broker-call.js");
+        await brokerCall(async (client) => {
+          await client.rmAccount(normalizedAccount, "google");
+        });
+        console.log();
+        console.log(
+          chalk.green(
+            `  ✓ Removed Google account ${chalk.bold(normalizedAccount)} from broker.`,
+          ),
+        );
+        console.log();
+      }),
+    );
+}
+
+function registerAccountList(accountParent: Command): void {
+  accountParent
+    .command("list")
+    .description(
+      "List Google accounts known to the auth-broker. Distinct from `auth google list` (which shows the YAML google_accounts × agents matrix).",
+    )
+    .option("--json", "Emit raw JSON instead of a table")
+    .action(
+      withConfigError(async (opts: { json?: boolean }) => {
+        const { brokerCall } = await import("./broker-call.js");
+        // Phase 3b.3 — broker doesn't yet surface per-provider lists.
+        // For Google specifically the broker doesn't yet store accounts
+        // (Phase 3b.2c lands the storage path); the call below succeeds
+        // but only Anthropic accounts come back in `state.accounts`.
+        // Verb is scoped to Google — we DON'T leak Anthropic state into
+        // the output. JSON mode emits an empty list with the deferral
+        // note; human mode prints the deferral + a pointer at the
+        // sibling `auth google list` for the YAML matrix view.
+        await brokerCall(async (client) => {
+          // Trip the broker connection (validates the socket is
+          // reachable) but discard the Anthropic-only result — Google
+          // listing lands in Phase 3b.2c.
+          await client.listState();
+        });
+        if (opts.json) {
+          console.log(
+            JSON.stringify(
+              {
+                google_accounts: [],
+                note: "Phase 3b.2c will surface Google accounts stored in the broker. Today the broker stores Anthropic only; this verb returns an empty list.",
+              },
+              null,
+              2,
+            ),
+          );
+          return;
+        }
+        console.log();
+        console.log(
+          chalk.gray(
+            `  Google accounts surfaced via the broker land in Phase 3b.2c.`,
+          ),
+        );
+        console.log(
+          `  For the YAML google_accounts × agents matrix, use: ${chalk.bold("switchroom auth google list")}`,
+        );
+        console.log();
+      }),
+    );
 }
 
 // Re-export for tests.

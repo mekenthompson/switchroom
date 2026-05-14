@@ -51,8 +51,13 @@
  * Adding a new provider is a deliberate enum extension — operators
  * can't accidentally type a wrong provider name. Future Notion / Slack
  * providers extend this.
+ *
+ * Re-exported from `protocol.ts` so the wire-validation enum and the
+ * TS-side type are guaranteed identical (single source of truth, no
+ * drift risk from defining the union in two places).
  */
-export type ProviderName = "anthropic" | "google";
+export type { ProviderName } from "./protocol.js";
+import type { ProviderName } from "./protocol.js";
 
 /**
  * Composite key for per-account state. Two accounts with the same label

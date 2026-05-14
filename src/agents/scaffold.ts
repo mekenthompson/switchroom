@@ -2253,8 +2253,10 @@ export function scaffoldAgent(
   // .credentials.json. Each agent must go through its own fresh OAuth flow
   // (Phase 2 policy: copyExistingCredentials removed from scaffold path).
   // Existing credential blobs can be stale and cause silent 401s.
-  // Operators are directed to `switchroom auth login <agent>` or
-  // `switchroom agent bootstrap <agent>` for a guided OAuth flow.
+  // Operators register a fleet-wide account via `switchroom auth add
+  // <label> --from-oauth` + `switchroom auth use <label>` (RFC H); the
+  // auth-broker mirrors `.credentials.json` per agent at boot, on
+  // setActive, and on refresh-tick.
   //
   // UPGRADE WARN: if ~/.claude-home/.credentials.json (or ~/.claude/.credentials.json)
   // exists at scaffold time, we deliberately skip copying it. Agents that were

@@ -7434,7 +7434,7 @@ function renderAuthCodeOutcome(outcome: AuthCodeOutcome | null | undefined): str
     case 'pane-not-ready':
       return `Auth pane not ready — tap <b>Retry</b>.`
     case 'timeout':
-      return `Still waiting after 2 min — tap <b>Retry</b> or check <code>switchroom auth status</code>.${tail}`
+      return `Still waiting after 2 min — tap <b>Retry</b> or check <code>switchroom auth list</code>.${tail}`
   }
 }
 
@@ -7621,6 +7621,10 @@ function buildAgentAudit(agentName: string): AgentAudit | undefined {
 
 // Build an AgentMetadata snapshot for the current agent by shelling out
 // to `switchroom agent list --json` and `switchroom auth status --json`.
+// TODO(rfc-h): the `auth status` verb was retired by RFC H. The shell
+// fails silently and `authSummary` lands as null — /status renders
+// without auth detail. Replace with an `auth show --json` adapter that
+// maps the new fleet-broker shape to the per-agent AuthSummary fields.
 // Best-effort — any missing piece renders as a placeholder in the text
 // templates rather than blocking the reply.
 async function buildAgentMetadata(agentName: string): Promise<AgentMetadata> {

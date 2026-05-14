@@ -47,6 +47,8 @@ import {
   refreshAccountIfNeeded,
   type AccountRefreshOptions,
 } from "../account-refresh.js";
+import { AnthropicProvider } from "./anthropic-provider.js";
+import { ProviderRegistry, type ProviderName } from "./provider.js";
 import {
   accountCredentialsPath,
   accountDir,
@@ -175,6 +177,17 @@ export class AuthBroker {
   private now: () => number;
   private operatorUid: number | undefined;
   private fetcher: AccountRefreshOptions["fetcher"];
+  /**
+   * Provider registry — RFC G Phase 3b.1b. AnthropicProvider is registered
+   * unconditionally at startup (the broker's existing surface is
+   * Anthropic-only). Phase 3b.2 will register GoogleProvider alongside.
+   * The registry is consulted for: (a) gating provider-aware verbs at
+   * the wire layer, (b) credential-shape validation on add-account,
+   * (c) expiry-extraction on refresh-tick. The actual Anthropic refresh
+   * exchange continues to be invoked directly via account-refresh.ts —
+   * see AnthropicProvider class docstring for rationale.
+   */
+  private readonly providers: ProviderRegistry;
 
   // In-memory state mirrored to disk.
   private quota: QuotaState = {};
@@ -205,6 +218,13 @@ export class AuthBroker {
     this.stateDir =
       opts.stateDir ?? resolve(this.homeRoot(), ".switchroom", "state", "auth-broker");
     this.socketRoot = opts.socketRoot ?? AUTH_BROKER_ROOT;
+
+    // Phase 3b.1b — register the Anthropic provider unconditionally.
+    // Phase 3b.2 will conditionally register Google when the
+    // `google_accounts:` config block is non-empty (no point loading
+    // a Google OAuth provider in installs that don't use it).
+    this.providers = new ProviderRegistry();
+    this.providers.register(new AnthropicProvider());
 
     this.assertConfigConsistent(config);
   }
@@ -472,11 +492,11 @@ export class AuthBroker {
           await this.opListState(socket, reqId, identity);
           break;
         case "set-active": {
-          // Phase 3b.1: provider field is carried for protocol uniformity
-          // but `set-active` is fleet-wide active-account swap, an
-          // Anthropic-only concept. Reject non-default until/unless a
-          // fleet-wide-active Google concept exists.
-          const provider = req.provider ?? "anthropic";
+          // Phase 3b.1b: `set-active` is fleet-wide active-account swap,
+          // an Anthropic-only concept by design (Google's account-active
+          // model is per-agent via google_accounts.enabled_for[]). Reject
+          // any non-Anthropic provider regardless of registry state.
+          const provider: ProviderName = req.provider ?? "anthropic";
           if (provider !== "anthropic") {
             socket.write(
               encodeError(
@@ -494,65 +514,114 @@ export class AuthBroker {
           await this.opMarkExhausted(socket, reqId, identity, req.until);
           break;
         case "refresh-account": {
-          const provider = req.provider ?? "anthropic";
-          if (provider !== "anthropic") {
+          const provider: ProviderName = req.provider ?? "anthropic";
+          // Phase 3b.1b: gate via registry.has() — when 3b.2 registers
+          // Google, this naturally accepts provider:"google" requests.
+          // For now Anthropic is the only registered provider but the
+          // dispatch shape no longer hardcodes the name.
+          if (!this.providers.has(provider)) {
             socket.write(
               encodeError(
                 reqId,
                 "INVALID_ARGS",
-                `provider '${provider}' not yet implemented in broker server (Phase 3b.1b will add provider dispatch)`,
+                `provider '${provider}' is not registered with this broker (only ${this.providers.names().join(", ")} available)`,
               ),
             );
             break;
           }
-          await this.opRefreshAccount(socket, reqId, identity, req.account);
+          // Anthropic refresh continues via account-refresh.ts directly
+          // per AnthropicProvider class docstring. When Phase 3b.2 lands
+          // Google, this dispatcher will route by provider — for now the
+          // Anthropic short-circuit holds.
+          if (provider === "anthropic") {
+            await this.opRefreshAccount(socket, reqId, identity, req.account);
+            break;
+          }
+          // Future-provider path — for 3b.2 Google support.
+          socket.write(
+            encodeError(
+              reqId,
+              "INVALID_ARGS",
+              `refresh-account dispatch through provider '${provider}' lands in Phase 3b.2`,
+            ),
+          );
           break;
         }
         case "add-account": {
-          // Phase 3b.1: protocol now accepts an optional `provider:` field
-          // and a discriminated `credentials:` union. Until 3b.1b refactors
-          // the server to dispatch through providers, the server is
-          // Anthropic-only and rejects non-default providers.
-          const provider = req.provider ?? "anthropic";
-          if (provider !== "anthropic") {
+          const provider: ProviderName = req.provider ?? "anthropic";
+          if (!this.providers.has(provider)) {
             socket.write(
               encodeError(
                 reqId,
                 "INVALID_ARGS",
-                `provider '${provider}' not yet implemented in broker server (Phase 3b.1b will add provider dispatch)`,
+                `provider '${provider}' is not registered with this broker (only ${this.providers.names().join(", ")} available)`,
               ),
             );
             break;
           }
-          // Validate the credentials variant matches the provider.
-          if (!("claudeAiOauth" in req.credentials)) {
+          // Validate the credentials variant matches the provider via
+          // the provider's own shape validator. Replaces the hardcoded
+          // "claudeAiOauth in req.credentials" check.
+          const validationError = this.providers
+            .lookup(provider)
+            .validateCredentialShape(req.credentials);
+          if (validationError !== null) {
             socket.write(
               encodeError(
                 reqId,
                 "INVALID_ARGS",
-                `provider 'anthropic' requires credentials in claudeAiOauth shape`,
+                `provider '${provider}' rejected credentials: ${validationError}`,
               ),
             );
             break;
           }
-          // Type narrows: variant is AnthropicCredentialsShape; assignable to AccountCredentials.
-          const anthropicCreds = req.credentials as { claudeAiOauth: AccountCredentials["claudeAiOauth"] };
-          await this.opAddAccount(socket, reqId, identity, req.label, anthropicCreds, req.replace ?? false);
+          // Anthropic-only storage path for now; Google path lands in 3b.2.
+          if (provider === "anthropic") {
+            const anthropicCreds = req.credentials as {
+              claudeAiOauth: AccountCredentials["claudeAiOauth"];
+            };
+            await this.opAddAccount(
+              socket,
+              reqId,
+              identity,
+              req.label,
+              anthropicCreds,
+              req.replace ?? false,
+            );
+            break;
+          }
+          socket.write(
+            encodeError(
+              reqId,
+              "INVALID_ARGS",
+              `add-account storage path for provider '${provider}' lands in Phase 3b.2`,
+            ),
+          );
           break;
         }
         case "rm-account": {
-          const provider = req.provider ?? "anthropic";
-          if (provider !== "anthropic") {
+          const provider: ProviderName = req.provider ?? "anthropic";
+          if (!this.providers.has(provider)) {
             socket.write(
               encodeError(
                 reqId,
                 "INVALID_ARGS",
-                `provider '${provider}' not yet implemented in broker server (Phase 3b.1b will add provider dispatch)`,
+                `provider '${provider}' is not registered with this broker (only ${this.providers.names().join(", ")} available)`,
               ),
             );
             break;
           }
-          await this.opRmAccount(socket, reqId, identity, req.label);
+          if (provider === "anthropic") {
+            await this.opRmAccount(socket, reqId, identity, req.label);
+            break;
+          }
+          socket.write(
+            encodeError(
+              reqId,
+              "INVALID_ARGS",
+              `rm-account storage path for provider '${provider}' lands in Phase 3b.2`,
+            ),
+          );
           break;
         }
         case "set-override":
@@ -883,8 +952,16 @@ export class AuthBroker {
     if (this.refreshInFlight.has(label)) return { kind: "noop" };
 
     // Threshold-violation: detect on-disk expiresAt change vs last write.
+    // Phase 3b.1b — this single read uses the provider's extractExpiresAt
+    // as a plumbing demonstration. Eight other `claudeAiOauth?.expiresAt`
+    // reads in this file (lines ~620, ~640, ~745, ~785, ~790, ~935, and
+    // the seed loop ~1100) are still direct-access — they get routed
+    // through `lookup(accountKey.provider).extractExpiresAt()` as part of
+    // Phase 3b.2 alongside the `refreshOneAccount(label)` →
+    // `refreshOneAccount(accountKey)` signature change. This call is
+    // hardcoded to "anthropic" until that refactor lands.
     const credsBefore = readAccountCredentials(label, this.home);
-    const onDiskExpires = credsBefore?.claudeAiOauth?.expiresAt;
+    const onDiskExpires = this.providers.lookup("anthropic").extractExpiresAt(credsBefore);
     const lastWritten = this.lastWrittenExpiresAt.get(label);
     if (
       onDiskExpires !== undefined &&

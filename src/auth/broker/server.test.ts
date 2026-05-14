@@ -424,7 +424,7 @@ describe("AuthBroker — provider field gating (Phase 3b.1)", () => {
     broker.stop();
   });
 
-  it("refresh-account rejects provider: 'google' with Phase 3b.1b deferral message", async () => {
+  it("refresh-account rejects provider: 'google' as not-registered (until Phase 3b.2 registers Google)", async () => {
     const h = makeHarness();
     const config = makeConfig(h, {
       active: "default",
@@ -449,11 +449,11 @@ describe("AuthBroker — provider field gating (Phase 3b.1)", () => {
     }) as { ok: boolean; error?: { code: string; message: string } };
     expect(resp.ok).toBe(false);
     expect(resp.error?.code).toBe("INVALID_ARGS");
-    expect(resp.error?.message).toContain("Phase 3b.1b");
+    expect(resp.error?.message).toContain("not registered");
     broker.stop();
   });
 
-  it("add-account rejects provider: 'google' with Phase 3b.1b deferral message", async () => {
+  it("add-account rejects provider: 'google' as not-registered (until Phase 3b.2 registers Google)", async () => {
     const h = makeHarness();
     const config = makeConfig(h, {
       active: "default",
@@ -489,7 +489,38 @@ describe("AuthBroker — provider field gating (Phase 3b.1)", () => {
     }) as { ok: boolean; error?: { code: string; message: string } };
     expect(resp.ok).toBe(false);
     expect(resp.error?.code).toBe("INVALID_ARGS");
-    expect(resp.error?.message).toContain("Phase 3b.1b");
+    expect(resp.error?.message).toContain("not registered");
+    broker.stop();
+  });
+
+  it("rejection error message lists the actually-registered providers (regression-resistant)", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "rm-account",
+      label: "x",
+      provider: "google",
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    // The message should name what IS registered ("anthropic"), so a
+    // future Phase 3b.2 PR that registers Google can update the
+    // expectation by adding "google" to this assertion. Pinning the
+    // shape, not the literal text.
+    expect(resp.error?.message).toMatch(/only .*anthropic.* available/);
     broker.stop();
   });
 
@@ -528,7 +559,7 @@ describe("AuthBroker — provider field gating (Phase 3b.1)", () => {
     broker.stop();
   });
 
-  it("rm-account rejects provider: 'google' with Phase 3b.1b deferral message", async () => {
+  it("rm-account rejects provider: 'google' as not-registered (until Phase 3b.2 registers Google)", async () => {
     const h = makeHarness();
     const config = makeConfig(h, {
       active: "default",

@@ -64,6 +64,7 @@ import {
   accountDir,
   accountExists,
   accountsRoot,
+  enrichClaudeCreds,
   listAccounts,
   patchAccountMeta,
   readAccountCredentials,
@@ -164,6 +165,38 @@ function sha256Hex(content: string): string {
 
 function nowMs(): number {
   return Date.now();
+}
+
+/**
+ * Apply `enrichClaudeCreds` to a JSON string from the source-of-truth
+ * credentials.json, returning a JSON string for the per-agent
+ * `.credentials.json` mirror.
+ *
+ * Returns the source string verbatim (byte-identical) when:
+ *   - JSON is malformed (broker leaves the diagnostic to claude;
+ *     synthesizing a fake shape would mask the real corruption).
+ *   - There's nothing to enrich — `claudeAiOauth` is absent OR both
+ *     `scopes` (non-empty array) and `subscriptionType` are already
+ *     present. Avoids whitespace churn on the per-agent mirror when
+ *     the source is already in the post-#1280 shape.
+ *
+ * Exported for tests.
+ */
+export function enrichMirrorContent(sourceJson: string): string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(sourceJson);
+  } catch {
+    return sourceJson;
+  }
+  const value = parsed as AccountCredentials;
+  const oauth = value?.claudeAiOauth;
+  if (!oauth) return sourceJson;
+  const hasScopes = Array.isArray(oauth.scopes) && oauth.scopes.length > 0;
+  const hasSubscription =
+    typeof oauth.subscriptionType === "string" && oauth.subscriptionType.length > 0;
+  if (hasScopes && hasSubscription) return sourceJson;
+  return JSON.stringify(enrichClaudeCreds(value), null, 2);
 }
 
 function configToShape(cfg: SwitchroomConfig): AuthConfigShape {
@@ -1519,7 +1552,9 @@ export class AuthBroker {
   private mirrorAccountToAgent(label: string, agentName: string): boolean {
     const credsPath = accountCredentialsPath(label, this.home);
     if (!existsSync(credsPath)) return false;
-    const content = readFileSync(credsPath, "utf-8");
+    // enrichMirrorContent: defense-in-depth on top of #1280's write-
+    // time enrichment for stale legacy source files. See its docstring.
+    const mirrorContent = enrichMirrorContent(readFileSync(credsPath, "utf-8"));
     const agentsDir = resolveAgentsDir(this.config);
     const agentDir = resolve(agentsDir, agentName);
     if (!existsSync(agentDir)) return false;
@@ -1535,7 +1570,7 @@ export class AuthBroker {
     // first restart. Pinned by tests in server.test.ts.
     const targetPath = join(claudeDir, ".credentials.json");
     try {
-      atomicWriteFileSync(targetPath, content, 0o600);
+      atomicWriteFileSync(targetPath, mirrorContent, 0o600);
       try {
         const uid = allocateAgentUid(agentName);
         chownSync(targetPath, uid, uid);

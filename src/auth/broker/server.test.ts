@@ -1454,8 +1454,13 @@ describe("AuthBroker — historical-bug regressions (2026-05-14 fanout incident)
     // it root-owned. The exact pattern (a chownSync call against the
     // freshly-written .credentials.json path inside mirrorAccountToAgent)
     // is what closes Bug 1.
-    expect(serverSrc).toMatch(/mirrorAccountToAgent[\s\S]{0,1600}allocateAgentUid/);
-    expect(serverSrc).toMatch(/mirrorAccountToAgent[\s\S]{0,1600}chownSync\(targetPath/);
+    // Budget bumped from 1600 → 3000 when mirror-time enrichment landed
+    // (#1282: enrichMirrorContent call + load-bearing inline comments
+    // about the .credentials.json dotfile invariant). The pin is still
+    // meaningful — it asserts the chown call is *inside* the function,
+    // not extracted to a remote helper that could regress silently.
+    expect(serverSrc).toMatch(/mirrorAccountToAgent[\s\S]{0,3000}allocateAgentUid/);
+    expect(serverSrc).toMatch(/mirrorAccountToAgent[\s\S]{0,3000}chownSync\(targetPath/);
   });
 
   it("Bug 2: refresh tick writes ONLY the agent's effective account, not last-iterated label", async () => {

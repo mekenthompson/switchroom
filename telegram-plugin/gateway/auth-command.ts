@@ -313,7 +313,9 @@ export async function handleAuthCommand(
     return {
       text:
         `<b>Not authorized.</b> <code>/auth ${parsed.kind}</code> is admin-only.\n` +
-        `Add this agent to <code>auth.admin_agents</code> in switchroom.yaml to unlock.`,
+        `Set <code>admin: true</code> on this agent in switchroom.yaml to unlock ` +
+        `(the same flag that gates <code>/agents</code>, <code>/restart</code>, ` +
+        `<code>/update</code> etc.).`,
       html: true,
     }
   }

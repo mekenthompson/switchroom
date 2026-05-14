@@ -95,14 +95,19 @@ describe("validateConsumerNames", () => {
     ]);
   });
 
-  it("flags consumer listed in admin_agents", () => {
+  it("flags consumer name that's also an admin agent", () => {
+    // Post-unification: admin is sourced from `agents.<name>.admin: true`,
+    // so `adminAgents` in the shape is the derived subset of agent names
+    // with that flag. A consumer-name collision with an admin-agent is
+    // still a config error (and the agent-name collision check above
+    // catches it too — this is defence in depth).
     const errs = validateConsumerNames({
       agents: ["ziggy"],
       consumers: ["ziggy-shadow"],
       adminAgents: ["ziggy-shadow"],
     });
     expect(errs).toContain(
-      "consumer name 'ziggy-shadow' is listed in admin_agents (consumers cannot be admins)",
+      "consumer name 'ziggy-shadow' is an admin agent (consumers cannot be admins)",
     );
   });
 

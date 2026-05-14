@@ -345,7 +345,7 @@ switchroom auth agent override <agent> --clear    # Back to fleet active
 switchroom auth refresh [label]                   # Diagnostic: force a refresh tick
 ```
 
-The same surface is reachable from Telegram in any agent's chat: `/auth show` (read-only), `/auth use <label>`, `/auth rotate`. The latter two are admin-gated (`auth.admin_agents:` in `switchroom.yaml`).
+The same surface is reachable from Telegram in any agent's chat: `/auth show` (read-only), `/auth use <label>`, `/auth rotate`. Mutating verbs are admin-gated against the per-agent `admin: true` flag (the same flag that gates `/agents`, `/restart`, `/update`, etc.). One knob to make an agent the fleet control panel.
 
 ### Workspace (agent bootstrap layer)
 

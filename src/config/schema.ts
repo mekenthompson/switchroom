@@ -1805,15 +1805,6 @@ export const SwitchroomConfigSchema = z.object({
           "through when the active account hits a quota event. First entry is " +
           "normally the same as `auth.active`. When unset, `rotate` is a no-op.",
         ),
-      admin_agents: z
-        .array(z.string().min(1))
-        .optional()
-        .describe(
-          "Agents allowed to call admin verbs on switchroom-auth-broker " +
-          "(set-active, refresh-account, add-account, rm-account, set-override). " +
-          "Non-admin agents can only read their own credentials and report " +
-          "quota exhaustion on their own account. See RFC H §4.3.",
-        ),
       consumers: z
         .array(
           z.object({
@@ -1847,8 +1838,9 @@ export const SwitchroomConfigSchema = z.object({
         .describe(
           "Non-agent peers that hold a broker socket (RFC H §4.8). Each gets " +
           "its own `/run/switchroom/auth-broker/<name>/sock` chowned to its UID. " +
-          "Consumers cannot be admins; adding a consumer name to `admin_agents` " +
-          "is a config error.",
+          "Consumers cannot be admins; a consumer name that collides with an " +
+          "agent (whether that agent has `admin: true` or not) is a config " +
+          "error caught at schema validation.",
         ),
     })
     .optional()

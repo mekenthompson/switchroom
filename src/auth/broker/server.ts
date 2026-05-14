@@ -167,10 +167,14 @@ function nowMs(): number {
 
 function configToShape(cfg: SwitchroomConfig): AuthConfigShape {
   const auth = cfg.auth ?? {};
+  const agentsMap = cfg.agents ?? {};
+  const adminAgents = Object.entries(agentsMap)
+    .filter(([, a]) => (a as { admin?: boolean }).admin === true)
+    .map(([name]) => name);
   return {
-    agents: Object.keys(cfg.agents ?? {}),
+    agents: Object.keys(agentsMap),
     consumers: (auth.consumers ?? []).map((c) => c.name),
-    adminAgents: auth.admin_agents ?? [],
+    adminAgents,
   };
 }
 
@@ -409,10 +413,14 @@ export class AuthBroker {
     }
     const sockPath = this.agentSocketPath(agentName);
     const uid = allocateAgentUid(agentName);
+    // Admin authority sourced from the per-agent `admin: true` flag —
+    // same source of truth as the gateway's /agents / /restart / /update
+    // intercepts (PR #1258). One knob, not two.
+    const adminFlag = (this.config.agents?.[agentName] as { admin?: boolean } | undefined)?.admin === true;
     await this.bindListener(sockPath, uid, 0o660, {
       kind: "agent",
       name: agentName,
-      admin: (this.config.auth?.admin_agents ?? []).includes(agentName),
+      admin: adminFlag,
     });
   }
 
@@ -1539,12 +1547,12 @@ export class AuthBroker {
     if (errs.length > 0) {
       throw new Error(`CONFIG_INVALID: ${errs.join("; ")}`);
     }
-    // admin_agents must be subsets of agents.
-    for (const a of shape.adminAgents) {
-      if (!shape.agents.includes(a)) {
-        throw new Error(`CONFIG_INVALID: admin_agents entry '${a}' is not a declared agent`);
-      }
-    }
+    // adminAgents is derived from agents.<name>.admin === true so the
+    // subset-of-agents invariant holds by construction — no explicit
+    // check needed. Pre-unification (PR #?), `auth.admin_agents` was a
+    // separate list and we asserted it referenced declared agents only;
+    // that gate moved into the per-agent schema (zod refuses a
+    // top-level `admin: true` outside an agent block).
   }
 
   /* ─── Test affordances ──────────────────────────────────────── */

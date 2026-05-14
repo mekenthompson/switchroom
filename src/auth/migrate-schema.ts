@@ -126,8 +126,43 @@ export function migrateAuthSchema(
     legacy.push({ name, accounts, authLabel, node: agentNode });
   }
 
+  // Post-RFC-H but pre-admin-unification: `auth.admin_agents: [foo, bar]`
+  // existed briefly as a separate list. The unification commit transfers
+  // every entry to `agents.<name>.admin = true` and removes the list.
+  // This pass is idempotent — re-runs find no admin_agents node and skip.
+  const authNode = root.get("auth", true);
+  let strayAdminAgents: string[] = [];
+  if (isMap(authNode)) {
+    const adminAgentsNode = authNode.get("admin_agents", true);
+    if (isSeq(adminAgentsNode)) {
+      strayAdminAgents = adminAgentsNode.items
+        .map((n) => (isScalar(n) ? String(n.value) : null))
+        .filter((s): s is string => typeof s === "string" && s.length > 0);
+      if (strayAdminAgents.length > 0) needsMigration = true;
+    }
+  }
+
   if (!needsMigration) {
     return { yaml: yamlText, report: emptyReport() };
+  }
+
+  // Lift admin_agents → per-agent `admin: true`.
+  if (strayAdminAgents.length > 0 && isMap(authNode)) {
+    for (const name of strayAdminAgents) {
+      const agentNode = agentsNode.get(name, true);
+      if (!isMap(agentNode)) continue;
+      const existing = agentNode.get("admin", true);
+      const alreadyAdmin =
+        isScalar(existing) && existing.value === true;
+      if (!alreadyAdmin) {
+        agentNode.set("admin", true);
+      }
+    }
+    authNode.delete("admin_agents");
+    warn(
+      `  ⚠ auth-admin-unify: lifted ${strayAdminAgents.length} entry(ies) from ` +
+        `auth.admin_agents into per-agent admin: true: ${strayAdminAgents.join(", ")}\n`,
+    );
   }
 
   // Build the histogram of primaries.

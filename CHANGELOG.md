@@ -43,7 +43,6 @@ agents:
 auth:
   active: me@kenthompson.com.au
   fallback_order: [me@kenthompson.com.au, you@example.com]
-  admin_agents: [clerk]
   consumers:
     - name: hindsight
       account: me@kenthompson.com.au
@@ -51,6 +50,8 @@ auth:
 
 agents:
   ziggy: {}                                # uses fleet active
+  clerk:
+    admin: true                            # gates /agents, /restart, AND admin /auth verbs
   klanker:
     auth:
       override: you@example.com          # edge case only

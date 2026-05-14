@@ -952,11 +952,14 @@ export class AuthBroker {
     if (this.refreshInFlight.has(label)) return { kind: "noop" };
 
     // Threshold-violation: detect on-disk expiresAt change vs last write.
-    // Phase 3b.1b — uses provider's extractExpiresAt() so the same code
-    // path works when Phase 3b.2 plugs Google in. Anthropic provider
-    // returns `claudeAiOauth.expiresAt`, Google provider will return
-    // `googleOauth.expiresAt`. Same broker logic, provider-aware
-    // expiry extraction.
+    // Phase 3b.1b — this single read uses the provider's extractExpiresAt
+    // as a plumbing demonstration. Eight other `claudeAiOauth?.expiresAt`
+    // reads in this file (lines ~620, ~640, ~745, ~785, ~790, ~935, and
+    // the seed loop ~1100) are still direct-access — they get routed
+    // through `lookup(accountKey.provider).extractExpiresAt()` as part of
+    // Phase 3b.2 alongside the `refreshOneAccount(label)` →
+    // `refreshOneAccount(accountKey)` signature change. This call is
+    // hardcoded to "anthropic" until that refactor lands.
     const credsBefore = readAccountCredentials(label, this.home);
     const onDiskExpires = this.providers.lookup("anthropic").extractExpiresAt(credsBefore);
     const lastWritten = this.lastWrittenExpiresAt.get(label);

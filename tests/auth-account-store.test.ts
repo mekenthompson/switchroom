@@ -148,6 +148,56 @@ describe("credentials roundtrip", () => {
     writeFileSync(accountCredentialsPath("broken", home), "{ not: json");
     expect(readAccountCredentials("broken", home)).toBeNull();
   });
+
+  // RFC-H file-shape gate. Claude post-RFC-H reads .credentials.json
+  // verbatim and rejects accounts whose `scopes` is empty or whose
+  // `subscriptionType` is missing as "not logged in" (the legacy
+  // env-var path used to synthesise these). Any caller writing creds
+  // without these fields would silently break the agent at next boot
+  // and force a manual unstick. Enrichment closes that loophole.
+  it("enriches missing scopes + subscriptionType on write (RFC-H shape gate)", () => {
+    writeAccountCredentials(
+      "legacy",
+      { claudeAiOauth: { accessToken: "at", expiresAt: 9_999_999_999_999 } },
+      home,
+    );
+    const out = readAccountCredentials("legacy", home);
+    expect(out?.claudeAiOauth?.scopes).toEqual(["user:inference"]);
+    expect(out?.claudeAiOauth?.subscriptionType).toBe("max");
+  });
+
+  it("treats empty scopes array as missing (replaces with defaults)", () => {
+    writeAccountCredentials(
+      "empty-scopes",
+      { claudeAiOauth: { accessToken: "at", scopes: [] } },
+      home,
+    );
+    const out = readAccountCredentials("empty-scopes", home);
+    expect(out?.claudeAiOauth?.scopes).toEqual(["user:inference"]);
+  });
+
+  it("preserves explicit scopes + subscriptionType when provided", () => {
+    writeAccountCredentials(
+      "explicit",
+      {
+        claudeAiOauth: {
+          accessToken: "at",
+          scopes: ["custom:scope"],
+          subscriptionType: "pro",
+        },
+      },
+      home,
+    );
+    const out = readAccountCredentials("explicit", home);
+    expect(out?.claudeAiOauth?.scopes).toEqual(["custom:scope"]);
+    expect(out?.claudeAiOauth?.subscriptionType).toBe("pro");
+  });
+
+  it("does not synthesise claudeAiOauth when the input has none", () => {
+    writeAccountCredentials("no-oauth", {}, home);
+    const out = readAccountCredentials("no-oauth", home);
+    expect(out?.claudeAiOauth).toBeUndefined();
+  });
 });
 
 describe("meta roundtrip + patch", () => {
@@ -326,7 +376,11 @@ describe("getAccountInfos", () => {
     const personal = infos.find((i) => i.label === "personal")!;
     // missing expiresAt → not expired path; healthy if accessToken present + no quota
     expect(personal.health).toBe("healthy");
-    expect(personal.subscriptionType).toBeUndefined();
+    // subscriptionType is now defaulted to "max" at write time to satisfy
+    // claude's post-RFC-H file-shape gate. See enrichClaudeCreds in
+    // account-store.ts. Callers that need a different default should
+    // pass it explicitly.
+    expect(personal.subscriptionType).toBe("max");
   });
 });
 

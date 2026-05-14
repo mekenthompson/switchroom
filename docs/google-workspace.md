@@ -18,7 +18,7 @@ Google account, not a service account. Nothing leaves your subscription.
 switchroom auth google account add ken-personal
 
 # 2. Allow an agent to use that account.
-switchroom auth google enable klanker ken-personal
+switchroom auth google enable ken-personal klanker
 
 # 3. (Optional) Configure which Workspace tier an agent gets.
 #    See docs/configuration.md for the cascade — defaults to "core".
@@ -83,7 +83,10 @@ Default scopes (Workspace tier `core`):
 - `userinfo.email` — identity sanity check on the refresh
 
 Wider tiers (`extended`, `complete`) add write scopes, Calendar, Gmail.
-See `docs/configuration.md` for the cascade.
+The tier knob lives in the `google_workspace:` config block (see
+"Configuration cascade" below) and the cascade rules are the same as
+every other config field — `docs/configuration.md` covers the
+general cascade model.
 
 ### Removing an account
 
@@ -101,9 +104,14 @@ By default a new Google account is reachable by **no agents**. Enable
 explicitly:
 
 ```bash
-switchroom auth google enable klanker ken-personal
-switchroom auth google list   # show the full agent × account matrix
-switchroom auth google disable klanker ken-personal
+# Enable one or more agents on an account ("all" expands to every agent):
+switchroom auth google enable ken-personal klanker
+switchroom auth google enable ken-personal klanker clerk
+switchroom auth google enable ken-personal all
+
+# Inspect / revoke:
+switchroom auth google list                       # show the full agent × account matrix
+switchroom auth google disable ken-personal klanker
 ```
 
 ACL changes take effect on the next `get_credentials` call — no agent
@@ -194,8 +202,9 @@ treat un-trash as a recovery signal, but missing→missing isn't).
 ## Configuration cascade
 
 The `google_workspace:` block (alias: `drive:`) lives in `switchroom.yaml`.
-Defaults → profile → per-agent override, same as everything else.
-Full reference at `docs/configuration.md`. The minimum:
+Defaults → profile → per-agent override, same as everything else
+(see `docs/configuration.md` for the general cascade rules). The
+minimum:
 
 ```yaml
 google_workspace:
@@ -225,16 +234,15 @@ expired (7-day Testing-mode token lifetimes).
 
 ### Agent says "Not logged in" right after `switchroom update`
 
-See `docs/operators/rollback-v0.10.0.md` if this is a known issue;
-otherwise:
+The boot-fanout fix in #1280 + the mirror-time enrichment in #1285
+address the known cases. If you hit it on a current build:
 
 ```bash
 switchroom auth google list                      # confirm the account is registered
-switchroom auth google enable <agent> <account>  # re-attach if the agent fell out of the ACL
+switchroom auth google enable <account> <agent>  # re-attach if the agent fell out of the ACL
 switchroom agent restart <agent>
 ```
 
-The boot-fanout fix in #1280 should prevent this in current builds.
 
 ### Two agents stomping on each other's Drive
 

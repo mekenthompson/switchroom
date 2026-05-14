@@ -1099,7 +1099,13 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
     lines.push(`  auth-broker-${a.name}-sock:`);
   }
   for (const c of authConsumers) {
+    // Override the project-prefix so cross-project consumers (e.g. the
+    // standalone hindsight container started by `startHindsight()`) can
+    // reference the volume by the canonical unprefixed name. Per-agent
+    // volumes above don't need this — they're consumed inside this same
+    // compose project, so the prefix is invisible.
     lines.push(`  auth-broker-${c.name}-sock:`);
+    lines.push(`    name: auth-broker-${c.name}-sock`);
   }
   lines.push("");
 

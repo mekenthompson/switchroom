@@ -41,9 +41,13 @@ RUN npm install -g @anthropic-ai/claude-code@latest \
 # Install claude-agent-sdk into the same venv the hindsight API runs from.
 # The upstream start-all.sh activates this venv before launching uvicorn,
 # so `from claude_agent_sdk import query` resolves to this install.
-# `uv pip install` is faster than plain pip and the venv is already
-# uv-managed by upstream.
-RUN /app/api/.venv/bin/pip install --no-cache-dir claude-agent-sdk \
+#
+# Upstream's `:latest` is built with `uv sync`, which leaves the venv
+# WITHOUT a `pip` binary (uv replaces pip's role). Calling `.venv/bin/pip`
+# directly fails with exit 127. Use `uv pip install` against the venv
+# via `VIRTUAL_ENV=...` (the canonical uv pattern for "install into this
+# specific venv from outside it").
+RUN VIRTUAL_ENV=/app/api/.venv uv pip install --no-cache-dir claude-agent-sdk \
  && /app/api/.venv/bin/python -c "from claude_agent_sdk import query; print('claude-agent-sdk ok')" >&2
 
 # Pin the upstream `hindsight` user to UID 11000 to match
@@ -71,6 +75,13 @@ RUN OLD_UID=$(id -u hindsight) && NEW_UID=11000 \
 # fetch and the background refresh loop. Pulled out of the entrypoint
 # so both code paths exercise the exact same wire shape.
 COPY --chmod=0644 docker/hindsight-fetch-creds.cjs /usr/local/lib/switchroom/hindsight-fetch-creds.cjs
+# `COPY --chmod=0644` propagates the mode to the implicitly-created
+# parent dir, leaving /usr/local/lib/switchroom at mode 0644 (no `x`
+# bit → not traversable). Without this chmod, the runtime UID 11000
+# user can't `cd` into the dir and the entrypoint Node fetcher fails
+# with `Cannot find module '.../hindsight-fetch-creds.cjs'` even
+# though the file is present. Restore 0755 on the dir explicitly.
+RUN chmod 0755 /usr/local/lib/switchroom
 
 # Entrypoint shim — runs the fetcher at boot, spawns a refresh sidecar,
 # then execs the upstream CMD. See the file header for the boot/refresh

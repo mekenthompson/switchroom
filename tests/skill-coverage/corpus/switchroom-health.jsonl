@@ -1,18 +1,18 @@
-{"id":"b7f8cab4d168ac58","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"Can you something's wrong?","source":"paraphrase-template"}
-{"id":"fb1e4cccf4f28f9d","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"What's wrong with my agents, please.","source":"paraphrase-template"}
-{"id":"485f1d2e84cd94ae","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"Could you what's wrong with my agents for me?","source":"paraphrase-template"}
-{"id":"deda1e8dd0e019ce","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"Help me can you check my setup.","source":"paraphrase-template"}
-{"id":"66b9aa06afbbd5c8","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"Help me run a health check.","source":"paraphrase-template"}
-{"id":"19ae75ba03e39342","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"I'd like to my agent keeps failing.","source":"paraphrase-template"}
-{"id":"d0bf37f7ec4d3c8e","targetSkill":"switchroom-health","kind":"typo","phrase":"diagnose my switchroom setup","source":"typo-rule"}
-{"id":"cebd942e715fa175","targetSkill":"switchroom-health","kind":"typo","phrase":"diagnose y switchroom setup","source":"typo-rule"}
-{"id":"e68562abdbcf0e1b","targetSkill":"switchroom-health","kind":"typo","phrase":"my agets are broken","source":"typo-rule"}
-{"id":"bb029a5a04dea3a0","targetSkill":"switchroom-health","kind":"slang","phrase":"hey, can you check my setup?","source":"slang-template"}
-{"id":"1d8c230d3f8df09e","targetSkill":"switchroom-health","kind":"slang","phrase":"hey, something's wrong?","source":"slang-template"}
-{"id":"1627e55885422bde","targetSkill":"switchroom-health","kind":"slang","phrase":"any way to run a health check?","source":"slang-template"}
-{"id":"e26f71def7db7a92","targetSkill":"switchroom-health","kind":"indirect","phrase":"things feel off","source":"indirect-template"}
-{"id":"fbe0aa9c6d9be867","targetSkill":"switchroom-health","kind":"indirect","phrase":"the fleet is sluggish","source":"indirect-template"}
-{"id":"646b3688f040a2dd","targetSkill":"switchroom-health","kind":"indirect","phrase":"my agents are acting weird","source":"indirect-template"}
+{"id":"e844582948b07ee3","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"For switchroom doctor / health, Can you something's wrong?","source":"paraphrase-template"}
+{"id":"38c496db06ca042e","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"For switchroom doctor / health, What's wrong with my agents, please.","source":"paraphrase-template"}
+{"id":"45f7bcbd87edb1a0","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"For switchroom doctor / health, Could you what's wrong with my agents for me?","source":"paraphrase-template"}
+{"id":"6c44000da91ee8a9","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"For switchroom doctor / health, Help me can you check my setup.","source":"paraphrase-template"}
+{"id":"538575a81caa8e8b","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"For switchroom doctor / health, Help me run a health check.","source":"paraphrase-template"}
+{"id":"7d0fc32d56be7278","targetSkill":"switchroom-health","kind":"paraphrase","phrase":"For switchroom doctor / health, I'd like to my agent keeps failing.","source":"paraphrase-template"}
+{"id":"376e0035a844d5c7","targetSkill":"switchroom-health","kind":"typo","phrase":"For switchroom doctor / health, diagnose my switchroom setup","source":"typo-rule"}
+{"id":"99c1af31070c14a0","targetSkill":"switchroom-health","kind":"typo","phrase":"For switchroom doctor / health, diagnose y switchroom setup","source":"typo-rule"}
+{"id":"b0e0247fa9d867f0","targetSkill":"switchroom-health","kind":"typo","phrase":"For switchroom doctor / health, my agets are broken","source":"typo-rule"}
+{"id":"8334c22940cb7150","targetSkill":"switchroom-health","kind":"slang","phrase":"For switchroom doctor / health, hey, can you check my setup?","source":"slang-template"}
+{"id":"33e2d41ccaca9788","targetSkill":"switchroom-health","kind":"slang","phrase":"For switchroom doctor / health, hey, something's wrong?","source":"slang-template"}
+{"id":"946d94a23d426891","targetSkill":"switchroom-health","kind":"slang","phrase":"For switchroom doctor / health, any way to run a health check?","source":"slang-template"}
+{"id":"4d6e7a9b6609453a","targetSkill":"switchroom-health","kind":"indirect","phrase":"For switchroom doctor / health, things feel off","source":"indirect-template"}
+{"id":"adadfe67bcfecfc4","targetSkill":"switchroom-health","kind":"indirect","phrase":"For switchroom doctor / health, the fleet is sluggish","source":"indirect-template"}
+{"id":"78dda55f05cf42f1","targetSkill":"switchroom-health","kind":"indirect","phrase":"For switchroom doctor / health, my agents are acting weird","source":"indirect-template"}
 {"id":"e9e83bceac9354b0","targetSkill":null,"kind":"negative","phrase":"sync my config","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-cli"}
 {"id":"804e347cfe9edb0a","targetSkill":null,"kind":"negative","phrase":"report this issue on GitHub","source":"negative-from-adjacent","expectedOtherSkill":"file-bug"}
 {"id":"842dae820114650a","targetSkill":null,"kind":"negative","phrase":"show me the logs","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-cli"}

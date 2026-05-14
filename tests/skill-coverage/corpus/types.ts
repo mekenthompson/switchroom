@@ -48,6 +48,14 @@ export interface SkillFixture {
   trigger_phrases: string[];
   negatives: string[];
   adjacent_skills: string[];
+  /**
+   * Optional short clause prepended to generated rule-based probes
+   * (paraphrase / typo / slang / indirect) to disambiguate the
+   * skill's domain — e.g. `"Using the Buildkite CLI, "`. Author-curated
+   * seed-yaml probes and negative controls are NOT prefixed (negatives
+   * test cross-skill confusion; the prefix would defeat the test).
+   */
+  context_prefix?: string;
 }
 
 export interface SkillsFixtureFile {

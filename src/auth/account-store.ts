@@ -227,14 +227,27 @@ export function readAccountCredentials(
  * empty scopes list and missing subscriptionType don't pass the
  * post-RFC-H file-shape gate.
  *
- * Enrichment here closes the gap at the write side: any account
- * credentials we persist always carry the fields claude expects, even
- * if the OAuth handshake didn't return them.
+ * Enrichment closes the gap at the write side (#1280) AND at broker
+ * fanout time (`mirrorAccountToAgent` calls `enrichClaudeCreds` so a
+ * stale legacy source file on disk still produces a usable per-agent
+ * mirror without waiting for refresh-tick to rewrite the source).
  */
 const DEFAULT_SCOPES = ["user:inference"] as const;
 const DEFAULT_SUBSCRIPTION_TYPE = "max";
 
-function enrichClaudeCreds(value: AccountCredentials): AccountCredentials {
+/**
+ * Pure: fill `scopes` (when missing or empty) and `subscriptionType`
+ * (when missing) on an `AccountCredentials` value with the canonical
+ * defaults claude expects. Returns the input untouched when there's
+ * no `claudeAiOauth` block — we never synthesize one.
+ *
+ * Exported so the broker's `mirrorAccountToAgent` can reuse the same
+ * defaults at fanout time, closing the residual window between boot
+ * fanout and the first source-file rewrite.
+ */
+export function enrichClaudeCreds(
+  value: AccountCredentials,
+): AccountCredentials {
   const oauth = value.claudeAiOauth;
   if (!oauth) return value;
   const scopes =

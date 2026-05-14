@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.9.1 — `switchroom-hindsight` on the auth-broker: no API key needed
+
+`reference/vision.md`'s **subscription-honest, no-API-key-routing** outcome reaches the memory backend. Hindsight (the bundled long-term-memory container) now runs against an Anthropic OAuth account that switchroom is already managing on the operator's behalf — the OpenAI API key prompt, vault entry, and `-e HINDSIGHT_API_LLM_API_KEY=...` plumbing are all gone.
+
+### What changed
+
+- Hindsight is now a first-class **auth-broker consumer** (RFC H §4.8). Declare it once in `switchroom.yaml`:
+  ```yaml
+  auth:
+    active: me@example.com
+    consumers:
+      - name: hindsight
+        account: me@example.com
+        uid: 11000
+  ```
+  `switchroom apply` binds `/run/switchroom/auth-broker/hindsight/sock` chowned to UID 11000. The setup wizard adds this entry automatically.
+- New image `ghcr.io/switchroom/switchroom-hindsight:latest`, built from `docker/Dockerfile.hindsight`. Extends upstream `vectorize-io/hindsight:latest` with `claude-agent-sdk` (the Python SDK the upstream `claude-code` provider needs) and the `@anthropic-ai/claude-code` CLI on PATH.
+- New entrypoint shim `docker/hindsight-entrypoint.sh` fetches OAuth credentials from the broker over UDS at every boot, writes them to a tmpfs dotfile at `/run/claude-creds/.credentials.json`, exports `CLAUDE_CONFIG_DIR`, and exec's into the upstream `/app/start-all.sh`. The credentials never touch persistent disk; the broker remains the single writer of OAuth state.
+- `HINDSIGHT_API_LLM_PROVIDER` is pinned to `claude-code`. Memory consolidation and recall now consume Pro/Max session turns on the chosen account — operators with heavy retain can split memory onto its own account with `agents.<name>.auth.override`.
+
+### Doctor
+
+- New probe `hindsight consumer`: warns when `auth.consumers[]` has no `hindsight` entry or the per-consumer socket hasn't been bound yet. Replaces the pre-#1245 `hindsight env leak` probe (the OpenAI-key shape it watched for is no longer in the runtime path).
+
+### Setup wizard
+
+- Step 6 (memory backend) no longer prompts for an OpenAI API key. It registers the hindsight consumer in `switchroom.yaml`, surfaces a one-liner if a stale `HINDSIGHT_API_LLM_API_KEY` env or `hindsight-api-key` vault entry is still around (no longer used; safe to delete), and starts the container in broker-fed mode.
+
+### Migration
+
+Operators on v0.9.0 with a running hindsight container should `switchroom memory --stop` and re-run `switchroom setup` (or manually add the `auth.consumers[]` entry and re-`apply`). No in-place migration shim — per RFC §6, the no-compatibility-shims stance applies.
+
 ## v0.9.0 — `switchroom-auth-broker` (RFC H): single-writer OAuth plane
 
 Big release. RFC H operationalises `reference/share-auth-across-the-fleet.md`: the **Anthropic account becomes the unit of authentication**, not the agent. One OAuth flow per account drives N agents. A new singleton container, `switchroom-auth-broker`, owns the refresh loop, per-agent credentials.json mirrors, and per-account quota state. Net diff is **−6,771 LOC** — the cleanup is the win, not just the new daemon.

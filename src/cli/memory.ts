@@ -283,24 +283,25 @@ export function registerMemoryCommand(program: Command): void {
         );
       }
 
-      // Resolve OpenAI key from vault if available, falling back to env
-      let apiKey: string | undefined = process.env.OPENAI_API_KEY;
-      const passphrase = process.env.SWITCHROOM_VAULT_PASSPHRASE;
-      const { resolveStatePath } = await import("../config/paths.js");
-      const vaultPath = resolveStatePath("vault.enc");
-      if (!apiKey && passphrase && existsSync(vaultPath)) {
-        try {
-          const { getStringSecret } = await import("../vault/vault.js");
-          const fromVault = getStringSecret(passphrase, vaultPath, "openai-api-key");
-          if (fromVault) apiKey = fromVault;
-        } catch { /* ignore — fall through to provider default */ }
+      // RFC H §4.8 — hindsight runs in broker-fed mode against the
+      // upstream `claude-code` LLM provider. No API key is needed; the
+      // entrypoint shim fetches OAuth credentials from the auth-broker
+      // over UDS at boot. The `--provider` flag remains for back-compat
+      // with operator habit but is informational only (the image is
+      // pinned to `claude-code`).
+      if (opts.provider && opts.provider !== "claude-code") {
+        console.log(
+          chalk.gray(
+            `  Note: --provider=${opts.provider} ignored. switchroom-hindsight is pinned to the ` +
+              "`claude-code` provider (subscription-honest). The flag is kept for back-compat.",
+          ),
+        );
       }
-
-      const provider = opts.provider ?? (apiKey ? "openai" : undefined);
+      const provider = "claude-code";
 
       console.log(chalk.gray("  Starting Hindsight Docker container..."));
       try {
-        startHindsight(provider, apiKey, ports);
+        startHindsight(ports);
         console.log(chalk.green(`\n  Hindsight container started (switchroom-hindsight) on port ${ports.apiPort}.\n`));
       } catch (err) {
         console.error(chalk.red(`\n  Failed to start Hindsight: ${(err as Error).message}\n`));
@@ -315,15 +316,15 @@ export function registerMemoryCommand(program: Command): void {
           const raw = readFileSync(configPath, "utf-8");
           const doc = YAML.parseDocument(raw);
           if (!doc.has("memory")) {
-            doc.set("memory", { backend: "hindsight", shared_collection: "shared", config: { provider: "openai", url } });
+            doc.set("memory", { backend: "hindsight", shared_collection: "shared", config: { provider, url } });
           } else {
             const memNode = doc.get("memory") as YAML.YAMLMap;
             if (!memNode.has("config")) {
-              memNode.set("config", { provider: provider ?? "openai", url });
+              memNode.set("config", { provider, url });
             } else {
               const configNode = memNode.get("config") as YAML.YAMLMap;
               configNode.set("url", url);
-              if (provider && !configNode.has("provider")) {
+              if (!configNode.has("provider")) {
                 configNode.set("provider", provider);
               }
             }
@@ -349,11 +350,10 @@ export function registerMemoryCommand(program: Command): void {
   // switchroom memory docker-compose
   memory
     .command("docker-compose")
-    .description("Output a docker-compose snippet for Hindsight")
-    .option("--provider <provider>", "LLM provider (ollama, openai, anthropic)")
-    .action((opts: { provider?: string }) => {
+    .description("Output a docker-compose snippet for Hindsight (broker-fed mode)")
+    .action(() => {
       console.log(chalk.bold("\n# Add this to your docker-compose.yml:\n"));
-      console.log(generateHindsightComposeSnippet(opts.provider));
+      console.log(generateHindsightComposeSnippet());
       console.log();
     });
 

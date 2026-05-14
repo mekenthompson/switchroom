@@ -7,7 +7,7 @@ import type { SwitchroomConfig } from "../config/schema.js";
 import { scaffoldAgent } from "../agents/scaffold.js";
 import { syncTopics } from "../telegram/topic-manager.js";
 import { loadTopicState } from "../telegram/state.js";
-import { createVault, openVault, setStringSecret } from "../vault/vault.js";
+import { createVault, openVault, setStringSecret, getStringSecret } from "../vault/vault.js";
 import {
   applyAutoUnlock,
   autoUnlockSupported,
@@ -32,6 +32,8 @@ import {
   isHindsightContainerExists,
   startHindsight,
   stopHindsight,
+  ensureHindsightConsumer,
+  HINDSIGHT_CONSUMER_NAME,
 } from "../setup/hindsight.js";
 import {
   ask,
@@ -112,7 +114,7 @@ export function registerSetupCommand(program: Command): void {
         await stepCreateTopics(config, botToken, nonInteractive);
 
         // ── Step 6: Memory backend ───────────────────────────────
-        await stepMemoryBackend(config, nonInteractive);
+        await stepMemoryBackend(config, nonInteractive, switchroomConfigPath);
 
         // ── Step 7: Scaffold agents ──────────────────────────────
         await stepScaffoldAgents(
@@ -607,6 +609,7 @@ async function stepCreateTopics(
 async function stepMemoryBackend(
   config: SwitchroomConfig,
   nonInteractive: boolean,
+  switchroomConfigPath: string,
 ): Promise<void> {
   stepHeader(6, "Memory backend", STEP_ACTIVE);
 
@@ -623,6 +626,16 @@ async function stepMemoryBackend(
   // In non-interactive mode, default to hindsight unless env says otherwise
   let setupHindsight = true;
   if (!nonInteractive) {
+    console.log(
+      chalk.gray(
+        "  Hindsight will use Anthropic OAuth via the auth-broker. The fleet's",
+      ),
+    );
+    console.log(
+      chalk.gray(
+        "  active account (auth.active) is shared — no OpenAI API key is needed.",
+      ),
+    );
     setupHindsight = await askYesNo(
       "  Set up Hindsight memory? (recommended)",
       true,
@@ -635,19 +648,75 @@ async function stepMemoryBackend(
     return;
   }
 
+  // Surface a one-liner if the legacy OpenAI key still exists in vault or env.
+  // Pre-#1245 setups stored it under `hindsight-api-key`; pre-broker setups
+  // also accepted HINDSIGHT_API_LLM_API_KEY. Neither is consulted any more.
+  if (process.env.HINDSIGHT_API_LLM_API_KEY) {
+    console.log(
+      chalk.gray(
+        "  Note: HINDSIGHT_API_LLM_API_KEY is set in your env but is no longer used. " +
+          "You can remove it.",
+      ),
+    );
+  }
+  try {
+    const vaultPath = resolvePath(config.vault?.path ?? "~/.switchroom/vault.enc");
+    const passphrase = process.env.SWITCHROOM_VAULT_PASSPHRASE;
+    if (passphrase && existsSync(vaultPath)) {
+      const existing = getStringSecret(passphrase, vaultPath, "hindsight-api-key");
+      if (existing) {
+        console.log(
+          chalk.gray(
+            "  Note: legacy 'hindsight-api-key' is in your vault but is no longer used. " +
+              "You can remove it with `switchroom vault rm hindsight-api-key`.",
+          ),
+        );
+      }
+    }
+  } catch { /* vault unreachable; skip the courtesy note */ }
+
+  // Register the hindsight consumer in switchroom.yaml so the auth-broker
+  // binds a per-consumer UDS for it on next `switchroom apply`.
+  const activeAccount = config.auth?.active;
+  if (!activeAccount) {
+    console.log(
+      chalk.yellow(
+        `  No auth.active account set — skipping consumer registration. ` +
+          `Run \`switchroom auth use <label>\` and re-run setup.`,
+      ),
+    );
+  } else {
+    try {
+      const result = await ensureHindsightConsumer(switchroomConfigPath, activeAccount);
+      if (result.added) {
+        console.log(
+          chalk.green(
+            `  ${STEP_DONE} Registered auth.consumers[${HINDSIGHT_CONSUMER_NAME}] = ${activeAccount}`,
+          ),
+        );
+      } else {
+        console.log(
+          chalk.gray(
+            `  auth.consumers[${HINDSIGHT_CONSUMER_NAME}] already present.`,
+          ),
+        );
+      }
+    } catch (err) {
+      console.log(
+        chalk.yellow(
+          `  Warning: could not write auth.consumers entry: ${(err as Error).message}`,
+        ),
+      );
+    }
+  }
+
   // Check Docker availability
   if (!isDockerAvailable()) {
     console.log(
       chalk.yellow("  Docker is not available on this system."),
     );
-    console.log(chalk.gray("  To set up Hindsight manually:"));
-    console.log(chalk.gray("    1. Install Docker: https://docs.docker.com/get-docker/"));
-    console.log(chalk.gray("    2. Run: docker run -d --name switchroom-hindsight \\"));
-    console.log(chalk.gray("         --restart unless-stopped \\"));
-    console.log(chalk.gray("         -v switchroom-hindsight-data:/home/hindsight/.pg0 \\"));
-    console.log(chalk.gray("         ghcr.io/vectorize-io/hindsight:latest"));
-    console.log(chalk.gray("    3. Re-run: switchroom setup"));
-    console.log(chalk.green(`  ${STEP_DONE} Manual setup instructions shown`));
+    console.log(chalk.gray("  Install Docker, then re-run `switchroom setup`."));
+    console.log(chalk.green(`  ${STEP_DONE} Manual setup pending`));
     return;
   }
 
@@ -663,44 +732,11 @@ async function stepMemoryBackend(
     stopHindsight();
   }
 
-  // Ask for OpenAI API key for Hindsight LLM features
-  let hindsightApiKey: string | undefined;
-  if (!nonInteractive) {
-    const apiKeyInput = await ask(
-      "  Enter your OpenAI API key for Hindsight memory (or press Enter to skip)",
-    );
-    if (apiKeyInput) {
-      hindsightApiKey = apiKeyInput;
-      // Store in vault
-      const vaultPath = resolvePath(config.vault?.path ?? "~/.switchroom/vault.enc");
-      try {
-        let passphrase = process.env.SWITCHROOM_VAULT_PASSPHRASE;
-        if (!passphrase) {
-          passphrase = await ask("  Vault passphrase");
-        }
-        if (passphrase) {
-          if (!existsSync(vaultPath)) {
-            createVault(passphrase, vaultPath);
-          }
-          setStringSecret(passphrase, vaultPath, "hindsight-api-key", apiKeyInput);
-          console.log(chalk.green(`  ${STEP_DONE} API key stored in vault as 'hindsight-api-key'`));
-        }
-      } catch (err) {
-        console.log(chalk.yellow(`  Warning: Could not store in vault: ${(err as Error).message}`));
-      }
-    } else {
-      console.log(chalk.yellow("  Skipped. Memory features will be limited without an LLM API key."));
-    }
-  } else {
-    hindsightApiKey = process.env.HINDSIGHT_API_LLM_API_KEY;
-  }
-
-  // Start the container
+  // Start the container in broker-fed mode (no API key).
   const spin = spinner("Starting Hindsight Docker container...");
   try {
-    startHindsight("openai", hindsightApiKey);
+    startHindsight();
 
-    // Verify it started
     if (isHindsightRunning()) {
       spin.stop(chalk.green(`${STEP_DONE} Hindsight container started (switchroom-hindsight)`));
       console.log(chalk.gray("  API: http://localhost:8888/mcp"));
@@ -710,12 +746,12 @@ async function stepMemoryBackend(
     }
   } catch (err) {
     spin.stop(chalk.red(`Failed to start Hindsight: ${(err as Error).message}`));
-    console.log(chalk.gray("  You can start it manually:"));
-    console.log(chalk.gray("    docker run -d --name switchroom-hindsight \\"));
-    console.log(chalk.gray("      --restart unless-stopped \\"));
-    console.log(chalk.gray("      -p 8888:8888 -p 9999:9999 \\"));
-    console.log(chalk.gray("      -v switchroom-hindsight-data:/home/hindsight/.pg0 \\"));
-    console.log(chalk.gray("      ghcr.io/vectorize-io/hindsight:latest"));
+    console.log(
+      chalk.gray(
+        "  Make sure `switchroom apply` has run so the auth-broker " +
+          `consumer socket volume (auth-broker-${HINDSIGHT_CONSUMER_NAME}-sock) exists.`,
+      ),
+    );
   }
 }
 

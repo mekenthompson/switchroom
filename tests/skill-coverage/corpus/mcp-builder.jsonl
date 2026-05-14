@@ -1,18 +1,18 @@
-{"id":"424ac38af0e80c10","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"Let's write an MCP server for.","source":"paraphrase-template"}
-{"id":"4fe676cb9e4daa2c","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"Please integrate an external API as MCP.","source":"paraphrase-template"}
-{"id":"c1b20bed12caf131","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"Use the MCP SDK in TypeScript, please.","source":"paraphrase-template"}
-{"id":"bdbf5682a445cfd8","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"Write an MCP server for, please.","source":"paraphrase-template"}
-{"id":"59f95422e1c03514","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"I'd like to create a new MCP server.","source":"paraphrase-template"}
-{"id":"392117e06476d4e7","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"I need to use the MCP SDK in TypeScript.","source":"paraphrase-template"}
-{"id":"9c1b7bc50f646c75","targetSkill":"mcp-builder","kind":"typo","phrase":"create  new MCP server","source":"typo-rule"}
-{"id":"c806eacd07331b6c","targetSkill":"mcp-builder","kind":"typo","phrase":"write an MCPP server for","source":"typo-rule"}
-{"id":"e05084602847e429","targetSkill":"mcp-builder","kind":"typo","phrase":"use the MCP SD Kin TypeScript","source":"typo-rule"}
-{"id":"2ac41070625d2c81","targetSkill":"mcp-builder","kind":"slang","phrase":"pls create a new MCP server","source":"slang-template"}
-{"id":"463b19f6d2f8261e","targetSkill":"mcp-builder","kind":"slang","phrase":"pls build an MCP server","source":"slang-template"}
-{"id":"cc37a2aa30d5144a","targetSkill":"mcp-builder","kind":"slang","phrase":"gonna need to build an MCP server","source":"slang-template"}
-{"id":"e55feaeeff81d209","targetSkill":"mcp-builder","kind":"indirect","phrase":"the mcp-builder thing is weird","source":"indirect-template"}
-{"id":"53117e4647d5e705","targetSkill":"mcp-builder","kind":"indirect","phrase":"can you take a look at the mcp-builder situation","source":"indirect-template"}
-{"id":"ae9cd86df2dfeb1d","targetSkill":"mcp-builder","kind":"indirect","phrase":"something is going on with mcp-builder","source":"indirect-template"}
+{"id":"4d3bcd86ddf3f306","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"For building an MCP server, Let's write an MCP server for.","source":"paraphrase-template"}
+{"id":"ca14b1ed9593402c","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"For building an MCP server, Please integrate an external API as MCP.","source":"paraphrase-template"}
+{"id":"cb6257ebc6dcd77d","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"For building an MCP server, Use the MCP SDK in TypeScript, please.","source":"paraphrase-template"}
+{"id":"49cbf7aede4d4c38","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"For building an MCP server, Write an MCP server for, please.","source":"paraphrase-template"}
+{"id":"020fc4da75b4f0c1","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"For building an MCP server, I'd like to create a new MCP server.","source":"paraphrase-template"}
+{"id":"1bcb33179626cef9","targetSkill":"mcp-builder","kind":"paraphrase","phrase":"For building an MCP server, I need to use the MCP SDK in TypeScript.","source":"paraphrase-template"}
+{"id":"3940e02162258931","targetSkill":"mcp-builder","kind":"typo","phrase":"For building an MCP server, create  new MCP server","source":"typo-rule"}
+{"id":"3925164336a3212d","targetSkill":"mcp-builder","kind":"typo","phrase":"For building an MCP server, write an MCPP server for","source":"typo-rule"}
+{"id":"ea50c28629c149ed","targetSkill":"mcp-builder","kind":"typo","phrase":"For building an MCP server, use the MCP SD Kin TypeScript","source":"typo-rule"}
+{"id":"e06cf5f384a36d80","targetSkill":"mcp-builder","kind":"slang","phrase":"For building an MCP server, pls create a new MCP server","source":"slang-template"}
+{"id":"f98ee845c7e3f0ff","targetSkill":"mcp-builder","kind":"slang","phrase":"For building an MCP server, pls build an MCP server","source":"slang-template"}
+{"id":"7a8221f413c0d64f","targetSkill":"mcp-builder","kind":"slang","phrase":"For building an MCP server, gonna need to build an MCP server","source":"slang-template"}
+{"id":"dd217c225346583c","targetSkill":"mcp-builder","kind":"indirect","phrase":"For building an MCP server, the mcp-builder thing is weird","source":"indirect-template"}
+{"id":"76ef48348429c26b","targetSkill":"mcp-builder","kind":"indirect","phrase":"For building an MCP server, can you take a look at the mcp-builder situation","source":"indirect-template"}
+{"id":"94d8085f5250be36","targetSkill":"mcp-builder","kind":"indirect","phrase":"For building an MCP server, something is going on with mcp-builder","source":"indirect-template"}
 {"id":"042682ac45dbdcff","targetSkill":null,"kind":"negative","phrase":"edit an existing skill","source":"negative-from-adjacent","expectedOtherSkill":"skill-creator"}
 {"id":"e7b7662551300d17","targetSkill":null,"kind":"negative","phrase":"improve the trigger accuracy of a skill","source":"negative-from-adjacent","expectedOtherSkill":"skill-creator"}
 {"id":"5c62319dbca551cb","targetSkill":null,"kind":"negative","phrase":"create a new skill","source":"negative-from-adjacent","expectedOtherSkill":"skill-creator"}

@@ -1,18 +1,18 @@
-{"id":"b0b1fc17505da42e","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"Create a queue, please.","source":"paraphrase-template"}
-{"id":"edc53cb8156ae93c","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"Let's configure SSO.","source":"paraphrase-template"}
-{"id":"a095f56ce695a518","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"Could you scale queues for me?","source":"paraphrase-template"}
-{"id":"329d2b06a3ed95f3","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"I need to configure SSO.","source":"paraphrase-template"}
-{"id":"cc09dbbc827b06c1","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"Could you create a queue for me?","source":"paraphrase-template"}
-{"id":"2d642661f2626711","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"Please optimize CI costs.","source":"paraphrase-template"}
-{"id":"ba0c592a9008ba42","targetSkill":"buildkite-agent-infrastructure","kind":"typo","phrase":"manage clusetr secrets","source":"typo-rule"}
-{"id":"5558e16ae1a59ac7","targetSkill":"buildkite-agent-infrastructure","kind":"typo","phrase":"configuree agents","source":"typo-rule"}
-{"id":"2f851cefb3d72de4","targetSkill":"buildkite-agent-infrastructure","kind":"typo","phrase":"set up hostted agents","source":"typo-rule"}
-{"id":"5a3c26e6fcf60189","targetSkill":"buildkite-agent-infrastructure","kind":"slang","phrase":"pls create a pipeline template","source":"slang-template"}
-{"id":"512b580407e488ad","targetSkill":"buildkite-agent-infrastructure","kind":"slang","phrase":"quick q — can i optimize CI costs","source":"slang-template"}
-{"id":"45baac09bfce11a6","targetSkill":"buildkite-agent-infrastructure","kind":"slang","phrase":"hey, set up audit logging?","source":"slang-template"}
-{"id":"d9f64f164903b5c2","targetSkill":"buildkite-agent-infrastructure","kind":"indirect","phrase":"something is going on with buildkite-agent-infrastructure","source":"indirect-template"}
-{"id":"0c4ab22cd0691d14","targetSkill":"buildkite-agent-infrastructure","kind":"indirect","phrase":"the buildkite-agent-infrastructure thing is weird","source":"indirect-template"}
-{"id":"1e72bcea669cafc1","targetSkill":"buildkite-agent-infrastructure","kind":"indirect","phrase":"can you take a look at the buildkite-agent-infrastructure situation","source":"indirect-template"}
+{"id":"be4139668ce4b14e","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"In Buildkite cluster admin, Create a queue, please.","source":"paraphrase-template"}
+{"id":"fd5ece0866c5898e","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"In Buildkite cluster admin, Let's configure SSO.","source":"paraphrase-template"}
+{"id":"ed549147aba8ee1d","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"In Buildkite cluster admin, Could you scale queues for me?","source":"paraphrase-template"}
+{"id":"6177f6ab899225e5","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"In Buildkite cluster admin, I need to configure SSO.","source":"paraphrase-template"}
+{"id":"0ad483f351f135c2","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"In Buildkite cluster admin, Could you create a queue for me?","source":"paraphrase-template"}
+{"id":"6631222bf2be02b7","targetSkill":"buildkite-agent-infrastructure","kind":"paraphrase","phrase":"In Buildkite cluster admin, Please optimize CI costs.","source":"paraphrase-template"}
+{"id":"a9eb039fc1e52080","targetSkill":"buildkite-agent-infrastructure","kind":"typo","phrase":"In Buildkite cluster admin, manage clusetr secrets","source":"typo-rule"}
+{"id":"da95d5375719c801","targetSkill":"buildkite-agent-infrastructure","kind":"typo","phrase":"In Buildkite cluster admin, configuree agents","source":"typo-rule"}
+{"id":"1ae84332242af2e8","targetSkill":"buildkite-agent-infrastructure","kind":"typo","phrase":"In Buildkite cluster admin, set up hostted agents","source":"typo-rule"}
+{"id":"a8dc24526d90eeab","targetSkill":"buildkite-agent-infrastructure","kind":"slang","phrase":"In Buildkite cluster admin, pls create a pipeline template","source":"slang-template"}
+{"id":"2fd860986595b725","targetSkill":"buildkite-agent-infrastructure","kind":"slang","phrase":"In Buildkite cluster admin, quick q — can i optimize CI costs","source":"slang-template"}
+{"id":"24f04c13340e1617","targetSkill":"buildkite-agent-infrastructure","kind":"slang","phrase":"In Buildkite cluster admin, hey, set up audit logging?","source":"slang-template"}
+{"id":"5be3ae28ffa2051d","targetSkill":"buildkite-agent-infrastructure","kind":"indirect","phrase":"In Buildkite cluster admin, something is going on with buildkite-agent-infrastructure","source":"indirect-template"}
+{"id":"f8a49aeec03d3029","targetSkill":"buildkite-agent-infrastructure","kind":"indirect","phrase":"In Buildkite cluster admin, the buildkite-agent-infrastructure thing is weird","source":"indirect-template"}
+{"id":"845d27124fd748c2","targetSkill":"buildkite-agent-infrastructure","kind":"indirect","phrase":"In Buildkite cluster admin, can you take a look at the buildkite-agent-infrastructure situation","source":"indirect-template"}
 {"id":"b5991733c20e6ed1","targetSkill":null,"kind":"negative","phrase":"list builds","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-cli"}
 {"id":"0093601c5cd0eb02","targetSkill":null,"kind":"negative","phrase":"set up dynamic pipelines","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-pipelines"}
 {"id":"9cab4663cb1d0bb1","targetSkill":null,"kind":"negative","phrase":"authenticate with the Buildkite API","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-api"}

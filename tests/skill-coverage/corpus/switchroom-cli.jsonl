@@ -1,18 +1,18 @@
-{"id":"74b1bff5af5755f9","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"Please sync my config.","source":"paraphrase-template"}
-{"id":"2173ae43f4d49fcc","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"Could you check the journal for me?","source":"paraphrase-template"}
-{"id":"42a4f0331a730ccc","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"Can you why did it crash?","source":"paraphrase-template"}
-{"id":"254a349850a37042","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"Upgrade switchroom, please.","source":"paraphrase-template"}
-{"id":"22d2977f278bdf1e","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"I'd like to why did it crash.","source":"paraphrase-template"}
-{"id":"cccedcbf5135b9fe","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"I'd like to apply my config changes.","source":"paraphrase-template"}
-{"id":"e1ffe2000531f894","targetSkill":"switchroom-cli","kind":"typo","phrase":"list schedlued tasks","source":"typo-rule"}
-{"id":"aef91121b27cbfe8","targetSkill":"switchroom-cli","kind":"typo","phrase":"apply my cofnig changes","source":"typo-rule"}
-{"id":"b7f169c37fe269d7","targetSkill":"switchroom-cli","kind":"typo","phrase":"kick teh agent, it's stuck","source":"typo-rule"}
-{"id":"c7f75a2c052e519f","targetSkill":"switchroom-cli","kind":"slang","phrase":"pls why did it crash","source":"slang-template"}
-{"id":"1da15e7801df8fd9","targetSkill":"switchroom-cli","kind":"slang","phrase":"yo, how do i check the journal","source":"slang-template"}
-{"id":"9bd0ee620f9f1d3d","targetSkill":"switchroom-cli","kind":"slang","phrase":"yo, how do i show the cascade for X","source":"slang-template"}
-{"id":"046b5f0a6ce8e8d6","targetSkill":"switchroom-cli","kind":"indirect","phrase":"the agent just disappeared on me","source":"indirect-template"}
-{"id":"1b5d81c7abd80443","targetSkill":"switchroom-cli","kind":"indirect","phrase":"I don't know what version is live","source":"indirect-template"}
-{"id":"ea56aa3d5335aaf8","targetSkill":"switchroom-cli","kind":"indirect","phrase":"I want to know what happened last night","source":"indirect-template"}
+{"id":"5a3acf93220d58a7","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"In switchroom (the CLI), Please sync my config.","source":"paraphrase-template"}
+{"id":"a894b1c34c7b3b3b","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"In switchroom (the CLI), Could you check the journal for me?","source":"paraphrase-template"}
+{"id":"40f57f2fbc60d624","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"In switchroom (the CLI), Can you why did it crash?","source":"paraphrase-template"}
+{"id":"96c73a88e679b96b","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"In switchroom (the CLI), Upgrade switchroom, please.","source":"paraphrase-template"}
+{"id":"11f591b4f419ded0","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"In switchroom (the CLI), I'd like to why did it crash.","source":"paraphrase-template"}
+{"id":"ecfb4dba1f9a2667","targetSkill":"switchroom-cli","kind":"paraphrase","phrase":"In switchroom (the CLI), I'd like to apply my config changes.","source":"paraphrase-template"}
+{"id":"7c585a8db7c59926","targetSkill":"switchroom-cli","kind":"typo","phrase":"In switchroom (the CLI), list schedlued tasks","source":"typo-rule"}
+{"id":"cc05b3418d6c2e00","targetSkill":"switchroom-cli","kind":"typo","phrase":"In switchroom (the CLI), apply my cofnig changes","source":"typo-rule"}
+{"id":"d4f152899f79cf2f","targetSkill":"switchroom-cli","kind":"typo","phrase":"In switchroom (the CLI), kick teh agent, it's stuck","source":"typo-rule"}
+{"id":"83dd88c0404841d3","targetSkill":"switchroom-cli","kind":"slang","phrase":"In switchroom (the CLI), pls why did it crash","source":"slang-template"}
+{"id":"e17c19ce34a90be2","targetSkill":"switchroom-cli","kind":"slang","phrase":"In switchroom (the CLI), yo, how do i check the journal","source":"slang-template"}
+{"id":"e16a0776307faf7a","targetSkill":"switchroom-cli","kind":"slang","phrase":"In switchroom (the CLI), yo, how do i show the cascade for X","source":"slang-template"}
+{"id":"493df60cd866f115","targetSkill":"switchroom-cli","kind":"indirect","phrase":"In switchroom (the CLI), the agent just disappeared on me","source":"indirect-template"}
+{"id":"68421b6f41cb9478","targetSkill":"switchroom-cli","kind":"indirect","phrase":"In switchroom (the CLI), I don't know what version is live","source":"indirect-template"}
+{"id":"68fbb520e8128f78","targetSkill":"switchroom-cli","kind":"indirect","phrase":"In switchroom (the CLI), I want to know what happened last night","source":"indirect-template"}
 {"id":"4ce3457a0df8a7dc","targetSkill":null,"kind":"negative","phrase":"my agents are broken","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-health"}
 {"id":"fa99fc025157fece","targetSkill":null,"kind":"negative","phrase":"add a new agent","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-manage"}
 {"id":"f69a2b5b8d64dc82","targetSkill":null,"kind":"negative","phrase":"bootstrap switchroom from scratch","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-install"}

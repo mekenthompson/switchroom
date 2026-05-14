@@ -74,7 +74,11 @@ full model.
 | `/auth use <label>` | admin agents only | Swap the fleet-wide active account |
 | `/auth rotate` | admin agents only | Cycle to the next non-exhausted account in `auth.fallback_order` |
 
-Admin agents are listed in `auth.admin_agents:` in `switchroom.yaml`.
+Admin agents are flagged with `admin: true` on their per-agent block
+in `switchroom.yaml` — the same flag that gates `/agents`,
+`/restart`, `/update`, `/logs`, etc. One knob to make an agent the
+fleet control panel.
+
 The 1100-LOC slot-pool `/auth` dashboard from v0.7 was deleted in the
 broker rollout — the broker model doesn't need it.
 

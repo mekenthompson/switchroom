@@ -348,8 +348,7 @@ async function stepBotToken(
   if (config.telegram.bot_token.startsWith("vault:")) {
     if (nonInteractive && !process.env.SWITCHROOM_VAULT_PASSPHRASE) {
       throw new Error(
-        "Config references vault: refs but SWITCHROOM_VAULT_PASSPHRASE is unset. " +
-          "Set it in non-interactive mode so the vault can be created.",
+        "SWITCHROOM_VAULT_PASSPHRASE must be set before running setup in non-interactive mode when config uses vault: refs.",
       );
     }
     await storeTokenInVault(config, token);

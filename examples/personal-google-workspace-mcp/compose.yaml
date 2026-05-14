@@ -1,0 +1,66 @@
+# Personal Google Workspace MCP — operator-host Claude Code surface.
+#
+# This is the docker-compose pattern for an operator who wants their own
+# Claude Code on the host to have Drive + Docs + Sheets + Calendar tools.
+# It does NOT affect switchroom agents — they get Workspace via
+# `switchroom auth google connect <agent>` (RFC G §4.5, post-Phase-3).
+#
+# Setup walkthrough: see README.md.
+#
+# Compose project name (`name:`) is deliberately distinct from the
+# `switchroom` project so `switchroom apply` / `switchroom update` /
+# `docker compose -p switchroom down -v` won't touch this container.
+# Same isolation pattern as the hostd compose project.
+
+name: google-workspace-mcp
+
+services:
+  workspace-mcp:
+    image: ghcr.io/astral-sh/uv:python3.12-bookworm-slim
+    container_name: google-workspace-mcp
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WORKSPACE_MCP_CREDENTIALS_DIR: /credentials
+    ports:
+      # Loopback only — never expose Workspace MCP to the LAN.
+      # Bump the host-side port if 8217 collides with something else
+      # (also update WORKSPACE_MCP_PORT + GOOGLE_OAUTH_REDIRECT_URI in .env
+      # and the URL in your .mcp.json).
+      - "127.0.0.1:8217:8217"
+    volumes:
+      # Refresh tokens persist here (chmod 700-equivalent inside the
+      # container). Survives container recreate; lost on `docker compose
+      # down -v`.
+      - ./credentials:/credentials
+    command:
+      - uvx
+      # Pinned: bumping is a deliberate operator decision, not a silent
+      # surprise. Bump in lockstep with retesting the OAuth flow.
+      - --from
+      - workspace-mcp==1.20.4
+      - workspace-mcp
+      # streamable-http (not stdio) is required for OAuth 2.1 PKCE per
+      # upstream README.
+      - --transport
+      - streamable-http
+      # Tier knob — see README §4 for tier choice. `core` = ~16 tools
+      # (Drive + Docs + Sheets + Calendar, the validated default).
+      - --tool-tier
+      - core
+      # Restrict to only the four core services; omits Gmail (which is
+      # in `complete` tier and warrants its own approval shape).
+      - --tools
+      - drive
+      - docs
+      - sheets
+      - calendar
+    healthcheck:
+      # TCP-connect probe — the server returns 401 on `/mcp` until OAuth
+      # completes, which would fail an HTTP healthcheck. TCP-connect just
+      # verifies the listener is bound.
+      test: ["CMD-SHELL", "python -c \"import socket; s=socket.socket(); s.settimeout(2); s.connect(('127.0.0.1',8217)); s.close()\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

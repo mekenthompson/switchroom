@@ -59,12 +59,13 @@ function registerEnable(googleParent: Command, program: Command): void {
   googleParent
     .command("enable <account> <agents...>")
     .description(
-      "Enable a Google account on one or more agents (appends to switchroom.yaml google_accounts.<account>.enabled_for[]). Mirrors `auth enable` exactly.",
+      "Enable a Google account on one or more agents (appends to switchroom.yaml google_accounts.<account>.enabled_for[]). Use `all` to enable on every declared agent. Mirrors `auth enable` exactly.",
     )
     .action(
       withConfigError(async (account: string, agents: string[]) => {
-        const normalizedAccount = normalizeAccountEmail(account);
+        const normalizedAccount = validateAndNormalizeAccountEmail(account);
         const config = getConfig(program);
+        agents = expandAllAgents(agents, config);
 
         // Verify all named agents exist in switchroom.yaml. Fail-fast
         // before touching the YAML.
@@ -101,10 +102,15 @@ function registerEnable(googleParent: Command, program: Command): void {
           `  ${chalk.gray("now enabled on:")} ${enabledAfter.join(", ") || "(none)"}`,
         );
         console.log();
-        console.log(
-          `Next: ${chalk.bold(`switchroom agent restart ${newlyEnabled.join(" ") || "<agents>"}`)} so the wrapper picks up the new ACL.`,
-        );
-        console.log();
+        // Restart hint only when something actually changed — pure
+        // no-op enables don't require a restart, and printing a
+        // restart command with no agents to restart is misleading.
+        if (newlyEnabled.length > 0) {
+          console.log(
+            `Next: ${chalk.bold(`switchroom agent restart ${newlyEnabled.join(" ")}`)} so the wrapper picks up the new ACL.`,
+          );
+          console.log();
+        }
       }),
     );
 }
@@ -113,11 +119,13 @@ function registerDisable(googleParent: Command, program: Command): void {
   googleParent
     .command("disable <account> <agents...>")
     .description(
-      "Disable a Google account on one or more agents. Leaves the account in google_accounts: with an empty enabled_for[] (dormant) — does NOT remove the vault slot. Use `auth google account remove` (Phase 3b) for full teardown.",
+      "Disable a Google account on one or more agents. Use `all` to disable on every declared agent. Leaves the account in google_accounts: with an empty enabled_for[] (dormant) — does NOT remove the vault slot. Use `auth google account remove` (Phase 3b) for full teardown.",
     )
     .action(
       withConfigError(async (account: string, agents: string[]) => {
-        const normalizedAccount = normalizeAccountEmail(account);
+        const normalizedAccount = validateAndNormalizeAccountEmail(account);
+        const config = getConfig(program);
+        agents = expandAllAgents(agents, config);
         const yamlPath = getConfigPath(program);
         const before = readFileSync(yamlPath, "utf-8");
         const enabledBefore = getEnabledAgentsBefore(before, normalizedAccount);
@@ -236,13 +244,48 @@ function registerList(googleParent: Command, program: Command): void {
  * pipeline (lowercase + trim) — schema does this at parse time, vault
  * slot helpers do it on write/read, broker does it on lookup. Doing it
  * here too means the CLI accepts whatever case the operator types.
+ *
+ * Also enforces the same email-shape regex the schema uses, so
+ * malformed input fails at the CLI layer with an actionable error
+ * rather than getting written to YAML and rejected on the next
+ * config-load (would force operators to hand-edit the YAML to
+ * recover).
  */
-function normalizeAccountEmail(account: string): string {
-  return account.trim().toLowerCase();
+function validateAndNormalizeAccountEmail(account: string): string {
+  const normalized = account.trim().toLowerCase();
+  // Same regex as src/config/schema.ts:google_accounts key validator
+  // — must contain @ + dot, must NOT contain `:` (which would break
+  // the broker's slot-key parser).
+  if (!/^[^@\s:]+@[^@\s:]+\.[^@\s:]+$/.test(normalized)) {
+    throw new Error(
+      `'${account}' is not a valid Google account email. Expected format like 'alice@example.com' (colons not allowed).`,
+    );
+  }
+  return normalized;
 }
 
 function getEnabledAgentsBefore(yamlText: string, account: string): string[] {
   return getEnabledAgentsForGoogleAccount(yamlText, account) ?? [];
+}
+
+/**
+ * Expand the literal token `all` to every declared agent. Mirrors
+ * `auth-accounts.ts:expandAllAgents` exactly — operators reasonably
+ * try `auth google enable alice@example.com all`, and treating that as
+ * literal-agent-named-`all` would be a confusing failure.
+ *
+ * Pass-through if `all` isn't in the list. Multiple `all`s are
+ * harmless (deduplicated by the YAML mutator's idempotency).
+ */
+function expandAllAgents(agents: string[], config: SwitchroomConfig): string[] {
+  if (!agents.includes("all")) return agents;
+  const allNames = Object.keys(config.agents);
+  if (allNames.length === 0) {
+    throw new Error(
+      "switchroom.yaml has no agents declared — `all` matches nothing.",
+    );
+  }
+  return allNames;
 }
 
 function pad(s: string, width: number): string {
@@ -251,11 +294,8 @@ function pad(s: string, width: number): string {
 
 // Re-export for tests.
 export const _testing = {
-  normalizeAccountEmail,
+  validateAndNormalizeAccountEmail,
   getEnabledAgentsBefore,
+  expandAllAgents,
 };
 
-// Quiet unused-import linting for SwitchroomConfig — used in the
-// withConfigError-wrapped callback's inferred config type but not
-// referenced by name in this file.
-export type _SwitchroomConfigUsed = SwitchroomConfig;

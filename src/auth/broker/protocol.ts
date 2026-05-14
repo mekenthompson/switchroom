@@ -26,6 +26,19 @@
  * affects is derived from path-identity. This closes the
  * fleet-wide spurious-deauth abuse path the round-1 review
  * flagged.
+ *
+ * **Provider field (RFC G Phase 3b.1):** Per-account verbs accept an
+ * optional `provider:` field. When absent or `"anthropic"`, behavior
+ * is unchanged from RFC H. When `"google"` (added by Phase 3b.2),
+ * the broker dispatches through the Google provider. Per-account
+ * state is keyed on `(provider, account)` so an account named
+ * `"alice@example.com"` registered as Google does not collide with
+ * an Anthropic account label of the same string.
+ *
+ * `get-credentials` and `mark-exhausted` derive provider+account
+ * from path-identity (the broker knows which provider an agent or
+ * consumer is bound to from its socket-mount config), so they don't
+ * take a `provider:` field on the wire.
  */
 
 import { z } from "zod";
@@ -38,6 +51,21 @@ export const MAX_FRAME_BYTES = 64 * 1024;
 
 /** Wire-protocol major version. Bump on breaking change to envelope shape. */
 export const PROTOCOL_VERSION = 1;
+
+/**
+ * Provider names accepted on the wire (RFC G Phase 3b.1). New providers
+ * extend this enum; the broker server validates incoming `provider:`
+ * fields against it before dispatching.
+ */
+export const ProviderNameSchema = z.enum(["anthropic", "google"]);
+export type ProviderName = z.infer<typeof ProviderNameSchema>;
+
+/**
+ * Default provider — `"anthropic"`. Used when verbs omit the
+ * `provider:` field entirely (back-compat with RFC H pre-Phase-3b
+ * clients).
+ */
+export const DEFAULT_PROVIDER: ProviderName = "anthropic";
 
 // ─── Request schemas ───────────────────────────────────────────────────────
 
@@ -58,6 +86,17 @@ export const SetActiveRequestSchema = z.object({
   op: z.literal("set-active"),
   id: z.string().min(1),
   account: z.string().min(1),
+  /**
+   * Provider for the target account. Optional, defaults to
+   * `"anthropic"` (back-compat with RFC H pre-Phase-3b clients).
+   * `set-active` is fleet-wide active-account swap which is currently
+   * an Anthropic-only concept; Google's account-active model is
+   * per-agent-via-`google_accounts.enabled_for[]`. This field is
+   * carried for protocol uniformity even though `set-active` will
+   * reject `provider: "google"` until/unless a fleet-wide-active
+   * Google concept is added.
+   */
+  provider: ProviderNameSchema.optional(),
 });
 
 export const MarkExhaustedRequestSchema = z.object({
@@ -73,24 +112,81 @@ export const RefreshAccountRequestSchema = z.object({
   op: z.literal("refresh-account"),
   id: z.string().min(1),
   account: z.string().min(1),
+  /** Provider for the target account. Defaults to `"anthropic"` for back-compat. */
+  provider: ProviderNameSchema.optional(),
 });
+
+/**
+ * Anthropic-shaped credentials — the Phase-1 (RFC H) shape. Stored
+ * verbatim under `claudeAiOauth: { ... }`.
+ */
+export const AnthropicCredentialsSchema = z.object({
+  claudeAiOauth: z.object({
+    accessToken: z.string(),
+    refreshToken: z.string().optional(),
+    expiresAt: z.number().optional(),
+    scopes: z.array(z.string()).optional(),
+    subscriptionType: z.string().optional(),
+    rateLimitTier: z.string().optional(),
+  }),
+});
+export type AnthropicCredentialsShape = z.infer<typeof AnthropicCredentialsSchema>;
+
+/**
+ * Google-shaped credentials — added by Phase 3b.2. Stored verbatim
+ * under `googleOauth: { ... }`. Field set mirrors what
+ * `taylorwilsdon/google_workspace_mcp` and the Google OAuth 2.0
+ * token-exchange response provide.
+ */
+export const GoogleCredentialsSchema = z.object({
+  googleOauth: z.object({
+    accessToken: z.string(),
+    refreshToken: z.string(),
+    expiresAt: z.number(),
+    /** Granted scope set, space-separated as Google returns it. */
+    scope: z.string(),
+    /** OAuth client id used to obtain the credentials (broker validates on refresh). */
+    clientId: z.string(),
+    /** Account email — RFC G's per-account ACL key. */
+    accountEmail: z.string(),
+    tokenType: z.literal("Bearer"),
+  }),
+});
+export type GoogleCredentialsShape = z.infer<typeof GoogleCredentialsSchema>;
+
+/**
+ * Provider-discriminated credentials union. Each variant is the
+ * verbatim on-disk shape for that provider. Broker stores credentials
+ * pass-through; consumers (CLI, MCP wrapper) introspect.
+ */
+export const ProviderCredentialsSchema = z.union([
+  AnthropicCredentialsSchema,
+  GoogleCredentialsSchema,
+]);
+export type ProviderCredentialsShape = z.infer<typeof ProviderCredentialsSchema>;
 
 export const AddAccountRequestSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
   op: z.literal("add-account"),
   id: z.string().min(1),
   label: z.string().min(1),
-  /** Full credentials.json shape; broker stores verbatim. */
-  credentials: z.object({
-    claudeAiOauth: z.object({
-      accessToken: z.string(),
-      refreshToken: z.string().optional(),
-      expiresAt: z.number().optional(),
-      scopes: z.array(z.string()).optional(),
-      subscriptionType: z.string().optional(),
-      rateLimitTier: z.string().optional(),
-    }),
-  }),
+  /**
+   * Provider for the new account. Defaults to `"anthropic"` for
+   * back-compat — RFC H pre-Phase-3b clients omit this field and
+   * pass Anthropic credentials.
+   *
+   * The provider field MUST agree with the credentials shape:
+   * `provider: "anthropic"` requires `claudeAiOauth: { ... }`,
+   * `provider: "google"` requires `googleOauth: { ... }`. Server
+   * validates this agreement and rejects with INVALID_ARGS otherwise.
+   */
+  provider: ProviderNameSchema.optional(),
+  /**
+   * Full credentials.json shape for the provider; broker stores verbatim.
+   * Schema is a union over provider variants — the server validates the
+   * variant matches `provider:` (or `DEFAULT_PROVIDER`).
+   */
+  credentials: ProviderCredentialsSchema,
   /** Replace an existing account (used for drift recovery). */
   replace: z.boolean().optional(),
 });
@@ -100,6 +196,8 @@ export const RmAccountRequestSchema = z.object({
   op: z.literal("rm-account"),
   id: z.string().min(1),
   label: z.string().min(1),
+  /** Provider for the account. Defaults to `"anthropic"` for back-compat. */
+  provider: ProviderNameSchema.optional(),
 });
 
 export const SetOverrideRequestSchema = z.object({

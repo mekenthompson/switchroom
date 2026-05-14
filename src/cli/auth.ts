@@ -22,8 +22,36 @@ import {
   type RefreshOutcome,
 } from "../auth/token-refresh.js";
 import { getAgentStatus, restartAgent } from "../agents/lifecycle.js";
+import { alignAgentUid } from "../agents/scaffold.js";
+import { allocateAgentUid } from "../agents/compose.js";
 import { withConfigError, getConfig } from "./helpers.js";
 import { registerAuthAccountSubcommands } from "./auth-accounts.js";
+
+/**
+ * Re-chown the agent state dir to the per-agent UID after a host-side
+ * write (e.g. `switchroom auth code` writing OAuth token files). The
+ * scaffold/apply path already aligns this on first install, but any
+ * host-side write afterwards lands as the host operator UID — the
+ * containerised agent (running as the per-agent UID) then can't read
+ * its own .claude/.oauth-token and start.sh fails with EACCES.
+ * Install-validation finding #22.
+ */
+function realignAfterHostWrite(name: string, agentDir: string): void {
+  try {
+    const uid = allocateAgentUid(name);
+    alignAgentUid(name, agentDir, uid, { confirm: false });
+  } catch (err) {
+    // Don't fail the auth flow — surface as a warning so the operator
+    // knows to chown manually if needed.
+    process.stderr.write(
+      chalk.yellow(
+        `\n  ! could not re-align UID for ${name}: ${(err as Error).message}\n` +
+          `    The token was saved, but the agent (UID-isolated) may not be able to read it.\n` +
+          `    Fix: sudo chown -R ${allocateAgentUid(name)}:${allocateAgentUid(name)} ${agentDir}\n`,
+      ),
+    );
+  }
+}
 
 function printAuthTable(
   headers: string[],
@@ -309,6 +337,12 @@ export function registerAuthCommand(program: Command): void {
         const agentDir = resolve(agentsDir, name);
         const result = loginAgent(name, agentDir);
 
+        // No UID realignment here — `auth login` writes session
+        // metadata only and the subsequent `auth code` invocation
+        // needs to read that metadata from the same host UID context.
+        // We realign once at the END of the auth flow (in `auth code`
+        // after submitAuthCode completes).
+
         console.log();
         for (const line of result.instructions) {
           console.log(line);
@@ -558,6 +592,12 @@ export function registerAuthCommand(program: Command): void {
         requireKnownAgent(config, name);
         const agentDir = resolve(agentsDir, name);
         const result = submitAuthCode(name, agentDir, code, opts.slot);
+
+        // Re-align UIDs after the host-side token write so the
+        // containerised agent (per-agent UID) can read its own tokens.
+        if (result.completed && result.tokenSaved) {
+          realignAfterHostWrite(name, agentDir);
+        }
 
         if (opts.json) {
           console.log(JSON.stringify({

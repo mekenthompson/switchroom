@@ -23,23 +23,34 @@ export class TopicSyncError extends Error {
 /**
  * Resolve the bot token from config, handling vault: prefix and env fallback.
  * Returns the token string or null if unresolvable.
+ *
+ * Note: the general vault resolver in src/vault/resolver.ts handles
+ * `vault:<key>` refs for secrets that flow through the broker. This
+ * path is invoked early (during `switchroom topics` / `syncTopics`)
+ * before the broker is necessarily up, so we keep an env-var fallback
+ * for bootstrap. (Install-validation finding #14.)
  */
 export function resolveBotToken(configToken: string): string | null {
-  if (configToken.startsWith("vault:")) {
-    console.warn(
-      `Warning: Vault references are not yet implemented (found "${configToken}").`
-    );
-    console.warn(
-      "  Set TELEGRAM_BOT_TOKEN environment variable as a fallback."
-    );
-    const envToken = process.env.TELEGRAM_BOT_TOKEN;
-    return envToken && envToken.length > 0 ? envToken : null;
-  }
-
-  // Check env override first, then fall back to config value
+  // Env var always wins — covers both the bootstrap case (vault not
+  // yet initialized) and operator overrides.
   const envToken = process.env.TELEGRAM_BOT_TOKEN;
   if (envToken && envToken.length > 0) {
     return envToken;
+  }
+
+  if (configToken.startsWith("vault:")) {
+    // We don't synchronously open the vault here — that requires a
+    // passphrase and the broker, neither of which is guaranteed at
+    // this callsite. Callers that need vault resolution should set
+    // TELEGRAM_BOT_TOKEN ahead of time (setup writes it; the per-
+    // agent telegram/.env writer covers runtime).
+    console.warn(
+      `Warning: bot_token "${configToken}" is a vault ref but TELEGRAM_BOT_TOKEN is not set in the environment.`,
+    );
+    console.warn(
+      "  Set TELEGRAM_BOT_TOKEN, or run from a context that has loaded the per-agent telegram/.env file.",
+    );
+    return null;
   }
 
   return configToken;

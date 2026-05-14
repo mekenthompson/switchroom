@@ -2332,6 +2332,20 @@ export function scaffoldAgent(
     mkdirSync(agentsDir, { recursive: true });
     for (const [saName, saDef] of Object.entries(agentConfig.subagents)) {
       const mdPath = join(agentsDir, `${saName}.md`);
+      // Post-cascade invariant: description is what Claude Code uses
+      // to decide when to delegate to a subagent. The schema allows
+      // partial overrides (so profile-level overlays don't have to
+      // restate it — see SubagentSchema in src/config/schema.ts), but
+      // the FINAL merged subagent must have one. Fail loudly with
+      // actionable guidance instead of writing `description: undefined`
+      // to the markdown (which Claude Code rejects silently).
+      if (!saDef.description) {
+        throw new Error(
+          `subagent "${saName}" has no description after cascade — add one ` +
+            `to your defaults, the profile this agent extends, or the agent's ` +
+            `own subagents.${saName} block.`,
+        );
+      }
       const frontmatter: Record<string, unknown> = {
         name: saName,
         description: saDef.description,
@@ -3598,6 +3612,14 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
       mkdirSync(saDir, { recursive: true });
       for (const [saName, saDef] of Object.entries(agentConfig.subagents)) {
         const mdPath = join(saDir, `${saName}.md`);
+        // Post-cascade invariant — see same check in scaffoldAgent above.
+        if (!saDef.description) {
+          throw new Error(
+            `subagent "${saName}" has no description after cascade — add one ` +
+              `to your defaults, the profile this agent extends, or the agent's ` +
+              `own subagents.${saName} block.`,
+          );
+        }
         const frontmatter: Record<string, unknown> = {
           name: saName,
           description: saDef.description,

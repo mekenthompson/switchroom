@@ -168,8 +168,10 @@ export function removeGoogleAccount(stateDir: string, account: string): void {
 }
 
 /**
- * List all Google accounts the broker has stored. Used by `list-state`
- * (Phase 3b.2c.2 future) and the doctor.
+ * List all Google accounts the broker has stored. Used by the
+ * `list-google-accounts` op (powering `switchroom auth google account
+ * list`), the refresh-tick loop (`refreshOneGoogleAccount`), and the
+ * doctor.
  *
  * Reads filesystem layout, not in-memory state — operators can drop
  * a credentials.json by hand and the broker will pick it up on next

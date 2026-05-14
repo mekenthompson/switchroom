@@ -499,12 +499,42 @@ shippable as four PRs (1a, 1b, 1c, 1d) for incremental review.
 
 ## 10. Tracking
 
-Open one tracking issue per sub-phase, all blocked on this spec
-landing:
+### Phase 1 primitives — all merged
 
-- [ ] Phase 1a — Folder picker + Open-in-Drive deep links
-- [ ] Phase 1b — Section-anchor editing primitive
-- [ ] Phase 1c — Suggesting writes + diff preview
-- [ ] Phase 1d — Reconciler missing→present recovery
-- [ ] **RFC F (separate)** — Second doc surface (Notion candidate)
+- [x] Phase 1a — Open-in-Drive deep-link builders — #1251
+- [x] Phase 1a — Open-in-Drive button on granted approval cards — #1295
+- [x] Phase 1a — Folder picker primitives (list + cache + card) — #1296
+- [x] Phase 1b — Section-anchor editing primitive — #1250
+- [x] Phase 1c — `doc:gdrive:suggest:*` scope namespace — #1290
+- [x] Phase 1c — Diff-preview builder — #1252
+- [x] Phase 1c — Edit-prep helpers for the four MCP tools — #1297
+- [x] Phase 1c — Telegram diff-preview card renderer — #1299
+- [x] Phase 1d — Reconciler missing→present recovery detector — #1249
+- [x] Phase 1d — Recovery audit / digest / nudge formatters — #1300
+- [x] Cross-cutting — `docs/google-workspace.md` user guide
+
+### Outstanding follow-up wiring (before operator-visible end-to-end)
+
+The Phase 1 plan deliberately followed a *ship-the-helper-then-wire*
+pattern (so each PR is independently reviewable and the
+kernel-agnostic surface area stabilises before the Telegram /
+kernel / MCP-server glue lands). The remaining pieces:
+
+- [ ] Gateway `drvpick:` callback dispatcher + `switchroom drive
+      folders <agent>` CLI verb (folder-picker glue — consumes #1296)
+- [ ] Reconciler-driver loop that iterates grants, fetches Drive
+      metadata on a schedule, and fans recoveries through #1300's
+      audit-write + chat-nudge + staleness-digest paths
+- [ ] MCP-server tool registration that wires #1297's prep
+      functions to actual Google Docs `batchUpdate` calls (the
+      kernel-side double-request_id coordination — the
+      diff-preview card #1299 already expects this shape)
+
+These deliberately stay out of the Phase 1 PRs — each touches
+substantial Telegram-side surface area + the approval kernel and
+warrants its own review pass.
+
+### Phase 2+
+
+- **RFC F (separate)** — Second doc surface (Notion candidate)
   + framework extraction once Drive collab is real.

@@ -53,6 +53,35 @@ function realignAfterHostWrite(name: string, agentDir: string): void {
   }
 }
 
+/**
+ * Temporarily chown the agent dir to the HOST operator UID so a
+ * host-side process (like `switchroom auth code`) can write into it.
+ * Pair with `realignAfterHostWrite` at the end of the host-side
+ * operation. Without this, a reauth on an already-running agent
+ * fails with EACCES because the dir is owned by the per-agent UID.
+ * Install-validation finding #22 (round-4-followup).
+ */
+function chownToHostForWrite(agentDir: string): void {
+  const hostUid = process.getuid?.();
+  const hostGid = process.getgid?.();
+  if (hostUid === undefined || hostGid === undefined) return;
+  try {
+    execFileSync("chown", ["-R", `${hostUid}:${hostGid}`, agentDir], {
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+  } catch {
+    // Fall back to sudo. If sudo isn't available we just let the
+    // subsequent write throw EACCES — operator can resolve manually.
+    try {
+      execFileSync("sudo", ["chown", "-R", `${hostUid}:${hostGid}`, agentDir], {
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+    } catch {
+      // Don't crash; the subsequent write will surface the real error.
+    }
+  }
+}
+
 function printAuthTable(
   headers: string[],
   rows: string[][],
@@ -335,13 +364,21 @@ export function registerAuthCommand(program: Command): void {
         requireKnownAgent(config, name);
 
         const agentDir = resolve(agentsDir, name);
+
+        // Pre-write: ensure host operator can write into the agent
+        // dir for the session-metadata files (.setup-token.session.json).
+        // On a fresh install the dir is operator-owned already, but a
+        // re-login after `auth code` (or any flow that triggered
+        // realignAfterHostWrite) needs this re-prep.
+        chownToHostForWrite(agentDir);
+
         const result = loginAgent(name, agentDir);
 
-        // No UID realignment here — `auth login` writes session
-        // metadata only and the subsequent `auth code` invocation
-        // needs to read that metadata from the same host UID context.
-        // We realign once at the END of the auth flow (in `auth code`
-        // after submitAuthCode completes).
+        // No realign here — `auth login` writes session metadata
+        // and the subsequent `auth code` invocation needs to read
+        // that metadata from the same host UID context. We realign
+        // once at the END of the auth flow (in `auth code` after
+        // submitAuthCode completes).
 
         console.log();
         for (const line of result.instructions) {
@@ -365,6 +402,10 @@ export function registerAuthCommand(program: Command): void {
         requireKnownAgent(config, name);
 
         const agentDir = resolve(agentsDir, name);
+
+        // Pre-write: ensure host operator can write session metadata.
+        chownToHostForWrite(agentDir);
+
         const result = opts.slot
           ? startAuthSession(name, agentDir, { force: true, slot: opts.slot })
           : refreshAgent(name, agentDir);
@@ -591,10 +632,18 @@ export function registerAuthCommand(program: Command): void {
 
         requireKnownAgent(config, name);
         const agentDir = resolve(agentsDir, name);
+
+        // Pre-write: chown agent dir to host UID so submitAuthCode
+        // can write the token files. (Reauth on an already-running
+        // agent: the dir was previously realigned to the per-agent
+        // UID by a prior auth code, so the host operator can't write
+        // without this prep step.)
+        chownToHostForWrite(agentDir);
+
         const result = submitAuthCode(name, agentDir, code, opts.slot);
 
-        // Re-align UIDs after the host-side token write so the
-        // containerised agent (per-agent UID) can read its own tokens.
+        // Post-write: re-align UIDs so the containerised agent
+        // (per-agent UID) can read its own tokens.
         if (result.completed && result.tokenSaved) {
           realignAfterHostWrite(name, agentDir);
         }

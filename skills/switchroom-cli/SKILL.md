@@ -198,10 +198,11 @@ auth:
     - me@example.com
     - work
     - personal
-  admin_agents: [clerk]               # agents allowed to call admin verbs from Telegram
 
 agents:
   ziggy: {}                           # inherits fleet active
+  clerk:
+    admin: true                       # gates /agents, /restart, /update AND admin /auth verbs
   klanker:
     auth:
       override: work                  # opt-out (edge case)

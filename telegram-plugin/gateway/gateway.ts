@@ -8523,14 +8523,17 @@ bot.command("auth", async ctx => {
   const parsed = parseAuthCommand(text)
   if (!parsed) return
   const currentAgent = getMyAgentName()
-  // Per RFC §4.3 admin gating, `auth.admin_agents[]` is the ACL. Load
-  // the local switchroom.yaml config and pull the list; broker enforces
-  // server-side too — the gateway-side check is for clean UX.
+  // Post-unification admin gating: admin authority is sourced from each
+  // agent's own `admin: true` flag (the same flag that gates /agents,
+  // /restart, /update etc. per PR #1258). The gateway-side check is
+  // for clean UX; the broker enforces server-side from the same source.
   let adminAgents: string[] | undefined
   try {
     const cfg = loadSwitchroomConfig()
-    const raw = (cfg as unknown as { auth?: { admin_agents?: unknown } } )?.auth?.admin_agents
-    if (Array.isArray(raw)) adminAgents = raw.filter((s): s is string => typeof s === "string")
+    const agentsMap = (cfg as unknown as { agents?: Record<string, { admin?: boolean }> })?.agents ?? {}
+    adminAgents = Object.entries(agentsMap)
+      .filter(([, a]) => a?.admin === true)
+      .map(([name]) => name)
   } catch { /* best-effort */ }
 
   // `/auth add` and `/auth cancel` are gateway-routed (drive a
@@ -8543,7 +8546,9 @@ bot.command("auth", async ctx => {
       await switchroomReply(
         ctx,
         `<b>Not authorized.</b> <code>/auth ${parsed.kind}</code> is admin-only.\n` +
-          `Add this agent to <code>auth.admin_agents</code> in switchroom.yaml to unlock.`,
+          `Set <code>admin: true</code> on this agent in switchroom.yaml to unlock ` +
+          `(the same flag that gates <code>/agents</code>, <code>/restart</code>, ` +
+          `<code>/update</code> etc.).`,
         { html: true },
       )
       return

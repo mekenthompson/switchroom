@@ -100,8 +100,11 @@ function makeConfig(h: Harness, agents: string[]): SwitchroomConfig {
   return ({
     switchroom: { version: 1, agents_dir: h.agentsDir },
     telegram: {},
-    agents: Object.fromEntries(agents.map((a) => [a, {}])),
-    auth: { active: "default", admin_agents: agents },
+    // Every agent in this fixture gets admin: true so set-active works
+    // (admin authority is now sourced from the per-agent flag, RFC H
+    // post-unification).
+    agents: Object.fromEntries(agents.map((a) => [a, { admin: true }])),
+    auth: { active: "default" },
   } as unknown) as SwitchroomConfig;
 }
 

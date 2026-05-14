@@ -42,14 +42,20 @@ export function socketPathToName(socketPath: string): string | null {
  * Returns the identity kind plus the resolved name. `null` when the
  * name is reserved (operator) but path didn't take the operator shape,
  * or when the name doesn't match any known agent/consumer.
+ *
+ * Admin authority is sourced from the per-agent `agents.<name>.admin`
+ * field — the canonical "this agent has fleet admin powers" flag
+ * established by PR #1258 (foreman retirement). The auth-broker
+ * shares this source of truth so an operator setting up an admin
+ * agent has one knob to flip, not two.
  */
 export interface AuthConfigShape {
   /** Agent names declared in switchroom.yaml `agents:`. */
   agents: readonly string[];
+  /** Subset of `agents` whose `agents.<name>.admin` field is true. */
+  adminAgents: readonly string[];
   /** Consumer names declared in `auth.consumers[]`. */
   consumers: readonly string[];
-  /** Agent names declared in `auth.admin_agents[]` (subset of `agents`). */
-  adminAgents: readonly string[];
 }
 
 export type Identity =
@@ -78,9 +84,14 @@ export function classify(
 
 /**
  * Same-name check used by schema validation: a consumer name cannot
- * collide with an agent name or an admin-agent entry. Enforces RFC §4.5
- * "Consumers cannot be admins; adding a consumer name to `admin_agents`
- * is a config error."
+ * collide with an agent name or be listed as an admin agent.
+ *
+ * Post-RFC-H + PR #1258 unification: admin is sourced from each agent's
+ * own `admin: true` flag. A consumer name collides with an agent name
+ * iff it appears in `config.agents` — separately checking the admin
+ * subset is defence in depth (a consumer can't have an agent admin
+ * setting, so the path-identity gate already prevents it, but we
+ * surface the error early at schema-validation time).
  */
 export function validateConsumerNames(config: AuthConfigShape): string[] {
   const errors: string[] = [];
@@ -92,7 +103,7 @@ export function validateConsumerNames(config: AuthConfigShape): string[] {
       errors.push(`consumer name '${c}' collides with an agent name`);
     }
     if (config.adminAgents.includes(c)) {
-      errors.push(`consumer name '${c}' is listed in admin_agents (consumers cannot be admins)`);
+      errors.push(`consumer name '${c}' is an admin agent (consumers cannot be admins)`);
     }
   }
   return errors;

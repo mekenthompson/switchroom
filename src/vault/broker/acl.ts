@@ -243,6 +243,17 @@ export function checkAclByAgent(
     return { allow: false, reason: `agent '${agentName}' not found in config` };
   }
 
+  // ── RFC G §4.4 — google: slots are gated by google_accounts[].enabled_for,
+  // not by per-cron schedule.secrets. The shared-token-with-per-agent-ACL
+  // model exists exactly to bypass the per-agent allowlist that would
+  // otherwise prevent two agents from reading the same Google account.
+  // Match shape: `google:<account>:*`. The account email is extracted
+  // from the slot key directly.
+  const googleSlot = parseGoogleAccountSlotKey(key);
+  if (googleSlot !== null) {
+    return checkGoogleAccountAcl(config, agentName, googleSlot.account, key);
+  }
+
   const schedule = agentConfig.schedule ?? [];
   if (schedule.length === 0) {
     return {
@@ -262,4 +273,65 @@ export function checkAclByAgent(
     allow: false,
     reason: `key '${key}' not in ACL for agent '${agentName}'`,
   };
+}
+
+/**
+ * Parse a `google:<account>:<field>` slot key into its account + field
+ * components. Returns null if the key doesn't match the shape.
+ *
+ * Pattern: literal `google:`, then account email (`[^:]+`), then literal
+ * `:`, then field name (`[a-z_]+`). The account-email regex is lenient
+ * here — strict validation lives at the schema layer where operators see
+ * the error. Broker just needs to extract the account.
+ */
+export function parseGoogleAccountSlotKey(
+  key: string,
+): { account: string; field: string } | null {
+  const match = key.match(/^google:([^:]+):([a-z_]+)$/);
+  if (!match) return null;
+  return { account: match[1], field: match[2] };
+}
+
+/**
+ * RFC G §4.4 — check whether an agent is in `google_accounts.<account>.
+ * enabled_for[]`. Fail-closed:
+ *   - account not in google_accounts → deny.
+ *   - enabled_for missing or empty → deny.
+ *   - agent not in enabled_for → deny.
+ *   - otherwise → allow.
+ *
+ * Pattern matches `share-auth-across-the-fleet.md`'s account-with-ACL
+ * model — the account is the unit of trust, the agent is the consumer.
+ */
+function checkGoogleAccountAcl(
+  config: SwitchroomConfig,
+  agentName: string,
+  account: string,
+  key: string,
+): AclResult {
+  const accounts = config.google_accounts ?? {};
+  // Match against normalized (lowercase) account email — schema accepts
+  // any case but vault slots are written under the normalized form.
+  const accountKey = account.toLowerCase();
+  const accountEntry = accounts[accountKey] ?? accounts[account];
+  if (!accountEntry) {
+    return {
+      allow: false,
+      reason: `google_accounts['${account}'] not configured (key '${key}')`,
+    };
+  }
+  const enabled = accountEntry.enabled_for ?? [];
+  if (enabled.length === 0) {
+    return {
+      allow: false,
+      reason: `google_accounts['${account}'].enabled_for is empty (key '${key}')`,
+    };
+  }
+  if (!enabled.includes(agentName)) {
+    return {
+      allow: false,
+      reason: `agent '${agentName}' not in google_accounts['${account}'].enabled_for (key '${key}')`,
+    };
+  }
+  return { allow: true };
 }

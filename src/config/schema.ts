@@ -1821,6 +1821,51 @@ export const SwitchroomConfigSchema = z.object({
     "(docs/rfcs/host-control-daemon.md) and the field-level help on " +
     "`enabled` for the Phase 1 scope.",
   ),
+  google_accounts: z
+    .record(
+      // Google account email — case-insensitive on Google's side, so we
+      // normalize via z.string().toLowerCase().trim() so the schema-level
+      // key matches the lowercase form vault slots are written under.
+      // Without this, a config key `Alice@Example.com` would write its
+      // slot at `google:alice@example.com:refresh_token` per
+      // normalizeGoogleAccount() but the broker's google_accounts[]
+      // lookup would miss (broker normalizes the slot-key side, not the
+      // config-key side). Schema-level normalization closes that gap.
+      //
+      // Validation: must contain @ + dot, must NOT contain `:` (the
+      // broker's slot-key parser uses `:` as the field separator —
+      // a colon in the local-part would write a slot the broker can't
+      // reverse-parse, silently rendering it unreachable). Strict email
+      // validation (RFC 5321 etc.) belongs at the CLI layer where we
+      // can give an actionable error; this is the load-bearing minimum.
+      z.string()
+        .regex(/^[^@\s:]+@[^@\s:]+\.[^@\s:]+$/, {
+          message: "Account key must be a Google account email like 'alice@example.com' (colons not allowed)",
+        })
+        .transform((v) => v.trim().toLowerCase()),
+      z.object({
+        enabled_for: z
+          .array(z.string().regex(/^[a-z0-9][a-z0-9_-]{0,50}$/, {
+            message: "Agent name must match the standard agent-name pattern",
+          }))
+          .describe(
+            "Agent slugs that may read this account's vault slots " +
+            "(`google:<account>:refresh_token` etc). Per-agent ACL is " +
+            "enforced at the broker, not at the agent identity layer — " +
+            "the agent still authenticates via socket-path-as-identity " +
+            "per RFC D §4.1, broker just gates the cross-agent token share."
+          ),
+      }),
+    )
+    .optional()
+    .describe(
+      "RFC G Phase 2: per-Google-account ACL for vault slots holding " +
+      "OAuth refresh tokens. Maps account email → list of agents " +
+      "permitted to read that account's slots. Written by `switchroom " +
+      "auth google enable|disable` (Phase 3); read by the broker on " +
+      "every Google slot access. Replaces RFC D's per-agent vault slot " +
+      "scope (which can't express 'two agents share one Google account')."
+    ),
   defaults: AgentDefaultsSchema.describe(
     "Implicit bottom-of-cascade profile applied to every agent before " +
     "per-agent config and `extends:` resolution. Tools, mcp_servers, and " +

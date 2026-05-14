@@ -688,6 +688,14 @@ describe("AuthBroker — Google provider registration (Phase 3b.2b)", () => {
       disableRefreshLoop: true,
     });
     await broker.start();
+    // Send WELL-FORMED Google credentials so the request passes
+    // schema validation and reaches the broker's dispatcher. The
+    // dispatcher routes through registry.lookup("google") (which
+    // requires GoogleProvider IS registered), runs
+    // validateCredentialShape, then hits the 3b.2c-deferral message
+    // for the storage path. If GoogleProvider weren't registered,
+    // it'd fail earlier at the registry.has() gate with a different
+    // message.
     const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
       v: 1,
       id: "1",
@@ -695,19 +703,21 @@ describe("AuthBroker — Google provider registration (Phase 3b.2b)", () => {
       label: "alice@example.com",
       provider: "google",
       credentials: {
-        // Missing required fields → GoogleProvider's
-        // validateCredentialShape rejects with field-name-specific message.
         googleOauth: {
-          accessToken: "at",
-          // no refreshToken, expiresAt, etc
+          accessToken: "at-x",
+          refreshToken: "rt-x",
+          expiresAt: 99999,
+          scope: "https://www.googleapis.com/auth/drive",
+          clientId: "client-id-x",
+          accountEmail: "alice@example.com",
+          tokenType: "Bearer",
         },
       },
     }) as { ok: boolean; error?: { code: string; message: string } };
-    // Schema-level validation actually fails first (incomplete
-    // googleOauth shape doesn't match GoogleCredentialsSchema), but
-    // either way the rejection message confirms Google's path was
-    // hit (not the "not registered" path).
+    // Reaches the storage-deferral path → confirms Google IS
+    // registered (otherwise we'd see "not registered" instead).
     expect(resp.ok).toBe(false);
+    expect(resp.error?.message).toContain("Phase 3b.2c");
     expect(resp.error?.message).not.toContain("not registered");
     broker.stop();
   });

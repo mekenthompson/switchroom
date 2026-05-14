@@ -12,7 +12,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as net from "node:net";
@@ -645,8 +645,8 @@ describe("AuthBroker — Google provider registration (Phase 3b.2b)", () => {
       disableRefreshLoop: true,
     });
     await broker.start();
-    // Provider:google now PASSES the registry gate but hits the
-    // 3b.2c-deferral message for the storage path.
+    // Phase 3b.2c — rm-account on a non-existent Google account
+    // returns ACCOUNT_NOT_FOUND (the storage path is real now).
     const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
       v: 1,
       id: "1",
@@ -655,20 +655,13 @@ describe("AuthBroker — Google provider registration (Phase 3b.2b)", () => {
       provider: "google",
     }) as { ok: boolean; error?: { code: string; message: string } };
     expect(resp.ok).toBe(false);
-    expect(resp.error?.message).toContain("Phase 3b.2c");
+    expect(resp.error?.code).toBe("ACCOUNT_NOT_FOUND");
     // Importantly — NOT "not registered" anymore. Google IS registered.
     expect(resp.error?.message).not.toContain("not registered");
     broker.stop();
   });
 
-  it("with both providers registered, the validateCredentialShape route uses GoogleProvider for google: requests", async () => {
-    // Instead of fighting the schema enum to test "unknown provider"
-    // rejection, this test confirms BOTH providers are registered by
-    // routing a malformed Google credentials object through
-    // add-account → registry.lookup("google").validateCredentialShape.
-    // If GoogleProvider weren't registered, the request would fail at
-    // the registry.has() gate with "not registered" instead of the
-    // shape-validation message.
+  it("Phase 3b.2c — add-account with Google credentials writes to broker stateDir and succeeds", async () => {
     const h = makeHarness();
     const config = makeConfig(h, {
       active: "default",
@@ -688,14 +681,6 @@ describe("AuthBroker — Google provider registration (Phase 3b.2b)", () => {
       disableRefreshLoop: true,
     });
     await broker.start();
-    // Send WELL-FORMED Google credentials so the request passes
-    // schema validation and reaches the broker's dispatcher. The
-    // dispatcher routes through registry.lookup("google") (which
-    // requires GoogleProvider IS registered), runs
-    // validateCredentialShape, then hits the 3b.2c-deferral message
-    // for the storage path. If GoogleProvider weren't registered,
-    // it'd fail earlier at the registry.has() gate with a different
-    // message.
     const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
       v: 1,
       id: "1",
@@ -713,12 +698,231 @@ describe("AuthBroker — Google provider registration (Phase 3b.2b)", () => {
           tokenType: "Bearer",
         },
       },
+    }) as { ok: boolean; data?: { label: string; expiresAt?: number } };
+    expect(resp.ok).toBe(true);
+    expect(resp.data?.label).toBe("alice@example.com");
+    expect(resp.data?.expiresAt).toBe(99999);
+    // Verify the credentials.json is on disk under the broker stateDir.
+    const credPath = join(
+      h.stateDir,
+      "google",
+      "alice@example.com",
+      "credentials.json",
+    );
+    expect(existsSync(credPath)).toBe(true);
+    broker.stop();
+  });
+
+  it("Phase 3b.2c — add-account refuses duplicate without replace:true", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const validCreds = {
+      accessToken: "at-1",
+      refreshToken: "rt-1",
+      expiresAt: 1234,
+      scope: "drive",
+      clientId: "cid",
+      accountEmail: "alice@example.com",
+      tokenType: "Bearer" as const,
+    };
+    // First add succeeds.
+    const r1 = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "1", op: "add-account", label: "alice@example.com",
+      provider: "google", credentials: { googleOauth: validCreds },
+    }) as { ok: boolean };
+    expect(r1.ok).toBe(true);
+    // Second without replace fails with ACCOUNT_ALREADY_EXISTS.
+    const r2 = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "2", op: "add-account", label: "alice@example.com",
+      provider: "google", credentials: { googleOauth: validCreds },
+    }) as { ok: boolean; error?: { code: string } };
+    expect(r2.ok).toBe(false);
+    expect(r2.error?.code).toBe("ACCOUNT_ALREADY_EXISTS");
+    // With replace:true succeeds.
+    const r3 = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "3", op: "add-account", label: "alice@example.com",
+      provider: "google", credentials: { googleOauth: validCreds },
+      replace: true,
+    }) as { ok: boolean };
+    expect(r3.ok).toBe(true);
+    broker.stop();
+  });
+
+  it("Phase 3b.2c — rm-account refuses to remove while agent is in google_accounts.enabled_for[]", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    // Inject a google_accounts ACL entry with the agent enabled.
+    (config as unknown as Record<string, unknown>).google_accounts = {
+      "alice@example.com": { enabled_for: ["klanker"] },
+    };
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    // Add the account first.
+    await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "1", op: "add-account", label: "alice@example.com",
+      provider: "google",
+      credentials: {
+        googleOauth: {
+          accessToken: "at", refreshToken: "rt", expiresAt: 1, scope: "x",
+          clientId: "cid", accountEmail: "alice@example.com",
+          tokenType: "Bearer" as const,
+        },
+      },
+    });
+    // Try to remove with agent still enabled.
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "2", op: "rm-account", label: "alice@example.com",
+      provider: "google",
     }) as { ok: boolean; error?: { code: string; message: string } };
-    // Reaches the storage-deferral path → confirms Google IS
-    // registered (otherwise we'd see "not registered" instead).
     expect(resp.ok).toBe(false);
-    expect(resp.error?.message).toContain("Phase 3b.2c");
-    expect(resp.error?.message).not.toContain("not registered");
+    expect(resp.error?.code).toBe("INVALID_ARGS");
+    expect(resp.error?.message).toContain("klanker");
+    expect(resp.error?.message).toContain("auth google disable");
+    broker.stop();
+  });
+
+  it("Phase 3b.2c — add-account rejects path-traversal labels (defense-in-depth)", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    // Attempt path-traversal via the label.
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "1", op: "add-account", label: "../../../etc/passwd",
+      provider: "google",
+      credentials: {
+        googleOauth: {
+          accessToken: "at", refreshToken: "rt", expiresAt: 1, scope: "x",
+          clientId: "cid", accountEmail: "alice@example.com",
+          tokenType: "Bearer" as const,
+        },
+      },
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("INVALID_ARGS");
+    expect(resp.error?.message).toContain("email shape");
+    // Verify nothing was written outside stateDir.
+    expect(existsSync(join(h.stateDir, "..", "..", "..", "etc", "passwd"))).toBe(false);
+    broker.stop();
+  });
+
+  it("Phase 3b.2c — rm-account rejects path-traversal labels", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "1", op: "rm-account", label: "../escape",
+      provider: "google",
+    }) as { ok: boolean; error?: { code: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("INVALID_ARGS");
+    broker.stop();
+  });
+
+  it("Phase 3b.2c — rm-account succeeds after add when no agents are enabled", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "1", op: "add-account", label: "alice@example.com",
+      provider: "google",
+      credentials: {
+        googleOauth: {
+          accessToken: "at", refreshToken: "rt", expiresAt: 1, scope: "x",
+          clientId: "cid", accountEmail: "alice@example.com",
+          tokenType: "Bearer" as const,
+        },
+      },
+    });
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "2", op: "rm-account", label: "alice@example.com",
+      provider: "google",
+    }) as { ok: boolean };
+    expect(resp.ok).toBe(true);
+    // Storage gone.
+    const credPath = join(
+      h.stateDir, "google", "alice@example.com", "credentials.json",
+    );
+    expect(existsSync(credPath)).toBe(false);
     broker.stop();
   });
 

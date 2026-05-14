@@ -264,12 +264,14 @@ export class AuthBrokerClient {
 
   // ─── Verb methods ────────────────────────────────────────────────────
 
-  async getCredentials(): Promise<GetCredentialsData> {
-    const data = await this.send({
+  async getCredentials(provider?: ProviderName): Promise<GetCredentialsData> {
+    const base = {
       v: PROTOCOL_VERSION,
       id: randomUUID(),
-      op: "get-credentials",
-    });
+      op: "get-credentials" as const,
+    };
+    const req = (provider !== undefined ? { ...base, provider } : base) as Request;
+    const data = await this.send(req);
     return data as GetCredentialsData;
   }
 

@@ -73,6 +73,19 @@ export const GetCredentialsRequestSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),
   op: z.literal("get-credentials"),
   id: z.string().min(1),
+  /**
+   * Provider for the credentials being requested. Optional; defaults to
+   * `"anthropic"` for back-compat with RFC H pre-Phase-3b.4 callers.
+   *
+   * For Anthropic: account is derived from path-as-identity per the
+   * existing callerAccount() logic (auth.active or per-agent override).
+   *
+   * For Google (RFC G Phase 3b.4): account is read from the agent's
+   * `google_workspace.account` config field. Broker validates the
+   * agent is in `google_accounts.<account>.enabled_for[]` before
+   * returning credentials.
+   */
+  provider: ProviderNameSchema.optional(),
 });
 
 export const ListStateRequestSchema = z.object({

@@ -58,7 +58,7 @@ export function registerAuthGoogleSubcommands(
   const account = google
     .command("account")
     .description(
-      "Manage Google account credentials (RFC G Phase 3b.3 — broker storage path lands in 3b.2c)",
+      "Manage Google account credentials in the auth-broker (add / remove / list).",
     );
   registerAccountAdd(account);
   registerAccountRemove(account);
@@ -314,41 +314,194 @@ function registerAccountAdd(accountParent: Command): void {
   accountParent
     .command("add <account>")
     .description(
-      "Mint a Google OAuth refresh token for <account> and register it with the auth-broker. Phase 3b.3 ships the CLI shape; OAuth flow extraction lives in Phase 3b.2c. For now use `switchroom drive connect <agent>` (the v0.6.0 verb).",
+      "Mint a Google OAuth refresh token for <account> and register it with the auth-broker. Three-tier OAuth: device-code → OOB-paste → desktop-loopback (RFC D §3, RFC G §4.5).",
+    )
+    .option(
+      "--replace",
+      "Overwrite existing credentials for <account> (default refuses if account already registered)",
+      false,
     )
     .action(
-      withConfigError(async (account: string) => {
+      withConfigError(async (account: string, opts: { replace?: boolean }) => {
         const normalizedAccount = validateAndNormalizeAccountEmail(account);
+
+        // Lazy-import the OAuth flow + vault resolver — they pull in
+        // sizeable trees (Drive scaffolding, AES vault) that the
+        // sibling enable/disable/list verbs don't need.
+        const [
+          { runDriveOAuthFlow, DRIVE_READONLY_SCOPES },
+          { selectInitialTier },
+          { brokerCall },
+          { loadConfig, resolvePath },
+          { getSecret },
+          { isVaultReference, parseVaultReference },
+        ] = await Promise.all([
+          import("./drive.js"),
+          import("../drive/oauth.js"),
+          import("./broker-call.js"),
+          import("../config/loader.js"),
+          import("../vault/vault.js"),
+          import("../vault/resolver.js"),
+        ]);
+
+        const config = loadConfig();
+        const gw = config.google_workspace;
+        if (!gw) {
+          throw new Error(
+            "switchroom.yaml is missing a `google_workspace:` block. Add `google_workspace: { google_client_id: ..., google_client_secret: ... }` (vault:<key> refs supported) before connecting accounts.",
+          );
+        }
+
+        // Resolve OAuth client id + secret. Env wins over config (one-
+        // off overrides during operator debugging). vault:<key> refs
+        // require the vault passphrase.
+        let clientIdRaw =
+          process.env.SWITCHROOM_GOOGLE_CLIENT_ID ?? gw.google_client_id;
+        let clientSecretRaw =
+          process.env.SWITCHROOM_GOOGLE_CLIENT_SECRET ??
+          gw.google_client_secret;
+        if (!clientIdRaw || !clientSecretRaw) {
+          throw new Error(
+            "Missing Google OAuth client credentials. Set google_workspace.google_client_id + google_client_secret in switchroom.yaml, or env SWITCHROOM_GOOGLE_CLIENT_ID + SWITCHROOM_GOOGLE_CLIENT_SECRET.",
+          );
+        }
+
+        const needsVault =
+          isVaultReference(clientIdRaw) || isVaultReference(clientSecretRaw);
+        if (needsVault) {
+          const vaultPath = resolvePath(
+            config.vault?.path ?? "~/.switchroom/vault.enc",
+          );
+          const passphrase =
+            process.env.SWITCHROOM_VAULT_PASSPHRASE ??
+            (await readHiddenLine("Vault passphrase: "));
+          const resolveRef = (raw: string, label: string): string => {
+            if (!isVaultReference(raw)) return raw;
+            const key = parseVaultReference(raw);
+            const entry = getSecret(passphrase, vaultPath, key);
+            if (!entry) {
+              throw new Error(
+                `${label} references vault key '${key}' but no such secret in vault.`,
+              );
+            }
+            if (entry.kind !== "string") {
+              throw new Error(
+                `${label} vault entry '${key}' is not a string (kind=${entry.kind}).`,
+              );
+            }
+            return entry.value;
+          };
+          clientIdRaw = resolveRef(clientIdRaw, "google_client_id");
+          clientSecretRaw = resolveRef(clientSecretRaw, "google_client_secret");
+        }
+
+        const oauthCfg = {
+          client_id: clientIdRaw,
+          client_secret: clientSecretRaw,
+          scopes: DRIVE_READONLY_SCOPES,
+        };
+        // OAuthEnv is a shaped subset of process.env — picking the
+        // fields the selector reads (rather than passing process.env
+        // wholesale) keeps the call typed.
+        const oauthEnv = {
+          DISPLAY: process.env.DISPLAY,
+          WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY,
+          SSH_CONNECTION: process.env.SSH_CONNECTION,
+          SSH_TTY: process.env.SSH_TTY,
+          SWITCHROOM_DRIVE_OAUTH_TIER:
+            process.env.SWITCHROOM_DRIVE_OAUTH_TIER,
+        };
+        const initialTier = selectInitialTier(oauthEnv);
+
         console.log();
         console.log(
-          chalk.yellow(
-            `  ⚠  Phase 3b.3 ships the CLI shape only; the OAuth flow extraction + broker storage path land in Phase 3b.2c.`,
+          chalk.bold(
+            `Connecting Google account ${chalk.cyan(normalizedAccount)} to switchroom auth-broker.`,
+          ),
+        );
+        console.log(
+          chalk.gray(
+            `  OAuth tier: ${initialTier} (will fall through if Google rejects)`,
           ),
         );
         console.log();
-        console.log(`  For now, use the v0.6.0 verb to mint the token:`);
-        console.log(
-          chalk.cyan(`    switchroom drive connect <agent-with-google-config>`),
+
+        const tokens = await runDriveOAuthFlow(
+          oauthCfg,
+          initialTier,
+          process.env,
         );
+
+        if (!tokens.refresh_token) {
+          throw new Error(
+            "Google did not return a refresh_token. Re-run after revoking prior consent at https://myaccount.google.com/permissions, or set OAUTH_PROMPT=consent in the environment.",
+          );
+        }
+
+        const googleCreds = buildGoogleCredentials({
+          tokens,
+          clientId: clientIdRaw,
+          accountEmail: normalizedAccount,
+          fallbackScope: DRIVE_READONLY_SCOPES.join(" "),
+        });
+
+        await brokerCall(async (client) => {
+          await client.addAccount(
+            normalizedAccount,
+            googleCreds,
+            opts.replace ?? false,
+            "google",
+          );
+        });
+
         console.log();
         console.log(
-          `  Once the broker storage path lands, this verb will:`,
+          chalk.green(
+            `  ✓ Registered Google account ${chalk.bold(normalizedAccount)} with auth-broker.`,
+          ),
         );
+        console.log();
+        console.log(`  Next: enable on one or more agents:`);
         console.log(
-          chalk.gray(`    1. Run the OAuth device-code / OOB-paste / loopback flow`),
-        );
-        console.log(
-          chalk.gray(`    2. Exchange code for refresh + access tokens`),
-        );
-        console.log(
-          chalk.gray(`    3. Call auth-broker.add-account({provider: "google", account: ${normalizedAccount}, credentials: {...}})`),
-        );
-        console.log(
-          chalk.gray(`    4. Operator runs \`auth google enable ${normalizedAccount} <agents>\` to enable on agents`),
+          chalk.cyan(
+            `    switchroom auth google enable ${normalizedAccount} <agent> [...]`,
+          ),
         );
         console.log();
       }),
     );
+}
+
+/**
+ * Read a single line from stdin without echoing characters. Falls
+ * back to a normal echoing read on terminals that don't support
+ * setRawMode (CI, pipes). Mirrors the inline implementations in
+ * drive.ts and telegram.ts — extraction to a shared module is a
+ * separate cleanup PR.
+ */
+async function readHiddenLine(prompt: string): Promise<string> {
+  const readline = await import("node:readline");
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  process.stdout.write(prompt);
+  const stdin = process.stdin as unknown as {
+    setRawMode?: (b: boolean) => void;
+  };
+  if (typeof stdin.setRawMode === "function") {
+    stdin.setRawMode(true);
+  }
+  return await new Promise((resolve) => {
+    rl.question("", (answer: string) => {
+      if (typeof stdin.setRawMode === "function") {
+        stdin.setRawMode(false);
+      }
+      process.stdout.write("\n");
+      rl.close();
+      resolve(answer);
+    });
+  });
 }
 
 function registerAccountRemove(accountParent: Command): void {
@@ -431,10 +584,71 @@ function registerAccountList(accountParent: Command): void {
     );
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Pure helpers — extracted for unit testing
+// ────────────────────────────────────────────────────────────────────────
+
+interface BuildGoogleCredentialsArgs {
+  tokens: {
+    access_token: string;
+    refresh_token?: string;
+    expires_in: number;
+    scope?: string;
+  };
+  clientId: string;
+  accountEmail: string;
+  /** Joined-with-spaces scope to fall back to if Google omits scope. */
+  fallbackScope: string;
+  /** Test seam — defaults to Date.now(). */
+  now?: () => number;
+}
+
+interface GoogleAddAccountCredentialsLike {
+  googleOauth: {
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number;
+    scope: string;
+    clientId: string;
+    accountEmail: string;
+    tokenType: "Bearer";
+  };
+}
+
+/**
+ * Construct the GoogleAddAccountCredentials payload the auth-broker
+ * expects from a Google token-exchange response. Pure — easy to unit
+ * test and reason about. Refuses tokens missing refresh_token (Google
+ * only returns it on first consent or `prompt=consent` re-consent).
+ */
+export function buildGoogleCredentials(
+  args: BuildGoogleCredentialsArgs,
+): GoogleAddAccountCredentialsLike {
+  const { tokens, clientId, accountEmail, fallbackScope, now } = args;
+  if (!tokens.refresh_token) {
+    throw new Error(
+      "Google token-exchange did not return a refresh_token — re-consent required.",
+    );
+  }
+  const epochMs = (now ?? Date.now)();
+  return {
+    googleOauth: {
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token,
+      expiresAt: epochMs + tokens.expires_in * 1000,
+      scope: tokens.scope ?? fallbackScope,
+      clientId,
+      accountEmail,
+      tokenType: "Bearer",
+    },
+  };
+}
+
 // Re-export for tests.
 export const _testing = {
   validateAndNormalizeAccountEmail,
   getEnabledAgentsBefore,
   expandAllAgents,
+  buildGoogleCredentials,
 };
 

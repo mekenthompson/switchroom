@@ -928,12 +928,20 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // `cap_drop: ALL` and only CHOWN + FOWNER, root cannot read into
   // those dirs, so the probe always fails. Broker already has this
   // cap (for vault file reads); adding it here gives both singletons
-  // the same probe-reachability. Read-only DAC bypass — strictly less
-  // powerful than DAC_OVERRIDE which also bypasses write checks.
+  // the same probe-reachability.
+  //
+  // DAC_OVERRIDE is needed because /state/approvals is bind-mounted
+  // from `~/.switchroom/approvals` on the host — owned by the operator
+  // user, mode 0775 — and the kernel runs as root inside the container.
+  // Without DAC_OVERRIDE, root-in-container can't open the SQLite db
+  // file there for writes (it isn't the owner and "other" doesn't have
+  // write). DAC_READ_SEARCH alone is read-only. Install-validation
+  // finding #18 (PR adding this comment).
   lines.push(`    cap_add:`);
   lines.push(`      - "CHOWN"`);
   lines.push(`      - "FOWNER"`);
   lines.push(`      - "DAC_READ_SEARCH"`);
+  lines.push(`      - "DAC_OVERRIDE"`);
   if (switchroomConfigPath) {
     lines.push(`    environment:`);
     lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);

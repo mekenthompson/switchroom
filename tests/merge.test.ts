@@ -442,6 +442,29 @@ describe("mergeAgentConfig subagents", () => {
     expect(result.subagents?.worker?.maxTurns).toBe(100);
     expect(result.subagents?.worker?.isolation).toBe("worktree");
   });
+
+  it("preserves partial-override semantics when defaults has a description and override doesn't (install-validation #13)", () => {
+    // Reproduces the bundled examples/switchroom.yaml case: defaults
+    // declares worker.description; coding profile overrides ONLY
+    // isolation. With SubagentSchema.description optional (schema
+    // change in install-validation round-3), schema validation passes
+    // and the cascade fills in description from defaults — the
+    // downstream scaffold invariant in src/agents/scaffold.ts then
+    // sees a non-empty description.
+    const defaults: AgentDefaults = {
+      subagents: {
+        worker: { description: "implementation work", model: "sonnet" },
+      },
+    };
+    const agent = baseAgent({
+      subagents: {
+        worker: { isolation: "worktree" }, // no description
+      },
+    });
+    const result = mergeAgentConfig(defaults, agent);
+    expect(result.subagents?.worker?.description).toBe("implementation work");
+    expect(result.subagents?.worker?.isolation).toBe("worktree");
+  });
 });
 
 describe("coding profile resolution (#682)", () => {

@@ -689,6 +689,18 @@ describe("generateCompose", () => {
     expect(block).toContain("DAC_READ_SEARCH");
   });
 
+  it("kernel has DAC_OVERRIDE so it can write the SQLite db to the host-owned approvals dir", () => {
+    // /state/approvals is bind-mounted from ~/.switchroom/approvals on
+    // the host (owned by the operator user). Kernel runs as root inside
+    // the container; without DAC_OVERRIDE, root can't open the SQLite
+    // db for writes (not owner, "other" doesn't have write). The kernel
+    // then crash-loops with "SQLiteError: unable to open database file"
+    // on fresh installs. Install-validation finding #18.
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const block = /approval-kernel:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toContain("DAC_OVERRIDE");
+  });
+
   // Operator socket — host-shell-reachable broker surface.
   // Pre-fix v0.7 docker mode bound the broker's data + unlock sockets
   // only inside the container; the host CLI defaulted to a v0.6 socket

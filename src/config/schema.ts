@@ -228,8 +228,14 @@ export const AgentHooksSchema = z
  * YAML key in `subagents: { <name>: { ... } }`.
  */
 export const SubagentSchema = z.object({
+  // Optional so profile-level partial overrides (e.g. coding profile
+  // overlaying just `isolation: worktree` onto the defaults' worker)
+  // don't have to restate the description. The cascade merges by key
+  // with defaults; the merged subagent retains the description from
+  // defaults. (Install-validation finding #13.)
   description: z
     .string()
+    .optional()
     .describe("When the main agent should delegate to this sub-agent"),
   model: z
     .string()

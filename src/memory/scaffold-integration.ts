@@ -67,7 +67,35 @@ export function getPlaywrightMcpSettingsEntry(): { key: string; value: McpServer
  * `mcp_servers: { gdrive: true }`; opt-out (the usual default-MCP shape)
  * is `mcp_servers: { gdrive: false }`. The reconciler honours either.
  */
-export function getGdriveMcpSettingsEntry(): { key: string; value: McpServerConfig } {
+/**
+ * Allowed `tier` values per RFC G §4.2 — kept here as a string-literal
+ * union (rather than importing from src/config/schema) to avoid a memory
+ * → config import dependency. The schema and this set must agree; the
+ * unit test in scaffold-integration.test.ts pins the alignment.
+ */
+export type GdriveMcpTier = "core" | "extended" | "complete";
+
+export interface GdriveMcpEntryOptions {
+  /**
+   * Which upstream `--tool-tier` to expose. When `undefined` (the Phase 1
+   * default), no `--tool-tier` flag is passed and the upstream MCP runs at
+   * its native default (full ~60+ tool surface). This preserves shipped
+   * v0.6.0 behaviour for operators who haven't opted into a tier yet.
+   *
+   * When set, plumbs through as `--tool-tier <value>` on the spawn args.
+   * Operators opt in via top-level or per-agent
+   * `google_workspace.tier: core | extended | complete` per RFC G §4.2.
+   *
+   * A future major-version cleanup will make `core` the default (per RFC
+   * G §4.2 "the validated 16-tool surface") — that's a documented breaking
+   * change, not Phase 1's job.
+   */
+  tier?: GdriveMcpTier;
+}
+
+export function getGdriveMcpSettingsEntry(
+  options: GdriveMcpEntryOptions = {},
+): { key: string; value: McpServerConfig } {
   // Specific commit SHA — bump deliberately. Pinning to a 40-char commit
   // SHA (not a tag) means upstream history rewrites can't change what we
   // run. google_workspace_mcp v1.20.3 = f3c7dc5df2641c8545abc9e8f402d794f2853745;
@@ -75,15 +103,17 @@ export function getGdriveMcpSettingsEntry(): { key: string; value: McpServerConf
   // (Note: RFC C originally referenced v0.5.0; that tag does not exist on
   // upstream — v1.20.3 is the latest stable as of this pin.)
   const PINNED_SHA = "f3c7dc5df2641c8545abc9e8f402d794f2853745";
+  const baseArgs = [
+    "--from",
+    `git+https://github.com/taylorwilsdon/google_workspace_mcp.git@${PINNED_SHA}`,
+    "google-workspace-mcp",
+  ];
+  const tierArgs = options.tier ? ["--tool-tier", options.tier] : [];
   return {
     key: "gdrive",
     value: {
       command: "uvx",
-      args: [
-        "--from",
-        `git+https://github.com/taylorwilsdon/google_workspace_mcp.git@${PINNED_SHA}`,
-        "google-workspace-mcp",
-      ],
+      args: [...baseArgs, ...tierArgs],
       env: {
         // The MCP wrapper reads the refresh token from the broker on
         // startup; the bridging script (drive-mcp-launcher.ts, future

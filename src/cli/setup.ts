@@ -367,22 +367,38 @@ async function stepBotToken(
   return { botToken: token, botUsername: botInfo.username, agentBots };
 }
 
-async function resolveOrPromptToken(
+export async function resolveOrPromptToken(
   rawToken: string,
   label: string,
   config: SwitchroomConfig,
   nonInteractive: boolean,
 ): Promise<string> {
-  // Check env var first
-  let token: string | undefined = process.env[`TELEGRAM_BOT_TOKEN_${label.toUpperCase().replace(/-/g, "_")}`];
-  if (!token) token = process.env.TELEGRAM_BOT_TOKEN;
+  // Resolution precedence (install-validation finding #31):
+  //
+  //   1. Agent-scoped env var: TELEGRAM_BOT_TOKEN_<LABEL>
+  //   2. Vault ref in config (if rawToken starts with `vault:`)
+  //   3. Literal config value (if rawToken is a plain token)
+  //   4. Global TELEGRAM_BOT_TOKEN env var (LAST RESORT)
+  //   5. Interactive prompt
+  //
+  // Why the global env is last for vault-ref configs: a multi-bot
+  // fleet declares `agents.<n>.bot_token: "vault:<key-per-agent>"`,
+  // and an operator running `TELEGRAM_BOT_TOKEN=… switchroom setup`
+  // would (pre-fix) get every agent stamped with the same global
+  // token — multiple gateways then poll the same bot and Telegram
+  // returns 409 conflicts. Resolving the per-agent vault ref first
+  // makes the per-agent declaration win, as the operator intended.
+  //
+  // Plain (non-vault) literal tokens in config still defer to the
+  // global env for backwards compat — single-bot fleets that used
+  // `TELEGRAM_BOT_TOKEN=… switchroom setup` as a one-shot override
+  // keep working.
 
-  // Check if config has a non-vault token
-  if (!token && !rawToken.startsWith("vault:")) {
-    token = rawToken;
-  }
+  // 1. Agent-scoped env var.
+  const labelEnvKey = `TELEGRAM_BOT_TOKEN_${label.toUpperCase().replace(/-/g, "_")}`;
+  let token: string | undefined = process.env[labelEnvKey];
 
-  // Try vault resolution
+  // 2. Vault ref takes priority over global env when present.
   if (!token && rawToken.startsWith("vault:")) {
     const passphrase = process.env.SWITCHROOM_VAULT_PASSPHRASE;
     if (passphrase) {
@@ -399,9 +415,22 @@ async function resolveOrPromptToken(
     }
   }
 
+  // 3. Plain literal config value.
+  if (!token && !rawToken.startsWith("vault:")) {
+    token = rawToken;
+  }
+
+  // 4. Global env var (backwards-compat fallback).
+  if (!token) token = process.env.TELEGRAM_BOT_TOKEN;
+
+  // 5. Interactive prompt.
   if (!token) {
     if (nonInteractive) {
-      throw new Error(`No bot token found for ${label}. Set TELEGRAM_BOT_TOKEN environment variable.`);
+      throw new Error(
+        `No bot token found for ${label}. Set ${labelEnvKey} or TELEGRAM_BOT_TOKEN, ` +
+          `or store the token in the vault under the key referenced by ` +
+          `agents.${label}.bot_token (run with SWITCHROOM_VAULT_PASSPHRASE).`,
+      );
     }
     token = await ask(`  Paste bot token for ${label} (from @BotFather)`);
     if (!token) throw new Error(`Bot token for ${label} is required`);

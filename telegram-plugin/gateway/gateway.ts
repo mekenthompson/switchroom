@@ -214,8 +214,11 @@ import {
   tryHostdDispatch,
   hostdRequestId,
   hostdWillBeUsed,
+  pollHostdStatus,
+  warnLegacySpawnIfHostdDisabled,
   _resetHostdEnabledCache,
 } from './hostd-dispatch.js'
+import type { HostdRequest } from '../../src/host-control/protocol.js'
 import type { AgentAudit } from '../welcome-text.js'
 import { shouldSweepChatAtBoot } from './boot-sweep-filter.js'
 
@@ -7469,6 +7472,75 @@ async function executeVaultOp(ctx: Context, chatId: string, op: 'list' | 'get' |
   }
 }
 
+/**
+ * Dispatch a short-running verb (agent_start, agent_stop, cross-agent
+ * agent_restart) through hostd when available, else fall back to the
+ * legacy in-container CLI shell-out.
+ *
+ * Why: on docker-mode hosts the agent container has no docker binary,
+ * so the legacy `runSwitchroomCommand` path silently exits 127 for any
+ * verb that touches compose (RFC C §1, #926). Hostd runs on the host
+ * with the docker socket mounted, so the verb actually works.
+ *
+ * Result handling:
+ *   - `not-configured` → fall back to {@link runSwitchroomCommand}.
+ *     (Operator opted out; let the legacy path's existing error
+ *     surfacing handle the exit-127 case.)
+ *   - `completed` → reply with the stdout tail (mirrors the legacy
+ *     path's formatted-output reply).
+ *   - `started`   → reply with a brief "🔄 dispatched" ack. Verbs that
+ *     return `started` (agent_restart) finish asynchronously on the
+ *     daemon; the audit log is the canonical record.
+ *   - `error` / `denied` → reply with the error tail inline. No
+ *     fallback (RFC §7 hard-fail contract — operator opted in).
+ */
+async function dispatchShortVerbViaHostd(
+  ctx: Context,
+  req: HostdRequest,
+  label: string,
+  legacyArgs: string[],
+): Promise<void> {
+  const hostdResp = await tryHostdDispatch(getMyAgentName(), req)
+  if (hostdResp === 'not-configured') {
+    warnLegacySpawnIfHostdDisabled(req.op)
+    await runSwitchroomCommand(ctx, legacyArgs, label)
+    return
+  }
+  if (hostdResp.result === 'completed') {
+    const body = hostdResp.stdout_tail?.trim() || `${label}: done (exit ${hostdResp.exit_code})`
+    const formatted = formatSwitchroomOutput(stripAnsi(body))
+    if (formatted) {
+      await switchroomReply(ctx, preBlock(formatted), { html: true })
+    } else {
+      await switchroomReply(ctx, `${label}: done (no output)`)
+    }
+    return
+  }
+  if (hostdResp.result === 'started') {
+    await switchroomReply(
+      ctx,
+      `🔄 <b>${escapeHtmlForTg(label)}</b> dispatched via hostd ` +
+        `(request_id=<code>${escapeHtmlForTg(hostdResp.request_id)}</code>). ` +
+        `Check audit log for completion.`,
+      { html: true },
+    )
+    return
+  }
+  // error / denied — surface inline. RFC §7 hard-fail: no spawn fallback.
+  const errBody =
+    hostdResp.error ??
+    hostdResp.stderr_tail ??
+    hostdResp.stdout_tail ??
+    '(no error tail returned)'
+  await switchroomReply(
+    ctx,
+    `❌ <b>${escapeHtmlForTg(label)} failed via hostd</b> ` +
+      `(result=${escapeHtmlForTg(hostdResp.result)}):\n` +
+      preBlock(stripAnsi(errBody)),
+    { html: true },
+  )
+}
+
 async function runSwitchroomCommand(ctx: Context, args: string[], label: string): Promise<void> {
   try {
     const output = stripAnsi(switchroomExec(args))
@@ -7879,14 +7951,24 @@ bot.command('agentstart', async ctx => {
   if (!isAuthorizedSender(ctx)) return
   const name = ctx.match?.trim() || getMyAgentName()
   try { assertSafeAgentName(name) } catch { await switchroomReply(ctx, 'Invalid agent name.'); return }
-  await runSwitchroomCommand(ctx, ['agent', 'start', name], `start ${name}`)
+  await dispatchShortVerbViaHostd(
+    ctx,
+    { v: 1, op: 'agent_start', request_id: hostdRequestId('gw-start'), args: { name } },
+    `start ${name}`,
+    ['agent', 'start', name],
+  )
 })
 
 bot.command('stop', async ctx => {
   if (!isAuthorizedSender(ctx)) return
   const name = ctx.match?.trim() || getMyAgentName()
   try { assertSafeAgentName(name) } catch { await switchroomReply(ctx, 'Invalid agent name.'); return }
-  await runSwitchroomCommand(ctx, ['agent', 'stop', name], `stop ${name}`)
+  await dispatchShortVerbViaHostd(
+    ctx,
+    { v: 1, op: 'agent_stop', request_id: hostdRequestId('gw-stop'), args: { name } },
+    `stop ${name}`,
+    ['agent', 'stop', name],
+  )
 })
 
 bot.command('restart', async ctx => {
@@ -7933,6 +8015,7 @@ bot.command('restart', async ctx => {
       args: { name, force: true, reason: 'user: /restart from chat' },
     })
     if (hostdResp === 'not-configured') {
+      warnLegacySpawnIfHostdDisabled('agent_restart')
       spawnSwitchroomDetached(
         ['agent', 'restart', name, '--force'],
         notifyDetachedFailure(chatId, threadId ?? null, `restart ${name}`),
@@ -7955,7 +8038,22 @@ bot.command('restart', async ctx => {
     )
     return
   }
-  await runSwitchroomCommand(ctx, ['agent', 'restart', name], `restart ${name}`)
+  // Cross-agent /restart <other>. Same hostd-first shape as self-target,
+  // but no restart marker / no self-kill: another agent's container is
+  // about to bounce, not ours. The daemon spawns the work and returns
+  // "started" (per handleAgentRestart at server.ts:466), so the user
+  // sees a brief dispatch ack and the audit log carries the outcome.
+  await dispatchShortVerbViaHostd(
+    ctx,
+    {
+      v: 1,
+      op: 'agent_restart',
+      request_id: hostdRequestId('gw-restart-cross'),
+      args: { name, force: true, reason: `user: /restart ${name} from chat` },
+    },
+    `restart ${name}`,
+    ['agent', 'restart', name],
+  )
 })
 
 // ─── /new and /reset ──────────────────────────────────────────────────────
@@ -8074,6 +8172,7 @@ async function handleNewOrResetCommand(ctx: Context, kind: 'new' | 'reset'): Pro
     args: { name, force: true, reason: `user: /${kind} from chat` },
   })
   if (hostdResp === 'not-configured') {
+    warnLegacySpawnIfHostdDisabled('agent_restart')
     spawnSwitchroomDetached(
       ['agent', 'restart', name, '--force'],
       notifyDetachedFailure(chatId, threadId ?? null, `${kind} ${name}`),
@@ -8237,23 +8336,83 @@ bot.command('update', async ctx => {
   await sweepBeforeSelfRestart()
   const skipImages = passthrough.includes('--skip-images')
   const rebuild = passthrough.includes('--rebuild')
+  const updateRequestId = hostdRequestId('gw-update')
   const hostdResp = await tryHostdDispatch(getMyAgentName(), {
     v: 1,
     op: 'update_apply',
-    request_id: hostdRequestId('gw-update'),
+    request_id: updateRequestId,
     args: {
       ...(skipImages ? { skip_images: true } : {}),
       ...(rebuild ? { rebuild: true } : {}),
     },
   })
   if (hostdResp === 'not-configured') {
+    warnLegacySpawnIfHostdDisabled('update_apply')
     spawnSwitchroomDetached(
       ['update', ...passthrough],
       notifyDetachedFailure(chatId, threadId ?? null, 'update'),
     )
     return
   }
-  if (hostdResp.result === 'started' || hostdResp.result === 'completed') {
+  if (hostdResp.result === 'completed') {
+    return
+  }
+  if (hostdResp.result === 'started') {
+    // RFC C §5.3: long-running mutation. Poll get_status until terminal
+    // or until the recreate kills this gateway (whichever happens first).
+    // The success signal is the post-restart greeting card edited into
+    // ackId via the restart marker. The poll is here so that
+    // *fail-before-recreate* (image pull error, scaffold regen crash)
+    // doesn't leave the operator staring at the orphan "🚀 update started"
+    // ack indefinitely. Live repro: PR #1305.
+    void (async () => {
+      // 60s budget: RFC C §5.3 specs `apply` at 30s and `update_apply`
+      // at 60s. Image pulls + scaffold regeneration dominate the wall
+      // clock for update_apply, hence the larger budget. The poll
+      // resolves earlier on any terminal state from the daemon.
+      const terminal = await pollHostdStatus(getMyAgentName(), updateRequestId, {
+        timeoutMs: 60_000,
+      })
+      if (terminal === 'not-configured') return
+      // completed → recreate is about to run / has run; let the post-
+      // restart greeting card handle the success message.
+      if (terminal.result === 'completed') return
+      // Anything else means the daemon's mutation failed before it could
+      // kill us. Edit the ack to surface the tail and clear the marker
+      // so the next gateway boot doesn't render a false success card.
+      clearRestartMarker()
+      const errBody =
+        terminal.error ??
+        terminal.stderr_tail ??
+        terminal.stdout_tail ??
+        '(no error tail returned)'
+      const editedText =
+        `🚀 <b>update started</b> — <b>FAILED</b> via hostd ` +
+        `(result=${escapeHtmlForTg(terminal.result)}):\n` +
+        preBlock(errBody)
+      if (ackId != null) {
+        try {
+          await robustApiCall(
+            () =>
+              lockedBot.api.editMessageText(chatId, ackId!, editedText, {
+                parse_mode: 'HTML',
+                link_preview_options: { is_disabled: true },
+              }),
+            { verb: 'update.poll.editAck' },
+          )
+        } catch {
+          // edit-failed (message deleted, parse error) — fall back to
+          // a fresh reply so the failure isn't silent.
+          try {
+            await switchroomReply(ctx, editedText, { html: true })
+          } catch {}
+        }
+      } else {
+        try {
+          await switchroomReply(ctx, editedText, { html: true })
+        } catch {}
+      }
+    })()
     return
   }
   clearRestartMarker()

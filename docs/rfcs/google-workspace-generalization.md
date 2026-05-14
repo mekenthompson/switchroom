@@ -1,8 +1,15 @@
 # RFC G: Google Workspace as a first-class agent capability
 
-Status: Draft v1
+Status: Draft v2
 Author: Ken (with Claude pair-design)
 Date: 2026-05-14
+
+**v2 changes** (addressing PR #1240 review):
+- CLI moved from invented `switchroom workspace ...` (which collides with the existing top-level `workspace` verb) to `switchroom auth google ...`, mirroring the auth-slot-pool pattern (account creation as separate verb, plural-agents on `enable`/`disable`, `--from-agent` flag instead of arrow syntax). See §4.5.
+- Phase 2 migration changed from interactive per-token merge to **clean cutover** (apply-time legacy-slot detection + refusal pointing at the new flow). Mirrors `share-auth-across-the-fleet.md` decision #10. See §7 + §8.
+- §5 acknowledges multi-Google-account-per-agent as the expected #1 follow-up rather than an indefinite out-of-scope.
+- §9 adds scope-drift-on-re-consent risk + drops the migration risk that no longer applies.
+- §4.7 drops the unverified `examples/operator-rebar/` precedent claim — `examples/` ships only top-level YAMLs today.
 
 Prerequisites:
 - **RFC B — Approval kernel** — landed v0.6.0 (#762).
@@ -28,27 +35,29 @@ gated by the approval kernel under its own identity.
 End-to-end flow from the operator's terminal:
 
 ```
-$ switchroom workspace connect klanker
-🔐 Connecting klanker to Google Workspace
-   Tier: core (16 tools — Drive, Docs, Sheets, Calendar)
-   Account: pixsoul@gmail.com (new)
+$ switchroom auth google account add pixsoul@gmail.com
+🔐 Adding Google account pixsoul@gmail.com
    On any device with a browser, visit:
        https://www.google.com/device
    And enter this code: WDJB-MJHT
    ...
-   ✅ klanker now has access to Workspace via pixsoul@gmail.com.
-   Enable for other agents: switchroom workspace enable pixsoul@gmail.com <agent>
+   ✅ Account pixsoul@gmail.com added to vault.
+   Enable on agents: switchroom auth google enable pixsoul@gmail.com <agents...>
 
-$ switchroom workspace enable pixsoul@gmail.com gymbro
-   ✅ gymbro now has access via the same account. No re-consent needed.
+$ switchroom auth google enable pixsoul@gmail.com klanker gymbro
+   ✅ klanker, gymbro now have access via pixsoul@gmail.com.
+   No re-consent needed — both agents share the account's refresh token.
 
-$ switchroom workspace list
+$ switchroom auth google list
 ACCOUNT                AGENTS                TIER    LAST USED
 pixsoul@gmail.com      klanker, gymbro       core    2 min ago
 work@bigcorp.com       coderev               extended  yesterday
 
-$ switchroom workspace share klanker → gymbro     # alternative shorthand
+$ switchroom auth google share pixsoul@gmail.com --from-agent klanker --to-agent executive
+   ✅ executive now has access via pixsoul@gmail.com (copied from klanker).
 ```
+
+(The shape mirrors `switchroom auth account add | enable | share | list | account remove` for Anthropic accounts. Google is the second vendor under `auth`; future vendors — Notion, Slack — follow the same `auth <vendor> ...` pattern.)
 
 End-to-end flow from a Telegram thread (uses RFC E §4.3 deep links + RFC D headless OAuth):
 
@@ -101,8 +110,9 @@ RFC E's diff-preview surface — no new work for that outcome here.
   config edit + a CLI verb. New tools added by upstream (`extended` /
   `complete` tiers) are a config-knob change, not a code patch.
 - **`talk-to-agents-from-anywhere.md`** — Headless OAuth tier from RFC
-  D §3.2 already covers SSH installs. `switchroom workspace connect`
-  composes that with the new flow.
+  D §3.2 already covers SSH installs. `switchroom auth google account
+  add` composes that with the new flow; `auth google connect <agent>`
+  does the wizard combo for first-run.
 - **`know-what-my-agent-is-doing.md`** — Each agent's tool calls
   remain separately approval-gated and audited (`approval_audit.action`
   records `read | suggest | write`); shared OAuth doesn't blur the
@@ -219,7 +229,7 @@ existing approval-kernel grants under that agent's identity for
 the agent shortly). They become **dormant** — the next access by
 that agent gets a `not_authorized` from the broker, which the
 approval kernel surfaces as: *"klanker no longer has access to
-pixsoul@gmail.com — re-enable with `switchroom workspace enable
+pixsoul@gmail.com — re-enable with `switchroom auth google enable
 pixsoul@gmail.com klanker` or revoke remaining grants with
 `/approvals revoke <id>`."*
 
@@ -237,28 +247,66 @@ If broker denies (agent removed from ACL): wrapper exits cleanly,
 agent's MCP tools just don't appear, gateway surfaces a one-line
 notice in chat per the dormant-grant text above.
 
-### 4.5 CLI surface — `switchroom workspace ...`
+### 4.5 CLI surface — `switchroom auth google ...`
 
-New verb (`drive` becomes an alias for `workspace` operating on the
-Drive subset, deprecation note same as §4.1):
+**Naming:** the new verbs live under `auth` to mirror the existing
+`auth account ...` pattern for Anthropic accounts (which is the
+shape the JTBD `share-auth-across-the-fleet.md` settled on, and
+which we explicitly want to inherit one-for-one). Google is the
+second auth vendor; future vendors (Notion, Slack) follow the
+same `auth <vendor> ...` pattern. `switchroom workspace` already
+exists as a top-level verb (manages AGENTS.md/MEMORY.md scaffold
+files) — using it for Google would silently break operators.
+
+`switchroom drive ...` (RFC D shipped surface) becomes a thin
+alias delegating to `auth google ...` for Drive-only operations,
+with a one-line deprecation note in `switchroom apply`.
+
+**Verb shape — mirrors `switchroom auth account ...` exactly:**
 
 ```
-switchroom workspace connect <agent>                 # OAuth flow + first-account setup
-switchroom workspace enable <account> <agent>        # add agent to existing account's ACL
-switchroom workspace disable <account> <agent>       # remove agent from ACL
-switchroom workspace list                            # accounts × agents matrix
-switchroom workspace disconnect <account>            # OAuth revoke + delete vault slot (refused while any agent is enabled)
-switchroom workspace share <agent_a> → <agent_b>     # shorthand: copy <agent_a>'s account to <agent_b>
+# Account lifecycle (creation is its own verb — never a side effect of enable)
+switchroom auth google account add <account>           # OAuth flow, lands token in vault
+switchroom auth google account remove <account>        # OAuth revoke + delete vault slot (refused while any agent is enabled)
+switchroom auth google account list                    # bare accounts (no agent matrix)
+
+# Agent-to-account ACL
+switchroom auth google enable <account> <agents...>    # plural agents, multi-enable in one call
+switchroom auth google disable <account> <agents...>   # plural disable
+
+# Convenience
+switchroom auth google list                            # accounts × agents matrix
+switchroom auth google share <account> --from-agent <name> --to-agent <name>
+                                                        # copy enable-state from one agent to another
+                                                        # mirrors `auth share <label> --from-agent` exactly
+
+# Wizard convenience (NOT a primary verb — only used by `switchroom setup`)
+switchroom auth google connect <agent>                 # alias for: account add + enable in one shot,
+                                                        # for the first-run experience only
+                                                        # (mirrors `auth login <agent>` per JTBD decision #12)
 ```
 
-Connect flow uses RFC D's three-tier OAuth auto-select (device-code
-→ OOB-paste → desktop-loopback). On a host with no `$DISPLAY`, the
-device-code flow is used by default; explicit `--headless` forces
-it.
+**`account add` flow** uses RFC D's three-tier OAuth auto-select
+(device-code → OOB-paste → desktop-loopback). On a host with no
+`$DISPLAY`, the device-code flow is used by default; explicit
+`--headless` forces it. Token lands at
+`vault:google:<account>:refresh_token` regardless of which agent
+will use it.
 
-`workspace disconnect` refuses while any agent is still enabled, per
-the JTBD's "no orphaned tokens left behind" check (mirrors `auth
-remove`).
+**`account remove` refuses** while any agent is still enabled on
+that account, per the JTBD's "no orphaned tokens left behind"
+check (mirrors `auth account remove` exactly).
+
+**`enable` / `disable` are plural** — `enable pixsoul@gmail.com
+klanker gymbro coderev` is one call writing one ACL update + one
+audit row, not three. The JTBD calls this out as the right shape
+for "add a sixth agent to my Anthropic account" — same shape
+applies to Google.
+
+**`share` uses `--from-agent` / `--to-agent` flags**, not arrow
+syntax. The CLI has no precedent for `→` and inventing one would
+be a consistency violation. (We considered `share <agent_a> →
+<agent_b>` in v1; the reviewer flagged it; we agreed.)
 
 ### 4.6 Setup wizard inline prompt
 
@@ -276,10 +324,12 @@ approval-gated requests in Telegram.
 Connect now? [Y/n] _
 ```
 
-Default Y. Inline runs `switchroom workspace connect klanker` →
-device-code flow if headless else loopback. If user declines, the
-wizard surfaces *"Connect later with: switchroom workspace connect
-klanker"* and continues. No mention of `docs/`.
+Default Y. Inline runs `switchroom auth google connect klanker`
+(the wizard convenience verb that combines `account add` +
+`enable` per §4.5) → device-code flow if headless else loopback.
+If user declines, the wizard surfaces *"Connect later with:
+switchroom auth google connect klanker"* and continues. No
+mention of `docs/`.
 
 Survives the docs test (no docs reading needed) and the defaults
 test (no config-by-default for users who aren't using Workspace —
@@ -302,17 +352,25 @@ examples/
 with: *"This is for **operators** who want their **own** Claude Code
 on the host to have Workspace tools (alongside or instead of giving
 agents access). It does not affect switchroom agents — they get
-Workspace via `switchroom workspace connect <agent>` (RFC G §4.5)."*
+Workspace via `switchroom auth google connect <agent>` (RFC G §4.5)."*
 
-Same artifact pattern as `examples/operator-rebar/` in the repo
-(if it exists; if not, this establishes it).
+Today `examples/` contains only top-level YAMLs (`minimal.yaml`,
+`switchroom.yaml`); RFC G establishes the `examples/<artifact>/`
+subdirectory pattern. Future operator-host integrations (Notion,
+Slack, etc.) follow the same shape under `examples/personal-*-mcp/`.
 
 ## 5. Out of scope
 
 - **Multi-Google-account-per-agent** — each agent connects to one
   account at a time. If an agent needs both `pixsoul@gmail.com` and
   `work@bigcorp.com`, that's a future spec. Ad-hoc workaround:
-  spin up a second agent on the second account.
+  spin up a second agent on the second account. **This is
+  acknowledged as the most likely follow-up RFC** — operators who
+  run a personal+work life from one assistant agent will hit it
+  fast. The fix probably looks like a list-valued `accounts:` config
+  block + a runtime account-picker on tool invocation. Out of scope
+  here only because the per-account ACL primitive in §4.4 is
+  prerequisite plumbing for it.
 - **Service-account auth** — same reason as RFC D §12: collapses
   approval semantics.
 - **Gmail as a first-class collaboration surface** — Gmail's
@@ -329,7 +387,8 @@ Same artifact pattern as `examples/operator-rebar/` in the repo
   generalizes *within* Google Workspace, not *across* doc surfaces.
 - **Selective scope downgrade after consent** — once OAuth scopes
   are granted, switchroom doesn't try to re-prompt the user to
-  reduce them. Operator runs `disconnect` + `connect` to re-do.
+  reduce them. Operator runs `account remove` + `account add` to
+  re-do.
 - **Per-tier billing / quota tracking** — Google Workspace is
   flat-rate per account, not per-tool; nothing to track.
 
@@ -339,8 +398,10 @@ Per `reference/principles.md`:
 
 ### 6.1 Docs test — *"Can someone use this without opening `docs/`?"*
 
-- ✅ `switchroom workspace connect klanker` prints the OAuth URL
-  inline + says "tap to consent." No prerequisite reading.
+- ✅ `switchroom auth google account add pixsoul@gmail.com` prints
+  the OAuth URL inline + says "tap to consent." No prerequisite
+  reading. Wizard alias `auth google connect klanker` works the
+  same way for the first-run path.
 - ✅ Setup wizard prompt explains *what* and *why* in two
   sentences ("read and (with approval) write to your Drive, Docs,
   Sheets, Calendar — tools appear as approval-gated requests").
@@ -362,9 +423,12 @@ Per `reference/principles.md`:
 
 ### 6.3 Consistency test — *"Does this feel like one product?"*
 
-- ✅ `switchroom workspace connect|enable|disable|list|disconnect`
-  matches `switchroom auth ...`'s shape exactly. Same noun-verb
-  pattern, same per-account-with-agent-ACL model.
+- ✅ `switchroom auth google account add|remove|list` + `auth
+  google enable|disable|list|share` mirrors the existing
+  `switchroom auth account add|remove|list` + `auth enable|disable
+  |share` shape exactly. Account-creation is its own verb (per
+  JTBD decision #6), `enable`/`disable` are plural-agents, `share`
+  uses `--from-agent` flag (no invented arrow syntax).
 - ✅ `vault:google:<acct>:*` matches the `vault:<surface>:*` slot
   pattern.
 - ✅ `apv:` callback shape unchanged; new tools added to existing
@@ -389,19 +453,31 @@ the others can land in any order around it.
    notice nothing. **~45 min.**
 2. **Phase 2 — Per-account vault slot + per-agent ACL (load-
    bearing).** Add `google_account_grant` ACL primitive to the
-   broker. Migration tool for in-flight per-agent tokens (one-shot,
-   reads all `gdrive:<agent>:refresh_token` slots, prompts operator
-   to merge per-agent tokens into per-account slots, writes ACL
-   config). Wrapper updates to read by account. **~120 min.**
-3. **Phase 3 — CLI verbs (`workspace connect|enable|disable|list|
-   disconnect|share`).** Drive verbs become aliases. **~75 min.**
+   broker. Wrapper updates to read by account. **Clean cutover, no
+   migration shipped** — `switchroom apply` detects legacy
+   `gdrive:<agent>:refresh_token` slots and **refuses to start the
+   new wrapper**, printing a one-screen explanation pointing the
+   operator at `switchroom auth google account add <account>` +
+   `enable`. Mirrors decision #10 of `share-auth-across-the-fleet.md`
+   ("no migration shipped... no compatibility shims") — RFC D shipped
+   only days ago in v0.6.0; the installed base is small enough that
+   asking those operators to re-add their accounts is the right
+   trade for keeping the design surface clean for everyone after.
+   **~60 min.**
+3. **Phase 3 — CLI verbs (`auth google account add|remove|list`,
+   `auth google enable|disable|list|share`, `auth google connect`
+   wizard alias).** `drive` verbs become thin aliases delegating to
+   `auth google` for Drive-only ops, with a one-line deprecation
+   note in `apply`. **~75 min.**
 4. **Phase 4 — Setup wizard prompt.** Inline Workspace connect
    after first-agent creation. **~30 min.**
 5. **Phase 5 — `examples/personal-google-workspace-mcp/`.**
    Compose.yaml + README + .env.example, lifted from the working
    pair-design setup. **~30 min.**
 
-Total: **~5 hours agent time** for the full RFC.
+Total: **~3.7 hours agent time** for the full RFC (down from ~5h
+in v1 — Phase 2 dropped 90 min by removing the interactive
+migration tool per the clean-cutover decision).
 
 ## 8. Effort estimate
 
@@ -410,44 +486,53 @@ Per CLAUDE.md, in **agent minutes**:
 | Phase | Item | Estimate |
 |---|---|---|
 | 1 | Config block + tier knob + cascade tests | ~45 min |
-| 2 | Vault slot migration + ACL primitive + broker tests | ~120 min |
-| 2 | MCP wrapper account-based credential read | ~30 min (subset of 120) |
-| 3 | CLI verbs + drive-alias deprecation note | ~75 min |
+| 2 | ACL primitive + broker tests + apply-time legacy-slot detector | ~60 min |
+| 2 | MCP wrapper account-based credential read | ~30 min (subset of 60) |
+| 3 | `auth google` CLI verbs + `drive` deprecation alias | ~75 min |
 | 4 | Setup wizard prompt + decline path | ~30 min |
 | 5 | Examples dir + README | ~30 min |
 | — | Doc updates (`docs/google-workspace.md` new file, RFC cross-refs) | ~30 min |
 
-**~5 hours agent time** total. Two-day spread if interspersed with
-other work; one focused day if pushed end-to-end.
+**~3.7 hours agent time** total (Phase 2 dropped 90 min by
+removing the interactive migration tool per the clean-cutover
+decision in §7). Two-day spread if interspersed with other work;
+one focused day if pushed end-to-end.
 
 ## 9. Risks and open questions
 
-- **In-flight token migration (Phase 2).** Existing operators with
-  `gdrive:<agent>:refresh_token` slots need their tokens migrated
-  to per-account slots. Hard if two agents auth'd against the same
-  account at different times (different scopes, different consent
-  state) — they'd land as one merged slot with whichever tokens
-  set is broader. Mitigation: migration tool is interactive, shows
-  the operator each per-agent slot's age + scopes, asks which to
-  keep on conflict. Refusal → migration aborts, operator stays on
-  per-agent (back-compat layer keeps that working).
-
-- **OAuth scope drift between agents.** If `klanker` was connected
-  with read-only and `gymbro` then enables on the same account,
-  does `gymbro` inherit read-only? Yes — that's the consent state
-  baked into the token. To upgrade scopes, operator runs
-  `workspace disconnect <account>` + `connect` again with the new
-  agent's tier. Surface this in the disconnect-blocked message
-  (refused while agents are enabled, but tells operator how to
-  re-consent if scopes need expanding).
+- **Re-consent silently expands scope across all enabled agents.**
+  If `klanker` is enabled at `tier: core` (Drive+Docs+Sheets+Cal)
+  and the operator later runs `account remove` + `account add` to
+  re-consent for `gymbro` at `tier: extended` (adds Slides), the
+  shared refresh token now grants Slides scope to **klanker too**
+  — even though klanker's operator never approved that. The kernel
+  still gates writes per-agent (Slides write requires a fresh
+  approval card), but reads of newly-scoped surfaces are not
+  gated. Mitigation: re-consent triggered by tier-bump posts a
+  "scope expanded" notice via Telegram to **every enabled agent's
+  approver**, naming the new scope and the agent that triggered
+  it. Operator can `disable` proactively if the expansion is
+  unwanted.
 
 - **Approval kernel drift on agent removal.** `disable <account>
-  <agent>` orphans the agent's standing approvals. Per §4.4 they
-  become dormant, not auto-revoked. Risk: if the operator forgets
-  about them, they sit indefinitely. Mitigation: weekly staleness
-  digest (RFC B §9.1) already surfaces dormant grants — `workspace
-  disable` adds a one-line notice listing the about-to-go-dormant
-  grants for the operator to confirm or pre-revoke.
+  <agents...>` orphans the agents' standing approvals. Per §4.4
+  they become dormant, not auto-revoked. Risk: if the operator
+  forgets about them, they sit indefinitely. Mitigation: weekly
+  staleness digest (RFC B §9.1) already surfaces dormant grants —
+  `auth google disable` adds a one-line notice listing the
+  about-to-go-dormant grants for the operator to confirm or
+  pre-revoke.
+
+- **Legacy-slot refusal (Phase 2 cutover) blocks operators
+  mid-flight.** A v0.6.0 operator running `switchroom apply` after
+  Phase 2 lands gets a hard refusal until they re-add their
+  account. If this lands during business hours and the operator
+  is mid-task, they're blocked. Mitigation: ship Phase 2 as a
+  CHANGELOG-headlined breaking change in a minor version bump
+  (v0.7.0 → v0.8.0), not a patch. The v0.7.x branch keeps
+  per-agent slots working for operators not ready to cut over.
+  Pattern is the same as the cron-fold-in cutover (PRs #890–#893)
+  documented in CLAUDE.md.
 
 - **Tier change after connect.** Going from `core` to `extended`
   doesn't expand granted OAuth scopes — Google's consent already
@@ -455,9 +540,9 @@ other work; one focused day if pushed end-to-end.
   fail at runtime. Mitigation: `apply` checks each agent's tier
   against the cached `google:<acct>:scopes` slot; warns operator
   inline if the upgrade requires re-consent: *"klanker's tier
-  bumped to extended — needs Slides scope. Run `workspace
-  disconnect pixsoul@gmail.com` + `connect` to re-consent, or
-  exclude Slides tools."*
+  bumped to extended — needs Slides scope. Run `auth google
+  account remove pixsoul@gmail.com` + `account add` to re-consent,
+  or exclude Slides tools."*
 
 - **Setup wizard prompt fatigue.** If we add too many "optional
   but recommended" prompts during setup, the user starts skipping
@@ -471,8 +556,9 @@ other work; one focused day if pushed end-to-end.
   operator manually edits `~/.switchroom/google_accounts.yaml`
   (or wherever ACL lives) outside the CLI, the broker's view and
   the CLI's view of "who's enabled" can diverge. Mitigation: ACL
-  state is a derived view, not source-of-truth — `workspace list`
-  reads the broker, `enable/disable` writes through the broker.
+  state is a derived view, not source-of-truth — `auth google
+  list` reads the broker, `enable/disable` writes through the
+  broker.
   No manual edit path documented; the file (if any) is internal.
 
 ## 10. Tracking
@@ -481,9 +567,10 @@ Open one tracking issue per phase, all blocked on this spec
 landing:
 
 - [ ] Phase 1 — Config block + tier knob + `drive:` alias
-- [ ] Phase 2 — Per-account vault slot + per-agent ACL + migration
-  tool
-- [ ] Phase 3 — `switchroom workspace ...` CLI verbs
+- [ ] Phase 2 — Per-account vault slot + per-agent ACL + apply-time
+  legacy-slot detector (clean cutover, no migration tool)
+- [ ] Phase 3 — `switchroom auth google ...` CLI verbs + `drive`
+  alias deprecation
 - [ ] Phase 4 — Setup wizard inline prompt
 - [ ] Phase 5 — `examples/personal-google-workspace-mcp/`
 - [ ] Cross-cutting — `docs/google-workspace.md` user guide

@@ -744,6 +744,9 @@ export class AuthBroker {
         case "set-override":
           await this.opSetOverride(socket, reqId, identity, req.agent, req.account);
           break;
+        case "list-google-accounts":
+          await this.opListGoogleAccounts(socket, reqId, identity);
+          break;
       }
     } catch (err) {
       socket.write(
@@ -844,6 +847,43 @@ export class AuthBroker {
         consumers,
       }),
     );
+  }
+
+  /**
+   * Inventory of Google accounts the broker has stored on disk.
+   * Reads `~/.switchroom/state/auth-broker/google/<account>/credentials.json`
+   * for each account and returns metadata only — refresh + access
+   * tokens stay on disk. Sorted by account email for stable output.
+   *
+   * Distinct from `list-state` (Anthropic-shaped fleet snapshot). The
+   * Google equivalent for the operator-facing matrix lives in YAML
+   * (`google_accounts.<email>.enabled_for[]`); this op exists so the
+   * `auth google account list` verb can confirm the broker actually
+   * holds the credentials the YAML claims.
+   *
+   * No ACL — same posture as `list-state`. Identity is recorded in the
+   * audit log but every caller that reaches the broker can call this.
+   */
+  private async opListGoogleAccounts(
+    socket: net.Socket,
+    id: string,
+    identity: Identity,
+  ): Promise<void> {
+    const accounts = listGoogleAccounts(this.stateDir)
+      .map((account) => {
+        const creds = readGoogleAccountCredentials(this.stateDir, account);
+        if (!creds) return null;
+        return {
+          account,
+          expiresAt: creds.googleOauth.expiresAt,
+          scope: creds.googleOauth.scope,
+          clientId: creds.googleOauth.clientId,
+        };
+      })
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+      .sort((a, b) => a.account.localeCompare(b.account));
+    this.audit({ op: "list-google-accounts", identity, ok: true });
+    socket.write(encodeSuccess(id, { accounts }));
   }
 
   private async opSetActive(

@@ -222,6 +222,26 @@ export const SetOverrideRequestSchema = z.object({
   account: z.string().min(1).nullable(),
 });
 
+/**
+ * Phase 3b.2d follow-up — enumerate Google accounts the broker has
+ * stored. Distinct from `list-state` (which is Anthropic-shaped:
+ * fleet active, fallback order, per-agent + consumer overrides). The
+ * Google equivalent is the per-account ACL via `google_accounts.<email>.
+ * enabled_for[]` in switchroom.yaml — that's the operator-facing matrix
+ * (see `switchroom auth google list`); this op is the broker-side
+ * inventory of what credentials are stored, used by `auth google
+ * account list` to confirm the YAML matches what the broker holds.
+ *
+ * Refresh token + access token are NOT returned — those stay on disk.
+ * Only credential metadata an operator needs to reason about (which
+ * accounts exist, when each token expires, what scopes were granted).
+ */
+export const ListGoogleAccountsRequestSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  op: z.literal("list-google-accounts"),
+  id: z.string().min(1),
+});
+
 export const RequestSchema = z.discriminatedUnion("op", [
   GetCredentialsRequestSchema,
   ListStateRequestSchema,
@@ -231,6 +251,7 @@ export const RequestSchema = z.discriminatedUnion("op", [
   AddAccountRequestSchema,
   RmAccountRequestSchema,
   SetOverrideRequestSchema,
+  ListGoogleAccountsRequestSchema,
 ]);
 
 export type Request = z.infer<typeof RequestSchema>;
@@ -299,6 +320,23 @@ export const RmAccountDataSchema = z.object({
 export const SetOverrideDataSchema = z.object({
   agent: z.string(),
   account: z.string().nullable(),
+});
+
+/**
+ * Per-Google-account inventory entry returned by `list-google-accounts`.
+ * Excludes the refresh + access tokens — operators querying the
+ * inventory don't need those, and never returning them keeps the wire
+ * surface narrow.
+ */
+export const GoogleAccountStateSchema = z.object({
+  account: z.string(),
+  expiresAt: z.number(),
+  scope: z.string(),
+  clientId: z.string(),
+});
+
+export const ListGoogleAccountsDataSchema = z.object({
+  accounts: z.array(GoogleAccountStateSchema),
 });
 
 // ─── Response envelope ─────────────────────────────────────────────────────

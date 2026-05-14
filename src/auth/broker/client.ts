@@ -180,6 +180,18 @@ export interface SetOverrideData {
   account: string | null;
 }
 
+/** Per-account inventory entry returned by `listGoogleAccounts()`. */
+export interface GoogleAccountState {
+  account: string;
+  expiresAt: number;
+  scope: string;
+  clientId: string;
+}
+
+export interface ListGoogleAccountsData {
+  accounts: GoogleAccountState[];
+}
+
 /** Anthropic-shaped credentials payload for `addAccount`. */
 export interface AnthropicAddAccountCredentials {
   claudeAiOauth: {
@@ -282,6 +294,15 @@ export class AuthBrokerClient {
       op: "list-state",
     });
     return data as ListStateData;
+  }
+
+  async listGoogleAccounts(): Promise<ListGoogleAccountsData> {
+    const data = await this.send({
+      v: PROTOCOL_VERSION,
+      id: randomUUID(),
+      op: "list-google-accounts",
+    });
+    return data as ListGoogleAccountsData;
   }
 
   async setActive(account: string): Promise<SetActiveData> {

@@ -1205,34 +1205,47 @@ async function stepGoogleWorkspace(
     true,
   );
 
-  // The verb that completes the flow. Today (pre-Phase-3b) it's the
-  // shipped `drive connect`. Phase 3b will introduce
-  // `auth google connect <agent>` as the wizard alias and swap this
-  // string. Both end up at the same OAuth flow.
-  const connectCmd = `switchroom drive connect ${firstName}`;
+  // RFC G Phase 3b.6 — surfaces the post-3b two-step shape per RFC
+  // G v3 §4.6. Pre-3b.6 this was `switchroom drive connect <agent>`;
+  // post-3b.3 + 3b.2c the `auth google account add <email>` verb
+  // mints credentials in the broker, then `auth google enable
+  // <email> <agent>` writes the per-agent ACL.
+  //
+  // (The `account add` verb is a stub today per Phase 3b.3 — the
+  // OAuth flow extraction lives in Phase 3b.2d alongside refresh-
+  // tick wiring. Until that lands, the v0.6.0 `drive connect <agent>`
+  // verb still works as the OAuth onramp. Wizard surfaces both so
+  // operators can pick.)
+  const accountAddCmd = `switchroom auth google account add <your-google-account-email>`;
+  const enableCmd = `switchroom auth google enable <your-google-account-email> ${firstName}`;
+  const fallbackCmd = `switchroom drive connect ${firstName}`;
 
   if (wantConnect) {
-    console.log(
-      chalk.green(`  ${STEP_DONE} Ready to connect`),
-    );
+    console.log(chalk.green(`  ${STEP_DONE} Ready to connect`));
+    console.log();
+    console.log(chalk.gray("  After setup completes:"));
     console.log();
     console.log(
-      chalk.gray("  After setup completes, run:"),
+      chalk.gray(`    Step 1 — register the Google account with the auth-broker:`),
+    );
+    console.log(chalk.cyan(`      ${accountAddCmd}`));
+    console.log();
+    console.log(chalk.gray(`    Step 2 — enable the account on ${chalk.bold(firstName)}:`));
+    console.log(chalk.cyan(`      ${enableCmd}`));
+    console.log();
+    console.log(
+      chalk.gray(`    (\`account add\` is a stub today — Phase 3b.2d wires the OAuth flow.`),
     );
     console.log(
-      chalk.cyan(`    ${connectCmd}`),
+      chalk.gray(`     Until then, use the v0.6.0 fallback:`),
     );
-    console.log(
-      chalk.gray(
-        "  to start the OAuth flow (device-code on headless hosts, browser otherwise).",
-      ),
-    );
+    console.log(chalk.gray(`       ${fallbackCmd})`));
   } else {
+    console.log(chalk.gray(`  ${STEP_DONE} Skipped — connect later with:`));
+    console.log(chalk.cyan(`    ${accountAddCmd}`));
+    console.log(chalk.cyan(`    ${enableCmd}`));
     console.log(
-      chalk.gray(`  ${STEP_DONE} Skipped — connect later with:`),
-    );
-    console.log(
-      chalk.cyan(`    ${connectCmd}`),
+      chalk.gray(`  (or the v0.6.0 fallback: ${fallbackCmd})`),
     );
   }
 }

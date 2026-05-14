@@ -354,6 +354,76 @@ export function runApplyPreflight(config: SwitchroomConfig): void {
   if (composeErr) {
     throw new Error(composeErr);
   }
+  // RFC G Phase 3b.5 — best-effort legacy `gdrive:<agent>:refresh_token`
+  // detection. Reads vault slots only when SWITCHROOM_VAULT_PASSPHRASE
+  // is set in the env (interactive prompts in preflight would block CI).
+  // Without the passphrase the check is silently skipped — the agent
+  // wrapper (Phase 3b.4) and `auth google account add` (Phase 3b.3
+  // stub today) will catch the legacy slots when an operator actually
+  // touches Google.
+  detectAndReportLegacyGdriveSlots(vaultPath);
+}
+
+/**
+ * RFC G Phase 3b.5 — print operator-actionable advisory if any legacy
+ * RFC D `gdrive:<agent>:refresh_token` slots are present in the vault.
+ * Refuses apply only when the operator has the passphrase available
+ * AND legacy slots are detected — a mid-`apply` interactive prompt
+ * would block CI / scripted invocations.
+ *
+ * Today: detection-only, prints advisory to stderr. A future Phase
+ * 3b.5b will ship the actual interactive `switchroom auth google
+ * migrate` verb that reads each legacy slot, prompts the operator to
+ * attribute it to a Google account, writes to the new
+ * `vault:google:<account>:refresh_token` shape, and deletes the
+ * legacy slot. Until that lands, operators can manually use
+ * `switchroom drive disconnect` + `auth google account add` to
+ * migrate.
+ */
+function detectAndReportLegacyGdriveSlots(vaultPath: string): void {
+  if (!existsSync(vaultPath)) return; // no vault, no slots to migrate
+  const passphrase = process.env.SWITCHROOM_VAULT_PASSPHRASE;
+  if (!passphrase) return; // best-effort: skip without prompting
+  let slotKeys: string[];
+  try {
+    // Lazy-import to keep the apply hot path free of vault crypto when
+    // the passphrase isn't available.
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { listSecrets } = require("../vault/vault.js") as typeof import("../vault/vault.js");
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { detectLegacyGdriveSlots } = require("../drive/vault-slots.js") as typeof import("../drive/vault-slots.js");
+    slotKeys = listSecrets(passphrase, vaultPath);
+    const legacy = detectLegacyGdriveSlots(slotKeys);
+    if (legacy.length > 0) {
+      const lines = [
+        "",
+        chalk.yellow(`⚠  Legacy RFC D Drive slots detected in vault:`),
+        ...legacy.map((agent) => chalk.gray(`     gdrive:${agent}:refresh_token`)),
+        chalk.yellow(`   These were created by the v0.6.0 \`switchroom drive connect <agent>\` flow.`),
+        chalk.yellow(`   Per RFC G v3 §4.4 + Phase 3b.2c, Google credentials now live in the auth-broker`),
+        chalk.yellow(`   under per-account labels (\`google:<email>:...\`) rather than per-agent slots.`),
+        "",
+        `   To migrate manually for each affected agent:`,
+        chalk.cyan(`     1. Note the Google account each \`gdrive:<agent>\` slot was minted for`),
+        chalk.cyan(`     2. switchroom drive disconnect <agent>           # revokes Google + clears slot`),
+        chalk.cyan(`     3. switchroom auth google account add <email>    # mints new per-account slot`),
+        chalk.cyan(`     4. switchroom auth google enable <email> <agent> # writes ACL to switchroom.yaml`),
+        "",
+        chalk.gray(`   Phase 3b.5b will ship an interactive \`switchroom auth google migrate\` verb`),
+        chalk.gray(`   that automates this. \`apply\` is advisory-only for now — does not refuse.`),
+        "",
+      ];
+      for (const line of lines) process.stderr.write(line + "\n");
+    }
+  } catch (err) {
+    // Don't break apply over the legacy-slot check. If we can't open
+    // the vault for any reason (wrong passphrase, corrupt file, etc.)
+    // the operator's other vault-touching commands will surface a
+    // clearer error.
+    process.stderr.write(
+      chalk.gray(`  (skipping legacy-slot check: ${(err as Error).message})\n`),
+    );
+  }
 }
 
 /**

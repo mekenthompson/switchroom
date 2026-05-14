@@ -24,6 +24,79 @@ function formatZodErrors(error: ZodError): string[] {
   });
 }
 
+/**
+ * RFC G Phase 1: coerce the legacy `drive:` key into the canonical
+ * `google_workspace:` key, both at the top level and on each agent.
+ *
+ * Rules (same at top level + per-agent):
+ *   - Neither set       → leave untouched.
+ *   - Only one set      → mirror it onto the other key so both readers see it.
+ *   - Both set          → fail fast IF they differ. Silently picking one would
+ *                         mask operator intent. If they're identical (a
+ *                         hand-written config that double-specified), allow it.
+ *
+ * Mirroring rather than renaming: existing readers (`src/cli/drive.ts`,
+ * tests, scaffold.ts) read `config.drive` today; Phase 1 must not break
+ * them. New readers (Phase 3+) prefer `config.google_workspace` and treat
+ * `config.drive` as fallback. Eventually we drop the legacy field — but
+ * that's a future major-version cleanup, not this phase.
+ *
+ * Mutates `parsed` in place. Same shape as the existing `clerk:` →
+ * `switchroom:` coercion above.
+ */
+function coerceLegacyGoogleWorkspaceKeys(
+  parsed: Record<string, unknown>,
+  filePath: string,
+): void {
+  // Order-insensitive deep stringification — fixes the case where two
+  // independently-authored YAML blocks have the same content but different
+  // key ordering (e.g. `approvers:` first vs `tier:` first). Plain
+  // JSON.stringify would falsely flag those as a mismatch.
+  const stableStringify = (v: unknown): string => {
+    if (v === null || typeof v !== "object") return JSON.stringify(v);
+    if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
+    const obj = v as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
+  };
+
+  const aliasInPlace = (obj: Record<string, unknown>, where: string) => {
+    const a = obj.drive;
+    const b = obj.google_workspace;
+    if (a !== undefined && b !== undefined) {
+      // Both set — must be deeply equal, otherwise reject.
+      if (stableStringify(a) !== stableStringify(b)) {
+        throw new ConfigError(
+          `Both \`drive:\` and \`google_workspace:\` are set on ${where} in ${filePath} with different values.`,
+          [
+            "  These are aliases — pick one and remove the other.",
+            "  `google_workspace:` is the RFC G canonical key; `drive:` is the legacy alias.",
+            "  Allowed during transition: setting both with identical values.",
+          ],
+        );
+      }
+      // Identical — leave both as-is.
+      return;
+    }
+    // Mirror whichever was set onto the other key.
+    if (a !== undefined && b === undefined) obj.google_workspace = a;
+    if (b !== undefined && a === undefined) obj.drive = b;
+  };
+
+  // Top-level
+  aliasInPlace(parsed, "the top level");
+
+  // Per-agent
+  const agents = parsed.agents;
+  if (agents && typeof agents === "object" && !Array.isArray(agents)) {
+    for (const [name, agent] of Object.entries(agents)) {
+      if (agent && typeof agent === "object" && !Array.isArray(agent)) {
+        aliasInPlace(agent as Record<string, unknown>, `agent \`${name}\``);
+      }
+    }
+  }
+}
+
 export function findConfigFile(startDir?: string): string {
   // Search order (first hit wins):
   // 1. $SWITCHROOM_CONFIG env var (explicit override for daemonized agents)
@@ -100,6 +173,15 @@ export function loadConfig(configPath?: string): SwitchroomConfig {
     const obj = parsed as Record<string, unknown>;
     obj.switchroom = obj.clerk;
     delete obj.clerk;
+  }
+
+  // RFC G Phase 1: `drive:` is the legacy key for what is now
+  // `google_workspace:`. Coerce here so the schema only sees one shape.
+  // Both-set is a fast-fail — silently picking one would mask operator
+  // intent and is exactly the kind of "convention over configuration"
+  // failure principles.md §1 warns about.
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+    coerceLegacyGoogleWorkspaceKeys(parsed as Record<string, unknown>, filePath);
   }
 
   let config: SwitchroomConfig;

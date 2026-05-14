@@ -713,14 +713,44 @@ const TIMEZONE_REGEX = /^UTC$|^[A-Z][A-Za-z0-9_+-]+(\/[A-Z][A-Za-z0-9_+-]+){1,2}
 const ApproverIdSchema = z.union([z.number(), z.string().regex(/^\d+$/)]);
 
 /**
- * Top-level drive config block. Centralizes Google OAuth client credentials
- * and the approver allowlist used by `switchroom drive connect` so operators
- * don't have to manage env vars. The block is optional — when omitted, the
- * CLI falls back to env vars (SWITCHROOM_GOOGLE_CLIENT_ID/_SECRET,
- * SWITCHROOM_APPROVER_USER_ID). When both are set, env wins (deliberate:
- * env is for one-off overrides; config is the persistent baseline).
+ * RFC G Phase 1: tier knob for the Google Workspace MCP surface.
+ *
+ * Maps directly to upstream `google_workspace_mcp`'s `--tool-tier` flag.
+ *   - core     ~16 tools: Drive + Docs + Sheets + Calendar (default)
+ *   - extended ~40 tools: + Slides, Forms, Tasks, Chat
+ *   - complete ~60+ tools: + Gmail (note: Gmail's per-thread approval
+ *     shape is unsuitable here today — see RFC G §5 out-of-scope)
+ *
+ * RFC D shipped without this knob (hardcoded to upstream's full surface
+ * via the no-flag default). Phase 1 makes the tier explicit at the
+ * config level; Phase 3 wires it through the MCP launcher.
  */
-export const DriveConfigSchema = z
+export const GoogleWorkspaceTierSchema = z.enum([
+  "core",
+  "extended",
+  "complete",
+]);
+export type GoogleWorkspaceTier = z.infer<typeof GoogleWorkspaceTierSchema>;
+
+/**
+ * Top-level drive / google_workspace config block. Centralizes Google OAuth
+ * client credentials, the approver allowlist used by `switchroom drive
+ * connect`, and (RFC G Phase 1) the tier knob.
+ *
+ * Block is optional — when omitted, the CLI falls back to env vars
+ * (SWITCHROOM_GOOGLE_CLIENT_ID/_SECRET, SWITCHROOM_APPROVER_USER_ID). When
+ * both are set, env wins (deliberate: env is for one-off overrides;
+ * config is the persistent baseline).
+ *
+ * **Naming note (RFC G Phase 1):** This schema is exported under both
+ * `DriveConfigSchema` (legacy / RFC D name, deprecated alias) and
+ * `GoogleWorkspaceConfigSchema` (RFC G canonical name). The shape is
+ * identical; the loader accepts either YAML key. Phase 3 will rename
+ * the user-facing key in docs + scaffold templates while keeping the
+ * alias indefinitely (no pre-announced removal — switchroom's installed
+ * base is small enough that a hard removal date isn't earned).
+ */
+export const GoogleWorkspaceConfigSchema = z
   .object({
     google_client_id: z
       .string()
@@ -741,15 +771,29 @@ export const DriveConfigSchema = z
         "Array of numeric Telegram user IDs authorized to approve drive onboarding. " +
         "At least one must be specified."
       ),
+    tier: GoogleWorkspaceTierSchema.optional().describe(
+      "RFC G Phase 1: which upstream MCP tier to expose. " +
+      "core (default) = ~16 tools (Drive+Docs+Sheets+Calendar). " +
+      "extended = ~40 tools (+Slides, Forms, Tasks, Chat). " +
+      "complete = ~60+ tools (+Gmail; not recommended yet — see RFC G §5)."
+    ),
   })
   .optional();
 
 /**
- * Per-agent drive override. Currently just narrows the approver set for a
- * single agent. google_client_id/secret are not per-agent — those live at
- * the top level (one OAuth client per switchroom install).
+ * Legacy alias for back-compat with RFC D shipped config. Identical shape;
+ * kept exported so existing imports + tests keep working. New code should
+ * prefer `GoogleWorkspaceConfigSchema`.
  */
-export const AgentDriveConfigSchema = z
+export const DriveConfigSchema = GoogleWorkspaceConfigSchema;
+
+/**
+ * Per-agent google_workspace override. Currently just narrows the approver
+ * set + lets the agent pick a tier different from the top-level default.
+ * google_client_id/secret are not per-agent — those live at the top level
+ * (one OAuth client per switchroom install).
+ */
+export const AgentGoogleWorkspaceConfigSchema = z
   .object({
     approvers: z
       .array(ApproverIdSchema)
@@ -759,8 +803,20 @@ export const AgentDriveConfigSchema = z
         "Per-agent approver override. When set, replaces (does not extend) " +
         "the top-level drive.approvers list for this agent's onboarding card."
       ),
+    tier: GoogleWorkspaceTierSchema.optional().describe(
+      "Per-agent tier override (RFC G Phase 1). When set, replaces the " +
+      "top-level google_workspace.tier for this agent. Common case: most " +
+      "agents on `core`, one specialist on `extended` for Slides access."
+    ),
   })
   .optional();
+
+/**
+ * Legacy alias for back-compat with RFC D shipped config. Identical shape
+ * (tier added is fully optional). New code should prefer
+ * `AgentGoogleWorkspaceConfigSchema`.
+ */
+export const AgentDriveConfigSchema = AgentGoogleWorkspaceConfigSchema;
 
 /**
  * Reaction-trigger configuration — controls when an emoji reaction on a
@@ -1431,10 +1487,19 @@ export const AgentSchema = z.object({
       "claim_worktree accepts the alias as the repo argument. " +
       "Absolute paths may always be passed regardless of this list.",
     ),
-  drive: AgentDriveConfigSchema.describe(
-    "Per-agent drive onboarding overrides (currently just approvers). " +
-    "When set, replaces the top-level drive.approvers list for this agent. " +
+  drive: AgentGoogleWorkspaceConfigSchema.describe(
+    "RFC D legacy key — use `google_workspace:` instead. Per-agent " +
+    "google_workspace overrides (currently approvers + tier). When set, " +
+    "replaces the top-level approvers list for this agent. " +
     "google_client_id/secret are not per-agent — they live at the top level.",
+  ),
+  google_workspace: AgentGoogleWorkspaceConfigSchema.describe(
+    "RFC G canonical key. Per-agent Google Workspace overrides — currently " +
+    "approvers (replaces, does not extend the top-level list) and tier " +
+    "(`core` | `extended` | `complete`, replaces top-level default). " +
+    "google_client_id/secret are not per-agent — they live at the top level. " +
+    "Mutually exclusive with `drive:` on the same agent (loader fails fast " +
+    "if both are set).",
   ),
   repos: z
     .record(
@@ -1732,13 +1797,20 @@ export const SwitchroomConfigSchema = z.object({
   telegram: TelegramConfigSchema,
   memory: MemoryBackendConfigSchema.optional(),
   vault: VaultConfigSchema.optional(),
-  drive: DriveConfigSchema.describe(
-    "Optional drive onboarding configuration. When set, supplies Google " +
-    "OAuth client credentials and the approver allowlist for `switchroom " +
-    "drive connect`. Env vars (SWITCHROOM_GOOGLE_CLIENT_ID, " +
-    "SWITCHROOM_GOOGLE_CLIENT_SECRET, SWITCHROOM_APPROVER_USER_ID) take " +
-    "precedence over this block when set, preserving back-compat with " +
-    "the env-only flow shipped in #766.",
+  drive: GoogleWorkspaceConfigSchema.describe(
+    "RFC D legacy key — use `google_workspace:` instead. Optional Google " +
+    "Workspace onboarding configuration. When set, supplies Google OAuth " +
+    "client credentials, the approver allowlist for `switchroom drive " +
+    "connect`, and the optional tier knob. Env vars " +
+    "(SWITCHROOM_GOOGLE_CLIENT_ID, SWITCHROOM_GOOGLE_CLIENT_SECRET, " +
+    "SWITCHROOM_APPROVER_USER_ID) take precedence over this block when " +
+    "set, preserving back-compat with the env-only flow shipped in #766.",
+  ),
+  google_workspace: GoogleWorkspaceConfigSchema.describe(
+    "RFC G canonical key. Top-level Google Workspace configuration — " +
+    "OAuth client credentials, approver allowlist, and tier knob (`core` " +
+    "| `extended` | `complete`, default `core`). Mutually exclusive with " +
+    "`drive:` at the top level (loader fails fast if both are set).",
   ),
   quota: QuotaConfigSchema.optional().describe(
     "Optional weekly/monthly USD spend budgets rendered in the session " +

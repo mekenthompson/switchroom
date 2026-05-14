@@ -12,8 +12,11 @@
 import { describe, expect, it } from "vitest";
 import {
   AgentDriveConfigSchema,
+  AgentGoogleWorkspaceConfigSchema,
   AgentSchema,
   DriveConfigSchema,
+  GoogleWorkspaceConfigSchema,
+  GoogleWorkspaceTierSchema,
   ScheduleEntrySchema,
   SwitchroomConfigSchema,
   VaultConfigSchema,
@@ -405,5 +408,128 @@ describe("AgentDriveConfigSchema (per-agent override)", () => {
     expect(() =>
       AgentSchema.parse(baseAgentInput({ drive: { approvers: [] } })),
     ).toThrow();
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────────
+// RFC G Phase 1: google_workspace: as the canonical key, drive: as alias
+// ───────────────────────────────────────────────────────────────────────
+
+describe("GoogleWorkspaceTierSchema (RFC G Phase 1 tier knob)", () => {
+  it("accepts the three documented tiers", () => {
+    expect(GoogleWorkspaceTierSchema.parse("core")).toBe("core");
+    expect(GoogleWorkspaceTierSchema.parse("extended")).toBe("extended");
+    expect(GoogleWorkspaceTierSchema.parse("complete")).toBe("complete");
+  });
+
+  it("rejects unknown tier values", () => {
+    expect(() => GoogleWorkspaceTierSchema.parse("minimal")).toThrow();
+    expect(() => GoogleWorkspaceTierSchema.parse("")).toThrow();
+    expect(() => GoogleWorkspaceTierSchema.parse(null as unknown as string)).toThrow();
+  });
+});
+
+describe("GoogleWorkspaceConfigSchema (RFC G canonical name)", () => {
+  it("is the same schema reference as DriveConfigSchema (alias)", () => {
+    // Aliasing at the schema level — same object identity, same parser.
+    expect(GoogleWorkspaceConfigSchema).toBe(DriveConfigSchema);
+  });
+
+  it("parses a fully-populated block including the new tier field", () => {
+    const result = GoogleWorkspaceConfigSchema.parse({
+      google_client_id: "id",
+      google_client_secret: "secret",
+      approvers: [123],
+      tier: "core",
+    });
+    expect(result?.tier).toBe("core");
+  });
+
+  it("accepts an extended tier per-agent style", () => {
+    const result = GoogleWorkspaceConfigSchema.parse({
+      google_client_id: "id",
+      google_client_secret: "secret",
+      approvers: [123],
+      tier: "extended",
+    });
+    expect(result?.tier).toBe("extended");
+  });
+
+  it("makes tier optional — undefined is fine (preserves shipped behaviour)", () => {
+    const result = GoogleWorkspaceConfigSchema.parse({
+      google_client_id: "id",
+      google_client_secret: "secret",
+      approvers: [123],
+    });
+    expect(result?.tier).toBeUndefined();
+  });
+
+  it("rejects unknown tier values", () => {
+    expect(() =>
+      GoogleWorkspaceConfigSchema.parse({
+        google_client_id: "id",
+        google_client_secret: "secret",
+        approvers: [123],
+        tier: "minimal",
+      }),
+    ).toThrow();
+  });
+
+  it("is wired onto the top-level SwitchroomConfigSchema as `google_workspace`", () => {
+    const result = SwitchroomConfigSchema.parse({
+      switchroom: { version: 1 },
+      telegram: { bot_token: "x", forum_chat_id: "1" },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+        approvers: [123],
+        tier: "core",
+      },
+      agents: {},
+    });
+    expect(result.google_workspace?.tier).toBe("core");
+  });
+});
+
+describe("AgentGoogleWorkspaceConfigSchema (RFC G per-agent override)", () => {
+  it("is the same schema reference as AgentDriveConfigSchema (alias)", () => {
+    expect(AgentGoogleWorkspaceConfigSchema).toBe(AgentDriveConfigSchema);
+  });
+
+  it("accepts a per-agent tier override without approvers", () => {
+    const result = AgentGoogleWorkspaceConfigSchema.parse({ tier: "extended" });
+    expect(result?.tier).toBe("extended");
+    expect(result?.approvers).toBeUndefined();
+  });
+
+  it("accepts both approvers and tier together", () => {
+    const result = AgentGoogleWorkspaceConfigSchema.parse({
+      approvers: [999],
+      tier: "complete",
+    });
+    expect(result?.approvers).toEqual([999]);
+    expect(result?.tier).toBe("complete");
+  });
+
+  it("is wired onto AgentSchema as `google_workspace`", () => {
+    const result = AgentSchema.parse(
+      baseAgentInput({ google_workspace: { tier: "extended", approvers: [999] } }),
+    );
+    expect(result.google_workspace?.tier).toBe("extended");
+    expect(result.google_workspace?.approvers).toEqual([999]);
+  });
+
+  it("AgentSchema accepts both `drive` and `google_workspace` simultaneously (loader rejects mismatch)", () => {
+    // Schema layer is permissive — drive: and google_workspace: have
+    // identical shapes and either can be set or both. Loader (not schema)
+    // is the layer that rejects the both-with-different-values case.
+    const result = AgentSchema.parse(
+      baseAgentInput({
+        drive: { approvers: [111] },
+        google_workspace: { approvers: [222], tier: "extended" },
+      }),
+    );
+    expect(result.drive?.approvers).toEqual([111]);
+    expect(result.google_workspace?.tier).toBe("extended");
   });
 });

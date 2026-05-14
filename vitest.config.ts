@@ -135,7 +135,6 @@ export default defineConfig({
       "**/telegram-plugin/tests/gateway-bridge.test.ts",
       "**/telegram-plugin/tests/gateway-startup-mutex.test.ts",
       "**/telegram-plugin/tests/gateway-clean-shutdown-marker.test.ts",
-      "**/telegram-plugin/tests/foreman-state.test.ts",
       "**/telegram-plugin/tests/boot-card-dedupe.test.ts",
       "**/telegram-plugin/tests/boot-card-reason.test.ts",
       // boot-card-reason-to-render.test.ts (#1153) imports bun:test — run via test:bun.

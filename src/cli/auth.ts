@@ -32,15 +32,13 @@ import { join, resolve } from "node:path";
 
 import {
   AuthBrokerClient,
-  AuthBrokerError,
-  AuthBrokerUnreachableError,
-  withAuthBrokerClient,
   type AccountState,
   type AddAccountCredentials,
   type AgentState,
   type ConsumerState,
   type ListStateData,
 } from "../auth/broker/client.js";
+import { brokerCall } from "./broker-call.js";
 import {
   accountCredentialsPath,
   readAccountCredentials,
@@ -178,31 +176,12 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
-
-function dieBrokerUnreachable(err: AuthBrokerUnreachableError): never {
-  console.error(chalk.red(`  auth-broker unreachable: ${err.message}`));
-  console.error(
-    chalk.gray(
-      `  Check the daemon: docker compose -p switchroom ps switchroom-auth-broker`,
-    ),
-  );
-  process.exit(2);
-}
-
-function dieBrokerError(err: AuthBrokerError): never {
-  console.error(chalk.red(`  ${err.code}: ${err.message}`));
-  process.exit(1);
-}
-
-async function brokerCall<T>(fn: (client: AuthBrokerClient) => Promise<T>): Promise<T> {
-  try {
-    return await withAuthBrokerClient(fn);
-  } catch (err) {
-    if (err instanceof AuthBrokerUnreachableError) dieBrokerUnreachable(err);
-    if (err instanceof AuthBrokerError) dieBrokerError(err);
-    throw err;
-  }
-}
+// `dieBrokerUnreachable` / `dieBrokerError` / `brokerCall` previously
+// lived here. Phase 3b.3 (RFC G review feedback) extracted them to
+// `./broker-call.ts` so the auth-google verbs can reuse the same
+// error UX shape — operators see identical "broker unreachable"
+// hints and stderr/exit-code discipline regardless of which CLI
+// surface they're using.
 
 function formatExpiry(expiresAt?: number): string {
   if (typeof expiresAt !== "number" || !Number.isFinite(expiresAt)) return "—";

@@ -361,39 +361,21 @@ function registerAccountRemove(accountParent: Command): void {
     .action(
       withConfigError(async (account: string) => {
         const normalizedAccount = validateAndNormalizeAccountEmail(account);
-        // Lazy-import — broker client only needed for these two verbs.
-        const { withAuthBrokerClient, AuthBrokerUnreachableError } = await import(
-          "../auth/broker/client.js"
+        // Use the shared brokerCall helper so error UX matches every
+        // other broker-touching verb (operator-actionable
+        // "broker unreachable" hint, exit code 2; broker error code
+        // + message to stderr, exit code 1).
+        const { brokerCall } = await import("./broker-call.js");
+        await brokerCall(async (client) => {
+          await client.rmAccount(normalizedAccount, "google");
+        });
+        console.log();
+        console.log(
+          chalk.green(
+            `  ✓ Removed Google account ${chalk.bold(normalizedAccount)} from broker.`,
+          ),
         );
-        try {
-          await withAuthBrokerClient(async (client) => {
-            await client.rmAccount(normalizedAccount, "google");
-          });
-          console.log();
-          console.log(
-            chalk.green(
-              `  ✓ Removed Google account ${chalk.bold(normalizedAccount)} from broker.`,
-            ),
-          );
-          console.log();
-        } catch (err) {
-          if (err instanceof AuthBrokerUnreachableError) {
-            console.log();
-            console.log(
-              chalk.yellow(
-                `  ⚠  auth-broker socket not reachable. Is the broker running?`,
-              ),
-            );
-            console.log();
-            return;
-          }
-          // Surface broker errors verbatim — they include the
-          // Phase-3b.2c-deferral message until storage lands.
-          console.log();
-          console.log(chalk.red(`  ✗ Broker rejected the remove:`));
-          console.log(chalk.red(`    ${(err as Error).message}`));
-          console.log();
-        }
+        console.log();
       }),
     );
 }
@@ -407,53 +389,44 @@ function registerAccountList(accountParent: Command): void {
     .option("--json", "Emit raw JSON instead of a table")
     .action(
       withConfigError(async (opts: { json?: boolean }) => {
-        const { withAuthBrokerClient, AuthBrokerUnreachableError } = await import(
-          "../auth/broker/client.js"
-        );
-        try {
-          const state = await withAuthBrokerClient(async (client) => {
-            return await client.listState();
-          });
-          // Phase 3b.3 — broker doesn't yet surface per-provider lists.
-          // For now print only Anthropic accounts the broker knows
-          // about, with a note that Google lookups land in Phase 3b.2c.
-          if (opts.json) {
-            console.log(
-              JSON.stringify(
-                {
-                  google_accounts: [],
-                  note: "Phase 3b.2c will surface Google accounts known to the broker. Today the broker stores Anthropic only.",
-                  anthropic_accounts: state.accounts.map((a) => a.label),
-                },
-                null,
-                2,
-              ),
-            );
-            return;
-          }
-          console.log();
+        const { brokerCall } = await import("./broker-call.js");
+        // Phase 3b.3 — broker doesn't yet surface per-provider lists.
+        // For Google specifically the broker doesn't yet store accounts
+        // (Phase 3b.2c lands the storage path); the call below succeeds
+        // but only Anthropic accounts come back in `state.accounts`.
+        // Verb is scoped to Google — we DON'T leak Anthropic state into
+        // the output. JSON mode emits an empty list with the deferral
+        // note; human mode prints the deferral + a pointer at the
+        // sibling `auth google list` for the YAML matrix view.
+        await brokerCall(async (client) => {
+          // Trip the broker connection (validates the socket is
+          // reachable) but discard the Anthropic-only result — Google
+          // listing lands in Phase 3b.2c.
+          await client.listState();
+        });
+        if (opts.json) {
           console.log(
-            chalk.gray(
-              `  Google accounts surfaced via the broker land in Phase 3b.2c.`,
+            JSON.stringify(
+              {
+                google_accounts: [],
+                note: "Phase 3b.2c will surface Google accounts stored in the broker. Today the broker stores Anthropic only; this verb returns an empty list.",
+              },
+              null,
+              2,
             ),
           );
-          console.log(
-            `  For the YAML google_accounts × agents matrix, use: ${chalk.bold("switchroom auth google list")}`,
-          );
-          console.log();
-        } catch (err) {
-          if (err instanceof AuthBrokerUnreachableError) {
-            console.log();
-            console.log(
-              chalk.yellow(
-                `  ⚠  auth-broker socket not reachable. Is the broker running?`,
-              ),
-            );
-            console.log();
-            return;
-          }
-          throw err;
+          return;
         }
+        console.log();
+        console.log(
+          chalk.gray(
+            `  Google accounts surfaced via the broker land in Phase 3b.2c.`,
+          ),
+        );
+        console.log(
+          `  For the YAML google_accounts × agents matrix, use: ${chalk.bold("switchroom auth google list")}`,
+        );
+        console.log();
       }),
     );
 }

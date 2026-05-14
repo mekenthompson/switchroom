@@ -62,7 +62,10 @@ import {
   parseSetupTokenUrl,
   readTokenFromCredentialsFile,
 } from '../../src/auth/manager.js'
-import type { AddAccountCredentials } from '../../src/auth/broker/client.js'
+import type {
+  AddAccountCredentials,
+  AnthropicAddAccountCredentials,
+} from '../../src/auth/broker/client.js'
 
 /* ── Pending-state map ────────────────────────────────────────────────── */
 
@@ -281,7 +284,7 @@ export async function submitAccountAuthCode(
         // accessToken regex, so the JSON is well-formed.
         try {
           const raw = readFileSync(credentialsPath, 'utf-8')
-          const parsed = JSON.parse(raw) as { claudeAiOauth?: AddAccountCredentials['claudeAiOauth'] }
+          const parsed = JSON.parse(raw) as { claudeAiOauth?: AnthropicAddAccountCredentials['claudeAiOauth'] }
           if (parsed.claudeAiOauth?.accessToken) {
             // Drain the child so it exits cleanly after success.
             try { flow.child.stdin?.end() } catch { /* best-effort */ }

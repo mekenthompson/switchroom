@@ -1,37 +1,18 @@
 ---
 name: switchroom-health
 description: >
-  Runs a health check and diagnostics on the switchroom setup. Use when the
-  user reports a generic failure or wants to verify everything is working
-  correctly, and answers the "what's wrong" question by checking the whole
-  stack (CLI, auth, units, files, memory).
-  Triggers on natural phrasings including: "Help me run a health check.",
-  "What's wrong with my agents, please.",
-  "Could you what's wrong with my agents for me?",
-  "I'd like to my agent keeps failing.", "Help me can you check my setup.",
-  "Can you something's wrong?", "hey, can you check my setup?",
-  "hey, something's wrong?", "any way to run a health check?",
-  and typo'd variants like "diagnose my switchroom setup",
-  "diagnose y switchroom setup", "my agets are broken".
-  Also fires on indirect signals like "things feel off", "the fleet is
-  sluggish", "my agents are acting weird", plus literal phrases:
-  'my agent keeps failing', 'my agents are broken', 'agent keeps crashing',
-  'health check', 'diagnose', 'troubleshoot', "something's wrong",
-  'can you check my setup'.
-  Prefer this over logs when the user is reporting a generic failure and
-  wants to know *what* is wrong, not *why* a specific crash happened.
-  Do NOT use for a per-agent uptime/listing snapshot (that's
-  `switchroom-status`), for restart/crash/interrupt actions (that's
-  `switchroom-runtime`), or for fresh install/setup (that's
-  `switchroom-install`). Do NOT use when the user's message begins with
-  "In switchroom (the CLI),"—that prefix is a HARD trigger for
-  `switchroom-cli` and ALWAYS wins over this skill, even if the body
-  asks "why did it crash", "what's wrong", "diagnose my setup", or
-  any other phrasing that would normally fire this health-check
-  skill. Examples that MUST route to `switchroom-cli` not here: "In
-  switchroom (the CLI), Can you why did it crash?", "In switchroom
-  (the CLI), what's wrong?", "In switchroom (the CLI), diagnose my
-  setup."
+  Use for diagnosing switchroom problems and running health checks across the
+  full stack. HARD PREFIX TRIGGER: any message starting with "For switchroom
+  doctor / health," — regardless of what follows — MUST use this skill
+  immediately. Beyond that prefix, use when the user: reports something is wrong
+  with agents, wants to verify their setup works, asks to diagnose or
+  troubleshoot, says agents are failing/broken/crashing/acting weird, or asks
+  "what's wrong" without a specific crash to investigate. Checks CLI, auth,
+  docker containers, agent files, bot tokens, and memory backend. Do NOT use
+  for: per-agent status/uptime listing (switchroom-status), restart or interrupt
+  actions (switchroom-runtime), or fresh installs (switchroom-install). Do NOT
+  use when message starts with "In switchroom (the CLI)," — that prefix always
+  routes to switchroom-cli, even if the body mentions diagnosis or errors.
 ---
 
 # Agent Health Diagnostics

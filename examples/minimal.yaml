@@ -1,10 +1,11 @@
 # switchroom.yaml — Minimal single-agent setup.
 # One bot, one agent, DM-only (no forum/topic routing).
 #
-# Tokens come from environment variables at setup time
-# (TELEGRAM_BOT_TOKEN for the first agent bot), then move into the
-# vault when setup completes. There is no `vault:`-prefixed token ref
-# in v0.8 — the vault-resolution shim isn't implemented yet.
+# `vault:telegram-bot-token` is the canonical way to reference the bot
+# token — `switchroom setup` stores your BotFather token in the vault
+# under that key and the runtime resolves it via the vault broker.
+# (For bootstrap before the vault exists, the wizard also accepts
+# TELEGRAM_BOT_TOKEN as an env-var fallback.)
 #
 # `forum_chat_id: "0"` is the DM-only sentinel used by v0.7+ — kept in
 # the schema for backwards compat with legacy forum-mode installs.
@@ -13,9 +14,7 @@ switchroom:
   version: 1
 
 telegram:
-  # Replaced by `switchroom setup` once you paste your BotFather token.
-  # Leave empty here; the wizard will route it through the vault.
-  bot_token: ""
+  bot_token: "vault:telegram-bot-token"
   forum_chat_id: "0"
 
 memory:

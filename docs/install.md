@@ -3,9 +3,9 @@
 Zero-to-first-message in ~15 minutes on a fresh Linux host. This is the
 canonical new-user guide. Follow it top to bottom.
 
-If you already have switchroom running and just want to update it, use
-[`switchroom update`](../README.md#operator-update--switchroom-update)
-instead.
+If you already have switchroom running and just want to update it, run
+`switchroom update` (pulls images, refreshes scaffolds, recreates
+containers).
 
 ## System requirements
 
@@ -174,9 +174,13 @@ agents, and MCP wireup, and prints actionable fixes.
 - **`env: 'bun': No such file or directory`** when running switchroom —
   bun didn't install. Re-run `sudo npm install -g bun`.
 - **`Cannot find module … examples/…`** on `switchroom setup` — you're
-  on switchroom < 0.8.2. Upgrade: `sudo npm install -g switchroom@latest`.
+  on an older switchroom whose npm package didn't ship the `examples/`
+  directory. Fixed on `main` after PR #1231; re-install once the next
+  release lands: `sudo npm install -g switchroom@latest`.
 - **`permission denied … /usr/local/lib/node_modules/switchroom/profiles/…`**
-  during setup — same as above; upgrade.
+  during setup — switchroom is trying to write to its own install dir.
+  Tracked work; see the install-validation follow-up that moves profile
+  rendering to a user-writable cache dir.
 - **Telegram bot doesn't reply** — `switchroom agent logs assistant -f`
   and `switchroom doctor`. The most common cause is OAuth not yet
   completed (`switchroom auth status`).

@@ -14,10 +14,7 @@ switchroom:
   skills_dir: ~/.switchroom/skills           # shared skill pool (symlinked per agent)
 
 telegram:
-  # `switchroom setup` writes the BotFather token into the vault and
-  # leaves this field empty — runtime resolves the token via vault.
-  # `vault:`-prefixed inline refs aren't implemented in v0.8.
-  bot_token: ""
+  bot_token: "vault:telegram-bot-token"
   # DM-only sentinel; v0.7+ defaults to per-agent DM-pair topology.
   # Legacy forum-mode installs keep a real chat id here.
   forum_chat_id: "0"

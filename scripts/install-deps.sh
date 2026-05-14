@@ -32,6 +32,12 @@ die()  { printf '%sx%s %s\n' "$RED" "$RESET" "$1" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# Wrap the body in a main() function so a partial curl-to-bash download
+# can't execute a half-script. Bash only starts running once the entire
+# function body parses successfully.
+
+main() {
+
 # Resolve the invoking user even when called via `sudo`. The bun install
 # writes to ~/.bun, which must end up in the operator's home, not /root.
 target_user="${SUDO_USER:-$(id -un)}"
@@ -62,10 +68,18 @@ if [ "$mem_int" -lt 4 ]; then
 fi
 
 # ---- preflight: disable unattended-upgrades during install ----
+#
+# Concurrent apt operations during heavy installs (especially nodejs's
+# 25+ MB of archives) have OOM-killed VMs in install-validation runs.
+# We stop the daemon for the duration and restart it on exit.
 
+UU_PAUSED=0
 if systemctl is-enabled unattended-upgrades 2>/dev/null | grep -q enabled; then
   log "Pausing unattended-upgrades for the duration of this install"
   systemctl stop unattended-upgrades 2>/dev/null || true
+  UU_PAUSED=1
+  # Restart on any exit path, success or failure.
+  trap '[ "$UU_PAUSED" = 1 ] && systemctl start unattended-upgrades 2>/dev/null || true' EXIT
 fi
 
 # ---- apt update + base tools ----
@@ -84,12 +98,17 @@ if have node; then
   if [ "$node_v" -ge 20 ]; then
     ok "node $(node --version) already installed"
   else
-    warn "node $(node --version) is too old (need 20.11+). Reinstalling."
-    apt-get install -y --no-install-recommends nodejs npm >/dev/null
+    # `apt-get install` against an already-installed package is a no-op —
+    # it won't upgrade you across major versions. Bail with explicit
+    # guidance rather than silently leaving the user on a broken setup.
+    die "node $(node --version) is too old (need 20.11+) and apt won't upgrade it in-place.
+   Remove it first (sudo apt-get purge nodejs npm) and re-run this script,
+   or install Node 20+ from NodeSource (https://github.com/nodesource/distributions)."
   fi
 else
   log "Installing node + npm from distro repo"
-  # Ubuntu 24.04+ ships node 22 in main; older distros may need NodeSource.
+  # Ubuntu 24.04 LTS / 26.04 ship node 22 in main; older distros need
+  # NodeSource — `die`d on above if the user has stale node already.
   apt-get install -y --no-install-recommends nodejs npm >/dev/null
   ok "node $(node --version) installed"
 fi
@@ -100,6 +119,11 @@ if have docker && docker compose version >/dev/null 2>&1; then
   ok "docker $(docker --version | awk '{print $3}' | tr -d ',') + compose v2 already installed"
 else
   log "Installing docker engine + compose v2 via get.docker.com"
+  # Docker's official convenience script doesn't publish a separate
+  # checksum file, so this is a trust-on-fetch download. The script
+  # itself is fetched over HTTPS from docker.com and is widely audited;
+  # operators with stricter requirements should follow the per-distro
+  # install guide at docs.docker.com instead.
   curl -fsSL https://get.docker.com -o /tmp/get-docker.sh
   sh /tmp/get-docker.sh >/dev/null
   rm -f /tmp/get-docker.sh
@@ -158,3 +182,7 @@ Versions:
   switchroom: $(switchroom --version 2>/dev/null || echo '?')
 
 NEXT
+
+} # end main
+
+main "$@"

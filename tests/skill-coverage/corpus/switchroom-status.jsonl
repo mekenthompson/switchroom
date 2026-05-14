@@ -1,18 +1,18 @@
-{"id":"80e00bfd3f64a5b3","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"Can you show me the fleet?","source":"paraphrase-template"}
-{"id":"56890b686ada4cf3","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"Let's how long has X been up.","source":"paraphrase-template"}
-{"id":"36744fc8f2479df5","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"I'd like to what's the uptime of each agent.","source":"paraphrase-template"}
-{"id":"88310367eade3159","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"Let's list switchroom agents.","source":"paraphrase-template"}
-{"id":"2f84e103804b76ab","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"Show me the fleet, please.","source":"paraphrase-template"}
-{"id":"ca6a45ae14c25de8","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"I need to how long has X been up.","source":"paraphrase-template"}
-{"id":"2bfe0a62f9760e59","targetSkill":"switchroom-status","kind":"typo","phrase":"per-agent  snapshot","source":"typo-rule"}
-{"id":"8654f2412292ae3f","targetSkill":"switchroom-status","kind":"typo","phrase":"per-agents napshot","source":"typo-rule"}
-{"id":"f63c8b61ac6bc50c","targetSkill":"switchroom-status","kind":"typo","phrase":"list swtchroom agents","source":"typo-rule"}
-{"id":"9cece3a536e21e3b","targetSkill":"switchroom-status","kind":"slang","phrase":"any way to list switchroom agents?","source":"slang-template"}
-{"id":"6446c932cfca1ed2","targetSkill":"switchroom-status","kind":"slang","phrase":"quick q — can i show me the fleet","source":"slang-template"}
-{"id":"72a104e548746a07","targetSkill":"switchroom-status","kind":"slang","phrase":"pls per-agent snapshot","source":"slang-template"}
-{"id":"bbd1b5abad27f87d","targetSkill":"switchroom-status","kind":"indirect","phrase":"how's the fleet doing","source":"indirect-template"}
-{"id":"b2888542a177fc64","targetSkill":"switchroom-status","kind":"indirect","phrase":"what's alive right now","source":"indirect-template"}
-{"id":"e46ab87eb5ffb900","targetSkill":"switchroom-status","kind":"indirect","phrase":"is anything running right now","source":"indirect-template"}
+{"id":"03c1ecdb2773c327","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"For switchroom fleet status, Can you show me the fleet?","source":"paraphrase-template"}
+{"id":"8e068561398da142","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"For switchroom fleet status, Let's how long has X been up.","source":"paraphrase-template"}
+{"id":"128a6ccf571687b7","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"For switchroom fleet status, I'd like to what's the uptime of each agent.","source":"paraphrase-template"}
+{"id":"3b7cb60387ed89b9","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"For switchroom fleet status, Let's list switchroom agents.","source":"paraphrase-template"}
+{"id":"880f55aac24b1fb6","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"For switchroom fleet status, Show me the fleet, please.","source":"paraphrase-template"}
+{"id":"8ff0c1e36c782db2","targetSkill":"switchroom-status","kind":"paraphrase","phrase":"For switchroom fleet status, I need to how long has X been up.","source":"paraphrase-template"}
+{"id":"91f0a19907dd7f8f","targetSkill":"switchroom-status","kind":"typo","phrase":"For switchroom fleet status, per-agent  snapshot","source":"typo-rule"}
+{"id":"099a4e5ae4c8c42e","targetSkill":"switchroom-status","kind":"typo","phrase":"For switchroom fleet status, per-agents napshot","source":"typo-rule"}
+{"id":"0ed634487ec27475","targetSkill":"switchroom-status","kind":"typo","phrase":"For switchroom fleet status, list swtchroom agents","source":"typo-rule"}
+{"id":"e5f2dbfc9816e513","targetSkill":"switchroom-status","kind":"slang","phrase":"For switchroom fleet status, any way to list switchroom agents?","source":"slang-template"}
+{"id":"64a7da500e97b8e5","targetSkill":"switchroom-status","kind":"slang","phrase":"For switchroom fleet status, quick q — can i show me the fleet","source":"slang-template"}
+{"id":"b011d8b7db9cc79d","targetSkill":"switchroom-status","kind":"slang","phrase":"For switchroom fleet status, pls per-agent snapshot","source":"slang-template"}
+{"id":"68e0da4df0e722f7","targetSkill":"switchroom-status","kind":"indirect","phrase":"For switchroom fleet status, how's the fleet doing","source":"indirect-template"}
+{"id":"dad4a59915f0eb5e","targetSkill":"switchroom-status","kind":"indirect","phrase":"For switchroom fleet status, what's alive right now","source":"indirect-template"}
+{"id":"eda6a6ac83b09c4e","targetSkill":"switchroom-status","kind":"indirect","phrase":"For switchroom fleet status, is anything running right now","source":"indirect-template"}
 {"id":"842dae820114650a","targetSkill":null,"kind":"negative","phrase":"show me the logs","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-cli"}
 {"id":"85ad14d64092e3ec","targetSkill":null,"kind":"negative","phrase":"run a health check","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-health"}
 {"id":"beba76aa860bd8fc","targetSkill":null,"kind":"negative","phrase":"what version is running","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-cli"}

@@ -1,14 +1,14 @@
-{"id":"c5740f7afc2968e6","targetSkill":"telegram-test-harness","kind":"paraphrase","phrase":"Let's write a telegram test.","source":"paraphrase-template"}
-{"id":"c0f02f4aaa8c7519","targetSkill":"telegram-test-harness","kind":"paraphrase","phrase":"Mock the bot api, please.","source":"paraphrase-template"}
-{"id":"3e4f60d8740c7e2e","targetSkill":"telegram-test-harness","kind":"paraphrase","phrase":"Write a telegram regression test, please.","source":"paraphrase-template"}
-{"id":"1d9f8cc253191425","targetSkill":"telegram-test-harness","kind":"paraphrase","phrase":"Test pin behavior, please.","source":"paraphrase-template"}
-{"id":"34cbc673fa0ef366","targetSkill":"telegram-test-harness","kind":"paraphrase","phrase":"Could you mock the bot api for me?","source":"paraphrase-template"}
-{"id":"27ff0718f996d2ca","targetSkill":"telegram-test-harness","kind":"typo","phrase":"mock he bot api","source":"typo-rule"}
-{"id":"10a32c79ff8c64e3","targetSkill":"telegram-test-harness","kind":"typo","phrase":"test what usesr see in chat","source":"typo-rule"}
-{"id":"d273c65897853c17","targetSkill":"telegram-test-harness","kind":"typo","phrase":"test the prgoress card","source":"typo-rule"}
-{"id":"ead15b23370073a7","targetSkill":"telegram-test-harness","kind":"slang","phrase":"hey, mock the bot api?","source":"slang-template"}
-{"id":"5557a5af836c73cc","targetSkill":"telegram-test-harness","kind":"slang","phrase":"hey, test bot interactions?","source":"slang-template"}
-{"id":"795957581edef57f","targetSkill":"telegram-test-harness","kind":"slang","phrase":"hey, test telegram?","source":"slang-template"}
-{"id":"7e214ee0a0d7004b","targetSkill":"telegram-test-harness","kind":"indirect","phrase":"something is going on with telegram-test-harness","source":"indirect-template"}
-{"id":"0922e0f1231c1bc1","targetSkill":"telegram-test-harness","kind":"indirect","phrase":"the telegram-test-harness thing is weird","source":"indirect-template"}
-{"id":"b76af9e075daafa9","targetSkill":"telegram-test-harness","kind":"indirect","phrase":"can you take a look at the telegram-test-harness situation","source":"indirect-template"}
+{"id":"c42936c61f316447","targetSkill":"telegram-test-harness","kind":"paraphrase","phrase":"For switchroom telegram-plugin testing, Let's write a telegram test.","source":"paraphrase-template"}
+{"id":"67ebd354c29d056c","targetSkill":"telegram-test-harness","kind":"paraphrase","phrase":"For switchroom telegram-plugin testing, Mock the bot api, please.","source":"paraphrase-template"}
+{"id":"ffea993e13a71afb","targetSkill":"telegram-test-harness","kind":"paraphrase","phrase":"For switchroom telegram-plugin testing, Write a telegram regression test, please.","source":"paraphrase-template"}
+{"id":"bc9c639e06a70667","targetSkill":"telegram-test-harness","kind":"paraphrase","phrase":"For switchroom telegram-plugin testing, Test pin behavior, please.","source":"paraphrase-template"}
+{"id":"80faa6b4bee0ab22","targetSkill":"telegram-test-harness","kind":"paraphrase","phrase":"For switchroom telegram-plugin testing, Could you mock the bot api for me?","source":"paraphrase-template"}
+{"id":"3f14d53e2084594b","targetSkill":"telegram-test-harness","kind":"typo","phrase":"For switchroom telegram-plugin testing, mock he bot api","source":"typo-rule"}
+{"id":"b10d83759f10beec","targetSkill":"telegram-test-harness","kind":"typo","phrase":"For switchroom telegram-plugin testing, test what usesr see in chat","source":"typo-rule"}
+{"id":"55f86b58ae2b3012","targetSkill":"telegram-test-harness","kind":"typo","phrase":"For switchroom telegram-plugin testing, test the prgoress card","source":"typo-rule"}
+{"id":"5c98cbdc5a5ec7b1","targetSkill":"telegram-test-harness","kind":"slang","phrase":"For switchroom telegram-plugin testing, hey, mock the bot api?","source":"slang-template"}
+{"id":"9c9c82230380f57e","targetSkill":"telegram-test-harness","kind":"slang","phrase":"For switchroom telegram-plugin testing, hey, test bot interactions?","source":"slang-template"}
+{"id":"5d39cb5d1807b051","targetSkill":"telegram-test-harness","kind":"slang","phrase":"For switchroom telegram-plugin testing, hey, test telegram?","source":"slang-template"}
+{"id":"3a1496b0ab8645c9","targetSkill":"telegram-test-harness","kind":"indirect","phrase":"For switchroom telegram-plugin testing, something is going on with telegram-test-harness","source":"indirect-template"}
+{"id":"766ebc16a5a3cdd5","targetSkill":"telegram-test-harness","kind":"indirect","phrase":"For switchroom telegram-plugin testing, the telegram-test-harness thing is weird","source":"indirect-template"}
+{"id":"890228272446a073","targetSkill":"telegram-test-harness","kind":"indirect","phrase":"For switchroom telegram-plugin testing, can you take a look at the telegram-test-harness situation","source":"indirect-template"}

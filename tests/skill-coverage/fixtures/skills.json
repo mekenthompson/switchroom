@@ -24,7 +24,8 @@
         "standardize pipelines across teams"
       ],
       "negatives": [],
-      "adjacent_skills": ["buildkite-cli", "buildkite-pipelines", "buildkite-api"]
+      "adjacent_skills": ["buildkite-cli", "buildkite-pipelines", "buildkite-api"],
+      "context_prefix": "In Buildkite cluster admin, "
     },
     {
       "id": "buildkite-agent-runtime",
@@ -45,7 +46,8 @@
         "debug environment variables in hooks"
       ],
       "negatives": [],
-      "adjacent_skills": ["buildkite-pipelines", "buildkite-cli", "buildkite-secure-delivery"]
+      "adjacent_skills": ["buildkite-pipelines", "buildkite-cli", "buildkite-secure-delivery"],
+      "context_prefix": "Inside a Buildkite step, "
     },
     {
       "id": "buildkite-api",
@@ -66,7 +68,8 @@
         "authenticate with the Buildkite API"
       ],
       "negatives": [],
-      "adjacent_skills": ["buildkite-cli", "buildkite-agent-infrastructure"]
+      "adjacent_skills": ["buildkite-cli", "buildkite-agent-infrastructure"],
+      "context_prefix": "Calling the Buildkite REST/GraphQL API, "
     },
     {
       "id": "buildkite-cli",
@@ -90,7 +93,8 @@
         "interact with Buildkite from the command line"
       ],
       "negatives": [],
-      "adjacent_skills": ["buildkite-pipelines", "buildkite-api", "buildkite-agent-infrastructure"]
+      "adjacent_skills": ["buildkite-pipelines", "buildkite-api", "buildkite-agent-infrastructure"],
+      "context_prefix": "Using the Buildkite CLI, "
     },
     {
       "id": "buildkite-migration",
@@ -112,7 +116,8 @@
         "what's the Buildkite equivalent of"
       ],
       "negatives": [],
-      "adjacent_skills": ["buildkite-cli", "buildkite-pipelines"]
+      "adjacent_skills": ["buildkite-cli", "buildkite-pipelines"],
+      "context_prefix": "Migrating to Buildkite, "
     },
     {
       "id": "buildkite-pipelines",
@@ -135,7 +140,8 @@
         "work with artifacts in pipeline YAML"
       ],
       "negatives": [],
-      "adjacent_skills": ["buildkite-agent-runtime", "buildkite-cli", "buildkite-test-engine"]
+      "adjacent_skills": ["buildkite-agent-runtime", "buildkite-cli", "buildkite-test-engine"],
+      "context_prefix": "In a Buildkite pipeline.yml, "
     },
     {
       "id": "buildkite-secure-delivery",
@@ -156,7 +162,8 @@
         "secure the supply chain"
       ],
       "negatives": [],
-      "adjacent_skills": ["buildkite-agent-runtime", "buildkite-pipelines"]
+      "adjacent_skills": ["buildkite-agent-runtime", "buildkite-pipelines"],
+      "context_prefix": "For Buildkite OIDC/SLSA, "
     },
     {
       "id": "buildkite-test-engine",
@@ -177,7 +184,8 @@
         "reduce flaky test failures"
       ],
       "negatives": [],
-      "adjacent_skills": ["buildkite-pipelines"]
+      "adjacent_skills": ["buildkite-pipelines"],
+      "context_prefix": "Using Buildkite Test Engine, "
     },
     {
       "id": "docx",
@@ -204,7 +212,8 @@
         "Google Docs",
         "general coding tasks"
       ],
-      "adjacent_skills": ["pdf", "xlsx", "pptx"]
+      "adjacent_skills": ["pdf", "xlsx", "pptx"],
+      "context_prefix": "For my Word .docx document, "
     },
     {
       "id": "file-bug",
@@ -224,7 +233,8 @@
         "thin descriptions",
         "mid-debugging speculative tickets"
       ],
-      "adjacent_skills": ["switchroom-health", "switchroom-cli"]
+      "adjacent_skills": ["switchroom-health", "switchroom-cli"],
+      "context_prefix": "For filing a GitHub bug report, "
     },
     {
       "id": "humanizer",
@@ -243,7 +253,8 @@
         "remove the rule of three"
       ],
       "negatives": [],
-      "adjacent_skills": ["humanizer-calibrate"]
+      "adjacent_skills": ["humanizer-calibrate"],
+      "context_prefix": "To humanize my writing style, "
     },
     {
       "id": "humanizer-calibrate",
@@ -277,7 +288,8 @@
         "write an MCP server for"
       ],
       "negatives": [],
-      "adjacent_skills": ["skill-creator"]
+      "adjacent_skills": ["skill-creator"],
+      "context_prefix": "For building an MCP server, "
     },
     {
       "id": "pdf",
@@ -298,7 +310,8 @@
         "create a PDF from scratch"
       ],
       "negatives": [],
-      "adjacent_skills": ["docx", "xlsx"]
+      "adjacent_skills": ["docx", "xlsx"],
+      "context_prefix": "For this PDF, "
     },
     {
       "id": "pptx",
@@ -317,7 +330,8 @@
         "work from a slide template"
       ],
       "negatives": [],
-      "adjacent_skills": ["docx", "pdf"]
+      "adjacent_skills": ["docx", "pdf"],
+      "context_prefix": "For my PowerPoint deck, "
     },
     {
       "id": "skill-creator",
@@ -390,7 +404,8 @@
         "bootstrap switchroom on a fresh machine",
         "something is broken diagnostics"
       ],
-      "adjacent_skills": ["switchroom-health", "switchroom-manage", "switchroom-install", "switchroom-status"]
+      "adjacent_skills": ["switchroom-health", "switchroom-manage", "switchroom-install", "switchroom-status"],
+      "context_prefix": "In switchroom (the CLI), "
     },
     {
       "id": "switchroom-health",
@@ -412,7 +427,8 @@
       "negatives": [
         "specific crash logs (use switchroom-cli)"
       ],
-      "adjacent_skills": ["switchroom-cli", "file-bug"]
+      "adjacent_skills": ["switchroom-cli", "file-bug"],
+      "context_prefix": "For switchroom doctor / health, "
     },
     {
       "id": "switchroom-install",
@@ -432,7 +448,8 @@
       "negatives": [
         "managing existing agents"
       ],
-      "adjacent_skills": ["switchroom-manage", "switchroom-architecture"]
+      "adjacent_skills": ["switchroom-manage", "switchroom-architecture"],
+      "context_prefix": "For switchroom setup, "
     },
     {
       "id": "switchroom-manage",
@@ -453,7 +470,8 @@
       "negatives": [
         "bootstrap switchroom itself (use switchroom-install)"
       ],
-      "adjacent_skills": ["switchroom-install", "switchroom-status"]
+      "adjacent_skills": ["switchroom-install", "switchroom-status"],
+      "context_prefix": "In switchroom agent management, "
     },
     {
       "id": "switchroom-runtime",
@@ -479,7 +497,8 @@
         "MCP tool questions",
         "persona / Execution-Bias rules"
       ],
-      "adjacent_skills": ["file-bug", "switchroom-cli"]
+      "adjacent_skills": ["file-bug", "switchroom-cli"],
+      "context_prefix": "For switchroom runtime hand-offs, "
     },
     {
       "id": "switchroom-status",
@@ -499,7 +518,8 @@
         "version/health summary (use switchroom-cli)",
         "something is broken (use switchroom-health)"
       ],
-      "adjacent_skills": ["switchroom-cli", "switchroom-health"]
+      "adjacent_skills": ["switchroom-cli", "switchroom-health"],
+      "context_prefix": "For switchroom fleet status, "
     },
     {
       "id": "telegram-test-harness",
@@ -521,7 +541,8 @@
         "write a telegram regression test"
       ],
       "negatives": [],
-      "adjacent_skills": []
+      "adjacent_skills": [],
+      "context_prefix": "For switchroom telegram-plugin testing, "
     },
     {
       "id": "token-helpers",
@@ -551,7 +572,8 @@
         "spin up a local server and test it"
       ],
       "negatives": [],
-      "adjacent_skills": []
+      "adjacent_skills": [],
+      "context_prefix": "For browser-based webapp testing with Playwright, "
     },
     {
       "id": "xlsx",
@@ -577,7 +599,8 @@
         "database pipelines",
         "Google Sheets API"
       ],
-      "adjacent_skills": ["docx", "pdf"]
+      "adjacent_skills": ["docx", "pdf"],
+      "context_prefix": "For my Excel spreadsheet, "
     }
   ]
 }

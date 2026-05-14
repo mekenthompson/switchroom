@@ -1,17 +1,17 @@
-{"id":"f5ec1301b2e9abf2","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Get or update a step attribute, please.","source":"paraphrase-template"}
-{"id":"57b6365ac141458c","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Please upload artifacts from a step.","source":"paraphrase-template"}
-{"id":"b5803cebdad83be5","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Help me add an annotation.","source":"paraphrase-template"}
-{"id":"a7fd9ab000869b11","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Please add an annotation.","source":"paraphrase-template"}
-{"id":"5bd5530a1d8756d2","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Could you upload pipeline dynamically for me?","source":"paraphrase-template"}
-{"id":"541cb7ce87386bdb","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Help me request an OIDC token inside a step.","source":"paraphrase-template"}
-{"id":"a94bc55318b41ecb","targetSkill":"buildkite-agent-runtime","kind":"typo","phrase":"request an IDC token inside a step","source":"typo-rule"}
-{"id":"8f265169a7294199","targetSkill":"buildkite-agent-runtime","kind":"typo","phrase":"retrieve a custer secret at runtime","source":"typo-rule"}
-{"id":"25e618dff8eec20c","targetSkill":"buildkite-agent-runtime","kind":"slang","phrase":"pls acquire a distributed lock","source":"slang-template"}
-{"id":"3685aaf5daf34ff9","targetSkill":"buildkite-agent-runtime","kind":"slang","phrase":"gonna need to add an annotation","source":"slang-template"}
-{"id":"aaddabac759f066f","targetSkill":"buildkite-agent-runtime","kind":"slang","phrase":"quick q — can i get or update a step attribute","source":"slang-template"}
-{"id":"b60a535fb87dc61b","targetSkill":"buildkite-agent-runtime","kind":"indirect","phrase":"something is going on with buildkite-agent-runtime","source":"indirect-template"}
-{"id":"9deefee0354b3021","targetSkill":"buildkite-agent-runtime","kind":"indirect","phrase":"the buildkite-agent-runtime thing is weird","source":"indirect-template"}
-{"id":"2bde229e4c07dcda","targetSkill":"buildkite-agent-runtime","kind":"indirect","phrase":"can you take a look at the buildkite-agent-runtime situation","source":"indirect-template"}
+{"id":"5d0c82aca1a9e663","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Inside a Buildkite step, Get or update a step attribute, please.","source":"paraphrase-template"}
+{"id":"02422a0b2f249a4a","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Inside a Buildkite step, Please upload artifacts from a step.","source":"paraphrase-template"}
+{"id":"f9d85b8efb6fb651","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Inside a Buildkite step, Help me add an annotation.","source":"paraphrase-template"}
+{"id":"5b3bd03d6ace1f8f","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Inside a Buildkite step, Please add an annotation.","source":"paraphrase-template"}
+{"id":"37f86ab7fb4c7f7e","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Inside a Buildkite step, Could you upload pipeline dynamically for me?","source":"paraphrase-template"}
+{"id":"a207b22843f81021","targetSkill":"buildkite-agent-runtime","kind":"paraphrase","phrase":"Inside a Buildkite step, Help me request an OIDC token inside a step.","source":"paraphrase-template"}
+{"id":"ce72ae4dc40d3673","targetSkill":"buildkite-agent-runtime","kind":"typo","phrase":"Inside a Buildkite step, request an IDC token inside a step","source":"typo-rule"}
+{"id":"ef4004ddc9ca5e72","targetSkill":"buildkite-agent-runtime","kind":"typo","phrase":"Inside a Buildkite step, retrieve a custer secret at runtime","source":"typo-rule"}
+{"id":"8fd5b37a429ca719","targetSkill":"buildkite-agent-runtime","kind":"slang","phrase":"Inside a Buildkite step, pls acquire a distributed lock","source":"slang-template"}
+{"id":"fc4d75e2b410352b","targetSkill":"buildkite-agent-runtime","kind":"slang","phrase":"Inside a Buildkite step, gonna need to add an annotation","source":"slang-template"}
+{"id":"ad5fa03eac7655d9","targetSkill":"buildkite-agent-runtime","kind":"slang","phrase":"Inside a Buildkite step, quick q — can i get or update a step attribute","source":"slang-template"}
+{"id":"dea96cb7ee0f6e09","targetSkill":"buildkite-agent-runtime","kind":"indirect","phrase":"Inside a Buildkite step, something is going on with buildkite-agent-runtime","source":"indirect-template"}
+{"id":"e45cc27e95037ea8","targetSkill":"buildkite-agent-runtime","kind":"indirect","phrase":"Inside a Buildkite step, the buildkite-agent-runtime thing is weird","source":"indirect-template"}
+{"id":"bd63f468646c9d41","targetSkill":"buildkite-agent-runtime","kind":"indirect","phrase":"Inside a Buildkite step, can you take a look at the buildkite-agent-runtime situation","source":"indirect-template"}
 {"id":"2a3061c9e9a4fc2c","targetSkill":null,"kind":"negative","phrase":"add plugins","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-pipelines"}
 {"id":"164f970f3dea946a","targetSkill":null,"kind":"negative","phrase":"retry a build","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-cli"}
 {"id":"5bfd5a2a54cb2879","targetSkill":null,"kind":"negative","phrase":"publish to package registry","source":"negative-from-adjacent","expectedOtherSkill":"buildkite-secure-delivery"}

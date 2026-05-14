@@ -1,15 +1,15 @@
-{"id":"02d18942126fff9a","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"Please spin up a local server and test it.","source":"paraphrase-template"}
-{"id":"2210900d0f51dc48","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"I'd like to run a Playwright test.","source":"paraphrase-template"}
-{"id":"9792880f2a535c4d","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"Can you run a Playwright test?","source":"paraphrase-template"}
-{"id":"0bfc25f1daa4124c","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"Help me view browser logs.","source":"paraphrase-template"}
-{"id":"141f05fca87c7977","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"Help me spin up a local server and test it.","source":"paraphrase-template"}
-{"id":"1c65964ab71009d6","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"Let's spin up a local server and test it.","source":"paraphrase-template"}
-{"id":"1fcb4fd56f8bf688","targetSkill":"webapp-testing","kind":"typo","phrase":"run a Playwwright test","source":"typo-rule"}
-{"id":"2a0b3d90c814cb6f","targetSkill":"webapp-testing","kind":"typo","phrase":"capture a browesr screenshot","source":"typo-rule"}
-{"id":"6a8af1a0582fb57e","targetSkill":"webapp-testing","kind":"typo","phrase":"test a local web app","source":"typo-rule"}
-{"id":"d2dbe893fc669ed9","targetSkill":"webapp-testing","kind":"slang","phrase":"pls capture a browser screenshot","source":"slang-template"}
-{"id":"c8667fc1113d1601","targetSkill":"webapp-testing","kind":"slang","phrase":"any way to test the frontend?","source":"slang-template"}
-{"id":"3a35357adf2842a5","targetSkill":"webapp-testing","kind":"slang","phrase":"gonna need to test a local web app","source":"slang-template"}
-{"id":"2bf9a9bba9a12336","targetSkill":"webapp-testing","kind":"indirect","phrase":"something is going on with webapp-testing","source":"indirect-template"}
-{"id":"49e43a933e5fe440","targetSkill":"webapp-testing","kind":"indirect","phrase":"the webapp-testing thing is weird","source":"indirect-template"}
-{"id":"76673fa042847e5f","targetSkill":"webapp-testing","kind":"indirect","phrase":"can you take a look at the webapp-testing situation","source":"indirect-template"}
+{"id":"9f0104122b1d902a","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"For browser-based webapp testing with Playwright, Please spin up a local server and test it.","source":"paraphrase-template"}
+{"id":"976461024a3c480c","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"For browser-based webapp testing with Playwright, I'd like to run a Playwright test.","source":"paraphrase-template"}
+{"id":"f4fa67cac980746f","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"For browser-based webapp testing with Playwright, Can you run a Playwright test?","source":"paraphrase-template"}
+{"id":"1adf3bcafa8a85a3","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"For browser-based webapp testing with Playwright, Help me view browser logs.","source":"paraphrase-template"}
+{"id":"cc06849ac1129d9a","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"For browser-based webapp testing with Playwright, Help me spin up a local server and test it.","source":"paraphrase-template"}
+{"id":"3dda76f384e878a9","targetSkill":"webapp-testing","kind":"paraphrase","phrase":"For browser-based webapp testing with Playwright, Let's spin up a local server and test it.","source":"paraphrase-template"}
+{"id":"dc10f05402747324","targetSkill":"webapp-testing","kind":"typo","phrase":"For browser-based webapp testing with Playwright, run a Playwwright test","source":"typo-rule"}
+{"id":"3619bc2e3751e156","targetSkill":"webapp-testing","kind":"typo","phrase":"For browser-based webapp testing with Playwright, capture a browesr screenshot","source":"typo-rule"}
+{"id":"3995c6d1d1d28c0c","targetSkill":"webapp-testing","kind":"typo","phrase":"For browser-based webapp testing with Playwright, test a local web app","source":"typo-rule"}
+{"id":"5a45aa2d01c49a05","targetSkill":"webapp-testing","kind":"slang","phrase":"For browser-based webapp testing with Playwright, pls capture a browser screenshot","source":"slang-template"}
+{"id":"3347bf29f307fd3c","targetSkill":"webapp-testing","kind":"slang","phrase":"For browser-based webapp testing with Playwright, any way to test the frontend?","source":"slang-template"}
+{"id":"552ac71a47e4abff","targetSkill":"webapp-testing","kind":"slang","phrase":"For browser-based webapp testing with Playwright, gonna need to test a local web app","source":"slang-template"}
+{"id":"9731330234eb9245","targetSkill":"webapp-testing","kind":"indirect","phrase":"For browser-based webapp testing with Playwright, something is going on with webapp-testing","source":"indirect-template"}
+{"id":"cf9124f374521791","targetSkill":"webapp-testing","kind":"indirect","phrase":"For browser-based webapp testing with Playwright, the webapp-testing thing is weird","source":"indirect-template"}
+{"id":"87b4690f22c86835","targetSkill":"webapp-testing","kind":"indirect","phrase":"For browser-based webapp testing with Playwright, can you take a look at the webapp-testing situation","source":"indirect-template"}

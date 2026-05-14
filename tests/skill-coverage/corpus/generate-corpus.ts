@@ -314,6 +314,23 @@ export function generateForSkill(
 
   const triggers = skill.trigger_phrases.length > 0 ? skill.trigger_phrases : [skill.description];
 
+  /**
+   * Prepend the skill's `context_prefix` (if any) to a rule-generated
+   * phrase. Round-3 analysis (`scorecards/round-3.scorecard.md`)
+   * showed median F1=0.33: bare paraphrases like "Help me retry a
+   * build" lacked domain context, so the model answered
+   * conversationally instead of firing the Skill tool. The prefix
+   * resupplies that context cheaply. Negative controls are NEVER
+   * prefixed — they're drawn from adjacent-skill triggers to test
+   * cross-skill confusion, and a prefix would defeat the test.
+   * Author-curated seed-yaml probes are also left alone (callers
+   * who write seeds opt out of this behaviour by construction).
+   */
+  const withPrefix = (phrase: string): string => {
+    if (!skill.context_prefix) return phrase;
+    return `${skill.context_prefix}${phrase}`;
+  };
+
   // Curated seeds get prepended for each category; they take priority
   // and are deduped against the rule-based variants below.
   const yaml = loadSeedYaml(skill.id);
@@ -356,7 +373,7 @@ export function generateForSkill(
     push({
       targetSkill: skill.id,
       kind: "paraphrase",
-      phrase: tmpl(trigger),
+      phrase: withPrefix(tmpl(trigger)),
       source: "paraphrase-template",
     });
   }
@@ -368,7 +385,7 @@ export function generateForSkill(
     push({
       targetSkill: skill.id,
       kind: "typo",
-      phrase: rule(trigger),
+      phrase: withPrefix(rule(trigger)),
       source: "typo-rule",
     });
   }
@@ -380,7 +397,7 @@ export function generateForSkill(
     push({
       targetSkill: skill.id,
       kind: "slang",
-      phrase: tmpl(trigger),
+      phrase: withPrefix(tmpl(trigger)),
       source: "slang-template",
     });
   }
@@ -397,7 +414,7 @@ export function generateForSkill(
     push({
       targetSkill: skill.id,
       kind: "indirect",
-      phrase,
+      phrase: withPrefix(phrase),
       source: "indirect-template",
     });
   }

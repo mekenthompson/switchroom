@@ -1,17 +1,17 @@
-{"id":"754b1b980b3485cd","targetSkill":"switchroom-runtime","kind":"paraphrase","phrase":"Why did you restart, please.","source":"paraphrase-template"}
-{"id":"9fce03095cf54cd5","targetSkill":"switchroom-runtime","kind":"paraphrase","phrase":"I'd like to you went away.","source":"paraphrase-template"}
-{"id":"c8a42c5620b1c88a","targetSkill":"switchroom-runtime","kind":"paraphrase","phrase":"Let's can I stop you mid-turn.","source":"paraphrase-template"}
-{"id":"4898ad53526c8cc2","targetSkill":"switchroom-runtime","kind":"paraphrase","phrase":"I'd like to why did you restart.","source":"paraphrase-template"}
-{"id":"641e2b6b166d834b","targetSkill":"switchroom-runtime","kind":"paraphrase","phrase":"Can you still there??","source":"paraphrase-template"}
-{"id":"d4bafdaa3237f40a","targetSkill":"switchroom-runtime","kind":"typo","phrase":"anyupdate?","source":"typo-rule"}
-{"id":"07ff414eaad4078c","targetSkill":"switchroom-runtime","kind":"typo","phrase":"how do I interrupt you","source":"typo-rule"}
-{"id":"d40ba4fd4c1b680b","targetSkill":"switchroom-runtime","kind":"typo","phrase":"stil there?","source":"typo-rule"}
-{"id":"1491d8f17faeeba9","targetSkill":"switchroom-runtime","kind":"slang","phrase":"gonna need to still there?","source":"slang-template"}
-{"id":"03855c4e5407827a","targetSkill":"switchroom-runtime","kind":"slang","phrase":"gonna need to how do I interrupt you","source":"slang-template"}
-{"id":"12aa1d0f423ed707","targetSkill":"switchroom-runtime","kind":"slang","phrase":"gonna need to any update?","source":"slang-template"}
-{"id":"8c81765159abf8d6","targetSkill":"switchroom-runtime","kind":"indirect","phrase":"the switchroom-runtime thing is weird","source":"indirect-template"}
-{"id":"ea88817e19fa0b4b","targetSkill":"switchroom-runtime","kind":"indirect","phrase":"can you take a look at the switchroom-runtime situation","source":"indirect-template"}
-{"id":"cf5b0bcf9ee91a28","targetSkill":"switchroom-runtime","kind":"indirect","phrase":"something is going on with switchroom-runtime","source":"indirect-template"}
+{"id":"fa68195ea5ecfd69","targetSkill":"switchroom-runtime","kind":"paraphrase","phrase":"For switchroom runtime hand-offs, Why did you restart, please.","source":"paraphrase-template"}
+{"id":"6a352e1fae1eb98b","targetSkill":"switchroom-runtime","kind":"paraphrase","phrase":"For switchroom runtime hand-offs, I'd like to you went away.","source":"paraphrase-template"}
+{"id":"7b2d8b651305ea15","targetSkill":"switchroom-runtime","kind":"paraphrase","phrase":"For switchroom runtime hand-offs, Let's can I stop you mid-turn.","source":"paraphrase-template"}
+{"id":"baaf645f25688ee3","targetSkill":"switchroom-runtime","kind":"paraphrase","phrase":"For switchroom runtime hand-offs, I'd like to why did you restart.","source":"paraphrase-template"}
+{"id":"782b4b987eaae1d4","targetSkill":"switchroom-runtime","kind":"paraphrase","phrase":"For switchroom runtime hand-offs, Can you still there??","source":"paraphrase-template"}
+{"id":"080610fabc265540","targetSkill":"switchroom-runtime","kind":"typo","phrase":"For switchroom runtime hand-offs, anyupdate?","source":"typo-rule"}
+{"id":"0d4bfa46776498c6","targetSkill":"switchroom-runtime","kind":"typo","phrase":"For switchroom runtime hand-offs, how do I interrupt you","source":"typo-rule"}
+{"id":"76bf35e9098ebfb6","targetSkill":"switchroom-runtime","kind":"typo","phrase":"For switchroom runtime hand-offs, stil there?","source":"typo-rule"}
+{"id":"357c2653ae6bea2b","targetSkill":"switchroom-runtime","kind":"slang","phrase":"For switchroom runtime hand-offs, gonna need to still there?","source":"slang-template"}
+{"id":"2cc15dfb17a55582","targetSkill":"switchroom-runtime","kind":"slang","phrase":"For switchroom runtime hand-offs, gonna need to how do I interrupt you","source":"slang-template"}
+{"id":"1d6d7579ebb03774","targetSkill":"switchroom-runtime","kind":"slang","phrase":"For switchroom runtime hand-offs, gonna need to any update?","source":"slang-template"}
+{"id":"3fd072ae49efcc38","targetSkill":"switchroom-runtime","kind":"indirect","phrase":"For switchroom runtime hand-offs, the switchroom-runtime thing is weird","source":"indirect-template"}
+{"id":"bf18f1d44f49aec8","targetSkill":"switchroom-runtime","kind":"indirect","phrase":"For switchroom runtime hand-offs, can you take a look at the switchroom-runtime situation","source":"indirect-template"}
+{"id":"53bdf51a372fcf10","targetSkill":"switchroom-runtime","kind":"indirect","phrase":"For switchroom runtime hand-offs, something is going on with switchroom-runtime","source":"indirect-template"}
 {"id":"804e347cfe9edb0a","targetSkill":null,"kind":"negative","phrase":"report this issue on GitHub","source":"negative-from-adjacent","expectedOtherSkill":"file-bug"}
 {"id":"532f5db97dcb9197","targetSkill":null,"kind":"negative","phrase":"apply my config changes","source":"negative-from-adjacent","expectedOtherSkill":"switchroom-cli"}
 {"id":"19c365e9f7fe2b96","targetSkill":null,"kind":"negative","phrase":"file a bug","source":"negative-from-adjacent","expectedOtherSkill":"file-bug"}

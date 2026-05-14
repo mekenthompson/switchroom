@@ -1,8 +1,15 @@
 # RFC E: Make Google Drive a real collaboration surface
 
-Status: Draft v2
+Status: Draft v3
 Author: Ken (with Claude pair-design)
 Date: 2026-05-14
+
+**v3 changes** (addressing PR #1227 review):
+- §3 dropped `extend-without-forking` JTBD claim (overstated — that JTBD is about adding new agents/skills/tools, not config-surface affordances inside an existing integration).
+- §4.5 added a third anchor primitive: text-snippet anchor (`after_line_containing: "..."` resolved by wrapper). Covers the 80% of real-world meeting-notes / draft-prose docs that have no headings without forcing a "agent must add headings first" hard contract.
+- §4.2 hardened the diff-preview against intent-lies (not just size-lies): wrapper-attested anchor name appears on the primary card, agent-supplied summary appears below it. User has wrapper truth to sanity-check the agent's framing against.
+- §6.3 added explicit acknowledgment that approval cards are the existing exception to the "chat IS the artifact" sub-principle, per RFC B §8.1 — preempt the next reviewer re-litigating it.
+- §9 added two risks: anchor-fragmentation (covered in §4.5 expansion) + summary-lies-about-intent variant.
 
 Prerequisites — both shipped:
 - **RFC B — Approval kernel** (`approval-kernel.md`) — landed v0.6.0 (#762).
@@ -85,12 +92,11 @@ what the agent is about to do *before* it touches their doc.
 
 ## 3. JTBD alignment
 
-- **`extend-without-forking.md`** — Granting an agent access to a
-  new folder is a tap, not a code change. Per-folder write grants
-  are a config-surface affordance, not an MCP-server fork.
 - **`share-auth-across-the-fleet.md`** — Drive OAuth = once per
   Google account. Adding a second agent that needs the same Drive
   doesn't re-prompt; the cascade resolves the shared vault slot.
+  (Note: this JTBD is the load-bearing one for **RFC G** — RFC E
+  inherits its OAuth posture but doesn't drive that JTBD by itself.)
 - **`talk-to-agents-from-anywhere.md`** — Folder browsing, write
   approvals with diff preview, deep-link to Drive, reconnect-on-
   token-revocation — every step is reachable from a phone. The
@@ -99,7 +105,10 @@ what the agent is about to do *before* it touches their doc.
 - **`know-what-my-agent-is-doing.md`** — The diff-preview-before-
   write pattern is the JTBD's "see every step" applied to mutations.
   The user never finds out the agent edited a doc by re-opening it
-  later.
+  later. The wrapper-attested anchor name on the diff-preview card
+  (§4.2) is the load-bearing detail that makes this JTBD honest —
+  without it, "see every step" reduces to "see whatever the agent
+  chose to summarize."
 
 ## 4. Scope — five pieces, all Drive
 
@@ -169,23 +178,39 @@ edits, etc.).
     `write` scope.
   - `gdrive_append_to_doc(doc_id, text)` — append; uses `write` (no
     Suggesting equivalent in the API for pure append).
-- Approval card for a suggestion edit:
+- Approval card for a suggestion edit (anchor + line-count are
+  **wrapper-attested**; summary is agent-supplied):
   ```
   ✏️ klanker wants to add to "Q3 Strategy Notes"
-  +47 lines · "Added Hiring section after 'Goals'"
+  📍 after heading 'Goals' (level 2)         ← wrapper, not agent
+  +47 lines / -0 lines                       ← wrapper, not agent
+  💬 "Added Hiring section after 'Goals'"     ← agent-supplied summary
   [ 📖 Open in Drive ]  [ ✅ Apply as suggestion ]
   [ ⚠ Apply directly ]  [ 🚫 Cancel ]
   ```
+  - **Wrapper-attested anchor name** sits on its own line above the
+    diff metrics, prefixed `📍`. The wrapper has just resolved the
+    anchor (per §4.5) so it knows the actual heading / line-snippet
+    / position the edit will land at — and surfaces it independently
+    of whatever the agent says in its summary. This is the
+    load-bearing detail that makes the JTBD `know-what-my-agent-is-
+    doing` honest for mutations: even if the agent's summary says
+    *"Added Hiring section"*, if the resolved anchor reads `📍 after
+    heading 'Goals'` and the edit actually lands in Goals, the user
+    sees the truth.
+  - **Wrapper-attested diff metrics** (`+47 / -0 lines`) — the
+    wrapper computes these from the proposed edit relative to the
+    current doc state. Agent cannot lie about size.
+  - **Agent-supplied summary** (`💬 "..."`) is the agent's
+    explanation of *why*, not *what* — the wrapper-attested anchor
+    and metrics already cover *what*. Audit row stores both for
+    post-hoc review of agent intent vs. wrapper truth.
   - Primary action is **Apply as suggestion** — single tap, lands
     as a Drive Suggestion the user reviews in Drive's UI.
   - **Apply directly** is a secondary, badged with `⚠`. Standing
     direct-write grants are opt-in via expand only — never on the
     primary card row.
   - **Open in Drive** is always present. See §4.3.
-- Diff summary (`+47 lines · "..."`) is best-effort: render
-  line-counts always, render the agent-supplied "what changed"
-  string if present (the agent passes a `summary` param to the
-  suggest tool).
 - Audit row records `action: suggest` or `action: write` so
   `/approvals stats` separates collaboration traffic from outright
   writes.
@@ -248,20 +273,55 @@ needs an anchor model that's robust enough for an agent to use.
 Naive "insert after byte offset N" breaks the moment the doc
 shifts.
 
-**Design:**
+**Three anchor types, in priority order:**
 
-- Anchors are **heading-based**, not byte-offset-based. The agent
-  passes `anchor: { after_heading: "Goals", level: 2 }` or
-  `anchor: { append_to_section: "Hiring", level: 2 }`.
-- The wrapper resolves anchors against the current doc state at
-  edit-time (via `documents.get` → walk the structural tree).
-- If the anchor doesn't resolve (heading was renamed, deleted),
-  the edit is rejected at the wrapper layer with a clear error
-  the agent surfaces back: *"⚠ Couldn't find heading 'Goals' in
-  current doc. Want me to suggest a heading-by-heading rewrite,
-  or pick a different anchor?"*
-- For docs with no headings, the wrapper falls back to two anchor
-  modes: `at_start`, `at_end`. No silent guess at byte offsets.
+1. **Heading-based** (preferred for headed docs):
+   ```
+   anchor: { after_heading: "Goals", level: 2 }
+   anchor: { append_to_section: "Hiring", level: 2 }
+   ```
+   Wrapper resolves against `documents.get` → structural tree
+   walk. If multiple headings match (`level` not specified or
+   ambiguous), the first match wins; agent can disambiguate by
+   adding `level` or `nth_match`.
+
+2. **Text-snippet anchor** (covers unheaded docs — meeting notes,
+   draft prose, the long tail):
+   ```
+   anchor: { after_line_containing: "we agreed to ship by Q3" }
+   anchor: { before_line_containing: "Action items:" }
+   anchor: { replace_line_matching: /TBD: hiring section/ }
+   ```
+   Wrapper resolves by walking paragraph-level text content,
+   matching the snippet (case-insensitive substring by default;
+   regex if the value is a `RegExp`-shaped object). If multiple
+   matches, the agent gets `MULTIPLE_MATCHES` with the first 3
+   surrounding-context excerpts and must pick one — no "first
+   wins" silent guess for snippets, because the user can't
+   visually verify which match the agent meant.
+
+3. **Document-position fallback** (last resort, for empty / very
+   short docs only):
+   ```
+   anchor: { at_start: true }
+   anchor: { at_end: true }
+   ```
+
+**Resolution failure** at any tier:
+
+- Heading not found → `HEADING_NOT_FOUND` with suggestion to
+  switch to a snippet anchor: *"⚠ Couldn't find heading 'Goals'.
+  Try `after_line_containing: \"...\"` or pick a different
+  anchor."*
+- Snippet not found / matches multiple → `SNIPPET_NOT_FOUND` or
+  `SNIPPET_AMBIGUOUS` with the actual match excerpts. Agent must
+  re-decide; no silent fallback to `at_end`.
+- All three resolved successfully → wrapper computes the
+  **resolved anchor name** that gets surfaced on the diff-preview
+  card per §4.2 (e.g. `'Goals' (heading)` or `line 47: "we agreed
+  to ship by Q3"` or `at end of doc`). This is the
+  wrapper-attested anchor the user sees — the agent cannot
+  override it.
 
 ## 5. Out of scope (this spec)
 
@@ -323,6 +383,30 @@ Per `reference/principles.md`, applied to this spec:
 - ✅ Same headed-doc model the user already lives in for any Drive
   doc; agent anchors mean what they look like they mean.
 
+**Sub-principle: "the chat IS the artifact" — explicit
+acknowledgment.** `principles.md` §3 sub-principle warns against
+adding new pinned cards / status bars / live widgets when the
+model could communicate naturally instead. The diff-preview
+approval card in §4.2 looks like a violation of that rule. It
+isn't, and the spec says so explicitly so the next reviewer
+doesn't have to re-litigate:
+
+> Approval cards are the existing exception per RFC B §8.1. The
+> rule is "build the model to communicate; let the framework be
+> the safety net, not the headline." Approvals are the framework
+> safety net for **mutations under operator authorization** —
+> they're the one place where the chat alone can't carry the
+> semantic weight (a tap is structurally different from a
+> message). The diff-preview card in §4.2 is the same primitive
+> RFC B §8.1 already established, applied to write-shaped
+> approvals; it does not introduce a new pinned-card-shaped
+> object. Open-in-Drive is an inline-keyboard button on the
+> existing card, not a separate widget. If the user taps "Apply
+> directly" repeatedly the model can still narrate ("you've
+> approved 6 direct writes today, want me to suggest instead?")
+> in chat — the card never replaces the chat as the source of
+> truth.
+
 ## 7. Migration / rollout
 
 All five pieces are scoped as **Phase 1 — Drive collab experience**.
@@ -369,18 +453,36 @@ shippable as four PRs (1a, 1b, 1c, 1d) for incremental review.
   a doc, pure append) have no Suggesting equivalent — those stay
   on the direct `write` scope. Document this clearly in the agent-
   facing tool descriptions so the agent picks the right tool.
-- **Anchor robustness vs agent ergonomics.** Heading-based anchors
-  are robust against doc evolution but require docs to actually
-  have headings. For unheaded docs the fallback is `at_start` /
-  `at_end` only — agents working on unstructured notes will need
-  to add structure first or accept end-append as the only option.
-  Document this expectation in the prompt-pack for any agent that
-  uses Drive writes.
-- **Diff preview accuracy.** The "+47 lines · summary" preview is
-  agent-supplied. A misbehaving agent could under-state the diff
-  to pass approval. Mitigation: line-count comes from the wrapper
-  (not the agent), only the summary string is agent-supplied.
-  Audit row stores both for post-hoc review.
+- **Anchor type selection by the agent.** Three anchor types in
+  §4.5 (heading / snippet / position) means the agent has to pick
+  the right one. Wrong pick = `*_NOT_FOUND` error and a wasted
+  tool call, not user-visible damage — but it does add a class of
+  agent confusion. Mitigation: prompt-pack guidance + tool
+  descriptions explicitly call out the priority order (try
+  heading first, fall back to snippet, position only for
+  empty/very-short docs). After 3 wasted tool calls in a session
+  on the same doc, the wrapper returns the doc's structural tree
+  in the error response so the agent can re-plan from ground
+  truth instead of guessing again.
+- **Snippet anchor ambiguity in long docs.** A snippet that
+  appears multiple times forces the agent to pick a specific
+  match. In a long doc with repetitive structure (meeting notes
+  with a "Action items:" section in every entry), this becomes a
+  multi-round conversation. Mitigation: `MULTIPLE_MATCHES` error
+  returns the first 3 surrounding-context excerpts (per §4.5);
+  agent picks by `nth_match` index. Acceptable friction for the
+  collab loop; not a blocker.
+- **Diff preview — size lies and intent lies, separately
+  defended.** Two distinct attacks on the diff-preview card:
+  (a) *size lie* — agent claims `+5 lines` for a 47-line change;
+  (b) *intent lie* — agent's summary says "Added Hiring section"
+  but the edit lands in Goals. Mitigation: §4.2 surfaces both
+  the wrapper-attested anchor name (`📍 after heading 'Goals'`)
+  and the wrapper-attested line counts (`+47 / -0 lines`)
+  alongside the agent's summary, on the primary card row. User
+  has wrapper truth to sanity-check the agent's framing.
+  Audit row stores all three for post-hoc review of agent intent
+  vs. wrapper resolution.
 - **Folder picker cache invalidation.** 5-min cache is right for
   most users but wrong for someone reorganizing their Drive in the
   same window. Add a `[ ↻ Refresh ]` affordance on the picker card

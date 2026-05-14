@@ -4,6 +4,10 @@
 
 - **Removed: standalone foreman bot.** The `switchroom-foreman` standalone Telegram bot is gone — `telegram-plugin/foreman/`, the `switchroom setup --foreman` CLI verb, and the `~/.switchroom/foreman/` config dir are all deleted. Fleet-management slash commands are now handled by per-agent gateways on agents with `admin: true` in `switchroom.yaml` (the three-tier command model — see `docs/architecture.md`). The `role: "foreman"` schema flag is **unchanged** — it controls auto-installation of operator skills (`switchroom-install`, `switchroom-manage`, `switchroom-architecture`) and is orthogonal to the retired standalone bot.
 
+  Foreman commands intentionally **not** migrated to the admin-agent gateway (run them on the host instead):
+  - `/create-agent` and `/setup` — multi-turn agent-onboarding wizards. Use `switchroom agent add <name>` on the host.
+  - `/delete <agent>` — two-step destructive removal. Use `switchroom agent destroy <name>` on the host.
+
 ## v0.8.1 — SOUL.md fingerprint re-render (v0.8.0 follow-up)
 
 Single fix. The v0.8.0 voice consolidation (PR #1177) moved the canonical AI-tells ban-list into `SOUL.md` "Never", but `seedWorkspaceBootstrapFiles` was seeding workspace bootstrap files via `writeIfMissing`. Once an agent had a `SOUL.md`, the template was frozen forever — same failure shape as #1122 was for `CLAUDE.md` before that fix.

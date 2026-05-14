@@ -138,9 +138,40 @@ The wedge against OpenClaw and NanoClaw isn't the substrate — it's the stock `
 
 ## Install
 
-Runs on the box you already have. The supported production runtime is Linux + Docker (Ubuntu 24.04 LTS with 4GB RAM is the canonical target; other Linux distros work with minor tweaks). `switchroom apply` scaffolds every agent and writes a `docker-compose.yml` from your `switchroom.yaml`; you bring the fleet up yourself with `docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d`. Five published images on GHCR (`switchroom-base`, `switchroom-agent`, `switchroom-broker`, `switchroom-kernel`, `switchroom-scheduler`) — no `docker build` on the operator's host. macOS (Docker Desktop) works for development but is not yet release-validated.
+Runs on the box you already have. The supported production runtime is Linux + Docker. **Canonical target: Ubuntu 24.04 LTS with ≥4 GiB RAM** (8 GiB recommended once you run more than one agent). Other Debian-derivatives work with the same script; non-apt distros need a manual prereq install. macOS (Docker Desktop) works for development but is not yet release-validated.
+
+> **Full new-user walkthrough — [`docs/install.md`](docs/install.md).** Zero to first Telegram message in ~15 minutes. Includes the [BotFather walkthrough](docs/botfather-walkthrough.md). Read that first if you're installing from scratch.
 
 > **Heads up on the package name.** The npm package was originally `switchroom-ai`. It's now just `switchroom`. The old name is deprecated and will stop receiving updates — `npm install -g switchroom` is the current path.
+
+### Fresh Linux box — one script
+
+```bash
+curl -fsSL https://github.com/switchroom/switchroom/raw/main/scripts/install-deps.sh | sudo bash
+```
+
+Installs Docker Engine + Compose v2, Node.js 20.11+, Bun, and the `@anthropic-ai/claude-code` + `switchroom` CLIs. Idempotent. Adds the invoking user to the `docker` group. Tested on Ubuntu 24.04 LTS and 26.04 LTS. Warns (does not block) on hosts under 4 GiB RAM.
+
+Then log out and back in so the docker group takes effect, and:
+
+```bash
+switchroom setup                       # interactive: Telegram + vault + first agent
+switchroom setup --foreman             # optional: admin bot (fleet control via Telegram)
+switchroom auth login assistant        # OAuth into your Claude Pro or Max account
+switchroom apply                       # write ~/.switchroom/compose/docker-compose.yml
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
+```
+
+After the last command you talk to the agent from Telegram. You don't touch the server again.
+
+### Already have Docker + Node ≥ 20.11
+
+```bash
+sudo npm install -g bun @anthropic-ai/claude-code switchroom
+switchroom setup
+```
+
+`bun` is a hard runtime dep — the `switchroom` CLI's entrypoint is a Bun script. A Node-only CLI build is on the roadmap but not yet shipped.
 
 ### From inside Claude Code (the on-ramp)
 
@@ -154,51 +185,9 @@ If you already use Claude Code, this is the shortest path. Inside any session:
 
 `/switchroom:setup` walks you through deps, `switchroom setup` (Telegram + vault + first agent), and `switchroom agent start`. Day-to-day: `/switchroom:start`, `/switchroom:stop`, `/switchroom:status`. See [`docs/publishing.md`](docs/publishing.md).
 
-### One-liner (static binary)
+### Static binary (planned, not yet shipped)
 
-```bash
-curl -fsSL https://github.com/switchroom/switchroom/raw/main/install.sh | sh
-```
-
-Auto-detects your platform (linux / macos) and arch (amd64 / arm64), downloads the matching pre-built binary from the latest [GitHub release](https://github.com/switchroom/switchroom/releases/latest), verifies its SHA256, and drops it in `/usr/local/bin` (or `~/.local/bin` if not writable). Source is [`install.sh`](install.sh).
-
-The static binary still needs the `claude` CLI to run agents: `npm i -g @anthropic-ai/claude-code` (Node 20.11+).
-
-**Manual install** if you'd rather not pipe to sh:
-
-```bash
-# Pick the artifact for your platform/arch from the latest release page
-curl -fsSL -o switchroom https://github.com/switchroom/switchroom/releases/latest/download/switchroom-linux-amd64
-chmod +x switchroom
-sudo mv switchroom /usr/local/bin/
-```
-
-Replace `switchroom-linux-amd64` with `switchroom-linux-arm64`, `switchroom-macos-amd64`, or `switchroom-macos-arm64` as needed. Verify against `switchroom-checksums.txt` from the same release.
-
-**macOS Gatekeeper note.** Releases are not yet Apple-code-signed. After installing on macOS you may need to clear the quarantine xattr so the binary will run: `xattr -d com.apple.quarantine /usr/local/bin/switchroom`. The `install.sh` one-liner handles this automatically.
-
-**Mac (Sequoia+) one-time.** macOS 15 adds a second-stage notarization check that the `xattr` strip alone does not bypass — you may still see a Gatekeeper "cannot verify the developer" dialog the first time you run `switchroom`. `install.sh` attempts `sudo spctl --add /usr/local/bin/switchroom` automatically (best-effort, ignored if sudo isn't available). If the dialog still fires, run that `spctl --add` manually, or open System Settings → Privacy & Security → "Open Anyway" once.
-
-Then:
-
-```bash
-switchroom setup                                        # interactive Telegram wiring
-switchroom agent create coach --profile health-coach    # scaffold your first agent
-switchroom auth login coach                             # link your Pro or Max session
-switchroom apply                                        # write docker-compose.yml
-docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
-```
-
-After the last command you talk to the agent from Telegram. You don't touch the server again.
-
-### Already have node?
-
-```bash
-npm install -g @anthropic-ai/claude-code switchroom
-switchroom setup
-```
-
-Node 20.11+. `switchroom setup` is the interactive first-time wizard. Scaffolds config, handles Telegram wiring, sets up the vault.
+Pre-built single-binary releases (no Node or Bun required on the host) are scaffolded in [`install.sh`](install.sh) and referenced from the GitHub Releases page, but **the release workflow that publishes those binaries does not yet exist**. Until v0.9, use the one-script or npm paths above. Tracking work: switching the release pipeline to actually upload `switchroom-linux-{amd64,arm64}` and `switchroom-macos-{amd64,arm64}` on every tag.
 
 ### One-shot happy path (no wizard)
 
@@ -416,6 +405,8 @@ Overlay entries win on collision with built-in defaults. Unknown files that appe
 
 | Guide | Description |
 |---|---|
+| **[Install](docs/install.md)** | Zero-to-first-message new-user walkthrough |
+| **[BotFather walkthrough](docs/botfather-walkthrough.md)** | Step-by-step bot creation in Telegram |
 | **[Changelog](CHANGELOG.md)** | Release notes, every version |
 | **[Configuration](docs/configuration.md)** | Full field reference, cascade semantics, profiles |
 | **[Vault](docs/vault.md)** | Architecture, per-cron secrets, ACL, audit log, threat model |

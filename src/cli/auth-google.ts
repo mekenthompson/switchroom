@@ -473,34 +473,56 @@ function registerAccountAdd(accountParent: Command): void {
 }
 
 /**
- * Read a single line from stdin without echoing characters. Falls
- * back to a normal echoing read on terminals that don't support
- * setRawMode (CI, pipes). Mirrors the inline implementations in
- * drive.ts and telegram.ts — extraction to a shared module is a
- * separate cleanup PR.
+ * Read a single line from stdin without echoing characters. Mirrors
+ * the inline implementations in drive.ts:121 and telegram.ts:584
+ * exactly — manual `'data'` accumulation under setRawMode (so
+ * keystrokes never reach stdout), `rl.question(prompt, …)` fallback
+ * for the non-TTY/pipe case where echo isn't a concern.
+ *
+ * Extraction of the three duplicates into a shared module is its own
+ * cleanup PR (would touch unrelated callsites).
  */
 async function readHiddenLine(prompt: string): Promise<string> {
-  const readline = await import("node:readline");
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
-  process.stdout.write(prompt);
-  const stdin = process.stdin as unknown as {
-    setRawMode?: (b: boolean) => void;
-  };
-  if (typeof stdin.setRawMode === "function") {
-    stdin.setRawMode(true);
-  }
-  return await new Promise((resolve) => {
-    rl.question("", (answer: string) => {
-      if (typeof stdin.setRawMode === "function") {
-        stdin.setRawMode(false);
-      }
-      process.stdout.write("\n");
-      rl.close();
-      resolve(answer);
+  const { createInterface } = await import("node:readline");
+  return await new Promise<string>((resolve, reject) => {
+    const rl = createInterface({
+      input: process.stdin,
+      output: process.stdout,
     });
+    if (process.stdin.isTTY) {
+      process.stdout.write(prompt);
+      const stdin = process.stdin;
+      stdin.setRawMode(true);
+      stdin.resume();
+      let input = "";
+      const onData = (data: Buffer) => {
+        const char = data.toString("utf8");
+        if (char === "\n" || char === "\r") {
+          stdin.setRawMode(false);
+          stdin.removeListener("data", onData);
+          rl.close();
+          process.stdout.write("\n");
+          resolve(input);
+        } else if (char === "") {
+          // Ctrl-C
+          stdin.setRawMode(false);
+          stdin.removeListener("data", onData);
+          rl.close();
+          process.stdout.write("\n");
+          reject(new Error("Aborted"));
+        } else if (char === "" || char === "\b") {
+          if (input.length > 0) input = input.slice(0, -1);
+        } else {
+          input += char;
+        }
+      };
+      stdin.on("data", onData);
+    } else {
+      rl.question(prompt, (answer) => {
+        rl.close();
+        resolve(answer);
+      });
+    }
   });
 }
 
@@ -537,49 +559,37 @@ function registerAccountList(accountParent: Command): void {
   accountParent
     .command("list")
     .description(
-      "List Google accounts known to the auth-broker. Distinct from `auth google list` (which shows the YAML google_accounts × agents matrix).",
+      "List Google accounts stored in the auth-broker. Distinct from `auth google list` (which shows the YAML google_accounts × agents matrix).",
     )
     .option("--json", "Emit raw JSON instead of a table")
     .action(
-      withConfigError(async (opts: { json?: boolean }) => {
-        const { brokerCall } = await import("./broker-call.js");
-        // Phase 3b.3 — broker doesn't yet surface per-provider lists.
-        // For Google specifically the broker doesn't yet store accounts
-        // (Phase 3b.2c lands the storage path); the call below succeeds
-        // but only Anthropic accounts come back in `state.accounts`.
-        // Verb is scoped to Google — we DON'T leak Anthropic state into
-        // the output. JSON mode emits an empty list with the deferral
-        // note; human mode prints the deferral + a pointer at the
-        // sibling `auth google list` for the YAML matrix view.
-        await brokerCall(async (client) => {
-          // Trip the broker connection (validates the socket is
-          // reachable) but discard the Anthropic-only result — Google
-          // listing lands in Phase 3b.2c.
-          await client.listState();
-        });
-        if (opts.json) {
-          console.log(
-            JSON.stringify(
-              {
-                google_accounts: [],
-                note: "Phase 3b.2c will surface Google accounts stored in the broker. Today the broker stores Anthropic only; this verb returns an empty list.",
-              },
-              null,
-              2,
-            ),
-          );
-          return;
-        }
-        console.log();
-        console.log(
-          chalk.gray(
-            `  Google accounts surfaced via the broker land in Phase 3b.2c.`,
+      withConfigError(async (_opts: { json?: boolean }) => {
+        // The broker stores Google credentials per-account today
+        // (#1272 / opGoogleAddAccount → google-storage.ts) but doesn't
+        // yet expose a `list-google-accounts` op. Rather than return
+        // a misleading empty list (which scripts would silently treat
+        // as "no accounts"), refuse with NOT_IMPLEMENTED + a pointer
+        // at the on-disk source of truth and the sibling YAML matrix
+        // verb. A `list-google-accounts` broker op + this verb's
+        // wiring is tracked as a follow-up.
+        console.error();
+        console.error(
+          chalk.yellow(
+            `  ⚠  \`auth google account list\` is not yet implemented — the broker has no list-google-accounts op.`,
           ),
         );
-        console.log(
-          `  For the YAML google_accounts × agents matrix, use: ${chalk.bold("switchroom auth google list")}`,
+        console.error();
+        console.error(`  To inspect Google accounts the broker holds:`);
+        console.error(
+          chalk.gray(`    ls ~/.switchroom/state/auth-broker/google/`),
         );
-        console.log();
+        console.error();
+        console.error(`  For the YAML google_accounts × agents matrix:`);
+        console.error(
+          chalk.cyan(`    switchroom auth google list`),
+        );
+        console.error();
+        process.exit(1);
       }),
     );
 }

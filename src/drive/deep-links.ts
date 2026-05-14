@@ -10,24 +10,25 @@
  *
  * No new auth needed — these are the same shareable URLs the user would
  * copy from Drive's "Share" dialog.
- *
- * Phase 1a ships the URL builders + tests. Wiring them onto the actual
- * approval-card inline-keyboard rows lives in the kernel/gateway code
- * (separate PR — touches `src/vault/approvals/kernel.ts` and
- * `telegram-plugin/gateway/gateway.ts` approval-card builders, both
- * substantial enough to warrant their own change).
  */
 
 /**
- * Drive file mime types that have first-class web UIs. Other mime types
- * (PDFs, images, .docx, etc.) get the generic `/file/d/<id>/view` URL.
+ * Drive surfaces that have first-class web UIs. Other mime types (PDFs,
+ * images, .docx, etc.) get the generic `/file/d/<id>/view` URL.
  */
-export type DriveDocKind = "doc" | "spreadsheet" | "presentation" | "form" | "drawing" | "file";
+export type DriveDocKind =
+  | "doc"
+  | "spreadsheet"
+  | "presentation"
+  | "form"
+  | "drawing"
+  | "folder"
+  | "file";
 
 /**
  * Map a Google Workspace mime type string to a DriveDocKind. Returns
  * "file" (the generic viewer) for anything we don't recognize as a
- * first-class Workspace doc.
+ * first-class Workspace surface.
  */
 export function classifyMimeType(mimeType: string | undefined): DriveDocKind {
   if (!mimeType) return "file";
@@ -42,6 +43,8 @@ export function classifyMimeType(mimeType: string | undefined): DriveDocKind {
       return "form";
     case "application/vnd.google-apps.drawing":
       return "drawing";
+    case "application/vnd.google-apps.folder":
+      return "folder";
     default:
       return "file";
   }
@@ -68,6 +71,13 @@ export interface OpenInDriveOptions {
    * as fileId.
    */
   discussionId?: string;
+  /**
+   * Treat the target as a folder regardless of mimeType. Used by the
+   * grant-confirmation card on `doc:gdrive:folder/<id>/**` scopes,
+   * where we only have the scope string and no `files.get` lookup
+   * has happened.
+   */
+  isFolder?: boolean;
 }
 
 /**
@@ -82,7 +92,8 @@ export function openInDriveUrl(options: OpenInDriveOptions): string {
   if (options.discussionId !== undefined) {
     validateDriveId(options.discussionId, "discussionId");
   }
-  const base = baseUrlFor(classifyMimeType(options.mimeType), options.fileId);
+  const kind = options.isFolder ? "folder" : classifyMimeType(options.mimeType);
+  const base = baseUrlFor(kind, options.fileId);
   if (options.discussionId !== undefined) {
     // `?disco=<id>` is Drive's documented discussion-thread anchor.
     // We append it as a query string so it survives the Workspace
@@ -105,6 +116,8 @@ function baseUrlFor(kind: DriveDocKind, fileId: string): string {
       return `https://docs.google.com/forms/d/${fileId}/edit`;
     case "drawing":
       return `https://docs.google.com/drawings/d/${fileId}/edit`;
+    case "folder":
+      return `https://drive.google.com/drive/folders/${fileId}`;
     case "file":
       return `https://drive.google.com/file/d/${fileId}/view`;
   }
@@ -133,10 +146,10 @@ function validateDriveId(id: string, fieldName: string): void {
 /**
  * Convenience builder for the common "render an inline-keyboard
  * button on an approval card" case. Returns the {text, url} pair the
- * Telegram bot library expects. Phase 1a callers (gateway approval-
- * card builders) construct InlineKeyboardButton objects directly from
- * this; the literal `📖 Open in Drive` text matches the RFC E §4.3
- * mockup.
+ * Telegram bot library expects. Callers (gateway approval-card
+ * builders, grant-confirmation edits) construct InlineKeyboardButton
+ * objects directly from this; the literal `📖 Open in Drive` text
+ * matches the RFC E §4.3 mockup.
  */
 export function openInDriveButton(
   options: OpenInDriveOptions,
@@ -145,4 +158,94 @@ export function openInDriveButton(
     text: "📖 Open in Drive",
     url: openInDriveUrl(options),
   };
+}
+
+/**
+ * Inspect a kernel `scope` string and, if it points at a specific Drive
+ * surface, return the {text, url} button pair for `[ 📖 Open in Drive ]`.
+ * Returns `null` for non-Drive scopes and for the whole-Drive globs
+ * (where there's no single artifact to deep-link to — the user can
+ * navigate from `[ 📂 Open my Drive ]` instead; see `myDriveButton`).
+ *
+ * Handles all three action namespaces — `read` (`doc:gdrive:…`),
+ * `suggest` (`doc:gdrive:suggest:…`), `write` (`doc:gdrive:write:…`) —
+ * because once the user has tapped Allow, the target artifact is the
+ * same in all three.
+ *
+ * Designed for the grant-confirmation card edit in
+ * `telegram-plugin/gateway/approval-callback.ts`: the kernel returns
+ * the scope alongside the consume result, this helper turns it into a
+ * keyboard button, or null if no button applies. Callers that have a
+ * mimeType (e.g. a diff-preview card with the file already fetched)
+ * should pass it via `mimeTypeHint` so doc/sheet/slide gets the right
+ * base URL; otherwise we infer from scope shape.
+ */
+export function scopeToOpenInDriveButton(
+  scope: string,
+  mimeTypeHint?: string,
+): { text: string; url: string } | null {
+  const parsed = parseDriveScope(scope);
+  if (parsed === null) return null;
+  if (parsed.target.kind === "all") return null;
+  if (parsed.target.kind === "folder") {
+    return openInDriveButton({ fileId: parsed.target.folder_id, isFolder: true });
+  }
+  return openInDriveButton({
+    fileId: parsed.target.doc_id,
+    mimeType: mimeTypeHint,
+  });
+}
+
+/**
+ * Whole-Drive equivalent of `openInDriveButton`. For onboarding /
+ * granted-Drive scopes like `doc:gdrive:**` where no specific artifact
+ * exists, surfacing a `[ 📂 Open my Drive ]` URL button is the closest
+ * useful affordance.
+ */
+export function myDriveButton(): { text: string; url: string } {
+  return {
+    text: "📂 Open my Drive",
+    url: "https://drive.google.com/drive/my-drive",
+  };
+}
+
+export type DriveScopeTarget =
+  | { kind: "all" }
+  | { kind: "folder"; folder_id: string }
+  | { kind: "doc"; doc_id: string };
+
+export interface DriveScope {
+  /** Action namespace per RFC E §4.2 + grants.ts. */
+  action: "read" | "suggest" | "write";
+  target: DriveScopeTarget;
+}
+
+/**
+ * Parse a kernel scope string into its action namespace + target. Returns
+ * `null` for anything that doesn't look like a Drive scope. Strict on
+ * id character set to prevent a malformed scope from rendering an unsafe
+ * URL — same `[A-Za-z0-9_-]+` rule as `validateDriveId`.
+ */
+export function parseDriveScope(scope: string): DriveScope | null {
+  if (!scope.startsWith("doc:gdrive:")) return null;
+  let rest = scope.slice("doc:gdrive:".length);
+  let action: DriveScope["action"] = "read";
+  if (rest.startsWith("write:")) {
+    action = "write";
+    rest = rest.slice("write:".length);
+  } else if (rest.startsWith("suggest:")) {
+    action = "suggest";
+    rest = rest.slice("suggest:".length);
+  }
+  if (rest === "**") return { action, target: { kind: "all" } };
+  if (rest.startsWith("folder/")) {
+    const tail = rest.slice("folder/".length);
+    if (!tail.endsWith("/**")) return null;
+    const folder_id = tail.slice(0, -"/**".length);
+    if (!/^[A-Za-z0-9_-]+$/.test(folder_id)) return null;
+    return { action, target: { kind: "folder", folder_id } };
+  }
+  // Single-doc form. Must be a bare id — no slashes, no glob.
+  if (!/^[A-Za-z0-9_-]+$/.test(rest)) return null;
+  return { action, target: { kind: "doc", doc_id: rest } };
 }

@@ -744,6 +744,26 @@ describe("generateCompose", () => {
     expect(block).toContain("/home/op/.switchroom/broker-operator:/run/switchroom/broker/operator");
   });
 
+  // auth-broker mirrors the vault-broker operator-socket contract under
+  // its own env var name (SWITCHROOM_AUTH_BROKER_OPERATOR_UID) so the
+  // host CLI's `switchroom auth …` verbs can reach the broker. Without
+  // this the operator-dir bind mount the generator already emits is
+  // unused dead weight and the broker never binds an operator listener.
+  it("emits SWITCHROOM_AUTH_BROKER_OPERATOR_UID on the auth-broker when operatorUid is set", () => {
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+      operatorUid: 1000,
+    });
+    const block = /switchroom-auth-broker:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toMatch(/SWITCHROOM_AUTH_BROKER_OPERATOR_UID:\s*"1000"/);
+  });
+
+  it("omits SWITCHROOM_AUTH_BROKER_OPERATOR_UID when operatorUid is not set (back-compat)", () => {
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const block = /switchroom-auth-broker:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).not.toContain("SWITCHROOM_AUTH_BROKER_OPERATOR_UID");
+  });
+
 });
 
 describe("agent service env (Phase 2c F2 — IPC wiring)", () => {

@@ -793,27 +793,45 @@ not a config-flag wiring exercise.)
 - [x] Phase 1 — Config block + tier knob + `drive:` alias — #1244
 - [x] Phase 2 — Per-account vault slot + per-agent ACL primitive — #1246
 - [x] Phase 3a — `auth google enable / disable / list` CLI — #1247
+- [x] Phase 3b.1 — Provider abstraction in auth-broker — #1259, #1262
+- [x] Phase 3b.2a — GoogleProvider implementation — #1264
+- [x] Phase 3b.2b — Register Google when config provides credentials — #1268
+- [x] Phase 3b.2c — Google credential storage in broker stateDir — #1270
+- [x] Phase 3b.2d — Google refresh-tick (production hardening) — #1275
+- [x] Phase 3b.3 — `auth google account add` real OAuth + broker register — #1274
+- [x] Phase 3b.4 — `get-credentials` op + per-agent ACL gate — #1272
+- [x] Phase 3b.4b — `wrapper-broker.ts` client-side helper — #1273
+- [x] Phase 3b.5 + 3b.6 — Legacy-slot detector + setup wizard pivot — #1271
+- [x] Phase 3b — `auth google account list` op + CLI verb — #1279
 - [x] Phase 4 — Setup wizard Step 11 — #1248
 - [x] Phase 5 — `examples/personal-google-workspace-mcp/` — #1245
-
-### Pending Phase 3b (post-RFC-H / #1254 merge)
-
-- [ ] Phase 3b.1 — Provider abstraction in auth-broker
-- [ ] Phase 3b.2 — Google provider implementation
-- [ ] Phase 3b.3 — `auth google account add / remove` CLI (blocks
-      on RFC H's CLI-writes-YAML-first contract — see §9)
-- [ ] Phase 3b.4 — MCP wrapper credential-read pivot to auth-broker UDS
-- [ ] Phase 3b.5 — Apply-time legacy-slot migration tool + hard-refusal
-- [ ] Phase 3b.6 — Setup wizard pivot in `setup.ts:stepGoogleWorkspace`
-- [ ] Cross-cutting — `docs/google-workspace.md` user guide
+- [x] Cross-cutting — `docs/google-workspace.md` user guide
 
 ### Pairs with
 
-- **RFC E (Drive collab loop)** — primitives merged: anchors (#1250),
-  diff-preview (#1252), deep-links (#1251), recovery detector (#1249).
-  Followups land the gateway/kernel wiring for those primitives.
-- **RFC H (`switchroom-auth-broker`)** — PR #1254. Phase 3b of
-  this RFC is a downstream consumer of RFC H's broker.
+- **RFC E (Drive collab loop)** — Phase 1 primitives **all merged**:
+  - anchors (#1250)
+  - diff-preview builder (#1252)
+  - deep-links (#1251) + granted-card wire-up (#1295)
+  - recovery detector (#1249) + audit/digest/nudge formatters (#1300)
+  - folder picker primitives (#1296)
+  - edit-prep helpers for the four MCP tools (#1297)
+  - Telegram diff-preview card renderer (#1299)
+
+  Outstanding follow-ups before Phase 1 is operator-visible
+  end-to-end:
+  - Gateway `drvpick:` dispatcher + `switchroom drive folders <agent>`
+    CLI verb (folder-picker glue)
+  - Reconciler-driver loop that fans recoveries through #1300's
+    formatters
+  - MCP-server tool registration that wires #1297's prep functions
+    to actual Google Docs `batchUpdate` calls
+  - Kernel-side double-request_id coordination for the diff-preview
+    card (one request per scope namespace; #1299 already expects
+    this shape)
+
+- **RFC H (`switchroom-auth-broker`)** — PR #1254. RFC G Phase 3b
+  is a downstream consumer of RFC H's broker.
 - **RFC F** (deferred, not yet opened) — second doc surface
   (Notion candidate). RFC G's per-account ACL pattern becomes
   the template when Notion lands a `notion:<workspace>:*` slot.

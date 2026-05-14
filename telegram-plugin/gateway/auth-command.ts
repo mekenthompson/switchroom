@@ -220,8 +220,14 @@ export interface AuthBrokerClient {
 export interface AuthCommandContext {
   /** The agent the gateway is bound to (its socket-path identity). */
   agentName: string
-  /** Names of agents allowed to mutate fleet state. Empty / undefined → no admin. */
-  adminAgents: ReadonlyArray<string> | undefined
+  /**
+   * True when this agent is an admin (per `agents.<name>.admin: true`
+   * in switchroom.yaml — the same flag PR #1258 introduced for fleet
+   * ops, unified into the auth-broker gate by PR #1263). Computed by
+   * the gateway from its loaded config and passed through; the
+   * handler does not consult any list.
+   */
+  isAdmin: boolean
   client: AuthBrokerClient
   /**
    * Telegram chat id this command was issued in. Used to key the
@@ -563,17 +569,17 @@ export async function handleAuthCommand(
  * Admin gate. Exposed so the gateway-routed verbs (`/auth add`,
  * `/auth cancel`) reuse the same ACL check as the handler-routed
  * verbs (`/auth use`, `/auth rotate`).
+ *
+ * Post-RFC-H + PR #1263 unification, admin is a per-agent boolean
+ * (`agents.<name>.admin === true`) computed by the gateway from
+ * its loaded config. The gate is the boolean lookup itself.
  */
-export function isAuthAdmin(args: {
-  agentName: string
-  adminAgents: ReadonlyArray<string> | undefined
-}): boolean {
-  if (!args.adminAgents || args.adminAgents.length === 0) return false
-  return args.adminAgents.includes(args.agentName)
+export function isAuthAdmin(args: { isAdmin: boolean }): boolean {
+  return args.isAdmin === true
 }
 
 function isAdmin(ctx: AuthCommandContext): boolean {
-  return isAuthAdmin(ctx)
+  return ctx.isAdmin === true
 }
 
 /**

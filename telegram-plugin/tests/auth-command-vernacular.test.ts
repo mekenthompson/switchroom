@@ -226,7 +226,7 @@ describe('handleAuthCommand — read verbs are open to any agent', () => {
     const client = mockClient()
     const reply = await handleAuthCommand(
       { kind: 'list' },
-      { agentName: 'random-agent', adminAgents: ['someone-else'], client },
+      { agentName: 'random-agent', isAdmin: false, client },
     )
     expect(reply.html).toBe(true)
     expect(reply.text).toMatch(/Auth — fleet snapshot/)
@@ -238,7 +238,7 @@ describe('handleAuthCommand — read verbs are open to any agent', () => {
     const client = mockClient()
     const reply = await handleAuthCommand(
       { kind: 'show', agent: 'researcher' },
-      { agentName: 'random', adminAgents: [], client },
+      { agentName: 'random', isAdmin: false, client },
     )
     expect(reply.text).toMatch(/researcher/)
     expect(reply.text).toMatch(/override/)
@@ -249,7 +249,7 @@ describe('handleAuthCommand — read verbs are open to any agent', () => {
     const client = mockClient()
     const reply = await handleAuthCommand(
       { kind: 'show', agent: 'ghost' },
-      { agentName: 'random', adminAgents: [], client },
+      { agentName: 'random', isAdmin: false, client },
     )
     expect(reply.text).toMatch(/no agent named/i)
     expect(reply.text).toMatch(/ghost/)
@@ -259,7 +259,7 @@ describe('handleAuthCommand — read verbs are open to any agent', () => {
 /* ── 3. Admin gating ──────────────────────────────────────────────────── */
 
 describe('handleAuthCommand — admin gating', () => {
-  const nonAdmin = { agentName: 'snooper', adminAgents: ['clerk'] as string[] }
+  const nonAdmin = { agentName: 'snooper', isAdmin: false }
 
   it('refuses /auth rm <label> for non-admin', async () => {
     const client = mockClient()
@@ -315,7 +315,7 @@ describe('handleAuthCommand — admin gating', () => {
 /* ── 4. rm two-step confirm flow ──────────────────────────────────────── */
 
 describe('handleAuthCommand — /auth rm two-step confirm', () => {
-  const admin = { agentName: 'clerk', adminAgents: ['clerk'] as string[] }
+  const admin = { agentName: 'clerk', isAdmin: true }
 
   it('prompt phase succeeds for a valid non-active label and stashes a pending entry', async () => {
     const client = mockClient()
@@ -418,7 +418,7 @@ describe('handleAuthCommand — /auth rm two-step confirm', () => {
 /* ── 5. refresh ───────────────────────────────────────────────────────── */
 
 describe('handleAuthCommand — /auth refresh', () => {
-  const admin = { agentName: 'clerk', adminAgents: ['clerk'] as string[] }
+  const admin = { agentName: 'clerk', isAdmin: true }
 
   it('without a label refreshes every account, once each', async () => {
     const client = mockClient()
@@ -473,7 +473,7 @@ describe('handleAuthCommand — /auth refresh', () => {
 /* ── 6. override set + clear ──────────────────────────────────────────── */
 
 describe('handleAuthCommand — /auth agent override', () => {
-  const admin = { agentName: 'clerk', adminAgents: ['clerk'] as string[] }
+  const admin = { agentName: 'clerk', isAdmin: true }
 
   it('set calls setOverride(agent, label)', async () => {
     const client = mockClient()
@@ -508,7 +508,7 @@ describe('handleAuthCommand — help text lists every verb', () => {
     const client = mockClient()
     const reply = await handleAuthCommand(
       { kind: 'help' },
-      { agentName: 'x', adminAgents: ['x'], client },
+      { agentName: 'x', isAdmin: true, client },
     )
     const text = reply.text
     // Verbs (all variants). The help is HTML; <code> wraps each verb.

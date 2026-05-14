@@ -66,7 +66,7 @@ const TAG = "phase1b-test";
 // Phase 4 (#893) retired the singleton scheduler image. Listing it
 // here would make `imagesOk` false in any environment that doesn't
 // build the (now-deleted) image, silently skipping the whole suite.
-const IMAGES = ["base", "agent", "broker", "kernel"].map(
+const IMAGES = ["base", "agent", "broker", "kernel", "auth-broker"].map(
   (n) => `switchroom/${n}:${TAG}`,
 );
 const PROJECT = `phase1c-iso-${process.pid}`;
@@ -188,8 +188,12 @@ function buildTestCompose(agents: string[], cfgPath: string): string {
     `      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`,
     `      SWITCHROOM_KERNEL_DB_PATH: /state/approvals/kernel.db`,
   ]);
+  yml = mergeServiceEnv(yml, "switchroom-auth-broker", [
+    `      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`,
+  ]);
   yml = yml.replace(/(  vault-broker:[\s\S]*?volumes:\n)/, `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`);
   yml = yml.replace(/(  approval-kernel:[\s\S]*?volumes:\n)/, `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`);
+  yml = yml.replace(/(  switchroom-auth-broker:[\s\S]*?volumes:\n)/, `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`);
   yml += "  vault-state:\n  approvals-state:\n  agent-state:\n  claude-state:\n";
   // CLAUDE.md HARD RULES: every test container carries the
   // `switchroom.test=phase1c` label + per-run UUID. Note this fires

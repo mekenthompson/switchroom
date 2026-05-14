@@ -80,7 +80,7 @@ const PROD_FLEET_LIVE = productionFleetIsLive();
 const TAG = "phase1b-test";
 // Phase 4 cron-fold-in cutover removed the singleton scheduler image.
 // Cron now runs in-container in every agent (see start.sh.hbs).
-const IMAGES = ["base", "agent", "broker", "kernel"].map(
+const IMAGES = ["base", "agent", "broker", "kernel", "auth-broker"].map(
   (n) => `switchroom/${n}:${TAG}`,
 );
 const PROJECT = `phase1c-race-${process.pid}`;
@@ -206,13 +206,20 @@ function buildTestCompose(agents: string[], cfgPath: string): string {
     `      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`,
     `      SWITCHROOM_KERNEL_DB_PATH: /state/approvals/kernel.db`,
   ]);
-  // Mount the test config into broker + kernel.
+  yml = mergeServiceEnv(yml, "switchroom-auth-broker", [
+    `      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`,
+  ]);
+  // Mount the test config into broker + kernel + auth-broker.
   yml = yml.replace(
     /(  vault-broker:[\s\S]*?volumes:\n)/,
     `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`,
   );
   yml = yml.replace(
     /(  approval-kernel:[\s\S]*?volumes:\n)/,
+    `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`,
+  );
+  yml = yml.replace(
+    /(  switchroom-auth-broker:[\s\S]*?volumes:\n)/,
     `$1      - ${cfgPath}:/state/config/switchroom.yaml:ro\n`,
   );
   // Phase 4 cron-fold-in cutover: the singleton scheduler container

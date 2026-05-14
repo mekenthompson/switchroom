@@ -7,7 +7,7 @@ RFC G Phase 3b lands: a Google account is a first-class auth slot alongside the 
 ### Headline benefits
 
 - **Google Workspace per agent (or per fleet).** `switchroom auth google account add <label>` runs an OAuth flow against Google and registers the resulting refresh token with the broker. Agents that need Drive / Gmail / Calendar get a per-agent socket bound at `/run/switchroom/auth-broker/<agent>/sock` and a `get-credentials provider=google` op that mints a fresh access token on demand — same protocol shape as Anthropic credentials.
-- **Per-account ACLs.** `switchroom auth google enable/disable/list` controls which agents can pull credentials for which Google account. Default is **deny** — adding the account doesn't grant fleet-wide access. The setup wizard's Phase 4 prompt offers Google connect inline (#1248).
+- **Per-account ACLs.** The `switchroom auth google enable/disable/list` verbs (shipped in #1247 during the v0.9.x window) now have a working broker behind them: Google credentials are actually mintable, and the per-account ACL gates real `get-credentials` calls. Default is **deny** — adding the account doesn't grant fleet-wide access. The setup wizard's Phase 4 prompt (#1248, also v0.9.x) likewise becomes operative this release.
 - **Refresh races eliminated for Google too.** The broker holds an exclusive refresh lease per Google account (#1275). Production-hardened: jitter, backoff, lease release on SIGTERM, audit lines for every refresh outcome.
 - **`switchroom auth add <label> --via-claude`** (#1286). Broader OAuth scopes than `setup-token` ships with — useful for accounts that need to operate hindsight or other broker consumers without re-running setup. Goes through the `claude` CLI's OAuth flow with the wider scope set, then registers the credentials with the broker.
 - **Silent-failure regressions closed.** Two RFC-H aftershocks that bit during the v0.9.0/v0.9.1 install-validation loop are now structurally impossible:
@@ -18,7 +18,7 @@ RFC G Phase 3b lands: a Google account is a first-class auth slot alongside the 
 
 - **`switchroom auth google account add <label>`** (#1274) — real OAuth flow + broker registration. Replaces the stub from RFC G Phase 3b.3.
 - **`switchroom auth google account list`** (#1279) — broker-backed list of registered Google accounts, surfacing label, scopes, refresh status.
-- **`switchroom auth google enable <agent> <label>`** / **`disable`** / **`list`** (RFC G Phase 3a, surface completion) — per-account ACL controls.
+- **`switchroom auth google enable <agent> <label>`** / **`disable`** / **`list`** — per-account ACL controls (verbs landed in #1247 in v0.9.x; behind them, the get-credentials path is functional as of this release).
 - **`switchroom auth add <label> --via-claude`** (#1286) — broader-scope OAuth via the `claude` CLI flow.
 - **`switchroom auth use <label>`** + **`auth rotate`** now write `auth.active` to YAML (#1282) — previously these mutated broker state but left `switchroom.yaml` stale, so the next `switchroom apply` would re-bind the old active account. Closes a recurrence of the silent fanout class.
 - Stale RFC-pre-H references removed: `auth login`, `auth status` no longer appear in CLI help, docs, or doctor output (#1283).
@@ -43,7 +43,7 @@ RFC G Phase 3b lands: a Google account is a first-class auth slot alongside the 
 
 - `docs/auth.md` — Google sections added covering the `auth google` verb tree, per-account ACL semantics, and the broker `get-credentials provider=google` protocol.
 - `docs/rfcs/auth-broker.md` — RFC G v3 cross-referenced.
-- Install-validation Phase 1-4 retrospective at `docs/install-validation-2026-05-14.md` (#1253) — what broke during the fresh-VM install loop, what fixed it, and the doctor probes that now catch each class.
+- Install-validation Phase 1-4 retrospective at `docs/install-validation-2026-05.md` (#1253) — what broke during the fresh-VM install loop, what fixed it, and the doctor probes that now catch each class.
 
 ### Migration
 

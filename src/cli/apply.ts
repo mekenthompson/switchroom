@@ -503,15 +503,28 @@ export async function runApply(
   // as the host operator UID (because mkdir runs as the operator).
   // The per-agent scaffold loop above already called `alignAgentUid`,
   // but at that point the log dir didn't exist yet (existsSync gate
-  // in scaffold.ts:194), so it was silently skipped — leaving the
+  // in scaffold.ts:194 for the log dir), so it was silently skipped — leaving the
   // dir operator-owned. start.sh inside the container runs as the
   // per-agent UID and bind-mounts `~/.switchroom/logs/<agent>` to
   // `/var/log/switchroom`; it then hits "Permission denied" trying
   // to write supervisor logs and the autoaccept / gateway / scheduler
   // sidecars never start. Re-run alignment now that the dir exists.
   // Install-validation finding #21.
+  // Iterate `agentNames` (which respects `--only`), NOT
+  // `Object.keys(config.agents)` — otherwise `apply --only=<name>`
+  // would sudo-chown every agent's state tree on every run, defeating
+  // the migration playbook documented on `ApplyOptions.only`.
+  //
+  // Failure shape: this second pass is non-fatal regardless of
+  // `--allow-unaligned`. The first-pass alignAgentUid at line 443
+  // aborts on hard chown failure (UidAlignmentAbort), so by the time
+  // we reach the second pass the state-dir ownership is already
+  // correct — only the log dir is at risk of misalignment, and a
+  // log-dir EACCES surfaces visibly on the agent's first boot via
+  // start.sh's supervise restart-loop. We always warn so the operator
+  // has the actionable breadcrumb if first-boot fails.
   if (!skipScaffold) {
-    for (const name of Object.keys(config.agents)) {
+    for (const name of agentNames) {
       try {
         const uid = allocateAgentUid(name);
         alignAgentUid(name, join(agentsDir, name), uid, {
@@ -520,14 +533,12 @@ export async function runApply(
         });
       } catch (alignErr) {
         const msg = (alignErr as Error).message;
-        if (!options.allowUnaligned) {
-          writeOut(
-            chalk.yellow(
-              `    ! post-mount-source UID re-align failed for ${name}: ${msg}\n` +
-                `      Agent may fail to write supervisor logs on first boot.\n`,
-            ),
-          );
-        }
+        writeOut(
+          chalk.yellow(
+            `    ! post-mount-source UID re-align failed for ${name}: ${msg}\n` +
+              `      Agent may fail to write supervisor logs on first boot.\n`,
+          ),
+        );
       }
     }
   }

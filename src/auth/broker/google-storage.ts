@@ -30,7 +30,7 @@
  * names but worth confirming.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 
 import { atomicWriteFileSync } from "../../util/atomic.js";
@@ -44,6 +44,46 @@ import type { GoogleCredentialsShape } from "./protocol.js";
  */
 export function normalizeGoogleAccountForStorage(account: string): string {
   return account.trim().toLowerCase();
+}
+
+/**
+ * Validate that an account label is safe to use as a filesystem path
+ * component before any fs op touches it. Refuses path-traversal
+ * (`..`), separators (`/` `\`), null bytes, empty, and anything else
+ * that doesn't fit the email-shape contract Phase 2 already
+ * enforces at the schema layer.
+ *
+ * Throws on rejection with an operator-actionable message. Callers
+ * (broker dispatcher) wrap throws into `INVALID_ARGS` errors.
+ *
+ * Mirrors the schema-side regex from
+ * `src/config/schema.ts:google_accounts` key validator. Defense in
+ * depth — the broker can't assume the schema has already filtered
+ * (admin clients sending raw protocol frames bypass schema).
+ */
+export function validateGoogleAccountLabel(account: string): void {
+  if (typeof account !== "string" || account.length === 0) {
+    throw new Error(`Google account label must be a non-empty string`);
+  }
+  if (account !== account.trim()) {
+    throw new Error(`Google account label must not have leading/trailing whitespace`);
+  }
+  // Reject control characters explicitly. `\s` in JS regex matches
+  // ASCII/Unicode whitespace but NOT `\x00` (null) or other control
+  // chars, so a label like `"alice\0@example.com"` would slip through
+  // the email-shape regex below. POSIX filenames also reject null
+  // bytes — defending here keeps fs ops well-formed.
+  if (/[\x00-\x1f\x7f]/.test(account)) {
+    throw new Error(`Google account label '${account.replace(/[\x00-\x1f\x7f]/g, "?")}' contains control characters; email shape rejects them.`);
+  }
+  // Character allowlist matches the schema regex (`[^@\s:]+@[^@\s:]+\.[^@\s:]+`).
+  // No path separators, no `..`, no whitespace, no `:` (which the
+  // broker's slot-key parser uses).
+  if (!/^[^@\s:/\\]+@[^@\s:/\\]+\.[^@\s:/\\]+$/.test(account)) {
+    throw new Error(
+      `Google account label '${account}' is not a valid email shape. Expected like 'alice@example.com' (no slashes, colons, or whitespace).`,
+    );
+  }
 }
 
 /**
@@ -138,7 +178,6 @@ export function removeGoogleAccount(stateDir: string, account: string): void {
 export function listGoogleAccounts(stateDir: string): string[] {
   const root = join(stateDir, "google");
   if (!existsSync(root)) return [];
-  const { readdirSync, statSync } = require("node:fs") as typeof import("node:fs");
   return readdirSync(root)
     .filter((name) => {
       try {

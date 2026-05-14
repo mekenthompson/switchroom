@@ -53,6 +53,7 @@ import {
   googleAccountExists,
   readGoogleAccountCredentials,
   removeGoogleAccount,
+  validateGoogleAccountLabel,
   writeGoogleAccountCredentials,
 } from "./google-storage.js";
 import { ProviderRegistry, type ProviderName } from "./provider.js";
@@ -234,16 +235,19 @@ export class AuthBroker {
     // Google provider loaded; the broker still rejects
     // `provider: "google"` requests via registry.has() per Phase 3b.1.
     //
-    // **TODO (Phase 3b.2c):** the `google_client_id` / `_secret`
+    // **TODO (Phase 3b.2d):** the `google_client_id` / `_secret`
     // schema fields accept `vault:<key>` references (per
     // `src/config/schema.ts:759`); `src/cli/drive.ts:446-448`
     // resolves them via `resolveMaybeVaultRef`. Today the broker
     // passes the raw config string verbatim, so a vault-ref config
     // would silently send a literal `"vault:..."` string to Google's
-    // token endpoint and fail. Phase 3b.2c must resolve vault refs
-    // here BEFORE constructing the GoogleProvider — otherwise the
-    // first refresh tick will surface a confusing error. Latent
-    // until 3b.2c wires storage; flagged here as a foot-gun.
+    // token endpoint and fail. Phase 3b.2c shipped storage but
+    // refresh-tick is still deferred to 3b.2d (along with the
+    // per-(provider, account) state-keying refactor); 3b.2d MUST
+    // resolve vault refs here BEFORE the GoogleProvider's first
+    // refresh fires. Foot-gun until then — operators using
+    // `vault:` refs in google_workspace will hit it on the first
+    // refresh attempt.
     //
     // **Known limitation:** `reload()` does NOT re-run provider
     // registration. An operator who adds `google_workspace:` to a
@@ -990,6 +994,16 @@ export class AuthBroker {
       this.respondForbidden(socket, id, "add-account requires admin");
       return;
     }
+    // Defense-in-depth path-traversal guard. Wire-protocol schema
+    // accepts `z.string().min(1)`; the email-shape validator runs
+    // here so a malformed label can't escape the stateDir via `..`,
+    // `/`, etc. before any fs op fires.
+    try {
+      validateGoogleAccountLabel(label);
+    } catch (err) {
+      socket.write(encodeError(id, "INVALID_ARGS", (err as Error).message));
+      return;
+    }
     if (googleAccountExists(this.stateDir, label) && !replace) {
       this.audit({ op: "add-account", identity, account: label, ok: false, error: "ACCOUNT_ALREADY_EXISTS" });
       socket.write(encodeError(id, "ACCOUNT_ALREADY_EXISTS", `google account '${label}' already exists; pass replace:true to overwrite`));
@@ -1021,6 +1035,12 @@ export class AuthBroker {
     if (!this.isAdmin(identity)) {
       this.audit({ op: "rm-account", identity, account: label, ok: false, error: "FORBIDDEN" });
       this.respondForbidden(socket, id, "rm-account requires admin");
+      return;
+    }
+    try {
+      validateGoogleAccountLabel(label);
+    } catch (err) {
+      socket.write(encodeError(id, "INVALID_ARGS", (err as Error).message));
       return;
     }
     if (!googleAccountExists(this.stateDir, label)) {

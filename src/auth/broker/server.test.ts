@@ -813,6 +813,75 @@ describe("AuthBroker — Google provider registration (Phase 3b.2b)", () => {
     broker.stop();
   });
 
+  it("Phase 3b.2c — add-account rejects path-traversal labels (defense-in-depth)", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    // Attempt path-traversal via the label.
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "1", op: "add-account", label: "../../../etc/passwd",
+      provider: "google",
+      credentials: {
+        googleOauth: {
+          accessToken: "at", refreshToken: "rt", expiresAt: 1, scope: "x",
+          clientId: "cid", accountEmail: "alice@example.com",
+          tokenType: "Bearer" as const,
+        },
+      },
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("INVALID_ARGS");
+    expect(resp.error?.message).toContain("email shape");
+    // Verify nothing was written outside stateDir.
+    expect(existsSync(join(h.stateDir, "..", "..", "..", "etc", "passwd"))).toBe(false);
+    broker.stop();
+  });
+
+  it("Phase 3b.2c — rm-account rejects path-traversal labels", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1, id: "1", op: "rm-account", label: "../escape",
+      provider: "google",
+    }) as { ok: boolean; error?: { code: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.code).toBe("INVALID_ARGS");
+    broker.stop();
+  });
+
   it("Phase 3b.2c — rm-account succeeds after add when no agents are enabled", async () => {
     const h = makeHarness();
     const config = makeConfig(h, {

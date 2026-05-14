@@ -5,10 +5,10 @@
  * stateDir. No mocking — real filesystem.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   googleAccountCredentialsPath,
@@ -18,6 +18,7 @@ import {
   normalizeGoogleAccountForStorage,
   readGoogleAccountCredentials,
   removeGoogleAccount,
+  validateGoogleAccountLabel,
   writeGoogleAccountCredentials,
 } from "./google-storage.js";
 import type { GoogleCredentialsShape } from "./protocol.js";
@@ -102,23 +103,15 @@ describe("read returns null for missing/malformed", () => {
 
   it("returns null when JSON is malformed", () => {
     const path = googleAccountCredentialsPath(stateDir, "alice@example.com");
-    require("node:fs").mkdirSync(require("node:path").dirname(path), {
-      recursive: true,
-      mode: 0o700,
-    });
-    require("node:fs").writeFileSync(path, "{not json", { mode: 0o600 });
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, "{not json", { mode: 0o600 });
     expect(readGoogleAccountCredentials(stateDir, "alice@example.com")).toBe(null);
   });
 
   it("returns null when shape lacks googleOauth.accessToken", () => {
     const path = googleAccountCredentialsPath(stateDir, "alice@example.com");
-    require("node:fs").mkdirSync(require("node:path").dirname(path), {
-      recursive: true,
-      mode: 0o700,
-    });
-    require("node:fs").writeFileSync(path, JSON.stringify({ googleOauth: {} }), {
-      mode: 0o600,
-    });
+    mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+    writeFileSync(path, JSON.stringify({ googleOauth: {} }), { mode: 0o600 });
     expect(readGoogleAccountCredentials(stateDir, "alice@example.com")).toBe(null);
   });
 });
@@ -165,10 +158,57 @@ describe("listGoogleAccounts", () => {
   it("excludes dirs without credentials.json (defensive against half-removed state)", () => {
     writeGoogleAccountCredentials(stateDir, "alice@example.com", sampleCreds);
     // Create an empty dir that doesn't have credentials.json
-    require("node:fs").mkdirSync(
-      join(stateDir, "google", "ghost@example.com"),
-      { recursive: true, mode: 0o700 },
-    );
+    mkdirSync(join(stateDir, "google", "ghost@example.com"), {
+      recursive: true,
+      mode: 0o700,
+    });
     expect(listGoogleAccounts(stateDir).sort()).toEqual(["alice@example.com"]);
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// validateGoogleAccountLabel — defense-in-depth path-traversal guard
+// per Phase 3b.2c reviewer feedback.
+// ────────────────────────────────────────────────────────────────────────
+
+describe("validateGoogleAccountLabel", () => {
+  it("accepts valid email-shaped labels", () => {
+    expect(() => validateGoogleAccountLabel("alice@example.com")).not.toThrow();
+    expect(() => validateGoogleAccountLabel("alice+work@example.co.uk")).not.toThrow();
+  });
+
+  it("rejects empty string", () => {
+    expect(() => validateGoogleAccountLabel("")).toThrow(/non-empty/);
+  });
+
+  it("rejects path-traversal sequences", () => {
+    expect(() => validateGoogleAccountLabel("..")).toThrow(/email shape/);
+    expect(() => validateGoogleAccountLabel("../../../etc/passwd")).toThrow();
+  });
+
+  it("rejects forward and back slashes", () => {
+    expect(() => validateGoogleAccountLabel("alice/bob@example.com")).toThrow();
+    expect(() => validateGoogleAccountLabel("alice\\bob@example.com")).toThrow();
+  });
+
+  it("rejects whitespace + leading/trailing whitespace", () => {
+    expect(() => validateGoogleAccountLabel("alice bob@example.com")).toThrow();
+    expect(() => validateGoogleAccountLabel("  alice@example.com  ")).toThrow();
+    expect(() => validateGoogleAccountLabel("alice@example.com\n")).toThrow();
+  });
+
+  it("rejects colons (broker slot-key separator)", () => {
+    expect(() => validateGoogleAccountLabel("alice:risky@example.com")).toThrow();
+  });
+
+  it("rejects null bytes", () => {
+    expect(() => validateGoogleAccountLabel("alice @example.com")).toThrow();
+  });
+
+  it("rejects non-string input via type-narrowing", () => {
+    expect(() => validateGoogleAccountLabel(undefined as unknown as string)).toThrow(
+      /non-empty/,
+    );
+    expect(() => validateGoogleAccountLabel(null as unknown as string)).toThrow();
   });
 });

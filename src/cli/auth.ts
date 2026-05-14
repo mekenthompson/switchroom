@@ -7,7 +7,7 @@
  * refresh-accounts / status / account add / account list / account rm`)
  * into a small accounts-and-fleet surface:
  *
- *   auth add <label> --from-agent | --from-credentials | --from-oauth
+ *   auth add <label> --from-agent | --from-credentials | --from-oauth | --via-claude
  *   auth list
  *   auth use <label>            — set fleet active
  *   auth rotate                 — cycle to next non-exhausted entry
@@ -343,7 +343,10 @@ function loadCredentialsFromGlobalAccount(label: string): AddAccountCredentials 
     console.error(
       chalk.red(
         `  No credentials found at ${accountCredentialsPath(label)}.\n` +
-          `  Run 'claude setup-token' first to populate them.`,
+          `  For a first-time setup, use \`switchroom auth add ${label} --via-claude\`\n` +
+          `  (drives claude through its native OAuth flow to mint a broader-scope token\n` +
+          `  that works with agents running in claude server: mode). \`claude setup-token\`\n` +
+          `  mints scope=user:inference only, which is rejected by server: mode at boot.`,
       ),
     );
     process.exit(1);
@@ -356,6 +359,58 @@ function loadCredentialsFromGlobalAccount(label: string): AddAccountCredentials 
       scopes: creds.claudeAiOauth.scopes,
       subscriptionType: creds.claudeAiOauth.subscriptionType,
       rateLimitTier: creds.claudeAiOauth.rateLimitTier,
+    },
+  };
+}
+
+/**
+ * `--via-claude` entry point. Spawns claude in a tmux session, surfaces
+ * the OAuth URL claude itself emits (which requests the broader scope
+ * set that server: mode needs), prompts the operator for the pasted
+ * code, waits for credentials.json to land, returns it.
+ *
+ * Lazy-imports the via-claude module so the more common
+ * --from-credentials / --from-agent paths don't pay the file-watch +
+ * tmux-helper import cost. Mirrors the `auth-google` pattern (Phase
+ * 3b.3 of RFC G) of lazy-importing OAuth heavy modules.
+ *
+ * Install-validation finding #38.
+ */
+async function loadCredentialsViaClaude(label: string): Promise<AddAccountCredentials> {
+  const [{ runViaClaude }, { homedir }, { default: readline }] = await Promise.all([
+    import("../auth/via-claude.js"),
+    import("node:os"),
+    import("node:readline"),
+  ]);
+  const configDir = join(homedir(), ".switchroom", "accounts", label);
+
+  const result = await runViaClaude({
+    configDir,
+    promptForCode: async (_url) => {
+      // We surface the URL inside runViaClaude (via its log callback).
+      // Block here on stdin for the operator's paste.
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      try {
+        return await new Promise<string>((resolve) => {
+          rl.question("  Paste the code Claude shows you: ", (answer) => resolve(answer));
+        });
+      } finally {
+        rl.close();
+      }
+    },
+  });
+
+  const oauth = result.credentials.claudeAiOauth;
+  return {
+    claudeAiOauth: {
+      accessToken: oauth.accessToken,
+      refreshToken: oauth.refreshToken,
+      expiresAt: oauth.expiresAt,
+      scopes: oauth.scopes,
+      subscriptionType: oauth.subscriptionType,
     },
   };
 }
@@ -440,7 +495,11 @@ export function registerAuthCommand(program: Command): void {
     .option("--from-credentials <path>", "Seed from a credentials.json file")
     .option(
       "--from-oauth",
-      "Seed from a freshly-completed OAuth flow's credentials at ~/.switchroom/accounts/<label>/credentials.json",
+      "Seed from a freshly-completed `claude setup-token` flow at ~/.switchroom/accounts/<label>/credentials.json. NOTE: setup-token mints scope=user:inference only; the token won't work for agents running in claude server: mode. Prefer --via-claude for first-time setup.",
+    )
+    .option(
+      "--via-claude",
+      "Drive `claude` interactively in a tmux session to mint a broader-scope OAuth token (recommended for first-time setup). Spawns claude, surfaces the OAuth URL, accepts your pasted code, ingests the resulting credentials.json. See src/auth/via-claude.ts.",
     )
     .option("--replace", "Overwrite an existing account (drift recovery)")
     .action(
@@ -451,15 +510,20 @@ export function registerAuthCommand(program: Command): void {
             fromAgent?: string;
             fromCredentials?: string;
             fromOauth?: boolean;
+            viaClaude?: boolean;
             replace?: boolean;
           },
         ) => {
-          const sources = [opts.fromAgent, opts.fromCredentials, opts.fromOauth]
-            .filter((v) => v !== undefined && v !== false).length;
+          const sources = [
+            opts.fromAgent,
+            opts.fromCredentials,
+            opts.fromOauth,
+            opts.viaClaude,
+          ].filter((v) => v !== undefined && v !== false).length;
           if (sources !== 1) {
             console.error(
               chalk.red(
-                "  Pass exactly one of --from-agent, --from-credentials, --from-oauth.",
+                "  Pass exactly one of --from-agent, --from-credentials, --from-oauth, --via-claude.",
               ),
             );
             process.exit(2);
@@ -468,6 +532,7 @@ export function registerAuthCommand(program: Command): void {
           if (opts.fromAgent) credentials = loadCredentialsFromAgent(opts.fromAgent);
           else if (opts.fromCredentials)
             credentials = loadCredentialsFromFile(opts.fromCredentials);
+          else if (opts.viaClaude) credentials = await loadCredentialsViaClaude(label);
           else credentials = loadCredentialsFromGlobalAccount(label);
 
           const data = await brokerCall((client) =>
@@ -476,6 +541,11 @@ export function registerAuthCommand(program: Command): void {
           console.log(chalk.green(`  Added "${data.label}" to the broker.`));
           if (typeof data.expiresAt === "number") {
             console.log(chalk.gray(`  Token expires: ${formatExpiry(data.expiresAt)}`));
+          }
+          if (opts.viaClaude) {
+            console.log();
+            console.log(chalk.gray("  Next: enable on the fleet"));
+            console.log(chalk.cyan(`    switchroom auth use ${data.label}`));
           }
         },
       ),

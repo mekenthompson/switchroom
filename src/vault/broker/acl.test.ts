@@ -17,7 +17,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { checkAcl, checkAclByAgent } from "./acl.js";
+import { checkAcl, checkAclByAgent, parseGoogleAccountSlotKey } from "./acl.js";
 import type { SwitchroomConfig } from "../../config/schema.js";
 import type { PeerInfo } from "./peercred.js";
 
@@ -306,5 +306,141 @@ describe("ACL: socket-path-as-identity (Phase 2a)", () => {
     const r = checkAclByAgent(config, "alice", "k");
     expect(r.allow).toBe(false);
     if (!r.allow) expect(r.reason).toContain("no schedule entries");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// RFC G Phase 2 — google: slot ACL via google_accounts[].enabled_for[]
+// ────────────────────────────────────────────────────────────────────────
+
+function makeGoogleAccountConfig(
+  accounts: Record<string, { enabled_for: string[] }>,
+  agents: Record<string, { schedule?: { cron: string; prompt: string; secrets?: string[] }[] }> = {},
+) {
+  const agentEntries: SwitchroomConfig["agents"] = {};
+  for (const [name, agent] of Object.entries(agents)) {
+    agentEntries[name] = {
+      topic_name: name,
+      schedule: (agent.schedule ?? []).map((s) => ({
+        cron: s.cron,
+        prompt: s.prompt,
+        secrets: s.secrets ?? [],
+      })),
+    } as SwitchroomConfig["agents"][string];
+  }
+  return {
+    switchroom: { version: 1 },
+    telegram: { bot_token: "t", forum_chat_id: "1" },
+    vault: { path: "~/.switchroom/vault.enc" },
+    google_accounts: accounts,
+    agents: agentEntries,
+  } as unknown as SwitchroomConfig;
+}
+
+describe("parseGoogleAccountSlotKey", () => {
+  it("extracts account + field for refresh_token slot", () => {
+    expect(parseGoogleAccountSlotKey("google:alice@example.com:refresh_token")).toEqual({
+      account: "alice@example.com",
+      field: "refresh_token",
+    });
+  });
+
+  it("extracts for status sidecar", () => {
+    expect(parseGoogleAccountSlotKey("google:alice@example.com:status")).toEqual({
+      account: "alice@example.com",
+      field: "status",
+    });
+  });
+
+  it("returns null for non-google: prefixes", () => {
+    expect(parseGoogleAccountSlotKey("gdrive:klanker:refresh_token")).toBe(null);
+    expect(parseGoogleAccountSlotKey("secret:OPENAI_API_KEY")).toBe(null);
+    expect(parseGoogleAccountSlotKey("google:alice@example.com")).toBe(null);
+  });
+});
+
+describe("ACL: google: slot routing through google_accounts[]", () => {
+  it("allows an agent listed in enabled_for", () => {
+    const config = makeGoogleAccountConfig(
+      { "alice@example.com": { enabled_for: ["klanker", "gymbro"] } },
+      { klanker: {} },
+    );
+    const r = checkAclByAgent(config, "klanker", "google:alice@example.com:refresh_token");
+    expect(r.allow).toBe(true);
+  });
+
+  it("denies an agent NOT in enabled_for (cross-account leak prevention)", () => {
+    const config = makeGoogleAccountConfig(
+      { "alice@example.com": { enabled_for: ["klanker"] } },
+      { gymbro: {} },
+    );
+    const r = checkAclByAgent(config, "gymbro", "google:alice@example.com:refresh_token");
+    expect(r.allow).toBe(false);
+    if (!r.allow) expect(r.reason).toContain("not in google_accounts");
+  });
+
+  it("denies when the account is not in google_accounts at all", () => {
+    const config = makeGoogleAccountConfig({}, { klanker: {} });
+    const r = checkAclByAgent(config, "klanker", "google:alice@example.com:refresh_token");
+    expect(r.allow).toBe(false);
+    if (!r.allow) expect(r.reason).toContain("not configured");
+  });
+
+  it("denies when enabled_for is empty (fail-closed)", () => {
+    const config = makeGoogleAccountConfig(
+      { "alice@example.com": { enabled_for: [] } },
+      { klanker: {} },
+    );
+    const r = checkAclByAgent(config, "klanker", "google:alice@example.com:refresh_token");
+    expect(r.allow).toBe(false);
+    if (!r.allow) expect(r.reason).toContain("enabled_for is empty");
+  });
+
+  it("normalizes account email casing — schema-key 'alice@…' matches lookup of 'ALICE@…'", () => {
+    const config = makeGoogleAccountConfig(
+      { "alice@example.com": { enabled_for: ["klanker"] } },
+      { klanker: {} },
+    );
+    // Slot key arrives in original case (not normalized at the broker
+    // boundary) — extension still needs to resolve it.
+    const r = checkAclByAgent(config, "klanker", "google:ALICE@EXAMPLE.COM:refresh_token");
+    expect(r.allow).toBe(true);
+  });
+
+  it("google: slots bypass the schedule.secrets allowlist (the whole point)", () => {
+    // Agent has NO schedule entries at all — under the legacy ACL path
+    // this would deny everything. Under RFC G the google: slot should
+    // still be readable when google_accounts[] permits it.
+    const config = makeGoogleAccountConfig(
+      { "alice@example.com": { enabled_for: ["klanker"] } },
+      { klanker: { schedule: [] } },
+    );
+    const r = checkAclByAgent(config, "klanker", "google:alice@example.com:refresh_token");
+    expect(r.allow).toBe(true);
+  });
+
+  it("non-google: keys still go through the legacy schedule.secrets allowlist", () => {
+    const config = makeGoogleAccountConfig(
+      { "alice@example.com": { enabled_for: ["klanker"] } },
+      {
+        klanker: {
+          schedule: [{ cron: "0 8 * * *", prompt: "hi", secrets: ["api_key"] }],
+        },
+      },
+    );
+    expect(checkAclByAgent(config, "klanker", "api_key").allow).toBe(true);
+    expect(checkAclByAgent(config, "klanker", "other_key").allow).toBe(false);
+  });
+
+  it("denies with helpful reason when google_accounts is undefined entirely", () => {
+    const config = {
+      switchroom: { version: 1 },
+      telegram: { bot_token: "t", forum_chat_id: "1" },
+      vault: { path: "~/.switchroom/vault.enc" },
+      agents: { klanker: { topic_name: "klanker", schedule: [] } },
+    } as unknown as SwitchroomConfig;
+    const r = checkAclByAgent(config, "klanker", "google:alice@example.com:refresh_token");
+    expect(r.allow).toBe(false);
+    if (!r.allow) expect(r.reason).toContain("not configured");
   });
 });

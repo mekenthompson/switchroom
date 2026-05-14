@@ -519,6 +519,70 @@ describe("AgentGoogleWorkspaceConfigSchema (RFC G per-agent override)", () => {
     expect(result.google_workspace?.approvers).toEqual([999]);
   });
 
+  it("RFC G Phase 2: SwitchroomConfigSchema accepts a google_accounts top-level block", () => {
+    const result = SwitchroomConfigSchema.parse({
+      switchroom: { version: 1 },
+      telegram: { bot_token: "x", forum_chat_id: "1" },
+      google_accounts: {
+        "alice@example.com": { enabled_for: ["klanker", "gymbro"] },
+        "work@bigcorp.com": { enabled_for: ["coderev"] },
+      },
+      agents: {},
+    });
+    expect(result.google_accounts?.["alice@example.com"].enabled_for).toEqual([
+      "klanker",
+      "gymbro",
+    ]);
+    expect(result.google_accounts?.["work@bigcorp.com"].enabled_for).toEqual(["coderev"]);
+  });
+
+  it("RFC G Phase 2: google_accounts is optional and defaults to undefined", () => {
+    const result = SwitchroomConfigSchema.parse({
+      switchroom: { version: 1 },
+      telegram: { bot_token: "x", forum_chat_id: "1" },
+      agents: {},
+    });
+    expect(result.google_accounts).toBeUndefined();
+  });
+
+  it("RFC G Phase 2: google_accounts rejects keys that aren't email-shaped", () => {
+    expect(() =>
+      SwitchroomConfigSchema.parse({
+        switchroom: { version: 1 },
+        telegram: { bot_token: "x", forum_chat_id: "1" },
+        google_accounts: {
+          "not-an-email": { enabled_for: ["klanker"] },
+        },
+        agents: {},
+      }),
+    ).toThrow();
+  });
+
+  it("RFC G Phase 2: google_accounts rejects malformed agent slugs in enabled_for", () => {
+    expect(() =>
+      SwitchroomConfigSchema.parse({
+        switchroom: { version: 1 },
+        telegram: { bot_token: "x", forum_chat_id: "1" },
+        google_accounts: {
+          "alice@example.com": { enabled_for: ["Has-Capitals"] },
+        },
+        agents: {},
+      }),
+    ).toThrow();
+  });
+
+  it("RFC G Phase 2: google_accounts.enabled_for accepts an empty array (means dormant)", () => {
+    const result = SwitchroomConfigSchema.parse({
+      switchroom: { version: 1 },
+      telegram: { bot_token: "x", forum_chat_id: "1" },
+      google_accounts: {
+        "alice@example.com": { enabled_for: [] },
+      },
+      agents: {},
+    });
+    expect(result.google_accounts?.["alice@example.com"].enabled_for).toEqual([]);
+  });
+
   it("AgentSchema accepts both `drive` and `google_workspace` simultaneously (loader rejects mismatch)", () => {
     // Schema layer is permissive — drive: and google_workspace: have
     // identical shapes and either can be set or both. Loader (not schema)

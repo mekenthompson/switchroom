@@ -122,12 +122,11 @@ export class GoogleProvider implements Provider {
         expiresAt,
         scope: token.scope ?? "",
         clientId: this.opts.clientId,
-        // accountEmail is NOT in the refresh response — broker stores
-        // the account label (which IS the email per RFC G's per-account
-        // ACL) and the wrapper should look it up from there. Phase 3b.2b
-        // will pass the accountEmail through `req.clientId`-style
-        // smuggling or extend RefreshRequest properly.
-        accountEmail: req.clientId ?? "",
+        // Phase 3b.2b — read accountEmail as a first-class
+        // RefreshRequest field (Phase 3b.2a smuggled it through
+        // `clientId`). Falls back to clientId for transitional
+        // callers; new callers should pass accountEmail explicitly.
+        accountEmail: req.accountEmail ?? req.clientId ?? "",
         tokenType: "Bearer",
       },
     };

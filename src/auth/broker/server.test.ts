@@ -62,6 +62,8 @@ function makeConfig(h: Harness, overrides: Partial<{
   admin_agents: string[];
   consumers: Array<{ name: string; account: string; uid?: number }>;
   agents: Record<string, { auth?: { override?: string } }>;
+  /** Phase 3b.2b — set to enable Google provider registration. */
+  google_workspace: { google_client_id: string; google_client_secret: string };
 }> = {}): SwitchroomConfig {
   return ({
     switchroom: { version: 1, agents_dir: h.agentsDir },
@@ -73,6 +75,7 @@ function makeConfig(h: Harness, overrides: Partial<{
       admin_agents: overrides.admin_agents,
       consumers: overrides.consumers,
     },
+    google_workspace: overrides.google_workspace,
   } as unknown) as SwitchroomConfig;
 }
 
@@ -584,6 +587,172 @@ describe("AuthBroker — provider field gating (Phase 3b.1)", () => {
     }) as { ok: boolean; error?: { code: string; message: string } };
     expect(resp.ok).toBe(false);
     expect(resp.error?.code).toBe("INVALID_ARGS");
+    broker.stop();
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// RFC G Phase 3b.2b — conditional GoogleProvider registration
+// ────────────────────────────────────────────────────────────────────────
+describe("AuthBroker — Google provider registration (Phase 3b.2b)", () => {
+  it("does NOT register Google when google_workspace config is absent", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    // Provider:google should be rejected as unknown.
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "rm-account",
+      label: "x",
+      provider: "google",
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.message).toContain("not registered");
+    expect(resp.error?.message).toMatch(/only .*anthropic.* available/);
+    broker.stop();
+  });
+
+  it("registers Google when google_workspace config provides client id + secret", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+      google_workspace: {
+        google_client_id: "test-client-id",
+        google_client_secret: "test-secret",
+      },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    // Provider:google now PASSES the registry gate but hits the
+    // 3b.2c-deferral message for the storage path.
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "rm-account",
+      label: "alice@example.com",
+      provider: "google",
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.message).toContain("Phase 3b.2c");
+    // Importantly — NOT "not registered" anymore. Google IS registered.
+    expect(resp.error?.message).not.toContain("not registered");
+    broker.stop();
+  });
+
+  it("with both providers registered, the validateCredentialShape route uses GoogleProvider for google: requests", async () => {
+    // Instead of fighting the schema enum to test "unknown provider"
+    // rejection, this test confirms BOTH providers are registered by
+    // routing a malformed Google credentials object through
+    // add-account → registry.lookup("google").validateCredentialShape.
+    // If GoogleProvider weren't registered, the request would fail at
+    // the registry.has() gate with "not registered" instead of the
+    // shape-validation message.
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+      google_workspace: {
+        google_client_id: "id",
+        google_client_secret: "secret",
+      },
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    await broker.start();
+    // Send WELL-FORMED Google credentials so the request passes
+    // schema validation and reaches the broker's dispatcher. The
+    // dispatcher routes through registry.lookup("google") (which
+    // requires GoogleProvider IS registered), runs
+    // validateCredentialShape, then hits the 3b.2c-deferral message
+    // for the storage path. If GoogleProvider weren't registered,
+    // it'd fail earlier at the registry.has() gate with a different
+    // message.
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "add-account",
+      label: "alice@example.com",
+      provider: "google",
+      credentials: {
+        googleOauth: {
+          accessToken: "at-x",
+          refreshToken: "rt-x",
+          expiresAt: 99999,
+          scope: "https://www.googleapis.com/auth/drive",
+          clientId: "client-id-x",
+          accountEmail: "alice@example.com",
+          tokenType: "Bearer",
+        },
+      },
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    // Reaches the storage-deferral path → confirms Google IS
+    // registered (otherwise we'd see "not registered" instead).
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.message).toContain("Phase 3b.2c");
+    expect(resp.error?.message).not.toContain("not registered");
+    broker.stop();
+  });
+
+  it("Google registration fails fast when client secret missing", async () => {
+    // (Defensive — schema requires both, but test the broker's
+    // null-check path independently.)
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      admin_agents: ["clerk"],
+      agents: { clerk: {} },
+    }) as unknown as Record<string, unknown>;
+    // Inject a partial google_workspace block (missing secret).
+    config.google_workspace = { google_client_id: "id" };
+    const broker = new AuthBroker(config as unknown as SwitchroomConfig, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    seedAccount(h, "default");
+    mkdirSync(join(h.agentsDir, "clerk"), { recursive: true });
+    await broker.start();
+    // Google should NOT be registered — partial config is treated as
+    // "not configured" rather than half-configured.
+    const resp = await rpc(join(h.socketRoot, "clerk", "sock"), {
+      v: 1,
+      id: "1",
+      op: "rm-account",
+      label: "x",
+      provider: "google",
+    }) as { ok: boolean; error?: { code: string; message: string } };
+    expect(resp.ok).toBe(false);
+    expect(resp.error?.message).toContain("not registered");
     broker.stop();
   });
 });

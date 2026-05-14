@@ -1012,6 +1012,15 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`      SWITCHROOM_AUTH_BROKER_STATE_DIR: /state/auth-broker`);
   lines.push(`      SWITCHROOM_ACCOUNTS_DIR: /state/accounts`);
   lines.push(`      SWITCHROOM_AGENTS_DIR: /state/agents`);
+  // Operator UID — when set, the broker binds an additional listener at
+  // /run/switchroom/auth-broker/operator/sock and chowns it to this UID
+  // so `switchroom auth …` from a shell on the host can reach the
+  // broker. Mirrors vault-broker's SWITCHROOM_BROKER_OPERATOR_UID
+  // env-driven enablement. Without this, the operator-dir bind mount
+  // below is unused dead weight.
+  if (opts.operatorUid !== undefined) {
+    lines.push(`      SWITCHROOM_AUTH_BROKER_OPERATOR_UID: "${opts.operatorUid}"`);
+  }
   lines.push(`    volumes:`);
   // Per-agent socket dir (named volume; agent side mounts the parent).
   for (const a of describeAgents(config)) {

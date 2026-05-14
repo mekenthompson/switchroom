@@ -8,13 +8,22 @@
  *   SWITCHROOM_CONFIG          — Path to switchroom.yaml (default
  *                                /etc/switchroom/switchroom.yaml inside
  *                                the broker container).
+ *   SWITCHROOM_AUTH_BROKER_OPERATOR_UID — When set (and no explicit
+ *                                `--operator-uid` flag is passed), bind
+ *                                the operator socket and chown it to
+ *                                this UID. Mirrors the vault-broker
+ *                                `SWITCHROOM_BROKER_OPERATOR_UID` shape.
+ *                                Used by the compose generator so the
+ *                                host CLI's `switchroom auth …` verbs
+ *                                can reach the broker.
  *
  * Flags:
  *   --operator-uid <N>         — When set, bind the operator socket and
- *                                chown it to <N>. Without this, the
- *                                broker still binds per-agent / per-
- *                                consumer listeners (the operator surface
- *                                is purely additive).
+ *                                chown it to <N>. Wins over the env var
+ *                                when both are present. Without either,
+ *                                the broker still binds per-agent /
+ *                                per-consumer listeners (the operator
+ *                                surface is purely additive).
  *
  * Signals:
  *   SIGTERM / SIGINT — graceful stop (close sockets, drop refresh timer).
@@ -51,9 +60,23 @@ function parseFlags(argv: readonly string[]): { operatorUid?: number } {
   return out;
 }
 
+function operatorUidFromEnv(): number | undefined {
+  const raw = process.env.SWITCHROOM_AUTH_BROKER_OPERATOR_UID;
+  if (raw === undefined || raw.length === 0) return undefined;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 0) {
+    throw new Error(
+      `SWITCHROOM_AUTH_BROKER_OPERATOR_UID='${raw}' is not a non-negative integer`,
+    );
+  }
+  return n;
+}
+
 export async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const flags = parseFlags(argv);
+  // Flag wins; env-var is the compose-driven default.
+  const operatorUid = flags.operatorUid ?? operatorUidFromEnv();
 
   const configPath = process.env.SWITCHROOM_CONFIG;
   if (configPath !== undefined && !existsSync(configPath)) {
@@ -82,7 +105,7 @@ export async function main(): Promise<void> {
   // any `depends_on: service_healthy` chain stalls forever.
   const stateDirEnv = process.env.SWITCHROOM_AUTH_BROKER_STATE_DIR;
   const broker = new AuthBroker(config, {
-    operatorUid: flags.operatorUid,
+    operatorUid,
     stateDir: stateDirEnv && stateDirEnv.length > 0 ? stateDirEnv : undefined,
   });
 

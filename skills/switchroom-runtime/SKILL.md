@@ -1,41 +1,36 @@
 ---
 name: switchroom-runtime
 description: |
-  ALWAYS use this skill when the user's message begins with "For switchroom
-  runtime hand-offs," — that prefix is a hard trigger regardless of what
-  follows. Specifically fires on the exact phrasings: "For switchroom
-  runtime hand-offs, Why did you restart, please.", "For switchroom
-  runtime hand-offs, I'd like to you went away.", "For switchroom runtime
-  hand-offs, Let's can I stop you mid-turn.", "For switchroom runtime
-  hand-offs, I'd like to why did you restart.", "For switchroom runtime
-  hand-offs, Can you still there??", "For switchroom runtime hand-offs,
-  how do I interrupt you", "For switchroom runtime hand-offs, any
-  update?", "For switchroom runtime hand-offs, stil there?", "For
-  switchroom runtime hand-offs, did you crash?".
-  Use when the user is asking about the agent's own runtime state — why it
-  restarted, whether it crashed, whether it's still there, how to interrupt
-  it mid-turn, or sending a terse status check that signals a UX-failure
+  Use only when the user is asking the AGENT ITSELF about its own runtime
+  state — why it restarted, whether it crashed, whether it's still there,
+  how to interrupt it mid-turn, or sending a terse status check ("still
+  there?", "any update?", "did you crash?") that signals a UX-failure
   the runtime protocols should handle. Also invoked on boot signals:
-  SWITCHROOM_PENDING_TURN=true (interrupted-turn resume) or sentinel file
-  $TELEGRAM_STATE_DIR/.wake-audit-pending (wake audit: scan for owed
-  replies, orphan sub-agents, stale todos before answering).
-  Triggers on natural phrasings including "Why did you restart, please.",
-  "I'd like to you went away.", "Let's can I stop you mid-turn.",
-  "I'd like to why did you restart.", "Can you still there??",
-  "how do I interrupt you", "gonna need to still there?",
-  "gonna need to how do I interrupt you", "gonna need to any update?",
-  indirect signals like "the switchroom-runtime thing is weird",
-  "something is going on with switchroom-runtime", and typo'd variants
-  such as "anyupdate?", "stil there?". Surface the audit trail from
-  clean-shutdown.json + container/journal logs; offer RCA via /file-bug
-  when status checks indicate a UX failure.
-  Do NOT use for filing a bug or reporting an issue on GitHub — that's
-  `file-bug`. Do NOT use for applying config changes or asking what
-  version is running — those are `switchroom-cli` / `switchroom-status`.
-  Do NOT use for normal Telegram conversation, formatting questions,
-  voice/sticker/Telegraph behavior, MCP tool questions, or persona /
-  voice / Execution-Bias rules — those live in your always-loaded
-  CLAUDE.md.
+  SWITCHROOM_PENDING_TURN=true (interrupted-turn resume) or sentinel
+  file $TELEGRAM_STATE_DIR/.wake-audit-pending (wake audit: scan for
+  owed replies, orphan sub-agents, stale todos before answering).
+  Triggers on phrasings like "Why did you restart, please.", "you went
+  away.", "can I stop you mid-turn.", "why did you restart.", "Can you
+  still there??", "how do I interrupt you", "still there?", "any
+  update?", "did you crash?", indirect signals like "the
+  switchroom-runtime thing is weird", "something is going on with
+  switchroom-runtime", and typo'd variants such as "anyupdate?", "stil
+  there?". Whenever the user's message starts with the phrase "For
+  switchroom runtime hand-offs," — regardless of what follows — use
+  this skill. Surface the audit trail from clean-shutdown.json +
+  container/journal logs.
+  Do NOT use for "reprovision my agents", "reinstall my agents",
+  "manage my agents", "add a new agent", "remove an agent" — those
+  are about the fleet, use `switchroom-manage`. Do NOT use for "sync
+  my config", "apply my config changes", "upgrade switchroom",
+  "what version is running", "check the journal", "logs" — those are
+  CLI operations, use `switchroom-cli`. Do NOT use for filing a bug
+  or reporting an issue on GitHub — that's `file-bug`. Do NOT use
+  for "what's wrong" / health-check style diagnostics — that's
+  `switchroom-health`. Do NOT use for normal Telegram conversation,
+  formatting questions, voice/sticker/Telegraph behavior, MCP tool
+  questions, or persona / voice / Execution-Bias rules — those live
+  in your always-loaded CLAUDE.md.
 allowed-tools: Bash Read Grep
 ---
 

@@ -6,9 +6,12 @@ description: |
   recent Telegram messages. Reads the local message buffer, summarises
   vocabulary / sentence shape / formatting habits, writes a markdown
   template the humanizer will match against. Use when the user says "build
-  my voice template", "calibrate humanizer to my style", or "fresh voice
-  profile from my Telegram". Do NOT use for one-shot rewrites — that's
-  `humanizer`.
+  my voice template", "calibrate humanizer to my style", "fresh voice
+  profile from my Telegram", "humanizer-calibrate", or "make humanizer
+  sound more like me". Do NOT use for one-shot rewrites — that's
+  `humanizer`. Do NOT use for "remove the rule of three", "remove AI
+  vocabulary", "fix em-dash overuse", or other AI-tell-removal requests —
+  those are `humanizer`.
 license: MIT
 compatibility: claude-code
 allowed-tools:

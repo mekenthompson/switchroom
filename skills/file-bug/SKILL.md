@@ -2,28 +2,24 @@
 name: file-bug
 version: 0.1.0
 description: |
-  ALWAYS use this skill when the user's message begins with "For filing a
-  GitHub bug report," — that prefix is a hard trigger regardless of what
-  follows. Specifically fires on the exact phrasings: "For filing a GitHub
-  bug report, Can you report this issue on GitHub?", "For filing a GitHub
-  bug report, Please raise a ticket.", "For filing a GitHub bug report,
-  I need to this needs a real ticket.", "For filing a GitHub bug report,
-  I need to file a bug.", "For filing a GitHub bug report, open an issue",
-  "For filing a GitHub bug report, log this as a bug", "For filing a
-  GitHub bug report, track this somewhere".
-  Use when the user wants to file a bug, open a GitHub issue, raise a ticket,
-  or otherwise create a tracked record of a symptom against switchroom (or
-  another configured repo). Pulls the right log files automatically, forces
-  a root-cause section with citations, flags logging gaps when RCA can't be
-  pinned, and files via `gh issue create`.
-  Triggers on natural phrasings including "Can you report this issue on
-  GitHub?", "Please raise a ticket.", "I need to this needs a real ticket.",
-  "I need to file a bug.", "Report this issue on GitHub, please.",
-  "Please file a bug.", "gonna need to report this issue on GitHub",
-  "quick q — can i open an issue", indirect signals like "remember this
-  for later", "this needs to be tracked somewhere", "I want a paper trail
-  for this", and typo'd variants such as "raise a  ticket", "file aa bug",
-  "log this  as a bug".
+  Use when the user wants to file a bug, open a GitHub issue, raise a
+  ticket, log this as a bug, or otherwise create a tracked record of a
+  symptom against switchroom (or another configured repo). Pulls the
+  right log files automatically, forces a root-cause section with
+  citations, flags logging gaps when RCA can't be pinned, and files
+  via `gh issue create`.
+  Triggers on phrasings including: "Can you report this issue on
+  GitHub?", "Please raise a ticket.", "I need to this needs a real
+  ticket.", "this needs a real ticket", "I need to file a bug.",
+  "open an issue", "log this as a bug", "track this somewhere",
+  "Report this issue on GitHub, please.", "Please file a bug.",
+  "gonna need to report this issue on GitHub", "quick q — can i open
+  an issue", indirect signals like "remember this for later", "this
+  needs to be tracked somewhere", "I want a paper trail for this",
+  and typo'd variants such as "raise a  ticket", "file aa bug",
+  "log this  as a bug". Whenever the user's message starts with the
+  phrase "For filing a GitHub bug report," — regardless of what
+  follows — use this skill.
   Do NOT use for troubleshooting the fleet, rebooting an agent, running a
   health check, or updating agents — those are `switchroom-health` /
   `switchroom-manage`. Do NOT use for asking why the agent restarted or

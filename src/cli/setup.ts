@@ -1306,7 +1306,7 @@ async function stepVerification(
       `    3. Send a message in the "${firstAgent.topic_name}" topic`,
     ),
   );
-  console.log(chalk.gray("    4. Check auth:      switchroom auth status"));
+  console.log(chalk.gray("    4. Check auth:      switchroom auth list"));
 
   if (!nonInteractive) {
     const startNow = await askYesNo(

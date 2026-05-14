@@ -1336,7 +1336,7 @@ export function checkAgents(config: SwitchroomConfig, configPath: string): Check
           detail: auth?.pendingAuth
             ? "pending (auth flow in progress)"
             : "not authenticated",
-          fix: `Run \`switchroom auth login ${name}\` and complete the OAuth flow`,
+          fix: `Run \`switchroom auth add <label> --from-oauth\` then \`switchroom auth use <label>\` (RFC H — see docs/auth.md)`,
         });
       }
     } else {
@@ -1356,7 +1356,7 @@ export function checkAgents(config: SwitchroomConfig, configPath: string): Check
         status: nearExpiry ? "warn" : "ok",
         detail: parts.join(" · "),
         fix: nearExpiry
-          ? `Token expires soon — run \`switchroom auth login ${name}\` to refresh`
+          ? `Token expires soon — broker refreshes automatically below 60 min remaining; force with \`switchroom auth refresh\``
           : undefined,
       });
     }
@@ -1396,9 +1396,9 @@ export function checkAgents(config: SwitchroomConfig, configPath: string): Check
           detail,
           fix:
             quotaOut > 0
-              ? `Quota-exhausted slot(s) will auto-recover. Add a fresh slot with \`switchroom auth add ${name} <slot>\``
+              ? `Quota-exhausted account(s) will auto-recover when the window resets; broker auto-rotates per \`auth.fallback_order\` (see \`switchroom auth show\`).`
               : expired > 0
-                ? `Expired slot(s) — run \`switchroom auth login ${name} --slot <name>\``
+                ? `Expired account(s) — add a fresh one via \`switchroom auth add <label> --from-oauth\` and \`switchroom auth use <label>\` (RFC H).`
                 : undefined,
         });
       }

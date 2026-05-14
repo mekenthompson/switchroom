@@ -141,6 +141,77 @@ describe("resolveAnchor — heading-based", () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────
+// append_to_section — empty-section semantics (post-review fix #1)
+// ────────────────────────────────────────────────────────────────────────
+
+describe("append_to_section — empty-section handling", () => {
+  it("heading immediately followed by another same-level heading → append_to_empty_section at heading index", () => {
+    const doc: DocumentSnapshot = {
+      paragraphs: [h(2, "Goals", 1), h(2, "Hiring", 2), p("Open roles.", 3)],
+    };
+    const r = resolveAnchor({ append_to_section: "Goals" }, doc);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.resolved.op).toEqual({
+        kind: "append_to_empty_section",
+        paragraphIndex: 1,
+      });
+      expect(r.resolved.displayName).toContain("currently empty");
+    }
+  });
+
+  it("heading is the LAST paragraph in the doc → append_to_empty_section", () => {
+    const doc: DocumentSnapshot = {
+      paragraphs: [p("Body.", 1), h(2, "Risks", 2)],
+    };
+    const r = resolveAnchor({ append_to_section: "Risks" }, doc);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.resolved.op).toEqual({
+        kind: "append_to_empty_section",
+        paragraphIndex: 2,
+      });
+    }
+  });
+
+  it("heading immediately followed by a higher-level heading (H2 → H1) → empty section", () => {
+    const doc: DocumentSnapshot = {
+      paragraphs: [h(2, "Notes", 1), h(1, "Other", 2), p("body", 3)],
+    };
+    const r = resolveAnchor({ append_to_section: "Notes" }, doc);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.resolved.op).toEqual({
+        kind: "append_to_empty_section",
+        paragraphIndex: 1,
+      });
+    }
+  });
+
+  it("heading with body and nested subheading → section_end at last body paragraph (subheading bodies count)", () => {
+    // 'Goals' has body paragraph (idx 2), then subheading H3 (idx 3)
+    // with its own body (idx 4). Section runs to next H<=2 or EOF;
+    // here EOF, so last body is idx 4.
+    const doc: DocumentSnapshot = {
+      paragraphs: [
+        h(2, "Goals", 1),
+        p("Top-level intent.", 2),
+        h(3, "Subgoal", 3),
+        p("Sub body.", 4),
+      ],
+    };
+    const r = resolveAnchor({ append_to_section: "Goals" }, doc);
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.resolved.op).toEqual({
+        kind: "append_to_section_end",
+        paragraphIndex: 4,
+      });
+    }
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
 // Text-snippet
 // ────────────────────────────────────────────────────────────────────────
 
@@ -223,6 +294,61 @@ describe("resolveAnchor — text-snippet", () => {
     const r = resolveAnchor({}, unheadedDoc);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.error.code).toBe("INVALID_ANCHOR");
+  });
+
+  it("INVALID_ANCHOR when after_line_containing is empty string (would silently match every paragraph)", () => {
+    const r = resolveAnchor({ after_line_containing: "" }, unheadedDoc);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("INVALID_ANCHOR");
+      expect(r.error.message).toContain("non-empty");
+    }
+  });
+
+  it("INVALID_ANCHOR when before_line_containing is whitespace-only", () => {
+    const r = resolveAnchor({ before_line_containing: "   " }, unheadedDoc);
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("INVALID_ANCHOR");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// nth_match out-of-range — distinct error code per review fix #2
+// ────────────────────────────────────────────────────────────────────────
+
+describe("nth_match out of range → NTH_MATCH_OUT_OF_RANGE (not _AMBIGUOUS)", () => {
+  it("heading: nth_match=5 when there are only 2 matches", () => {
+    const doc: DocumentSnapshot = {
+      paragraphs: [h(2, "Notes", 1), p("a", 2), h(2, "Notes", 3), p("b", 4)],
+    };
+    const r = resolveAnchor({ after_heading: "Notes", nth_match: 5 }, doc);
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("NTH_MATCH_OUT_OF_RANGE");
+      expect(r.error.message).toContain("nth_match=5");
+      expect(r.error.message).toContain("Valid range: 1..2");
+    }
+  });
+
+  it("snippet: nth_match=10 when there are only 2 matches", () => {
+    const r = resolveAnchor(
+      { after_line_containing: "Action items", nth_match: 10 },
+      unheadedDoc,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) {
+      expect(r.error.code).toBe("NTH_MATCH_OUT_OF_RANGE");
+      expect(r.error.message).toContain("nth_match=10");
+    }
+  });
+
+  it("nth_match=0 (boundary, 1-based indexing) → NTH_MATCH_OUT_OF_RANGE", () => {
+    const r = resolveAnchor(
+      { after_line_containing: "Action items", nth_match: 0 },
+      unheadedDoc,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error.code).toBe("NTH_MATCH_OUT_OF_RANGE");
   });
 });
 

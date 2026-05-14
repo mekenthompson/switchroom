@@ -102,7 +102,16 @@ export type ResolvedOp =
   | { kind: "insert_after"; paragraphIndex: number }
   | { kind: "insert_before"; paragraphIndex: number }
   | { kind: "replace_paragraph"; paragraphIndex: number }
-  | { kind: "append_to_section_end"; paragraphIndex: number /* index of LAST paragraph in section */ };
+  | {
+      kind: "append_to_section_end";
+      /** Index of LAST body paragraph in the section. */
+      paragraphIndex: number;
+    }
+  | {
+      kind: "append_to_empty_section";
+      /** Index of the heading itself — the section has no body paragraphs to append after. Wrapper inserts a new body paragraph immediately after this heading. */
+      paragraphIndex: number;
+    };
 
 export interface ResolvedAnchor {
   op: ResolvedOp;
@@ -115,6 +124,7 @@ export type AnchorErrorCode =
   | "HEADING_AMBIGUOUS"
   | "SNIPPET_NOT_FOUND"
   | "SNIPPET_AMBIGUOUS"
+  | "NTH_MATCH_OUT_OF_RANGE"
   | "EMPTY_DOC_NEEDS_POSITION"
   | "INVALID_ANCHOR";
 
@@ -182,6 +192,17 @@ function resolveHeading(
 
   const picked = pickByNthMatch(matches, anchor.nth_match);
   if (picked === null) {
+    if (anchor.nth_match !== undefined) {
+      // Operator did disambiguate — they just picked an index that
+      // doesn't exist. Distinct error so the message is honest.
+      return outOfRange(
+        `nth_match=${anchor.nth_match} exceeds the ${matches.length} matching heading${matches.length === 1 ? "" : "s"} titled '${target}'${anchor.level !== undefined ? ` at level ${anchor.level}` : ""}. Valid range: 1..${matches.length}.`,
+        matches.map((m) => ({
+          index: m.index,
+          excerpt: `(${ordinalLevel(m.level)}) ${m.text}`,
+        })),
+      );
+    }
     return ambiguous(
       "HEADING_AMBIGUOUS",
       `Found ${matches.length} headings titled '${target}'${anchor.level !== undefined ? ` at level ${anchor.level}` : ""}. Specify nth_match (1..${matches.length}) to disambiguate.`,
@@ -193,13 +214,32 @@ function resolveHeading(
   }
 
   if (anchor.append_to_section !== undefined) {
-    // Find the last paragraph in this heading's section: the next paragraph
-    // index that is a heading at level <= picked.level (or end-of-doc).
-    const sectionEndIdx = findSectionEnd(picked, doc);
+    // Find the last BODY paragraph in this heading's section. If the
+    // section is empty (heading immediately followed by another
+    // same-or-higher heading, or heading is the last paragraph in the
+    // doc), we return a distinct op so the wrapper knows to insert
+    // a fresh paragraph after the heading rather than appending to
+    // the heading itself (which would corrupt heading text).
+    const sectionEnd = findSectionEnd(picked, doc);
+    if (sectionEnd.empty) {
+      return {
+        ok: true,
+        resolved: {
+          op: {
+            kind: "append_to_empty_section",
+            paragraphIndex: picked.index,
+          },
+          displayName: `end of section '${picked.text}' (${ordinalLevel(picked.level)}, currently empty)`,
+        },
+      };
+    }
     return {
       ok: true,
       resolved: {
-        op: { kind: "append_to_section_end", paragraphIndex: sectionEndIdx },
+        op: {
+          kind: "append_to_section_end",
+          paragraphIndex: sectionEnd.lastBodyIndex,
+        },
         displayName: `end of section '${picked.text}' (${ordinalLevel(picked.level)})`,
       },
     };
@@ -214,22 +254,43 @@ function resolveHeading(
   };
 }
 
+/**
+ * Result of locating the end of a heading's section.
+ * - `empty: true`      — the heading has no body paragraphs (next sibling
+ *                        is another same-or-higher heading, or the heading
+ *                        is the last paragraph in the doc).
+ * - `lastBodyIndex`    — paragraphIndex of the LAST body paragraph in the
+ *                        section. Only set when `empty: false`.
+ */
+type SectionEnd =
+  | { empty: true }
+  | { empty: false; lastBodyIndex: number };
+
 function findSectionEnd(
   heading: HeadingParagraph,
   doc: DocumentSnapshot,
-): number {
-  // Find this heading's array position
+): SectionEnd {
   const arrPos = doc.paragraphs.findIndex((p) => p === heading);
-  if (arrPos === -1) return heading.index; // shouldn't happen
+  if (arrPos === -1) return { empty: true }; // shouldn't happen — defensive
   for (let i = arrPos + 1; i < doc.paragraphs.length; i++) {
     const p = doc.paragraphs[i];
     if (p.kind === "heading" && p.level <= heading.level) {
       // Section ends at the paragraph BEFORE this same-or-higher heading.
-      return doc.paragraphs[i - 1].index;
+      // If that paragraph IS the heading we started from (i.e. arrPos +
+      // 1 == this heading), the section is empty.
+      if (i === arrPos + 1) return { empty: true };
+      return { empty: false, lastBodyIndex: doc.paragraphs[i - 1].index };
     }
   }
-  // Section runs to end of doc.
-  return doc.paragraphs[doc.paragraphs.length - 1].index;
+  // No following same-or-higher heading.
+  if (arrPos === doc.paragraphs.length - 1) {
+    // Heading is the last paragraph — section is empty.
+    return { empty: true };
+  }
+  return {
+    empty: false,
+    lastBodyIndex: doc.paragraphs[doc.paragraphs.length - 1].index,
+  };
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -247,6 +308,20 @@ function resolveSnippet(
   if (setCount !== 1) {
     return invalidAnchor(
       "Snippet anchor must set exactly one of: after_line_containing, before_line_containing, replace_line_matching.",
+    );
+  }
+  // Reject empty/whitespace-only snippet strings up front. `''.includes('')`
+  // is true, so an empty string would silently match every paragraph and
+  // dump the operator into a SNIPPET_AMBIGUOUS error with no clue what
+  // went wrong.
+  if (after !== undefined && after.trim() === "") {
+    return invalidAnchor(
+      "after_line_containing must be a non-empty, non-whitespace search string.",
+    );
+  }
+  if (before !== undefined && before.trim() === "") {
+    return invalidAnchor(
+      "before_line_containing must be a non-empty, non-whitespace search string.",
     );
   }
 
@@ -278,6 +353,15 @@ function resolveSnippet(
 
   const picked = pickByNthMatch(matches, anchor.nth_match);
   if (picked === null) {
+    if (anchor.nth_match !== undefined) {
+      return outOfRange(
+        `nth_match=${anchor.nth_match} exceeds the ${matches.length} matching line${matches.length === 1 ? "" : "s"}. Valid range: 1..${matches.length}.`,
+        matches.slice(0, 3).map((m, i) => ({
+          index: m.paragraph.index,
+          excerpt: `match ${i + 1}: "${ellipsize(m.matchedText, 80)}"`,
+        })),
+      );
+    }
     return ambiguous(
       "SNIPPET_AMBIGUOUS",
       `Found ${matches.length} lines matching the snippet. Specify nth_match (1..${matches.length}) to disambiguate.`,
@@ -434,6 +518,13 @@ function ambiguous(
   candidates: AnchorError["candidates"],
 ): ResolveResult {
   return { ok: false, error: { code, message, candidates } };
+}
+
+function outOfRange(
+  message: string,
+  candidates: AnchorError["candidates"],
+): ResolveResult {
+  return { ok: false, error: { code: "NTH_MATCH_OUT_OF_RANGE", message, candidates } };
 }
 
 function invalidAnchor(message: string): ResolveResult {

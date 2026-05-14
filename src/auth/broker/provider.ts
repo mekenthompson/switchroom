@@ -100,6 +100,15 @@ export function accountKeyString(key: AccountKey): string {
  */
 export interface RefreshRequest {
   refreshToken: string;
+  /**
+   * Account identity within the provider's namespace. For Google
+   * this is the account email (e.g. "alice@example.com"); the
+   * provider stores it back into rawCredentials so consumers can
+   * route per-account. Phase 3b.2a temporarily smuggled this through
+   * `clientId`; Phase 3b.2b promotes it to a first-class field.
+   * Anthropic ignores this (uses the broker-side label directly).
+   */
+  accountEmail?: string;
   /** OAuth client id, when the provider needs it. */
   clientId?: string;
   /** Scope set to request, when the provider re-asserts scopes per refresh. */

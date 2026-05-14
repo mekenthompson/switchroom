@@ -12,7 +12,7 @@ import { getAuthStatus } from "../auth/manager.js";
  * Poll auth status for `name` until it reads authenticated=true, up to
  * `timeoutMs` (default 30 s).  Returns true if auth converged within the
  * window, false if it timed out.  Fixes #176: restart now blocks until auth
- * status reflects reality so `switchroom restart && switchroom auth status`
+ * status reflects reality so `switchroom restart && switchroom auth list`
  * shows ✓ without a second manual run.
  */
 function waitForAuthConverge(

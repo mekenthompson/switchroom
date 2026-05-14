@@ -861,7 +861,7 @@ export async function probeQuota(
         status: 'degraded',
         label: 'Quota',
         detail: 'no OAuth token',
-        nextStep: 'No OAuth token on disk — run `switchroom auth login <agent>` to authenticate',
+        nextStep: 'No OAuth token on disk — register a fleet account: `switchroom auth add <label> --from-oauth` then `switchroom auth use <label>` (RFC H)',
       }
     }
 
@@ -880,8 +880,8 @@ export async function probeQuota(
         label: 'Quota',
         detail: probe.reason,
         nextStep: isAuth
-          ? 'Auth rejected by Anthropic — re-authenticate with `switchroom auth login <agent>`'
-          : 'Anthropic quota probe failed — re-check after a minute; if persistent, `switchroom auth login <agent>`',
+          ? 'Auth rejected by Anthropic — broker auto-refreshes; if persistent, replace the account: `switchroom auth add <label> --from-oauth --replace`'
+          : 'Anthropic quota probe failed — re-check after a minute; broker auto-rotates per `auth.fallback_order`',
       }
     }
 

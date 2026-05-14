@@ -51,6 +51,7 @@ import { AnthropicProvider } from "./anthropic-provider.js";
 import { GoogleProvider } from "./google-provider.js";
 import {
   googleAccountExists,
+  listGoogleAccounts,
   readGoogleAccountCredentials,
   removeGoogleAccount,
   validateGoogleAccountLabel,
@@ -239,19 +240,19 @@ export class AuthBroker {
     // Google provider loaded; the broker still rejects
     // `provider: "google"` requests via registry.has() per Phase 3b.1.
     //
-    // **TODO (Phase 3b.2d):** the `google_client_id` / `_secret`
+    // **Known foot-gun (tracked):** the `google_client_id` / `_secret`
     // schema fields accept `vault:<key>` references (per
     // `src/config/schema.ts:759`); `src/cli/drive.ts:446-448`
-    // resolves them via `resolveMaybeVaultRef`. Today the broker
-    // passes the raw config string verbatim, so a vault-ref config
-    // would silently send a literal `"vault:..."` string to Google's
-    // token endpoint and fail. Phase 3b.2c shipped storage but
-    // refresh-tick is still deferred to 3b.2d (along with the
-    // per-(provider, account) state-keying refactor); 3b.2d MUST
-    // resolve vault refs here BEFORE the GoogleProvider's first
-    // refresh fires. Foot-gun until then — operators using
-    // `vault:` refs in google_workspace will hit it on the first
-    // refresh attempt.
+    // resolves them via `resolveMaybeVaultRef`. The broker passes the
+    // raw config string verbatim, so a vault-ref config would
+    // silently send a literal `"vault:..."` string to Google's token
+    // endpoint and fail. Resolution requires broker-side vault
+    // access (its own architectural piece — broker doesn't currently
+    // talk to vault-broker). Until then operators must use plain
+    // strings in `google_workspace.{google_client_id, google_client_secret}`
+    // — the OAuth client identity isn't a high-secrecy value (it's
+    // operator-owned, not account-owned). Refresh-tick (this file's
+    // `refreshOneGoogleAccount`) lands without vault-ref support.
     //
     // **Known limitation:** `reload()` does NOT re-run provider
     // registration. An operator who adds `google_workspace:` to a
@@ -1237,6 +1238,90 @@ export class AuthBroker {
       } catch (err) {
         this.logErr(`refresh-tick ${label}: ${(err as Error).message}`);
       }
+    }
+    // Phase 3b.2d — also walk Google accounts. The provider may not
+    // be registered (no google_workspace: config), in which case there
+    // are no Google accounts on disk anyway and the loop is a no-op.
+    if (this.providers.has("google")) {
+      for (const account of listGoogleAccounts(this.stateDir)) {
+        try {
+          await this.refreshOneGoogleAccount(account, /*force*/ false);
+        } catch (err) {
+          this.logErr(
+            `refresh-tick google:${account}: ${(err as Error).message}`,
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * Pre-emptively refresh one Google account's access token if it's
+   * within REFRESH_THRESHOLD_MS of expiry. Mirrors `refreshOneAccount`
+   * (the Anthropic path) in shape — same in-flight lease pattern, same
+   * threshold, same outcome discriminant — but talks to GoogleProvider
+   * and writes back via `writeGoogleAccountCredentials`.
+   *
+   * Unlike Anthropic refresh, there's no per-agent fanout: Google
+   * credentials are pulled on-demand by the wrapper-broker client
+   * (`src/drive/wrapper-broker.ts`) via `get-credentials({provider:
+   * "google"})`. The broker just needs the on-disk credentials kept
+   * fresh.
+   *
+   * Returns the same outcome shape as the Anthropic path so callers
+   * can branch uniformly.
+   */
+  private async refreshOneGoogleAccount(
+    account: string,
+    force: boolean,
+  ): Promise<
+    | { kind: "noop" }
+    | { kind: "refreshed"; newExpiresAt: number }
+    | { kind: "failed"; error: string }
+  > {
+    // Lease key is namespaced so Google `alice@example.com` doesn't
+    // collide with an Anthropic account literally named the same.
+    const leaseKey = `google:${account}`;
+    if (this.refreshInFlight.has(leaseKey)) return { kind: "noop" };
+
+    const credsBefore = readGoogleAccountCredentials(this.stateDir, account);
+    if (!credsBefore) {
+      // Account vanished between listGoogleAccounts() and now — treat
+      // as noop. Operator-driven `auth google account remove` is the
+      // typical path here.
+      return { kind: "noop" };
+    }
+    const provider = this.providers.lookup("google");
+    const onDiskExpires = provider.extractExpiresAt(credsBefore);
+    if (!force) {
+      const remaining = (onDiskExpires ?? 0) - this.now();
+      if (onDiskExpires !== undefined && remaining > REFRESH_THRESHOLD_MS) {
+        return { kind: "noop" };
+      }
+    }
+
+    this.refreshInFlight.add(leaseKey);
+    try {
+      const refreshToken = credsBefore.googleOauth.refreshToken;
+      const result = await provider.refresh({
+        refreshToken,
+        accountEmail: account,
+        clientId: credsBefore.googleOauth.clientId,
+      });
+      if (!result.ok) {
+        // Don't touch on-disk credentials on failure — the existing
+        // refreshToken may still work next tick (transient network),
+        // and on `invalid_grant` the operator needs to re-OAuth (the
+        // wrapper-broker get-credentials path will surface a clean
+        // error to the consumer when they next call).
+        return { kind: "failed", error: `${result.kind}: ${result.detail}` };
+      }
+      const newCreds = result.rawCredentials as GoogleCredentialsShape;
+      // Provider returned the rawCredentials shape verbatim; persist.
+      writeGoogleAccountCredentials(this.stateDir, account, newCreds);
+      return { kind: "refreshed", newExpiresAt: result.expiresAt };
+    } finally {
+      this.refreshInFlight.delete(leaseKey);
     }
   }
 

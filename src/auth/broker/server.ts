@@ -49,7 +49,15 @@ import {
 } from "../account-refresh.js";
 import { AnthropicProvider } from "./anthropic-provider.js";
 import { GoogleProvider } from "./google-provider.js";
+import {
+  googleAccountExists,
+  readGoogleAccountCredentials,
+  removeGoogleAccount,
+  validateGoogleAccountLabel,
+  writeGoogleAccountCredentials,
+} from "./google-storage.js";
 import { ProviderRegistry, type ProviderName } from "./provider.js";
+import type { GoogleCredentialsShape } from "./protocol.js";
 import {
   accountCredentialsPath,
   accountDir,
@@ -227,16 +235,19 @@ export class AuthBroker {
     // Google provider loaded; the broker still rejects
     // `provider: "google"` requests via registry.has() per Phase 3b.1.
     //
-    // **TODO (Phase 3b.2c):** the `google_client_id` / `_secret`
+    // **TODO (Phase 3b.2d):** the `google_client_id` / `_secret`
     // schema fields accept `vault:<key>` references (per
     // `src/config/schema.ts:759`); `src/cli/drive.ts:446-448`
     // resolves them via `resolveMaybeVaultRef`. Today the broker
     // passes the raw config string verbatim, so a vault-ref config
     // would silently send a literal `"vault:..."` string to Google's
-    // token endpoint and fail. Phase 3b.2c must resolve vault refs
-    // here BEFORE constructing the GoogleProvider — otherwise the
-    // first refresh tick will surface a confusing error. Latent
-    // until 3b.2c wires storage; flagged here as a foot-gun.
+    // token endpoint and fail. Phase 3b.2c shipped storage but
+    // refresh-tick is still deferred to 3b.2d (along with the
+    // per-(provider, account) state-keying refactor); 3b.2d MUST
+    // resolve vault refs here BEFORE the GoogleProvider's first
+    // refresh fires. Foot-gun until then — operators using
+    // `vault:` refs in google_workspace will hit it on the first
+    // refresh attempt.
     //
     // **Known limitation:** `reload()` does NOT re-run provider
     // registration. An operator who adds `google_workspace:` to a
@@ -606,7 +617,7 @@ export class AuthBroker {
             );
             break;
           }
-          // Anthropic-only storage path for now; Google path lands in 3b.2.
+          // Phase 3b.2c — providers dispatch by name.
           if (provider === "anthropic") {
             const anthropicCreds = req.credentials as {
               claudeAiOauth: AccountCredentials["claudeAiOauth"];
@@ -621,11 +632,29 @@ export class AuthBroker {
             );
             break;
           }
+          // Google: writes to broker's own state dir under
+          // `~/.switchroom/state/auth-broker/google/<account>/`.
+          // Phase 3b.2d will migrate to vault-broker-mediated storage
+          // per RFC G v3 §4.4.
+          if (provider === "google") {
+            const googleCreds = req.credentials as GoogleCredentialsShape;
+            await this.opGoogleAddAccount(
+              socket,
+              reqId,
+              identity,
+              req.label,
+              googleCreds,
+              req.replace ?? false,
+            );
+            break;
+          }
+          // Unreachable today (registry has() rejects unknown
+          // providers above), but defensive.
           socket.write(
             encodeError(
               reqId,
-              "INVALID_ARGS",
-              `add-account storage path for provider '${provider}' lands in Phase 3b.2c (vault-broker-mediated, not direct-to-disk like Anthropic)`,
+              "INTERNAL",
+              `unhandled provider '${provider}' in add-account dispatch`,
             ),
           );
           break;
@@ -646,11 +675,15 @@ export class AuthBroker {
             await this.opRmAccount(socket, reqId, identity, req.label);
             break;
           }
+          if (provider === "google") {
+            await this.opGoogleRmAccount(socket, reqId, identity, req.label);
+            break;
+          }
           socket.write(
             encodeError(
               reqId,
-              "INVALID_ARGS",
-              `rm-account storage path for provider '${provider}' lands in Phase 3b.2c (vault-broker-mediated, not direct-to-disk like Anthropic)`,
+              "INTERNAL",
+              `unhandled provider '${provider}' in rm-account dispatch`,
             ),
           );
           break;
@@ -923,6 +956,110 @@ export class AuthBroker {
     this.persistShaIndex();
     this.persistQuota();
     this.persistThresholdViolations();
+    this.audit({ op: "rm-account", identity, account: label, ok: true });
+    socket.write(encodeSuccess(id, { label }));
+  }
+
+  /**
+   * RFC G Phase 3b.2c — Google add-account.
+   *
+   * Storage layout: writes verbatim Google credentials to
+   * `<stateDir>/google/<account>/credentials.json` via
+   * `google-storage.ts`. Phase 3b.2d (future) will migrate to
+   * vault-broker-mediated storage per RFC G v3 §4.4.
+   *
+   * Differences from Anthropic's opAddAccount:
+   *   - Storage location is broker stateDir not `~/.switchroom/accounts/`
+   *   - Credentials are GoogleCredentialsShape (`googleOauth: {...}`)
+   *     not `claudeAiOauth`
+   *   - No fanout to per-agent .credentials.json mirrors — Google
+   *     consumers (MCP wrapper) will read via `get-credentials` UDS
+   *     when Phase 3b.4 wires the wrapper. Today the credentials sit
+   *     in storage waiting for that consumer.
+   *   - No sha-index or threshold-violation tracking yet (those are
+   *     Anthropic-state machinery; Google parallel state lands when
+   *     it's needed — likely Phase 3b.2d alongside the refresh tick
+   *     wiring).
+   */
+  private async opGoogleAddAccount(
+    socket: net.Socket,
+    id: string,
+    identity: Identity,
+    label: string,
+    credentials: GoogleCredentialsShape,
+    replace: boolean,
+  ): Promise<void> {
+    if (!this.isAdmin(identity)) {
+      this.audit({ op: "add-account", identity, account: label, ok: false, error: "FORBIDDEN" });
+      this.respondForbidden(socket, id, "add-account requires admin");
+      return;
+    }
+    // Defense-in-depth path-traversal guard. Wire-protocol schema
+    // accepts `z.string().min(1)`; the email-shape validator runs
+    // here so a malformed label can't escape the stateDir via `..`,
+    // `/`, etc. before any fs op fires.
+    try {
+      validateGoogleAccountLabel(label);
+    } catch (err) {
+      socket.write(encodeError(id, "INVALID_ARGS", (err as Error).message));
+      return;
+    }
+    if (googleAccountExists(this.stateDir, label) && !replace) {
+      this.audit({ op: "add-account", identity, account: label, ok: false, error: "ACCOUNT_ALREADY_EXISTS" });
+      socket.write(encodeError(id, "ACCOUNT_ALREADY_EXISTS", `google account '${label}' already exists; pass replace:true to overwrite`));
+      return;
+    }
+    try {
+      writeGoogleAccountCredentials(this.stateDir, label, credentials);
+    } catch (err) {
+      socket.write(encodeError(id, "INTERNAL", (err as Error).message));
+      return;
+    }
+    const expiresAt = credentials.googleOauth?.expiresAt;
+    this.audit({ op: "add-account", identity, account: label, ok: true, replace });
+    socket.write(encodeSuccess(id, { label, expiresAt }));
+  }
+
+  /**
+   * RFC G Phase 3b.2c — Google rm-account. Refuses to remove while
+   * the account is in `google_accounts.<label>.enabled_for[]` (any
+   * agent still depends on the credential). Operator must
+   * `auth google disable <label> all` first.
+   */
+  private async opGoogleRmAccount(
+    socket: net.Socket,
+    id: string,
+    identity: Identity,
+    label: string,
+  ): Promise<void> {
+    if (!this.isAdmin(identity)) {
+      this.audit({ op: "rm-account", identity, account: label, ok: false, error: "FORBIDDEN" });
+      this.respondForbidden(socket, id, "rm-account requires admin");
+      return;
+    }
+    try {
+      validateGoogleAccountLabel(label);
+    } catch (err) {
+      socket.write(encodeError(id, "INVALID_ARGS", (err as Error).message));
+      return;
+    }
+    if (!googleAccountExists(this.stateDir, label)) {
+      socket.write(encodeError(id, "ACCOUNT_NOT_FOUND", `google account '${label}' not found`));
+      return;
+    }
+    // Refuse if any agent is still enabled on this account.
+    const ga = (this.config as { google_accounts?: Record<string, { enabled_for?: string[] }> }).google_accounts;
+    const enabledFor = ga?.[label]?.enabled_for ?? [];
+    if (enabledFor.length > 0) {
+      socket.write(encodeError(id, "INVALID_ARGS", `google account '${label}' is still enabled for agents: ${enabledFor.join(", ")}. Run \`auth google disable ${label} all\` first.`));
+      return;
+    }
+    try {
+      removeGoogleAccount(this.stateDir, label);
+    } catch (err) {
+      socket.write(encodeError(id, "INTERNAL", (err as Error).message));
+      return;
+    }
     this.audit({ op: "rm-account", identity, account: label, ok: true });
     socket.write(encodeSuccess(id, { label }));
   }

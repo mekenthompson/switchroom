@@ -527,117 +527,79 @@ function checkVault(config: SwitchroomConfig): CheckResult[] {
 }
 
 /**
- * Inspect a running `switchroom-hindsight` container's `.Config.Env` for
- * secret-shaped values. Used by the doctor probe to surface pre-fix
- * containers that were started with `-e HINDSIGHT_API_LLM_API_KEY=...`
- * — those values appear in `docker inspect` and are readable by anyone
- * in the docker group.
+ * Probe the hindsight ephemeral-consumer wiring (RFC H §4.8 / #1245).
  *
- * Post-fix containers bind-mount the secret file and use an entrypoint
- * shim to export the env var INSIDE the container. Docker doesn't see
- * the export, so `.Config.Env` does not contain the key.
+ * Two related checks, returned as a single combined row:
+ *   1. `auth.consumers[]` in `switchroom.yaml` contains an entry named
+ *      `hindsight`. The auth-broker only binds a per-consumer socket
+ *      when this is set.
+ *   2. The bound socket exists on the host side at
+ *      `~/.switchroom/state/auth-broker/<host-socket-path>/sock`.
+ *      The hindsight side bind-mounts the named volume
+ *      `auth-broker-hindsight-sock` (managed by compose) into its own
+ *      container; the host-side state dir is where the broker writes
+ *      the socket.
  *
- * Note: `--env-file` was the original approach but was rejected during
- * review — empirically `--env-file` values DO populate `.Config.Env`
- * identically to `-e` on Docker 29.4.1. Only an in-container export
- * (via entrypoint shim) keeps the value out of `Config.Env`.
- *
- * @internal exported for testing
- */
-export function detectHindsightEnvLeak(
-  dockerInspectJson: string,
-): { leaked: true; leakedKeys: string[] } | { leaked: false } {
-  let env: unknown;
-  try {
-    env = JSON.parse(dockerInspectJson);
-  } catch {
-    return { leaked: false };
-  }
-  if (!Array.isArray(env)) return { leaked: false };
-
-  const leakedKeys: string[] = [];
-  // Patterns mirror telegram-plugin/secret-detect/patterns.ts:
-  //   - `*KEY*=sk-...` (OpenAI / Anthropic / generic)
-  //   - `*KEY*=AKIA...` (AWS access key)
-  //   - `*TOKEN*=` followed by 20+ base64-ish chars
-  //   - `*PASSWORD*=` / `*SECRET*=` with any non-trivial value
-  //   - explicit HINDSIGHT_API_LLM_API_KEY= with any non-empty value
-  //     (belt-and-braces — the variable name alone is sufficient signal)
-  const namePattern = /^[A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD|PASSWD)$/;
-  for (const entry of env) {
-    if (typeof entry !== "string") continue;
-    const eq = entry.indexOf("=");
-    if (eq < 0) continue;
-    const name = entry.slice(0, eq);
-    const value = entry.slice(eq + 1);
-    if (!value) continue;
-
-    if (name === "HINDSIGHT_API_LLM_API_KEY") {
-      leakedKeys.push(name);
-      continue;
-    }
-    if (!namePattern.test(name)) continue;
-
-    // Known provider prefixes — high confidence.
-    if (
-      /^sk-[A-Za-z0-9_-]{8,}/.test(value) ||
-      /^AKIA[0-9A-Z]{16}/.test(value) ||
-      /^ghp_[A-Za-z0-9]{20,}/.test(value) ||
-      /^xox[baprs]-[A-Za-z0-9-]{10,}/.test(value)
-    ) {
-      leakedKeys.push(name);
-      continue;
-    }
-
-    // Generic high-entropy value (20+ base64-ish chars). Only applied
-    // when the variable name is explicitly secret-shaped — the
-    // `namePattern` test above gates this.
-    if (/^[A-Za-z0-9_\-+/=.]{20,}$/.test(value)) {
-      leakedKeys.push(name);
-    }
-  }
-
-  return leakedKeys.length > 0 ? { leaked: true, leakedKeys } : { leaked: false };
-}
-
-/**
- * Probe the running `switchroom-hindsight` container (if any) for the
- * pre-#1068 env-var leak. Skips silently when docker or the container
- * isn't around — this is purely a leak-detector, not a container-health
- * check (the existing `hindsight reachable` row covers that).
+ * Replaces the pre-#1245 `hindsight env leak` probe — that was
+ * defending against an OpenAI-key shape that the broker-fed flow
+ * doesn't use at all.
  *
  * @internal exported for testing
  */
-export function checkHindsightEnvLeak(): CheckResult | null {
-  let inspectOut: string;
-  try {
-    inspectOut = execSync(
-      "docker inspect switchroom-hindsight --format '{{json .Config.Env}}'",
-      { stdio: ["ignore", "pipe", "ignore"], encoding: "utf-8" },
-    ).trim();
-  } catch {
-    // No docker, or no container — nothing to probe.
-    return null;
-  }
-  if (!inspectOut) return null;
-
-  const result = detectHindsightEnvLeak(inspectOut);
-  if (!result.leaked) {
+export function checkHindsightConsumer(
+  config: SwitchroomConfig,
+  opts?: { socketProbe?: (path: string) => boolean },
+): CheckResult {
+  const consumers = config.auth?.consumers ?? [];
+  const entry = consumers.find((c) => c.name === "hindsight");
+  if (!entry) {
     return {
-      name: "hindsight env leak",
-      status: "ok",
-      detail: "no secret-shaped env vars visible in `docker inspect`",
+      name: "hindsight consumer",
+      status: "warn",
+      detail: "no `auth.consumers[]` entry named `hindsight` in switchroom.yaml",
+      fix:
+        "Add an entry like:\n" +
+        "  auth:\n" +
+        "    consumers:\n" +
+        "      - name: hindsight\n" +
+        "        account: <your account label>\n" +
+        "        uid: 11000\n" +
+        "then run `switchroom apply` to bind the per-consumer socket.",
     };
   }
+
+  // Host-side path the broker container chowns its consumer socket into.
+  // Mirrors the named volume `auth-broker-hindsight-sock` populated by
+  // compose. The hindsight container itself sees this at
+  // /run/switchroom/auth-broker/sock, but the doctor runs on the host
+  // and inspects the docker volume's mountpoint via the
+  // ~/.switchroom/state/auth-broker- side. We just check it's there
+  // (volume mount may not be filesystem-visible without inspecting
+  // the named volume; treat absence as warn, not fail).
+  const socketProbe = opts?.socketProbe ?? ((p: string) => existsSync(p));
+  const home = process.env.HOME ?? "";
+  const dockerVolPath = `/var/lib/docker/volumes/switchroom_auth-broker-hindsight-sock/_data/sock`;
+  const altVolPath = join(home, ".local", "share", "docker", "volumes", "switchroom_auth-broker-hindsight-sock", "_data", "sock");
+  const present = socketProbe(dockerVolPath) || socketProbe(altVolPath);
+
+  if (!present) {
+    return {
+      name: "hindsight consumer",
+      status: "warn",
+      detail:
+        `auth.consumers[hindsight] -> ${entry.account} (uid ${entry.uid ?? 0}); ` +
+        `socket not yet bound on disk`,
+      fix:
+        "Run `switchroom apply` to bring up the auth-broker singleton " +
+        "and bind the per-consumer socket. The hindsight container will " +
+        "fetch credentials from it via `get-credentials` at boot.",
+    };
+  }
+
   return {
-    name: "hindsight env leak",
-    status: "fail",
-    detail:
-      `secret-shaped env vars exposed via \`docker inspect\`: ${result.leakedKeys.join(", ")}`,
-    fix:
-      "Container was started before the #1068 fix. Run `switchroom memory --stop && switchroom memory --start` " +
-      "to restart it with the API key bind-mounted from a tmpfs file and exported by an entrypoint shim " +
-      "(so the value never lands in `.Config.Env`).",
+    name: "hindsight consumer",
+    status: "ok",
+    detail: `auth.consumers[hindsight] -> ${entry.account} (uid ${entry.uid ?? 0})`,
   };
 }
 
@@ -704,11 +666,11 @@ async function checkHindsight(config: SwitchroomConfig): Promise<CheckResult[]> 
     detail: `${probe.serverName} ${probe.serverVersion} at ${host}:${port}`,
   });
 
-  // Secret-leak probe (#1068): pre-fix containers were started with
-  // `-e HINDSIGHT_API_LLM_API_KEY=...`, which leaks via `docker inspect`.
-  // The probe is best-effort — null result means no container to inspect.
-  const leakResult = checkHindsightEnvLeak();
-  if (leakResult) results.push(leakResult);
+  // Consumer probe (#1245): broker-fed hindsight needs an
+  // `auth.consumers[]` entry + a bound per-consumer socket. Replaces
+  // the legacy env-leak probe (the OpenAI-key shape it watched for
+  // is no longer in use).
+  results.push(checkHindsightConsumer(config));
 
   // Per-agent bank health checks
   for (const [agentName, agentConfig] of Object.entries(config.agents)) {

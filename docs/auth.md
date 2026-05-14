@@ -267,30 +267,73 @@ auth:
 
 On the next `switchroom apply`, the broker binds
 `/run/switchroom/auth-broker/hindsight/sock`, chowned to the
-declared UID. The hindsight compose bind-mounts the named volume
-into its own container at `/run/switchroom/auth-broker/`, then:
+declared UID. The hindsight compose project (SEPARATE from
+switchroom's compose project — needs its own `docker compose -p
+hindsight`) bind-mounts the named volume into its own container
+at `/run/switchroom/auth-broker/`, then runs an entrypoint shim
+that calls `get-credentials` and writes the result to a tmpfs
+dotfile before exec'ing the hindsight server.
 
-```bash
-# Inside the hindsight container:
-DST=/run/claude-creds
-mkdir -p "$DST"
-node -e '
-  const { connect } = require("net")
-  const sock = connect("/run/switchroom/auth-broker/sock")
-  sock.write(JSON.stringify({ v: 1, op: "get-credentials", id: "1" }) + "\n")
-  sock.on("data", buf => {
-    const { ok, data } = JSON.parse(buf.toString())
-    if (!ok) process.exit(1)
-    require("fs").writeFileSync("/run/claude-creds/.credentials.json",
-      JSON.stringify(data.credentials, null, 2))
-    process.exit(0)
-  })
-'
-CLAUDE_CONFIG_DIR=$DST claude -p "$@"
+The bundled `switchroom-hindsight` image (built from
+`docker/Dockerfile.hindsight`, published to
+`ghcr.io/switchroom/switchroom-hindsight`) ships with this shim
+pre-installed. Its compose snippet:
+
+```yaml
+services:
+  switchroom-hindsight:
+    image: ghcr.io/switchroom/switchroom-hindsight:latest
+    container_name: switchroom-hindsight
+    ports:
+      - "8888:8888"
+      - "9999:9999"
+    environment:
+      - HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE=1000
+      - HINDSIGHT_API_LLM_PROVIDER=claude-code
+    volumes:
+      - switchroom-hindsight-data:/home/hindsight/.pg0
+      - auth-broker-hindsight-sock:/run/switchroom/auth-broker
+    tmpfs:
+      - /run/claude-creds:rw,mode=0700
+    restart: unless-stopped
+
+volumes:
+  switchroom-hindsight-data:
+  auth-broker-hindsight-sock:
+    external: true  # bound by the switchroom-auth-broker singleton
 ```
+
+The entrypoint shim
+(`docker/hindsight-entrypoint.sh`) waits up to 60s for the broker
+socket, then fetches credentials via NDJSON:
+
+```sh
+node -e '
+  const net = require("net"), fs = require("fs"), crypto = require("crypto");
+  const sock = net.connect("/run/switchroom/auth-broker/sock");
+  const id = crypto.randomUUID();
+  sock.write(JSON.stringify({ v: 1, op: "get-credentials", id }) + "\n");
+  sock.on("data", buf => {
+    const { ok, data, error } = JSON.parse(buf.toString());
+    if (!ok) { console.error(error); process.exit(1); }
+    fs.writeFileSync("/run/claude-creds/.credentials.json",
+      JSON.stringify(data.credentials, null, 2), { mode: 0o600 });
+    process.exit(0);
+  });
+'
+export CLAUDE_CONFIG_DIR=/run/claude-creds
+exec "$@"
+```
+
+Note the dotfile (`.credentials.json`) — claude reads the dotfile
+name, not the bare form. The credentials live on tmpfs only; the
+auth-broker remains the single writer of OAuth state on disk.
 
 On 429, the consumer calls `mark-exhausted`; the broker fails over
 switchroom agents on the same account too (quota state is shared).
+The hindsight image's `HINDSIGHT_API_LLM_PROVIDER` is pinned to
+`claude-code` (the upstream subscription-honest provider) — no
+OpenAI / Anthropic API key is required or accepted.
 
 ## Degraded mode
 

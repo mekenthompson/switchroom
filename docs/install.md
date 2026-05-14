@@ -1,0 +1,193 @@
+# Install switchroom
+
+Zero-to-first-message in ~15 minutes on a fresh Linux host. This is the
+canonical new-user guide. Follow it top to bottom.
+
+If you already have switchroom running and just want to update it, use
+[`switchroom update`](../README.md#operator-update--switchroom-update)
+instead.
+
+## System requirements
+
+| Item | Minimum | Recommended |
+|---|---|---|
+| OS | Ubuntu 24.04 LTS (or recent Debian-derivative) | Ubuntu 24.04+ LTS |
+| RAM | 4 GiB | 8 GiB |
+| Disk | 20 GiB free on `/` | 40 GiB free |
+| Network | Outbound HTTPS to GitHub, Anthropic, Telegram, GHCR | — |
+
+> **Why 4 GiB minimum.** Each agent runs a Claude Code process plus the
+> Bun-runtime gateway sidecar inside a container, with the vault broker
+> and approval kernel as shared singletons. Two agents + docker daemon
+> + npm install will OOM a 2 GiB box. We've seen it. The installer
+> warns if you're below 4 GiB but does not block.
+
+## Step 1 — Install dependencies (one script)
+
+```sh
+curl -fsSL https://github.com/switchroom/switchroom/raw/main/scripts/install-deps.sh | sudo bash
+```
+
+This installs:
+
+- **Docker Engine + Compose v2** — agent containers + broker + kernel run as a docker-compose project.
+- **Node.js 20.11+** — for `@anthropic-ai/claude-code`.
+- **Bun 1.x** — required runtime for the `switchroom` CLI binary.
+- **`@anthropic-ai/claude-code`** — the Claude Code CLI; agents run this unmodified inside containers.
+- **`switchroom`** — the operator CLI.
+
+The script is idempotent; re-run it any time. It adds you to the
+`docker` group, so **log out and back in** (or `newgrp docker`) before
+proceeding to Step 2.
+
+### Manual alternative (non-Ubuntu / non-apt distros)
+
+If you can't run the script, install the same things by hand:
+
+```sh
+# 1. Docker (per https://docs.docker.com/engine/install/ for your distro)
+# 2. Node 20.11+ (from your package manager or NodeSource)
+# 3. The CLIs:
+sudo npm install -g bun @anthropic-ai/claude-code switchroom
+```
+
+## Step 2 — Create your bots in BotFather
+
+Switchroom uses one Telegram bot per agent. You'll create **two** bots
+for a typical setup:
+
+1. An **admin (foreman) bot** — the fleet's control panel. You DM it to
+   run `/agents`, `/restart`, `/update apply`, etc. Required.
+2. A **first agent bot** — a working agent you'll actually chat with.
+   Required to verify the install end-to-end.
+
+See [BotFather walkthrough](botfather-walkthrough.md) for the exact
+steps. Total time: ~3 minutes. You'll end up with two HTTP API tokens —
+keep them in a scratch buffer for Step 3.
+
+## Step 3 — Run setup
+
+```sh
+switchroom setup
+```
+
+Interactive wizard. You'll be prompted for:
+
+- **Your first agent's bot token** — paste the token from BotFather for
+  the *agent* bot (not the foreman).
+- **Your Telegram user ID** — the wizard will DM you a pairing link;
+  open it from your Telegram account and the wizard resolves your ID
+  automatically. (If pairing fails, get your ID from `@userinfobot` and
+  pass `--user-id <id>`.)
+- **Vault passphrase** — used to encrypt secrets on disk. Save it in
+  your password manager; you'll need it for unattended boots unless you
+  enable auto-unlock at the end of the wizard.
+- **Memory backend** — pick `none` for a minimal install, or `hindsight`
+  if you want semantic memory across sessions.
+
+The wizard scaffolds your first agent (`assistant` by default) and
+writes `~/.switchroom/switchroom.yaml` and
+`~/.switchroom/agents/assistant/`. It does **not** start any docker
+containers — that's Step 5.
+
+### Non-interactive setup (CI / scripting)
+
+```sh
+TELEGRAM_BOT_TOKEN=<agent bot token> \
+  SWITCHROOM_VAULT_PASSPHRASE=<passphrase> \
+  SWITCHROOM_MEMORY_BACKEND=none \
+  switchroom setup --non-interactive --user-id <telegram user id>
+```
+
+Recognised env vars:
+
+| Var | Meaning |
+|---|---|
+| `TELEGRAM_BOT_TOKEN` | First agent bot token |
+| `USER_ID` / `--user-id` | Your Telegram user ID |
+| `SWITCHROOM_VAULT_PASSPHRASE` | Vault passphrase (prompt-free unlock) |
+| `SWITCHROOM_MEMORY_BACKEND` | `hindsight` or `none` (default `hindsight`) |
+| `HINDSIGHT_API_LLM_API_KEY` | Required if memory backend is `hindsight` |
+| `SWITCHROOM_DANGEROUS_MODE` | `1` to skip approval prompts globally (not recommended) |
+
+## Step 4 — Set up the foreman (admin bot)
+
+```sh
+TELEGRAM_FOREMAN_BOT_TOKEN=<foreman bot token> \
+  TELEGRAM_USER_ID=<your telegram user id> \
+  switchroom setup --foreman
+```
+
+This writes `~/.switchroom/foreman/{env,access.json}` and adds the
+`switchroom-foreman` service to the compose project. The foreman runs
+as a docker-compose sibling of your agents.
+
+You can skip this step if you only want a single working agent and
+don't care about Telegram-based fleet control.
+
+## Step 5 — Authenticate with your Claude subscription
+
+```sh
+switchroom auth login assistant
+```
+
+Opens an OAuth browser flow. Log in with your Claude Pro or Max
+account. The CLI prints a code; you paste it back at the prompt.
+
+> **No API keys.** The whole point: this uses your existing Pro/Max
+> subscription via OAuth, exactly like the desktop app. No per-token
+> billing.
+
+## Step 6 — Bring the fleet up
+
+```sh
+switchroom apply
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
+```
+
+`apply` regenerates `docker-compose.yml` from your yaml. The `up -d`
+pulls images from GHCR (first run is slow — ~1-2 GiB across 5 images)
+and starts the broker, kernel, foreman, and agent container(s).
+
+Check status:
+
+```sh
+switchroom agent list
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml ps
+```
+
+## Step 7 — Verify in Telegram
+
+1. Open Telegram, search for your agent bot's username, hit `/start`.
+2. Send "hello".
+3. You should see a pinned **progress card** appear within a couple of
+   seconds, then a reply from the agent.
+
+If anything's off, run `switchroom doctor` — it sweeps deps, vault,
+agents, and MCP wireup, and prints actionable fixes.
+
+## Troubleshooting
+
+- **`switchroom: command not found`** — npm install probably finished
+  but `/usr/local/bin` isn't on your PATH. Confirm with
+  `which switchroom`; if empty, `echo $PATH` and check.
+- **`env: 'bun': No such file or directory`** when running switchroom —
+  bun didn't install. Re-run `sudo npm install -g bun`.
+- **`Cannot find module … examples/…`** on `switchroom setup` — you're
+  on switchroom < 0.8.2. Upgrade: `sudo npm install -g switchroom@latest`.
+- **`permission denied … /usr/local/lib/node_modules/switchroom/profiles/…`**
+  during setup — same as above; upgrade.
+- **Telegram bot doesn't reply** — `switchroom agent logs assistant -f`
+  and `switchroom doctor`. The most common cause is OAuth not yet
+  completed (`switchroom auth status`).
+- **`unauthorized` on `docker compose pull`** — see
+  [`operators/install.md#ghcr-auth`](operators/install.md#ghcr-auth).
+
+## Where to next
+
+- [Configuration reference](configuration.md) — every yaml field, the
+  cascade, profiles.
+- [Adding more agents](../README.md#cli-reference) — `switchroom agent add`
+  walks you through it.
+- [Telegram features](telegram-features.md) — voice-in, long replies,
+  scheduled tasks.

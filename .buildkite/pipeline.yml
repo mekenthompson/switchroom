@@ -4,10 +4,14 @@
 #   buildkite-agent pipeline upload
 # so this file is loaded on every build.
 #
-# Runs on Buildkite-hosted agents (queue: hosted, LINUX_AMD64_2X4 shape) so
-# no self-hosted infrastructure is required. Bun is bootstrapped per-step
-# because the default hosted image doesn't include it; we cache it under
-# ~/.bun across builds via the hosted-agent built-in cache.
+# Most steps run on Buildkite-hosted agents (queue: hosted,
+# LINUX_AMD64_2X4 shape). The `:robot: UAT fuzz` step is the only
+# exception — it targets the self-hosted `uat-host` queue because it
+# drives a real mtcute MTProto session against a live test-harness
+# Docker agent (see `.buildkite/README.md` § "UAT fuzz step"). Bun is
+# bootstrapped per-step because the default hosted image doesn't
+# include it; we cache it under ~/.bun across builds via the
+# hosted-agent built-in cache.
 #
 # Auth for the eval stages:
 #   The eval steps fetch CLAUDE_CODE_OAUTH_TOKEN from the cluster secret
@@ -69,7 +73,7 @@ steps:
       # The cache is keyed by bun.lock checksum (see `cache.key` below), so
       # hitting this path means the lockfile is unchanged since the last build.
       if [ ! -x "$$HOME/.bun/bin/bun" ]; then
-        curl -fsSL https://bun.sh/install | bash
+        curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.13"
       fi
       export PATH="$$HOME/.bun/bin:$$PATH"
       # --prefer-offline: skip registry lookups when the cache already has
@@ -81,7 +85,7 @@ steps:
       paths:
         - "~/.bun"
         - "node_modules/"
-      key: "v1-bun-{{ checksum 'bun.lock' }}"
+      key: "v2-bun-{{ checksum 'bun.lock' }}"
     retry:
       automatic:
         - exit_status: -1   # agent lost
@@ -110,7 +114,7 @@ steps:
       - ".buildkite/pipeline.yml"
     command: |
       if [ ! -x "$$HOME/.bun/bin/bun" ]; then
-        curl -fsSL https://bun.sh/install | bash
+        curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.13"
       fi
       export PATH="$$HOME/.bun/bin:$$PATH"
       # tests/boot-self-test.test.ts shells bin/boot-self-test.sh, which
@@ -283,7 +287,7 @@ steps:
       - ".buildkite/pipeline.yml"
     command: |
       if [ ! -x "$$HOME/.bun/bin/bun" ]; then
-        curl -fsSL https://bun.sh/install | bash
+        curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.13"
       fi
       export PATH="$$HOME/.bun/bin:$$PATH"
       bun install --frozen-lockfile --prefer-offline --no-progress
@@ -294,7 +298,7 @@ steps:
       paths:
         - "~/.bun"
         - "node_modules/"
-      key: "v1-bun-{{ checksum 'bun.lock' }}"
+      key: "v2-bun-{{ checksum 'bun.lock' }}"
     soft_fail:
       # The test self-skips when docker is unavailable; treat any
       # non-fatal exit as a soft signal so the build doesn't block
@@ -341,7 +345,7 @@ steps:
       - ".buildkite/pipeline.yml"
     command: |
       if [ ! -x "$$HOME/.bun/bin/bun" ]; then
-        curl -fsSL https://bun.sh/install | bash
+        curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.13"
       fi
       export PATH="$$HOME/.bun/bin:$$PATH"
       cd telegram-plugin
@@ -363,7 +367,7 @@ steps:
       paths:
         - "~/.bun"
         - "telegram-plugin/node_modules/"
-      key: "v1-tg-{{ checksum 'telegram-plugin/bun.lock' }}"
+      key: "v2-tg-{{ checksum 'telegram-plugin/bun.lock' }}"
     retry:
       automatic:
         - exit_status: -1
@@ -397,7 +401,7 @@ steps:
       - ".buildkite/docker-snapshot-gate.sh"
     command: |
       if [ ! -x "$$HOME/.bun/bin/bun" ]; then
-        curl -fsSL https://bun.sh/install | bash
+        curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.13"
       fi
       export PATH="$$HOME/.bun/bin:$$PATH"
       bun install --frozen-lockfile --prefer-offline --no-progress
@@ -407,13 +411,45 @@ steps:
       paths:
         - "~/.bun"
         - "node_modules/"
-      key: "v1-bun-{{ checksum 'bun.lock' }}"
+      key: "v2-bun-{{ checksum 'bun.lock' }}"
     retry:
       automatic:
         - exit_status: -1
           limit: 2
         - exit_status: 143
           limit: 2
+
+  # ---------------------------------------------------------------------------
+  # UAT fuzz gate — conditional upload of `.buildkite/pipeline.uat.yml`.
+  #
+  # The UAT step targets the self-hosted `uat-host` queue. Buildkite's
+  # pipeline.yml validator REJECTS the upload if it references a queue
+  # the cluster doesn't know about ("Queue 'uat-host' does not exist"),
+  # even when the step is gated by an `if:` that evaluates to false. To
+  # keep the main pipeline parseable on a cluster that hasn't been
+  # provisioned yet, the step lives in a separate fragment that's only
+  # uploaded when SWITCHROOM_UAT_GATE_ENABLED=true is set on the
+  # pipeline (Pipeline Settings → Environment Variables in the BK web
+  # UI — same surface that hosts ANTHROPIC_API_KEY).
+  #
+  # if_changed gates *whether the conditional upload step runs*; the
+  # outer build always passes when telegram-plugin/ isn't touched.
+  # See .buildkite/README.md § "UAT fuzz step" and
+  # .buildkite/pipeline.uat.yml for the actual job definition.
+  # ---------------------------------------------------------------------------
+  - label: ":robot: UAT fuzz — gate"
+    key: uat-fuzz-gate
+    timeout_in_minutes: 2
+    if: build.env("SWITCHROOM_UAT_GATE_ENABLED") == "true"
+    if_changed:
+      - "telegram-plugin/**"
+      - "src/agents/**"
+      - "telegram-plugin/uat/**"
+      - "vitest.uat.config.ts"
+      - ".buildkite/pipeline.yml"
+      - ".buildkite/pipeline.uat.yml"
+    command: |
+      buildkite-agent pipeline upload .buildkite/pipeline.uat.yml
 
   - wait
 

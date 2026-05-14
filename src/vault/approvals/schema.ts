@@ -117,7 +117,13 @@ export type ApprovalAuditEvent =
   | "expire"
   | "deny"
   | "match"
-  | "timeout";
+  | "timeout"
+  // RFC E §4.4 — missing→present recovery. Fired by the reconciler
+  // driver when a Drive scope's grant transitions from missing
+  // (deleted/trashed) back to present (un-trashed/restored). No
+  // approval_decisions row — recoveries don't create grants, they
+  // surface that an existing grant is reachable again.
+  | "recover";
 
 /**
  * Sliding-window TTL hard cap. RFC §7 specifies a default; the brief asks

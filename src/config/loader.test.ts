@@ -70,6 +70,24 @@ google_workspace:
     expect(config.drive).toEqual(config.google_workspace);
   });
 
+  it("top-level: both set with same content but different key order → accepted (order-insensitive)", () => {
+    const path = writeTempConfig(`${validBaseYaml}
+drive:
+  approvers: [123]
+  google_client_id: "id"
+  google_client_secret: "secret"
+  tier: core
+google_workspace:
+  tier: core
+  google_client_secret: "secret"
+  google_client_id: "id"
+  approvers: [123]
+`);
+    const config = loadConfig(path);
+    expect(config.drive?.tier).toBe("core");
+    expect(config.google_workspace?.tier).toBe("core");
+  });
+
   it("top-level: both set with identical values → accepted (transition convenience)", () => {
     const path = writeTempConfig(`${validBaseYaml}
 drive:

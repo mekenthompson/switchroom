@@ -48,15 +48,24 @@ function coerceLegacyGoogleWorkspaceKeys(
   parsed: Record<string, unknown>,
   filePath: string,
 ): void {
+  // Order-insensitive deep stringification — fixes the case where two
+  // independently-authored YAML blocks have the same content but different
+  // key ordering (e.g. `approvers:` first vs `tier:` first). Plain
+  // JSON.stringify would falsely flag those as a mismatch.
+  const stableStringify = (v: unknown): string => {
+    if (v === null || typeof v !== "object") return JSON.stringify(v);
+    if (Array.isArray(v)) return `[${v.map(stableStringify).join(",")}]`;
+    const obj = v as Record<string, unknown>;
+    const keys = Object.keys(obj).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
+  };
+
   const aliasInPlace = (obj: Record<string, unknown>, where: string) => {
     const a = obj.drive;
     const b = obj.google_workspace;
     if (a !== undefined && b !== undefined) {
-      // Both set — must be deeply equal, otherwise reject. JSON-stringify
-      // is fine here: schema fields are scalars + arrays + small objects,
-      // no functions/circular refs, and ordering at YAML parse time is
-      // stable per yaml lib's defaults.
-      if (JSON.stringify(a) !== JSON.stringify(b)) {
+      // Both set — must be deeply equal, otherwise reject.
+      if (stableStringify(a) !== stableStringify(b)) {
         throw new ConfigError(
           `Both \`drive:\` and \`google_workspace:\` are set on ${where} in ${filePath} with different values.`,
           [

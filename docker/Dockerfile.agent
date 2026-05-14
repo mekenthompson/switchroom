@@ -15,8 +15,20 @@ RUN echo "switchroom/agent building for arch=${TARGETARCH}" >&2
 #   /state/.claude   — ~/.claude/projects/<name>
 #   /var/log/switchroom — ~/.switchroom/logs/<name>
 # Pre-create them so first-boot doesn't race the bind-mount semantics.
+#
+# /var/log/switchroom is the destination for `_switchroom_supervise`
+# log files (gateway-supervisor, autoaccept, agent-scheduler) written
+# by start.sh. The compose `user:` directive runs start.sh as the
+# per-agent UID (10001-10999, see Dockerfile.base) — but the dir is
+# created here as root with default umask. Without an explicit
+# 0777, start.sh hits "Permission denied" writing the supervisor
+# logs and the three sidecars (gateway / autoaccept / scheduler)
+# never start; the agent then hangs forever on the Claude Code
+# first-run theme picker because autoaccept-poll isn't there to
+# dispatch keystrokes. (Install-validation finding #19.)
 RUN mkdir -p /state/agent /state/.claude /var/log/switchroom \
- && mkdir -p /run/switchroom
+ && mkdir -p /run/switchroom \
+ && chmod 0777 /var/log/switchroom
 
 # Make sure tmux's runtime dir exists; the per-agent UID will own it via
 # the compose `user:` directive at runtime.

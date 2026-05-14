@@ -338,8 +338,20 @@ async function stepBotToken(
     throw err;
   }
 
-  // Store in vault if interactive
-  if (!nonInteractive && config.telegram.bot_token.startsWith("vault:")) {
+  // Store in vault when the config references one. This works in both
+  // modes — interactive prompts for the vault passphrase if env-var
+  // isn't set, non-interactive requires SWITCHROOM_VAULT_PASSPHRASE.
+  // Previously this was gated behind `!nonInteractive`, which meant
+  // scripted/CI installs with `vault:`-prefixed config never created
+  // the vault — `switchroom apply` then refused to run with
+  // "vault.enc is missing" (install-validation finding #16).
+  if (config.telegram.bot_token.startsWith("vault:")) {
+    if (nonInteractive && !process.env.SWITCHROOM_VAULT_PASSPHRASE) {
+      throw new Error(
+        "Config references vault: refs but SWITCHROOM_VAULT_PASSPHRASE is unset. " +
+          "Set it in non-interactive mode so the vault can be created.",
+      );
+    }
     await storeTokenInVault(config, token);
   }
 
@@ -520,6 +532,20 @@ async function stepCreateTopics(
   nonInteractive: boolean,
 ): Promise<void> {
   stepHeader(5, "Create topics", STEP_ACTIVE);
+
+  // DM-only sentinel (v0.7+) — per-agent DM-pair is the default, the
+  // forum_chat_id field stays for schema compat with legacy installs.
+  // Don't actually call the Telegram API for a fake chat id; it'll
+  // return "Forum chat not found" and look like a real failure to a
+  // new user. (Install-validation finding #15.)
+  if (config.telegram.forum_chat_id === "0") {
+    console.log(
+      chalk.gray(
+        `  ${STEP_DONE} Skipped (DM-only mode — forum_chat_id is sentinel "0")`,
+      ),
+    );
+    return;
+  }
 
   const spin = spinner("Syncing forum topics...");
   try {

@@ -92,6 +92,27 @@ describe("enrichMirrorContent", () => {
     expect(enrichMirrorContent(source)).toBe(source);
   });
 
+  it("preserves a custom (non-canonical) scope set when only subscriptionType is missing", () => {
+    // Reviewer-flagged edge case: source has scopes the operator
+    // explicitly chose (e.g. broader claude scopes) AND missing
+    // subscriptionType. Enrichment must add subscriptionType WITHOUT
+    // clobbering the existing scope set.
+    const source = JSON.stringify({
+      claudeAiOauth: {
+        accessToken: "at-x",
+        expiresAt: 123,
+        scopes: ["org:create_api_key", "user:profile", "user:inference"],
+      },
+    });
+    const enriched = JSON.parse(enrichMirrorContent(source));
+    expect(enriched.claudeAiOauth.scopes).toEqual([
+      "org:create_api_key",
+      "user:profile",
+      "user:inference",
+    ]);
+    expect(enriched.claudeAiOauth.subscriptionType).toBe("max");
+  });
+
   it("preserves other claudeAiOauth fields when enriching (refreshToken, rateLimitTier)", () => {
     const source = JSON.stringify({
       claudeAiOauth: {

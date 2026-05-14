@@ -1454,8 +1454,8 @@ describe("AuthBroker — historical-bug regressions (2026-05-14 fanout incident)
     // it root-owned. The exact pattern (a chownSync call against the
     // freshly-written .credentials.json path inside mirrorAccountToAgent)
     // is what closes Bug 1.
-    // Budget bumped from 1600 → 3000 when mirror-time enrichment landed
-    // (#1282: enrichMirrorContent call + load-bearing inline comments
+    // Budget bumped from 1600 → 3000 when mirror-time enrichment
+    // landed (enrichMirrorContent call + load-bearing inline comments
     // about the .credentials.json dotfile invariant). The pin is still
     // meaningful — it asserts the chown call is *inside* the function,
     // not extracted to a remote helper that could regress silently.

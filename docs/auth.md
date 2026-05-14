@@ -35,10 +35,16 @@ refresh tokens themselves and never write credentials files.
 ## CLI surface
 
 ```bash
-# Add an Anthropic account (one OAuth flow)
-switchroom auth add me@example.com --from-oauth
-switchroom auth add work --from-agent clerk          # seed from an existing agent
-switchroom auth add stage --from-credentials path/   # import a credentials.json
+# Add an Anthropic account (one OAuth flow). First-time setup: use
+# --via-claude. This drives claude through its native OAuth flow in a
+# tmux session, gets you the broader scope set that `claude server:`
+# mode requires, and ingests the resulting credentials.json into the
+# broker. The alternative --from-oauth path runs `claude setup-token`
+# which mints scope=user:inference only — won't work for agents.
+switchroom auth add me@example.com --via-claude       # one OAuth flow, broader scope
+switchroom auth add work --from-agent clerk           # seed from an existing agent
+switchroom auth add stage --from-credentials path/    # import a credentials.json
+switchroom auth add legacy --from-oauth               # narrow-scope, --print-only use cases
 
 # See the state of the fleet
 switchroom auth list

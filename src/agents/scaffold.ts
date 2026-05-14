@@ -2250,13 +2250,17 @@ export function scaffoldAgent(
   // --- Claude Code config (onboarding state) ---
   // Copy onboarding state (.claude.json) from the host's Claude installation
   // so the agent skips the first-run wizard, but intentionally do NOT copy
-  // .credentials.json. Each agent must go through its own fresh OAuth flow
-  // (Phase 2 policy: copyExistingCredentials removed from scaffold path).
-  // Existing credential blobs can be stale and cause silent 401s.
-  // Operators register a fleet-wide account via `switchroom auth add
-  // <label> --from-oauth` + `switchroom auth use <label>` (RFC H); the
-  // auth-broker mirrors `.credentials.json` per agent at boot, on
-  // setActive, and on refresh-tick.
+  // .credentials.json — agent credentials are owned by the RFC-H auth-broker,
+  // not by scaffold-time file copies. The broker atomically writes
+  // `<agentDir>/.claude/.credentials.json` at boot, on setActive, and on
+  // refresh-tick, sourced from the fleet-active account at
+  // `~/.switchroom/accounts/<label>/credentials.json`.
+  //
+  // Operators register one fleet account via `switchroom auth add <label>
+  // --via-claude` (drives claude through its native broader-scope OAuth;
+  // see src/auth/via-claude.ts) then `switchroom auth use <label>`. Adding
+  // the 2nd/3rd/Nth agent to the same account is a YAML edit; no further
+  // OAuth round-trips. See `reference/share-auth-across-the-fleet.md`.
   //
   // UPGRADE WARN: if ~/.claude-home/.credentials.json (or ~/.claude/.credentials.json)
   // exists at scaffold time, we deliberately skip copying it. Agents that were

@@ -6,7 +6,7 @@
  * the agent-supplied summary, so the user can sanity-check intent.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import { buildDiffPreview, type DiffPreviewInput } from "./diff-preview.js";
 import { type ResolvedAnchor } from "./anchors.js";

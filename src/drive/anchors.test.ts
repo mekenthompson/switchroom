@@ -7,7 +7,7 @@
  * and the displayName surfaces the diff-preview card will attest.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import {
   resolveAnchor,

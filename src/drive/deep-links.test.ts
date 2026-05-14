@@ -2,7 +2,7 @@
  * Tests for open-in-Drive URL builders — RFC E §4.3.
  */
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import {
   classifyMimeType,

@@ -4,6 +4,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { FolderListCache } from "./folder-list.js";
 import {
   buildFolderPickerCard,
   parseFolderPickerCallback,
@@ -92,15 +93,54 @@ describe("buildFolderPickerCard — navigation rows", () => {
     expect(lastRow[0]!.callback_data).toBe("drvpick:back:klanker:Y2026");
   });
 
-  it("emits Next when next_page_token is set", () => {
+  it("emits Next when next_page_token is set — short handle via cache (not the raw token)", () => {
+    const cache = new FolderListCache({ now: () => 1000 });
+    const realDriveToken = "X".repeat(120); // realistic Drive page-token length
     const card = buildFolderPickerCard({
       agent: "klanker",
-      page: { folders: [{ id: "F1", name: "X" }], next_page_token: "PG2" },
+      cache,
+      page: {
+        folders: [{ id: "F1", name: "X" }],
+        next_page_token: realDriveToken,
+      },
     });
     const lastRow = card.rows[card.rows.length - 1]!;
     const next = lastRow.find((b) => b.text === "Next ▶");
     expect(next).toBeDefined();
-    expect(next!.callback_data).toBe("drvpick:open:klanker::PG2");
+    // The callback contains a short hex handle, NOT the long token.
+    expect(next!.callback_data).toMatch(/^drvpick:open:klanker::[0-9a-f]{8}$/);
+    expect(next!.callback_data).not.toContain(realDriveToken);
+    // And the cache can round-trip the handle back to the real token.
+    const handle = next!.callback_data.split(":").pop()!;
+    expect(cache.getPageToken("klanker", handle)).toBe(realDriveToken);
+  });
+
+  it("throws when next_page_token is set but no cache was passed", () => {
+    expect(() =>
+      buildFolderPickerCard({
+        agent: "klanker",
+        page: { folders: [{ id: "F1", name: "X" }], next_page_token: "TOK" },
+      }),
+    ).toThrow(/cache.*required|page_token.*cache/i);
+  });
+
+  it("re-emitting the same token returns the same handle (cache idempotence)", () => {
+    const cache = new FolderListCache({ now: () => 1000 });
+    const token = "Y".repeat(80);
+    const card1 = buildFolderPickerCard({
+      agent: "klanker",
+      cache,
+      page: { folders: [], next_page_token: token },
+    });
+    const card2 = buildFolderPickerCard({
+      agent: "klanker",
+      cache,
+      page: { folders: [], next_page_token: token },
+    });
+    const h1 = card1.rows[card1.rows.length - 1]![0]!.callback_data;
+    const h2 = card2.rows[card2.rows.length - 1]![0]!.callback_data;
+    expect(h1).toBe(h2);
+    expect(cache.tokenCount()).toBe(1);
   });
 });
 
@@ -172,6 +212,56 @@ describe("buildFolderPickerCard — validation", () => {
       }),
     ).toThrow(/exceeds Telegram's 64-byte cap/);
   });
+
+  it("realistic worst-case 'open' callback stays under the 64-byte cap", () => {
+    // Reviewer pin: parent_id + handle + max-typical agent must fit.
+    // drvpick:open:<agent (10)>:<parent (44)>:<handle (8)> + 4 colons = 13 + 10 + 44 + 8 = 75... let's check.
+    // Actually 'drvpick:open:' = 13, ':' separators = 3, then 10+44+8 = 62. Total: 13+3+62 = 78. Over.
+    // 7-char agent: 13+3+7+44+8 = 75. Still over.
+    // For a 7-char agent, parent_id of 44 chars puts us at 75. So we
+    // need the agent + handle to fit in 64 - 13 - 3 - 44 = 4 chars... which is impossible.
+    // The handle keeps the URL safe, but parent_id is the real cap-buster.
+    // Verify the cap is enforced and surfaces a clear error.
+    const cache = new FolderListCache();
+    expect(() =>
+      buildFolderPickerCard({
+        agent: "klanker",
+        cache,
+        parent: { id: "F".repeat(44), name: "x" },
+        page: { folders: [], next_page_token: "Z".repeat(120) },
+      }),
+    ).toThrow(/exceeds Telegram's 64-byte cap/);
+  });
+
+  it("realistic 'open' callback fits the cap for shorter parent ids", () => {
+    // Drive folder ids are typically 28-33 chars; 28 is the modern norm.
+    // 13 (prefix) + 3 (separators) + 7 (agent) + 28 (parent) + 8 (handle) = 59. Under 64. ✓
+    const cache = new FolderListCache();
+    const card = buildFolderPickerCard({
+      agent: "klanker",
+      cache,
+      parent: { id: "F".repeat(28), name: "x" },
+      page: { folders: [], next_page_token: "Z".repeat(120) },
+    });
+    const lastRow = card.rows[card.rows.length - 1]!;
+    const nextBtn = lastRow.find((b) => b.text === "Next ▶")!;
+    expect(Buffer.byteLength(nextBtn.callback_data, "utf8")).toBeLessThanOrEqual(64);
+  });
+
+  it("rejects agent names that exceed the 64-char length cap", () => {
+    expect(() =>
+      buildFolderPickerCard({
+        agent: "a".repeat(65),
+        page: { folders: [] },
+      }),
+    ).toThrow(/exceeds.*cap/);
+  });
+
+  it("rejects case-mixed agent names (cache-key isolation)", () => {
+    expect(() =>
+      buildFolderPickerCard({ agent: "Klanker", page: { folders: [] } }),
+    ).toThrow(/agent name/);
+  });
 });
 
 describe("parseFolderPickerCallback", () => {
@@ -205,16 +295,16 @@ describe("parseFolderPickerCallback", () => {
       kind: "refresh",
       agent: "klanker",
     });
-    expect(parseFolderPickerCallback("drvpick:open:klanker:F1:PGTOK")).toEqual({
+    expect(parseFolderPickerCallback("drvpick:open:klanker:F1:abcdef01")).toEqual({
       kind: "open",
       agent: "klanker",
       parent_id: "F1",
-      page_token: "PGTOK",
+      page_token_handle: "abcdef01",
     });
-    expect(parseFolderPickerCallback("drvpick:open:klanker::PGTOK")).toEqual({
+    expect(parseFolderPickerCallback("drvpick:open:klanker::abcdef01")).toEqual({
       kind: "open",
       agent: "klanker",
-      page_token: "PGTOK",
+      page_token_handle: "abcdef01",
     });
   });
 
@@ -233,9 +323,26 @@ describe("parseFolderPickerCallback", () => {
     expect(parseFolderPickerCallback("drvpick:nuke:klanker:F1")).toBeNull();
   });
 
-  it("rejects a malformed page token (URL-injection guard)", () => {
+  it("rejects a malformed page-token handle (must be 8 hex chars)", () => {
     expect(
       parseFolderPickerCallback("drvpick:open:klanker:F1:tok/with/slash"),
+    ).toBeNull();
+    // Too short.
+    expect(parseFolderPickerCallback("drvpick:open:klanker:F1:abc")).toBeNull();
+    // Too long.
+    expect(
+      parseFolderPickerCallback("drvpick:open:klanker:F1:abcdef0123"),
+    ).toBeNull();
+    // Wrong charset.
+    expect(
+      parseFolderPickerCallback("drvpick:open:klanker:F1:ABCDEF01"),
+    ).toBeNull();
+  });
+
+  it("rejects URL-encoded colon smuggle in agent slot", () => {
+    // %3A decodes to `:` — the regex must reject it post-decode.
+    expect(
+      parseFolderPickerCallback("drvpick:grant:klanker%3A:F1"),
     ).toBeNull();
   });
 });

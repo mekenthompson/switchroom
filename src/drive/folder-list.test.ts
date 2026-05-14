@@ -12,6 +12,7 @@ import {
   FolderListCache,
   fetchFolderPage,
   getOrFetchFirstPage,
+  isValidAgentName,
 } from "./folder-list.js";
 
 function mockFetch(handler: (url: string, init: RequestInit) => Response): typeof fetch {
@@ -95,6 +96,13 @@ describe("fetchFolderPage — query string + auth", () => {
       fetchFolderPage({ access_token: "TOK", parent_id: "abc' OR '1", fetchImpl }),
     ).rejects.toThrow(/invalid characters/);
   });
+
+  it("rejects empty parent_id (would pass !== undefined gate)", async () => {
+    const fetchImpl = mockFetch(() => jsonResp({ files: [] }));
+    await expect(
+      fetchFolderPage({ access_token: "TOK", parent_id: "", fetchImpl }),
+    ).rejects.toThrow(/invalid characters/);
+  });
 });
 
 describe("fetchFolderPage — response parsing", () => {
@@ -170,6 +178,45 @@ describe("fetchFolderPage — response parsing", () => {
       fetchFolderPage({ access_token: "TOK", fetchImpl }),
     ).rejects.toThrow(/429/);
   });
+
+  it("rejects a non-object Drive response (defensive — defends a malformed body)", async () => {
+    for (const body of ["null", "[]", '"oops"', "42"]) {
+      const fetchImpl = mockFetch(
+        () => new Response(body, { headers: { "content-type": "application/json" } }),
+      );
+      await expect(
+        fetchFolderPage({ access_token: "TOK", fetchImpl }),
+      ).rejects.toThrow(/non-object/);
+    }
+  });
+});
+
+describe("isValidAgentName", () => {
+  it("accepts canonical names", () => {
+    expect(isValidAgentName("klanker")).toBe(true);
+    expect(isValidAgentName("c2")).toBe(true);
+    expect(isValidAgentName("dev-bot")).toBe(true);
+    expect(isValidAgentName("a_b_c")).toBe(true);
+  });
+
+  it("rejects case-mixed (cache-key isolation matters)", () => {
+    expect(isValidAgentName("Klanker")).toBe(false);
+    expect(isValidAgentName("KLANKER")).toBe(false);
+  });
+
+  it("rejects empty / too-long / starts-with-non-letter", () => {
+    expect(isValidAgentName("")).toBe(false);
+    expect(isValidAgentName("a".repeat(65))).toBe(false);
+    expect(isValidAgentName("1klanker")).toBe(false);
+    expect(isValidAgentName("-klanker")).toBe(false);
+  });
+
+  it("rejects URL-injection charset", () => {
+    expect(isValidAgentName("klanker|x")).toBe(false);
+    expect(isValidAgentName("klanker/x")).toBe(false);
+    expect(isValidAgentName("klanker:x")).toBe(false);
+    expect(isValidAgentName("klanker x")).toBe(false);
+  });
 });
 
 describe("FolderListCache", () => {
@@ -217,6 +264,85 @@ describe("FolderListCache", () => {
     expect(cache.get("klanker", "P1")).toBeNull();
     expect(cache.get("klanker", "P2")).toBeNull();
     expect(cache.get("clerk")).not.toBeNull();
+  });
+
+  it("rejects invalid agent at the cache boundary (defense in depth)", () => {
+    const cache = new FolderListCache({ now: () => 1000 });
+    expect(() => cache.set("foo|bar", { folders: [] })).toThrow(/invalid agent/);
+    expect(() => cache.get("Klanker")).toThrow(/invalid agent/);
+    expect(() => cache.set("klanker", { folders: [] }, "bad/parent")).toThrow(
+      /invalid parent_id/,
+    );
+  });
+});
+
+describe("FolderListCache — page-token handle store", () => {
+  it("registers a long token and returns an 8-hex-char handle", () => {
+    const cache = new FolderListCache({ now: () => 1000 });
+    const handle = cache.registerPageToken("klanker", "X".repeat(120));
+    expect(handle).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it("round-trips handle → full token", () => {
+    const cache = new FolderListCache({ now: () => 1000 });
+    const token = "Z".repeat(150);
+    const handle = cache.registerPageToken("klanker", token);
+    expect(cache.getPageToken("klanker", handle)).toBe(token);
+  });
+
+  it("is idempotent — same (agent, token) returns the same handle", () => {
+    const cache = new FolderListCache({ now: () => 1000 });
+    const h1 = cache.registerPageToken("klanker", "X".repeat(80));
+    const h2 = cache.registerPageToken("klanker", "X".repeat(80));
+    expect(h1).toBe(h2);
+    expect(cache.tokenCount()).toBe(1);
+  });
+
+  it("different agents get different handles for the same token", () => {
+    const cache = new FolderListCache({ now: () => 1000 });
+    const tok = "X".repeat(80);
+    const h1 = cache.registerPageToken("klanker", tok);
+    const h2 = cache.registerPageToken("clerk", tok);
+    // Handles are deterministic per (agent, token), so collisions are
+    // theoretically possible but extraordinarily unlikely with the FNV
+    // mix; assert they're stored independently regardless.
+    expect(cache.getPageToken("klanker", h1)).toBe(tok);
+    expect(cache.getPageToken("clerk", h2)).toBe(tok);
+  });
+
+  it("getPageToken returns null on expiry", () => {
+    let now = 1000;
+    const cache = new FolderListCache({ ttl_ms: 5_000, now: () => now });
+    const handle = cache.registerPageToken("klanker", "X".repeat(80));
+    expect(cache.getPageToken("klanker", handle)).not.toBeNull();
+    now = 1000 + 5_001;
+    expect(cache.getPageToken("klanker", handle)).toBeNull();
+  });
+
+  it("getPageToken returns null for malformed handles (defense in depth)", () => {
+    const cache = new FolderListCache({ now: () => 1000 });
+    cache.registerPageToken("klanker", "X".repeat(80));
+    expect(cache.getPageToken("klanker", "abc")).toBeNull();
+    expect(cache.getPageToken("klanker", "ABCDEF01")).toBeNull();
+    expect(cache.getPageToken("klanker", "not-hex!")).toBeNull();
+  });
+
+  it("getPageToken returns null for an invalid agent name", () => {
+    const cache = new FolderListCache({ now: () => 1000 });
+    expect(cache.getPageToken("Klanker", "abcdef01")).toBeNull();
+  });
+
+  it("registerPageToken throws for an invalid agent name", () => {
+    const cache = new FolderListCache({ now: () => 1000 });
+    expect(() => cache.registerPageToken("Klanker", "X")).toThrow(/invalid agent/);
+  });
+
+  it("invalidateAgent clears registered tokens too", () => {
+    const cache = new FolderListCache({ now: () => 1000 });
+    const handle = cache.registerPageToken("klanker", "X".repeat(80));
+    cache.invalidateAgent("klanker");
+    expect(cache.getPageToken("klanker", handle)).toBeNull();
+    expect(cache.tokenCount()).toBe(0);
   });
 });
 

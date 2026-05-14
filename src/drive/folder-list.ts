@@ -70,7 +70,24 @@ export interface FetchFolderPageOptions {
 }
 
 const DRIVE_ID_RE = /^[A-Za-z0-9_-]+$/;
+const AGENT_NAME_RE = /^[a-z][a-z0-9_-]*$/;
+const AGENT_NAME_MAX = 64;
 const FOLDER_MIME = "application/vnd.google-apps.folder";
+
+/**
+ * Validate an agent name against the canonical shape. Both this module
+ * and `folder-picker.ts` use the same rule — pulled here so cache
+ * boundaries can enforce defense in depth even when called from
+ * paths that haven't validated their input.
+ */
+export function isValidAgentName(name: string): boolean {
+  return (
+    typeof name === "string" &&
+    name.length > 0 &&
+    name.length <= AGENT_NAME_MAX &&
+    AGENT_NAME_RE.test(name)
+  );
+}
 
 /**
  * One page of folders. Throws on auth failure (401), rate limit (429),
@@ -82,7 +99,7 @@ export async function fetchFolderPage(
   opts: FetchFolderPageOptions,
 ): Promise<FolderPage> {
   if (opts.parent_id !== undefined) {
-    if (!DRIVE_ID_RE.test(opts.parent_id)) {
+    if (opts.parent_id.length === 0 || !DRIVE_ID_RE.test(opts.parent_id)) {
       throw new Error(
         `Drive parent_id contains invalid characters. Expected base64-url-safe (alphanumerics + - + _).`,
       );
@@ -130,7 +147,13 @@ export async function fetchFolderPage(
     );
   }
 
-  const json = (await resp.json()) as {
+  const raw = (await resp.json()) as unknown;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw new Error(
+      `Drive files.list returned non-object body (got ${raw === null ? "null" : Array.isArray(raw) ? "array" : typeof raw}).`,
+    );
+  }
+  const json = raw as {
     files?: Array<{ id?: string; name?: string; parents?: string[] }>;
     nextPageToken?: string;
   };
@@ -193,6 +216,24 @@ export class FolderListCache {
   private readonly ttlMs: number;
   private readonly now: () => number;
   private readonly entries = new Map<string, { expires_at: number; page: FolderPage }>();
+  /**
+   * Map of `agent → handle → fullPageToken`. Drive's `nextPageToken`
+   * for `files.list` is a base64-encoded protobuf that routinely runs
+   * 50–200 chars — far over Telegram's 64-byte callback_data cap. The
+   * picker emits a short opaque handle (8 hex chars) instead and the
+   * gateway dispatcher resolves it back to the real token via
+   * `getPageToken()`. Same TTL as the folder cache itself; tokens
+   * outlast their parent cache entry by design (the user might
+   * paginate past 5 minutes of inactivity, then their first tap
+   * after expiry still needs the token).
+   */
+  private readonly tokens = new Map<string, { expires_at: number; full: string }>();
+  /**
+   * Stable hash-to-handle dedup. Re-emitting the same page-token for
+   * the same agent should produce the same handle so the cache
+   * doesn't bloat on every re-render. Keyed by `${agent}|${token}`.
+   */
+  private readonly handlesByToken = new Map<string, string>();
 
   constructor(opts?: { ttl_ms?: number; now?: () => number }) {
     this.ttlMs = opts?.ttl_ms ?? 5 * 60 * 1000;
@@ -227,22 +268,122 @@ export class FolderListCache {
 
   /** Drop all entries for an agent — used when the agent disconnects. */
   invalidateAgent(agent: string): void {
+    const prefix = `${agent}|`;
     for (const key of [...this.entries.keys()]) {
-      if (key === agent || key.startsWith(`${agent}|`)) {
+      if (key === agent || key.startsWith(prefix)) {
         this.entries.delete(key);
       }
     }
+    for (const key of [...this.tokens.keys()]) {
+      if (key.startsWith(prefix)) {
+        this.tokens.delete(key);
+      }
+    }
+    for (const key of [...this.handlesByToken.keys()]) {
+      if (key.startsWith(prefix)) {
+        this.handlesByToken.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Register a page token for `agent` and return the short opaque
+   * handle. Idempotent — re-registering the same token returns the
+   * same handle so the cache doesn't bloat on every re-render.
+   *
+   * Handles are 8 lowercase hex chars (~32 bits). Drive's
+   * `nextPageToken` for `files.list` is a base64-encoded protobuf
+   * that routinely runs 50–200 chars; the picker's
+   * `drvpick:open:<agent>:<parent>:<handle>` callback wouldn't fit
+   * inside Telegram's 64-byte cap with the raw token. Collision odds
+   * within a single agent's active 5-min window are tiny — Drive
+   * paginates O(folders/50) per breadcrumb level, so the active set
+   * per agent is single digits.
+   */
+  registerPageToken(agent: string, fullToken: string): string {
+    if (!isValidAgentName(agent)) {
+      throw new Error(
+        `FolderListCache.registerPageToken: invalid agent name '${agent}'`,
+      );
+    }
+    const lookupKey = `${agent}|${fullToken}`;
+    const existing = this.handlesByToken.get(lookupKey);
+    if (existing !== undefined) {
+      // Bump TTL on re-register so an active session keeps the
+      // token alive past its original 5-min window.
+      this.tokens.set(`${agent}|${existing}`, {
+        expires_at: this.now() + this.ttlMs,
+        full: fullToken,
+      });
+      return existing;
+    }
+    const handle = hashHandle(agent, fullToken);
+    this.tokens.set(`${agent}|${handle}`, {
+      expires_at: this.now() + this.ttlMs,
+      full: fullToken,
+    });
+    this.handlesByToken.set(lookupKey, handle);
+    return handle;
+  }
+
+  /**
+   * Resolve a handle back to the full page token. Returns `null` on
+   * miss or expiry — caller should treat that as "session lost; jump
+   * back to page 0".
+   */
+  getPageToken(agent: string, handle: string): string | null {
+    if (!isValidAgentName(agent)) return null;
+    if (!/^[0-9a-f]{8}$/.test(handle)) return null;
+    const key = `${agent}|${handle}`;
+    const entry = this.tokens.get(key);
+    if (entry === undefined) return null;
+    if (entry.expires_at <= this.now()) {
+      this.tokens.delete(key);
+      // Drop reverse mapping so future registrations get a fresh
+      // entry rather than reviving the expired one.
+      for (const [k, v] of this.handlesByToken.entries()) {
+        if (v === handle && k.startsWith(`${agent}|`)) {
+          this.handlesByToken.delete(k);
+        }
+      }
+      return null;
+    }
+    return entry.full;
   }
 
   /** Drop everything — used by tests. */
   clear(): void {
     this.entries.clear();
+    this.tokens.clear();
+    this.handlesByToken.clear();
   }
 
   /** Exposed for tests. */
   size(): number {
     return this.entries.size;
   }
+
+  /** Exposed for tests. */
+  tokenCount(): number {
+    return this.tokens.size;
+  }
+}
+
+function hashHandle(agent: string, token: string): string {
+  // Deterministic short hash. Web Crypto's subtle would be async; an
+  // FNV-1a-style mix with two starting seeds (one forward, one
+  // reverse-walk) gives enough collision resistance for the
+  // active-session size.
+  let h1 = 0x811c9dc5 >>> 0;
+  let h2 = 0xcbf29ce4 >>> 0;
+  const s = `${agent}|${token}`;
+  for (let i = 0; i < s.length; i++) {
+    h1 ^= s.charCodeAt(i);
+    h1 = Math.imul(h1, 0x01000193) >>> 0;
+    h2 ^= s.charCodeAt(s.length - 1 - i);
+    h2 = Math.imul(h2, 0x01000193) >>> 0;
+  }
+  return ((h1 ^ h2) >>> 0).toString(16).padStart(8, "0");
 }
 
 /**
@@ -273,10 +414,22 @@ export async function getOrFetchFirstPage(args: {
 }
 
 function cacheKey(agent: string, parent_id?: string): string {
-  // `|` is not legal in agent names (alnum + - + _ only) or Drive ids
-  // (URL-safe base64), so it can't appear in either component — no
-  // collision risk between an agent named `foo` browsing parent `bar`
-  // and an agent named `foo|bar` at top level (both impossible inputs
-  // either way; defense in depth).
+  // Assert here so an unvalidated agent name from a forgetful caller
+  // can't produce a colliding key. `|` is not legal in agent names
+  // (alnum + - + _ only) or Drive ids (URL-safe base64), so it can't
+  // appear in either component — collision-impossible by construction
+  // *given* this assertion.
+  if (!isValidAgentName(agent)) {
+    throw new Error(
+      `FolderListCache: invalid agent name '${agent}' — must match /^[a-z][a-z0-9_-]*$/ and be ≤ ${AGENT_NAME_MAX} chars`,
+    );
+  }
+  if (parent_id !== undefined) {
+    if (parent_id.length === 0 || !DRIVE_ID_RE.test(parent_id)) {
+      throw new Error(
+        `FolderListCache: invalid parent_id '${parent_id}'`,
+      );
+    }
+  }
   return parent_id === undefined ? agent : `${agent}|${parent_id}`;
 }

@@ -35,10 +35,17 @@
  * defense the operator-events module uses (issue #24).
  */
 
-import type { DriveFolder, FolderPage } from "./folder-list.js";
+import type { DriveFolder, FolderPage, FolderListCache } from "./folder-list.js";
 
 const DRIVE_ID_RE = /^[A-Za-z0-9_-]+$/;
-const AGENT_NAME_RE = /^[a-z][a-z0-9_-]*$/i;
+// Case-sensitive — matches `folder-list.ts:isValidAgentName`. A
+// case-insensitive regex here would let `Klanker` and `klanker`
+// validate but produce distinct cache keys; the gateway dispatcher
+// would then strand entries on disconnect (invalidateAgent("klanker")
+// wouldn't touch the `Klanker` entry).
+const AGENT_NAME_RE = /^[a-z][a-z0-9_-]*$/;
+const AGENT_NAME_MAX = 64;
+const PAGE_HANDLE_RE = /^[0-9a-f]{8}$/;
 
 /**
  * Input to the card builder. Most fields come straight from the
@@ -59,11 +66,11 @@ export interface FolderPickerCardInput {
    */
   breadcrumb?: Array<{ id: string; name: string }>;
   /**
-   * When set, the gateway is re-rendering after the user already
-   * navigated past page 0 — show the [Prev N] button as well as
-   * [Next N] when there's a `previous_page_token`.
+   * Cache used to convert Drive's long `nextPageToken` into a short
+   * opaque handle that fits in the 64-byte callback. Required when
+   * `page.next_page_token` is set; ignored otherwise.
    */
-  previous_page_token?: string;
+  cache?: FolderListCache;
 }
 
 export interface FolderPickerButton {
@@ -158,6 +165,15 @@ export function buildFolderPickerCard(
     ]),
   });
   if (input.page.next_page_token !== undefined) {
+    if (input.cache === undefined) {
+      throw new Error(
+        "buildFolderPickerCard: page.next_page_token is set but no `cache` was passed — required to register the token as a short handle (Drive tokens don't fit in Telegram's 64-byte callback cap)",
+      );
+    }
+    const handle = input.cache.registerPageToken(
+      input.agent,
+      input.page.next_page_token,
+    );
     navRow.push({
       text: "Next ▶",
       callback_data: encodeCallback([
@@ -165,7 +181,7 @@ export function buildFolderPickerCard(
         "open",
         input.agent,
         input.parent?.id ?? "",
-        input.page.next_page_token,
+        handle,
       ]),
     });
   }
@@ -214,7 +230,19 @@ function truncateName(name: string, max: number): string {
  * smuggle anything past the dispatcher into the kernel.
  */
 export type FolderPickerCallback =
-  | { kind: "open"; agent: string; parent_id?: string; page_token?: string }
+  | {
+      kind: "open";
+      agent: string;
+      parent_id?: string;
+      /**
+       * Short opaque handle (8 hex chars) that maps to Drive's
+       * actual `nextPageToken` via the FolderListCache. Drive tokens
+       * routinely run 50–200 chars — too long to fit in Telegram's
+       * 64-byte callback_data cap, so we store the long token
+       * server-side and round-trip the short handle.
+       */
+      page_token_handle?: string;
+    }
   | { kind: "enter"; agent: string; folder_id: string }
   | { kind: "back"; agent: string; parent_id?: string }
   | { kind: "refresh"; agent: string; parent_id?: string }
@@ -242,15 +270,15 @@ export function parseFolderPickerCallback(
       const parent = parts[3] ?? "";
       const token = parts[4] ?? "";
       if (parent !== "" && !DRIVE_ID_RE.test(parent)) return null;
-      // Page tokens are opaque to us but Drive emits them as
-      // alphanumeric-ish strings; accept the same charset to keep
-      // the inline-keyboard URL safe.
-      if (token !== "" && !/^[A-Za-z0-9_-]+$/.test(token)) return null;
+      // 8 hex chars — see `FolderListCache.registerPageToken`. The
+      // gateway resolves this back to Drive's real `nextPageToken`
+      // via `cache.getPageToken(agent, handle)`.
+      if (token !== "" && !PAGE_HANDLE_RE.test(token)) return null;
       return {
         kind: "open",
         agent,
         ...(parent !== "" ? { parent_id: parent } : {}),
-        ...(token !== "" ? { page_token: token } : {}),
+        ...(token !== "" ? { page_token_handle: token } : {}),
       };
     }
     case "enter": {
@@ -295,9 +323,14 @@ function encodeCallback(parts: string[]): string {
 }
 
 function validateAgentName(name: string): void {
+  if (name.length > AGENT_NAME_MAX) {
+    throw new Error(
+      `folder-picker agent name '${name.slice(0, 20)}…' exceeds ${AGENT_NAME_MAX}-char cap`,
+    );
+  }
   if (!AGENT_NAME_RE.test(name)) {
     throw new Error(
-      `folder-picker agent name must match /^[a-z][a-z0-9_-]*$/i — got '${name}'`,
+      `folder-picker agent name must match /^[a-z][a-z0-9_-]*$/ — got '${name}'`,
     );
   }
 }

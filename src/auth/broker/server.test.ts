@@ -59,20 +59,29 @@ afterEach(() => {
 function makeConfig(h: Harness, overrides: Partial<{
   active: string;
   fallback_order: string[];
+  /** Convenience: list of agent names that should get `admin: true`
+   *  set on their per-agent block. Mirrors the unified admin source
+   *  of truth (per-agent flag, not a top-level list). */
   admin_agents: string[];
   consumers: Array<{ name: string; account: string; uid?: number }>;
-  agents: Record<string, { auth?: { override?: string } }>;
+  agents: Record<string, { auth?: { override?: string }; admin?: boolean }>;
   /** Phase 3b.2b — set to enable Google provider registration. */
   google_workspace: { google_client_id: string; google_client_secret: string };
 }> = {}): SwitchroomConfig {
+  const agents = { ...(overrides.agents ?? {}) } as Record<
+    string,
+    { auth?: { override?: string }; admin?: boolean }
+  >;
+  for (const name of overrides.admin_agents ?? []) {
+    agents[name] = { ...(agents[name] ?? {}), admin: true };
+  }
   return ({
     switchroom: { version: 1, agents_dir: h.agentsDir },
     telegram: {},
-    agents: overrides.agents ?? {},
+    agents,
     auth: {
       active: overrides.active,
       fallback_order: overrides.fallback_order,
-      admin_agents: overrides.admin_agents,
       consumers: overrides.consumers,
     },
     google_workspace: overrides.google_workspace,

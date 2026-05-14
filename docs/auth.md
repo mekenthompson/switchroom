@@ -71,7 +71,6 @@ auth:
     - me@example.com
     - work
     - personal
-  admin_agents: [clerk]                 # agents allowed to call admin verbs
   consumers:                            # non-agent peers (hindsight, etc.)
     - name: hindsight
       account: me@example.com
@@ -79,6 +78,9 @@ auth:
 
 agents:
   ziggy: {}                             # inherits fleet active
+  clerk:
+    admin: true                         # gates /agents, /restart, /update,
+                                        # AND the admin /auth verbs
   klanker:
     auth:
       override: work                    # opt-out (edge case)
@@ -201,19 +203,22 @@ Admins are:
 - **The host operator** — connects via the operator socket at
   `/run/switchroom/auth-broker/operator/sock`, chowned to the
   operator UID at bind time (mode 0600). No sudo required.
-- **Admin agents** — listed in `auth.admin_agents:` in
-  `switchroom.yaml`. Reachable from Telegram via `/auth use` and
-  `/auth rotate` in any admin agent's chat.
+- **Admin agents** — any agent with `admin: true` in
+  `switchroom.yaml`. **Same flag** that gates `/agents`, `/restart`,
+  `/update`, `/logs`, etc. (the fleet-management slash commands from
+  PR #1258). One knob, not two — set `admin: true` on an agent and
+  it becomes the full fleet control panel: ops verbs AND auth verbs.
 
-Consumers cannot be admins. The CLI schema validator and the
-broker's boot-time config check both enforce this.
+Consumers cannot be admins. A consumer name that collides with an
+agent name is caught at schema validation time regardless of the
+agent's admin flag.
 
 ## Telegram surface
 
 The `/auth` chat command mirrors the CLI verb set (RFC H §
 "Same shape on the CLI and in Telegram"). Read verbs (`show`,
 `list`, `help`) are open to any agent; mutating verbs are
-admin-gated against `auth.admin_agents`.
+admin-gated against the per-agent `admin: true` flag.
 
 ### Quota-emergency recovery — LLM-free
 

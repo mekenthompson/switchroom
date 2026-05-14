@@ -15,6 +15,9 @@ dist/
 # Vault
 *.enc
 
+# RFC G Phase 5 — operator-host MCP credentials (refresh tokens land here)
+/examples/personal-google-workspace-mcp/credentials/
+
 # OpenClaw export bundle — contains real secrets, never commit
 /switchroom-export/
 /clerk-export/

@@ -1,5 +1,61 @@
 # Changelog
 
+## v0.10.0 — Google Workspace via the auth-broker + RFC H tail-fixes
+
+RFC G Phase 3b lands: a Google account is a first-class auth slot alongside the Anthropic accounts RFC H introduced in v0.9.0. The same broker that owns Anthropic OAuth refresh now owns Google OAuth refresh, per-account ACLs, and per-agent / per-consumer credential fan-out. Plus a tail of RFC-H hardening closing two silent-failure regressions that bit the 2026-05-14 install-validation loop.
+
+### Headline benefits
+
+- **Google Workspace per agent (or per fleet).** `switchroom auth google account add <label>` runs an OAuth flow against Google and registers the resulting refresh token with the broker. Agents that need Drive / Gmail / Calendar get a per-agent socket bound at `/run/switchroom/auth-broker/<agent>/sock` and a `get-credentials provider=google` op that mints a fresh access token on demand — same protocol shape as Anthropic credentials.
+- **Per-account ACLs.** `switchroom auth google enable/disable/list` controls which agents can pull credentials for which Google account. Default is **deny** — adding the account doesn't grant fleet-wide access. The setup wizard's Phase 4 prompt offers Google connect inline (#1248).
+- **Refresh races eliminated for Google too.** The broker holds an exclusive refresh lease per Google account (#1275). Production-hardened: jitter, backoff, lease release on SIGTERM, audit lines for every refresh outcome.
+- **`switchroom auth add <label> --via-claude`** (#1286). Broader OAuth scopes than `setup-token` ships with — useful for accounts that need to operate hindsight or other broker consumers without re-running setup. Goes through the `claude` CLI's OAuth flow with the wider scope set, then registers the credentials with the broker.
+- **Silent-failure regressions closed.** Two RFC-H aftershocks that bit during the v0.9.0/v0.9.1 install-validation loop are now structurally impossible:
+  - Account credentials written without `scopes` / `subscriptionType` claims caused the fleet to boot as "Not logged in" because claude rejected the credential shape. Fixed in #1280 (enrich on write) and reinforced in #1285 (mirror-time enrichment closes the residual boot gap).
+  - The broker didn't fan credentials out to per-agent mirrors at boot — only on add. Empty mirrors at boot showed up as fleet-wide auth failures after `switchroom update`. Fixed in #1277 (fanout at boot + wire `SWITCHROOM_AUTH_BROKER_OPERATOR_UID` end-to-end).
+
+### CLI changes
+
+- **`switchroom auth google account add <label>`** (#1274) — real OAuth flow + broker registration. Replaces the stub from RFC G Phase 3b.3.
+- **`switchroom auth google account list`** (#1279) — broker-backed list of registered Google accounts, surfacing label, scopes, refresh status.
+- **`switchroom auth google enable <agent> <label>`** / **`disable`** / **`list`** (RFC G Phase 3a, surface completion) — per-account ACL controls.
+- **`switchroom auth add <label> --via-claude`** (#1286) — broader-scope OAuth via the `claude` CLI flow.
+- **`switchroom auth use <label>`** + **`auth rotate`** now write `auth.active` to YAML (#1282) — previously these mutated broker state but left `switchroom.yaml` stale, so the next `switchroom apply` would re-bind the old active account. Closes a recurrence of the silent fanout class.
+- Stale RFC-pre-H references removed: `auth login`, `auth status` no longer appear in CLI help, docs, or doctor output (#1283).
+
+### Auth-broker internals
+
+- `wrapper-broker.ts` (#1273) — client-side helper that wraps a consumer process and feeds it credentials minted by `get-credentials`. Used by hindsight, the example `personal-google-workspace-mcp` (#1245, shipped in v0.9.0), and forthcoming Drive / Gmail integrations.
+- `--operator-uid` flag wired through the compose command (#1278) — the broker needs the host operator UID to chown per-agent socket dirs correctly during boot fanout.
+- Audit-log SIGKILL-safety + `AuthCommandContext` rename (#1284) — buffered audit writes now flush on SIGTERM and survive SIGKILL via a fsync-on-write fallback path. Internal rename clarifies the operator-vs-agent caller boundary.
+- Test pinning: auth-broker operator-command volume gating is now covered by `tests/docker/compose-generator.test.ts` (#1281).
+
+### Reconcile + scaffolding
+
+- `switchroom apply` regenerates `CLAUDE.md` silently on template drift (#1276). Previously a noisy "drift detected" message fired on every apply when the template had moved underneath an unchanged scaffold. The check + re-render still happens; just stays quiet.
+
+### CI / test infra
+
+- **Fuzz harness promoted to a Buildkite PR gate** (#1145) — the corpus-driven harness from #1132 / #1134 now runs on every PR via Buildkite, blocking merge on regression. Complements the existing GitHub Actions e2e gate.
+- **Boot-probes test alignment** (#1287) — `nextStep` assertions now use RFC-H vocabulary (`account`, `consumer`, `fanout-mirror`) instead of pre-H legacy terms.
+
+### Docs
+
+- `docs/auth.md` — Google sections added covering the `auth google` verb tree, per-account ACL semantics, and the broker `get-credentials provider=google` protocol.
+- `docs/rfcs/auth-broker.md` — RFC G v3 cross-referenced.
+- Install-validation Phase 1-4 retrospective at `docs/install-validation-2026-05-14.md` (#1253) — what broke during the fresh-VM install loop, what fixed it, and the doctor probes that now catch each class.
+
+### Migration
+
+No-op for Anthropic-only operators — the RFC-H surface from v0.9.0 is unchanged. Operators adding Google:
+
+1. `switchroom auth google account add <label>` and complete the OAuth flow.
+2. `switchroom auth google enable <agent> <label>` for each agent that needs the account (default-deny).
+3. `switchroom apply` to bind the new sockets.
+4. Agent containers pick up the new credentials at next restart.
+
+Per RFC §6, no compatibility shims — agents on a pre-v0.10.0 image are unaffected (they don't ask the broker for Google credentials).
+
 ## v0.9.1 — `switchroom-hindsight` on the auth-broker: no API key needed
 
 `reference/vision.md`'s **subscription-honest, no-API-key-routing** outcome reaches the memory backend. Hindsight (the bundled long-term-memory container) now runs against an Anthropic OAuth account that switchroom is already managing on the operator's behalf — the OpenAI API key prompt, vault entry, and `-e HINDSIGHT_API_LLM_API_KEY=...` plumbing are all gone.

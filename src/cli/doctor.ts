@@ -2081,6 +2081,55 @@ export function registerDoctorCommand(program: Command): void {
     .option("--skill <name>", "Run probes for a specific skill only (e.g. mff)")
     .action(
       withConfigError(async (opts: { json?: boolean; skill?: string }) => {
+        // Pre-config-load short-circuit: if no switchroom.yaml exists yet
+        // (e.g. fresh install before `switchroom setup`), running doctor
+        // should still be useful — that's exactly when an operator wants
+        // to verify their dependencies. Run the config-free sections
+        // (deps + skills prereqs) and exit, instead of erroring.
+        try {
+          getConfigPath(program);
+        } catch (_e) {
+          const depsOnlySections = [
+            { title: "Dependencies", results: checkDependencies() },
+            { title: "Skills Prerequisites", results: checkSkillsPrerequisites() },
+          ];
+          if (opts.json) {
+            console.log(
+              JSON.stringify(
+                {
+                  sections: depsOnlySections,
+                  configMissing: true,
+                  hint: "No switchroom.yaml found; ran deps-only preflight. Run `switchroom setup` to bootstrap config.",
+                },
+                null,
+                2,
+              ),
+            );
+          } else {
+            console.log(
+              chalk.yellow(
+                "No switchroom.yaml found — running deps-only preflight.",
+              ),
+            );
+            console.log(
+              chalk.gray(
+                "  Run `switchroom setup` to bootstrap config + Telegram wiring.",
+              ),
+            );
+            console.log();
+            let totalFails = 0;
+            for (const s of depsOnlySections) {
+              const { fails } = printSection(s.title, s.results);
+              totalFails += fails;
+            }
+            console.log();
+            if (totalFails > 0) {
+              process.exit(1);
+            }
+          }
+          return;
+        }
+
         const config = getConfig(program);
         const configPath = getConfigPath(program);
 

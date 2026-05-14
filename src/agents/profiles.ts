@@ -234,7 +234,13 @@ export function renderAgentSelfServiceFragment(
  *
  * Returns `{ wrote: true, path }` when the template was found and the
  * output file was written, or `{ wrote: false, path }` when the .hbs
- * source doesn't exist (caller can skip gracefully).
+ * source doesn't exist (caller can skip gracefully) OR the target dir
+ * is read-only (e.g. switchroom installed under
+ * `/usr/local/lib/node_modules/switchroom/profiles/` and run as a
+ * non-root user). In the read-only case, the rendered output isn't
+ * consumed by anything downstream — the per-agent scaffold renders
+ * its own CLAUDE.md from the same .hbs source at `scaffold.ts:2127`
+ * — so a graceful skip with a warning is correct here.
  */
 export function renderProfileClaudeTemplate(
   profileName: string,
@@ -252,6 +258,23 @@ export function renderProfileClaudeTemplate(
   const source = readFileSync(hbsPath, "utf-8");
   const template = Handlebars.compile(source, { noEscape: true });
   const rendered = template({ profile: profileName });
-  writeFileSync(outPath, rendered, "utf-8");
-  return { wrote: true, path: outPath };
+  try {
+    writeFileSync(outPath, rendered, "utf-8");
+    return { wrote: true, path: outPath };
+  } catch (err) {
+    // EACCES / EROFS: switchroom is installed under a root-owned dir
+    // and we're running as a non-root operator. The per-agent scaffold
+    // path re-renders the same .hbs into the agent dir anyway, so this
+    // bookkeeping write is non-load-bearing — warn once and continue.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EROFS" || code === "EPERM") {
+      console.warn(
+        `Note: profile CLAUDE.md at ${outPath} is not writable (${code}); ` +
+          `skipping bookkeeping render. Agent scaffolds re-render the .hbs ` +
+          `into their own dir, so this is non-fatal.`,
+      );
+      return { wrote: false, path: outPath };
+    }
+    throw err;
+  }
 }

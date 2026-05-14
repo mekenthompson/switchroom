@@ -172,7 +172,8 @@ export async function runReconcilerTick(
     errors: 0,
   };
 
-  for await (const grant of normaliseIterable(deps.listDriveGrants())) {
+  try {
+   for await (const grant of normaliseIterable(deps.listDriveGrants())) {
     result.scanned += 1;
     try {
       // Defense in depth — only act on scopes we can parse. A
@@ -200,6 +201,16 @@ export async function runReconcilerTick(
       // present/conflict we capture the freshly-fetched fields;
       // for missing we keep the prior snapshot so a transient
       // 404 doesn't reset the comparison baseline on next recovery.
+      //
+      // First-ever observation of a missing scope falls through to
+      // `{}` (empty snapshot) rather than `null` — the next
+      // recovery's `reconcile()` treats `{}` as "all fields
+      // undefined → no conflict reasons", which produces a clean
+      // present-state recovery once Drive returns the file. `null`
+      // would short-circuit reconcile() to present early, but the
+      // {} path is more honest about "we've never seen real
+      // metadata for this scope" and arrives at the same final
+      // state.
       const snapshot: LastSeenSnapshot =
         remoteMeta !== null
           ? {
@@ -227,7 +238,14 @@ export async function runReconcilerTick(
           deps.log?.(
             `reconciler-tick ${grant.agent_unit} ${grant.scope}: audit-write failed — ${describe(err)}`,
           );
-          // Continue — the nudge is still valuable even without audit.
+          // Continue — the nudge is still valuable even without
+          // audit. RFC §4.4 frames the audit as the source-of-truth
+          // for post-hoc review; here we trade that strictness for
+          // user-visible recovery. The next tick will re-fire the
+          // recovery (since last_verdict stays at "missing" if the
+          // save below also fails) and Drive's revision history is
+          // the operator's external escape hatch if the audit row
+          // never lands.
         }
         try {
           await deps.postChatNudge({
@@ -264,6 +282,17 @@ export async function runReconcilerTick(
         `reconciler-tick ${grant.agent_unit} ${grant.scope}: unexpected error — ${describe(err)}`,
       );
     }
+   }
+  } catch (err) {
+    // The grant iterator itself threw (SQLite blip mid-streaming,
+    // a generator throwing, etc). Failure isolation is per-grant
+    // by design, but a source-level failure shouldn't leave the
+    // tick silently dead from the operator's view — count it and
+    // surface in the summary log.
+    result.errors += 1;
+    deps.log?.(
+      `reconciler-tick iterator-source threw — ${describe(err)} (partial result: scanned=${result.scanned} recoveries=${result.recoveries})`,
+    );
   }
 
   deps.log?.(

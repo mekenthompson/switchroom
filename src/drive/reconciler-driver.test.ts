@@ -4,7 +4,11 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { DriveFileMetadata, ReconcilerVerdict } from "./reconciler.js";
+import type {
+  DriveFileMetadata,
+  LastSeenSnapshot,
+  ReconcilerVerdict,
+} from "./reconciler.js";
 import type { RecoveryAuditRow } from "./recovery.js";
 import {
   type DriveGrant,
@@ -15,7 +19,7 @@ import {
 interface TickHarness {
   audit: RecoveryAuditRow[];
   nudges: Array<{ agent_unit: string; text: string }>;
-  saves: Array<{ scope: string; verdict: ReconcilerVerdict }>;
+  saves: Array<{ scope: string; verdict: ReconcilerVerdict; snapshot: LastSeenSnapshot }>;
   logs: string[];
 }
 
@@ -28,22 +32,24 @@ function depsFor(args: {
   fetched: Map<string, DriveFileMetadata | null | Error>;
   audit?: RecoveryAuditRow[];
   nudges?: Array<{ agent_unit: string; text: string }>;
-  saves?: Array<{ scope: string; verdict: ReconcilerVerdict }>;
+  saves?: Array<{ scope: string; verdict: ReconcilerVerdict; snapshot: LastSeenSnapshot }>;
   logs?: string[];
   failSave?: Set<string>;
   failAudit?: Set<string>;
   failNudge?: Set<string>;
+  /** Allow tests to override the iterable shape (e.g. async generator). */
+  iterable?: () => AsyncIterable<DriveGrant> | Iterable<DriveGrant>;
 }): ReconcilerDriverDeps {
   return {
-    listDriveGrants: () => args.grants,
+    listDriveGrants: args.iterable ?? (() => args.grants),
     fetchDriveMeta: async (g) => {
       const r = args.fetched.get(g.scope);
       if (r instanceof Error) throw r;
       return r ?? null;
     },
-    saveVerdict: async ({ grant, verdict }) => {
+    saveVerdict: async ({ grant, verdict, snapshot }) => {
       if (args.failSave?.has(grant.scope)) throw new Error("save failed");
-      args.saves?.push({ scope: grant.scope, verdict });
+      args.saves?.push({ scope: grant.scope, verdict, snapshot });
     },
     writeAuditRow: async (row) => {
       if (args.failAudit?.has(row.scope)) throw new Error("audit failed");
@@ -286,7 +292,10 @@ describe("runReconcilerTick — defense in depth", () => {
 
   it("preserves prior last_seen on transient missing (doesn't reset the baseline)", async () => {
     const h = harness();
-    const priorSnapshot = { modifiedTime: "2026-05-10T00:00:00Z", contentHash: "h1" };
+    const priorSnapshot: LastSeenSnapshot = {
+      modifiedTime: "2026-05-10T00:00:00Z",
+      contentHash: "h1",
+    };
     const deps = depsFor({
       grants: [
         grant({
@@ -302,11 +311,45 @@ describe("runReconcilerTick — defense in depth", () => {
     // recovered doc gets compared against the OLD snapshot, not the
     // empty one a fresh-missing would have written.
     expect(h.saves[0]?.verdict.state).toBe("missing");
-    // Verify by inspecting the captured save call's effect chain:
-    // implementations are expected to write `snapshot` alongside
-    // verdict. We can't see the snapshot directly through our test
-    // harness without extending it, but the no-blanking guarantee
-    // is encoded by the test that follows.
+    // Snapshot field MUST equal the prior tick's snapshot, not be
+    // blanked. This is the load-bearing claim of the transient-miss
+    // path.
+    expect(h.saves[0]?.snapshot).toEqual(priorSnapshot);
+  });
+
+  it("writes an empty snapshot {} on first-ever observation if Drive returns missing", async () => {
+    const h = harness();
+    const deps = depsFor({
+      grants: [grant({ last_verdict: null, last_seen: null })],
+      fetched: new Map([["doc:gdrive:D1", null]]),
+      ...h,
+    });
+    await runReconcilerTick(deps);
+    expect(h.saves[0]?.snapshot).toEqual({});
+    expect(h.saves[0]?.verdict.state).toBe("missing");
+    expect(h.audit).toEqual([]); // no prior verdict → no recovery
+  });
+
+  it("writes the fresh remote snapshot on present", async () => {
+    const h = harness();
+    const meta: DriveFileMetadata = {
+      id: "D1",
+      name: "Q3",
+      modifiedTime: "2026-05-15T01:00:00Z",
+      mimeType: "application/vnd.google-apps.document",
+      contentHash: "hABC",
+    };
+    const deps = depsFor({
+      grants: [grant()],
+      fetched: new Map([["doc:gdrive:D1", meta]]),
+      ...h,
+    });
+    await runReconcilerTick(deps);
+    expect(h.saves[0]?.snapshot).toEqual({
+      modifiedTime: "2026-05-15T01:00:00Z",
+      contentHash: "hABC",
+      mimeType: "application/vnd.google-apps.document",
+    });
   });
 
   it("missing→present after a transient miss recovers cleanly (snapshot preserved)", async () => {
@@ -354,5 +397,115 @@ describe("runReconcilerTick — operator logging", () => {
     });
     const r = await runReconcilerTick(deps);
     expect(r.scanned).toBe(1);
+  });
+});
+
+describe("runReconcilerTick — iterator shapes + edge cases", () => {
+  it("handles an empty grant list (no side-effects, scanned: 0)", async () => {
+    const h = harness();
+    const deps = depsFor({ grants: [], fetched: new Map(), ...h });
+    const r = await runReconcilerTick(deps);
+    expect(r).toEqual({ scanned: 0, skipped: 0, recoveries: 0, errors: 0 });
+    expect(h.audit).toEqual([]);
+    expect(h.saves).toEqual([]);
+  });
+
+  it("works with an async generator source", async () => {
+    const h = harness();
+    const deps = depsFor({
+      grants: [],
+      fetched: new Map([["doc:gdrive:D1", presentMeta]]),
+      iterable: async function* () {
+        yield grant({ scope: "doc:gdrive:D1" });
+        yield grant({
+          scope: "doc:gdrive:D2",
+          last_verdict: { state: "missing", reason: "trashed" },
+        });
+      },
+      ...h,
+    });
+    const deps2: ReconcilerDriverDeps = {
+      ...deps,
+      fetchDriveMeta: async (g) => {
+        if (g.scope === "doc:gdrive:D1") return presentMeta;
+        if (g.scope === "doc:gdrive:D2") return { id: "D2", name: "restored" };
+        return null;
+      },
+    };
+    const r = await runReconcilerTick(deps2);
+    expect(r.scanned).toBe(2);
+    expect(r.recoveries).toBe(1);
+    expect(h.saves.map((s) => s.scope)).toEqual([
+      "doc:gdrive:D1",
+      "doc:gdrive:D2",
+    ]);
+  });
+
+  it("handles folder scopes (parseDriveScope accepts the folder shape)", async () => {
+    const h = harness();
+    const folderMeta: DriveFileMetadata = {
+      id: "F1",
+      name: "Work folder",
+      mimeType: "application/vnd.google-apps.folder",
+    };
+    const deps = depsFor({
+      grants: [
+        grant({
+          scope: "doc:gdrive:folder/F1/**",
+          last_verdict: { state: "missing", reason: "trashed" },
+        }),
+      ],
+      fetched: new Map([["doc:gdrive:folder/F1/**", folderMeta]]),
+      ...h,
+    });
+    const r = await runReconcilerTick(deps);
+    expect(r.skipped).toBe(0);
+    expect(r.recoveries).toBe(1);
+    expect(h.nudges[0]?.text).toContain("Work folder");
+  });
+
+  it("save-fail on a recovered grant: audit + nudge still fire (duplicate is acceptable next tick)", async () => {
+    const h = harness();
+    const deps = depsFor({
+      grants: [
+        grant({ last_verdict: { state: "missing", reason: "trashed" } }),
+      ],
+      fetched: new Map([["doc:gdrive:D1", presentMeta]]),
+      failSave: new Set(["doc:gdrive:D1"]),
+      ...h,
+    });
+    const r = await runReconcilerTick(deps);
+    expect(r.recoveries).toBe(1);
+    expect(r.errors).toBe(1);
+    expect(h.audit).toHaveLength(1);
+    expect(h.nudges).toHaveLength(1);
+    // Save failed → next tick's `last_verdict` is still "missing" →
+    // recovery re-fires. Acceptable per RFC §4.4: better a duplicate
+    // nudge than a silent swallow.
+    expect(h.saves).toEqual([]);
+  });
+
+  it("logs + returns a partial summary when the iterator source throws mid-enumeration", async () => {
+    const h = harness();
+    const deps = depsFor({
+      grants: [],
+      fetched: new Map([["doc:gdrive:D1", presentMeta]]),
+      iterable: async function* () {
+        yield grant({ scope: "doc:gdrive:D1" });
+        throw new Error("source-table connection dropped");
+      },
+      ...h,
+    });
+    const deps2: ReconcilerDriverDeps = {
+      ...deps,
+      fetchDriveMeta: async () => presentMeta,
+    };
+    const r = await runReconcilerTick(deps2);
+    expect(r.scanned).toBe(1); // counted the one we got before the throw
+    expect(r.errors).toBe(1);
+    expect(h.saves).toHaveLength(1); // first grant processed cleanly
+    // Tick still returns a summary instead of dying silently.
+    expect(h.logs.some((l) => l.includes("iterator-source"))).toBe(true);
+    expect(h.logs.some((l) => l.includes("done"))).toBe(true);
   });
 });

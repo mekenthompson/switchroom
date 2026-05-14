@@ -8366,6 +8366,10 @@ bot.command('update', async ctx => {
     // doesn't leave the operator staring at the orphan "🚀 update started"
     // ack indefinitely. Live repro: PR #1305.
     void (async () => {
+      // 60s budget: RFC C §5.3 specs `apply` at 30s and `update_apply`
+      // at 60s. Image pulls + scaffold regeneration dominate the wall
+      // clock for update_apply, hence the larger budget. The poll
+      // resolves earlier on any terminal state from the daemon.
       const terminal = await pollHostdStatus(getMyAgentName(), updateRequestId, {
         timeoutMs: 60_000,
       })

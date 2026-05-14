@@ -137,10 +137,14 @@ export function hostdRequestId(prefix: string): string {
  *     a timeout often means the recreate succeeded and killed the
  *     gateway; the *new* gateway's post-restart greeting card is the
  *     true success signal.
- *   - On a wire error from a poll tick, retries (transient net.Server
- *     errors during the recreate are expected). The last wire error is
- *     remembered and surfaced in the timeout response if we never see
- *     a successful poll.
+ *   - Any terminal state from the daemon (`completed`/`error`/`denied`)
+ *     bails immediately and returns that response. Wire errors are
+ *     synthesized by {@link tryHostdDispatch} as `result: "error"`,
+ *     which also bails — there's no separate retry on transient wire
+ *     failures because (a) the daemon doesn't actually go down except
+ *     during a recreate that kills us anyway, and (b) waiting until
+ *     timeout to surface a clear error is worse UX than surfacing it
+ *     immediately.
  *   - Returns immediately if hostd is unconfigured (treats as
  *     `not-configured`, same as {@link tryHostdDispatch}).
  */

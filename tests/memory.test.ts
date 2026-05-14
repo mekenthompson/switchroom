@@ -228,34 +228,42 @@ describe("getHindsightMcpUrl", () => {
   });
 });
 
-describe("generateHindsightComposeSnippet", () => {
-  it("generates valid compose snippet without provider", () => {
+describe("generateHindsightComposeSnippet (broker-fed, #1245)", () => {
+  it("generates a snippet that uses the switchroom-hindsight image", () => {
     const snippet = generateHindsightComposeSnippet();
 
     expect(snippet).toContain("switchroom-hindsight");
-    expect(snippet).toContain("image: ghcr.io/vectorize-io/hindsight:latest");
+    expect(snippet).toContain("image: ghcr.io/switchroom/switchroom-hindsight:latest");
     expect(snippet).toContain("switchroom-hindsight-data:/home/hindsight/.pg0");
     expect(snippet).toContain("restart: unless-stopped");
-    expect(snippet).not.toContain("LLM_PROVIDER");
+    // Upstream image is NOT used — switchroom-hindsight extends it with
+    // claude-agent-sdk + the claude CLI for the claude-code provider.
+    expect(snippet).not.toContain("ghcr.io/vectorize-io/hindsight:latest");
   });
 
-  it("includes LLM_PROVIDER when provider is specified", () => {
-    const snippet = generateHindsightComposeSnippet("openai");
+  it("pins HINDSIGHT_API_LLM_PROVIDER=claude-code (subscription-honest)", () => {
+    const snippet = generateHindsightComposeSnippet();
+    expect(snippet).toContain("HINDSIGHT_API_LLM_PROVIDER=claude-code");
+    // No legacy API key / OpenAI provider variant is configurable.
+    expect(snippet).not.toContain("LLM_PROVIDER=openai");
+    expect(snippet).not.toContain("HINDSIGHT_API_LLM_API_KEY");
+  });
 
-    expect(snippet).toContain("LLM_PROVIDER=openai");
-    expect(snippet).toContain("environment:");
+  it("bind-mounts the auth-broker consumer socket volume + tmpfs for creds", () => {
+    const snippet = generateHindsightComposeSnippet();
+    expect(snippet).toContain("auth-broker-hindsight-sock:/run/switchroom/auth-broker");
+    expect(snippet).toContain("tmpfs:");
+    expect(snippet).toContain("/run/claude-creds:rw,mode=0700");
+    // The named volume MUST be declared external so it can be shared
+    // with the main switchroom compose project (where the broker chowns
+    // and binds the per-consumer socket inside it).
+    expect(snippet).toMatch(/auth-broker-hindsight-sock:\s*\n\s+external:\s+true/);
   });
 
   it("always sets HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE (caps unbounded growth)", () => {
-    // Mitigation for vectorize-io/hindsight#1284. Must be present even
-    // when no LLM provider is configured (e.g. operator using an
-    // external Hindsight server but still wanting the cap on a self-
-    // managed container they generate the compose snippet for).
-    const noProvider = generateHindsightComposeSnippet();
-    expect(noProvider).toContain("HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE=1000");
-    expect(noProvider).toContain("environment:");
-
-    const withProvider = generateHindsightComposeSnippet("openai");
-    expect(withProvider).toContain("HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE=1000");
+    // Mitigation for vectorize-io/hindsight#1284 — same intent as before.
+    const snippet = generateHindsightComposeSnippet();
+    expect(snippet).toContain("HINDSIGHT_API_MAX_OBSERVATIONS_PER_SCOPE=1000");
+    expect(snippet).toContain("environment:");
   });
 });

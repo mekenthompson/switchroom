@@ -1,0 +1,58 @@
+# switchroom/hindsight — upstream Hindsight + claude-code provider deps.
+#
+# Why we extend the upstream image instead of running it as-is:
+#
+# Upstream `ghcr.io/vectorize-io/hindsight:latest` ships every LLM provider
+# the standalone Hindsight API supports EXCEPT the one we want. The
+# `claude-code` provider (vectorize-io/hindsight @
+# hindsight-api-slim/hindsight_api/engine/providers/claude_code_llm.py)
+# routes consolidation/recall through the user's Claude Pro/Max
+# subscription via `claude_agent_sdk.query()` instead of an OpenAI /
+# Anthropic API key. That matches switchroom's "subscription-honest, no
+# API-key routing" outcome (reference/vision.md).
+#
+# But the upstream Dockerfile (docker/standalone/Dockerfile) builds the
+# python venv with `uv sync --extra local-ml --extra embedded-db` only —
+# no `claude-agent-sdk` extra, and the `claude` CLI isn't on PATH. So
+# `ClaudeCodeLLM.__init__` raises at boot with a "Claude Agent SDK not
+# installed" error. We add both here.
+#
+# OAuth credentials are NOT baked into the image. Hindsight talks to the
+# auth-broker over a UDS bind-mounted from a named volume
+# (`auth-broker-hindsight-sock`, written by `src/agents/compose.ts`).
+# The entrypoint shim (docker/hindsight-entrypoint.sh) calls
+# `get-credentials` on the socket and writes the response to
+# `/run/claude-creds/.credentials.json` (tmpfs, dotfile per
+# claude-compat); then sets `CLAUDE_CONFIG_DIR=/run/claude-creds`
+# before exec'ing the upstream start-all.sh. The credentials never
+# touch persistent disk and the broker remains the single writer of
+# OAuth state (RFC H invariant).
+FROM ghcr.io/vectorize-io/hindsight:latest
+
+USER root
+
+# Node was already present in the upstream `standalone` stage (used for
+# the Control Plane). We piggyback on it to install the claude CLI
+# globally. Pinning to @latest at build time matches docker/Dockerfile.base
+# — we want the same claude bundle the agent containers ship.
+RUN npm install -g @anthropic-ai/claude-code@latest \
+ && claude --version >&2
+
+# Install claude-agent-sdk into the same venv the hindsight API runs from.
+# The upstream start-all.sh activates this venv before launching uvicorn,
+# so `from claude_agent_sdk import query` resolves to this install.
+# `uv pip install` is faster than plain pip and the venv is already
+# uv-managed by upstream.
+RUN /app/api/.venv/bin/pip install --no-cache-dir claude-agent-sdk \
+ && /app/api/.venv/bin/python -c "from claude_agent_sdk import query; print('claude-agent-sdk ok')" >&2
+
+# Entrypoint shim — fetches credentials from the auth-broker over UDS
+# on every boot (and on token-aged-out re-fetch by upstream code paths
+# that re-invoke claude). The shim is copied executable; see the file
+# header for the wire-protocol details and fail-loud guards.
+COPY --chmod=0755 docker/hindsight-entrypoint.sh /usr/local/bin/switchroom-hindsight-entrypoint.sh
+
+USER hindsight
+
+ENTRYPOINT ["/usr/local/bin/switchroom-hindsight-entrypoint.sh"]
+CMD ["/app/start-all.sh"]

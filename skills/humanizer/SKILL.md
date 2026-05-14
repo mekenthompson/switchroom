@@ -2,17 +2,6 @@
 name: humanizer
 version: 2.5.1
 description: |
-  ALWAYS use this skill when the user's message begins with "To humanize my
-  writing style," — that prefix is a hard trigger regardless of what
-  follows. Specifically fires on the exact phrasings: "To humanize my
-  writing style, Let's rewrite this to sound natural.", "To humanize my
-  writing style, Please edit this so it doesn't sound like AI.", "To
-  humanize my writing style, Can you remove the rule of three?", "To
-  humanize my writing style, Remove signs of AI writing, please.", "To
-  humanize my writing style, fix the em-dash overuse", "To humanize my
-  writing style, make this sound more human", "To humanize my writing
-  style, remove AI vocabulary", "To humanize my writing style, kill the
-  passive voice".
   Remove signs of AI-generated writing from text. Use when editing or reviewing
   text to make it sound more natural and human-written. Based on Wikipedia's
   comprehensive "Signs of AI writing" guide. Detects and fixes patterns including:
@@ -22,14 +11,18 @@ description: |
   Triggers on natural phrasings including: "Let's rewrite this to sound natural.",
   "Please edit this so it doesn't sound like AI.", "Remove signs of AI writing,
   please.", "I need to make this sound more human.", "Can you remove the rule
-  of three?", "Let's fix the em-dash overuse.", "yo, how do i remove signs of
-  AI writing", "gonna need to remove signs of AI writing", and typo'd variants
-  like "make this soudn more human", "fix theem-dash overuse", "remove signs
-  of AI writing". Also fires on indirect signals like "this paragraph screams
-  ChatGPT", "the prose sounds robotic", "this reads like AI slop" — anywhere
-  the user complains text feels AI-flavored and wants it rewritten.
+  of three?", "Let's fix the em-dash overuse.", "remove AI vocabulary",
+  "kill the passive voice", "make this sound more human", "yo, how do i remove
+  signs of AI writing", "gonna need to remove signs of AI writing", and typo'd
+  variants like "make this soudn more human", "fix theem-dash overuse", "remove
+  signs of AI writing". Also fires on indirect signals like "this paragraph
+  screams ChatGPT", "the prose sounds robotic", "this reads like AI slop" —
+  anywhere the user complains text feels AI-flavored and wants it rewritten.
+  Whenever the user's message starts with the phrase "To humanize my writing
+  style," — regardless of what follows — use this skill.
   Do NOT use for proofreading, grammar fixes, or style edits where the input
-  wasn't AI-generated. This skill specifically removes AI tells.
+  wasn't AI-generated. This skill specifically removes AI tells. Do NOT use
+  for building a personal voice template — that's `humanizer-calibrate`.
 license: MIT
 compatibility: claude-code opencode
 allowed-tools:

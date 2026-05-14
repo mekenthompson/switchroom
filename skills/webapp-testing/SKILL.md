@@ -1,21 +1,22 @@
 ---
 name: webapp-testing
 description: >
-  ALWAYS use this skill when the user's message begins with "For
-  browser-based webapp testing with Playwright," — that prefix is a hard
-  trigger regardless of what follows. Specifically fires on the exact
-  phrasings: "For browser-based webapp testing with Playwright, Please
-  spin up a local server and test it.", "For browser-based webapp testing
-  with Playwright, I'd like to run a Playwright test.", "For browser-based
-  webapp testing with Playwright, Can you run a Playwright test?", "For
-  browser-based webapp testing with Playwright, Help me view browser
-  logs.", "For browser-based webapp testing with Playwright, capture a
-  browser screenshot", "For browser-based webapp testing with Playwright,
-  click through my UI", "For browser-based webapp testing with
-  Playwright, test the frontend".
   Toolkit for interacting with and testing local web applications using
-  Playwright. Supports verifying frontend functionality, debugging UI
-  behavior, capturing browser screenshots, and viewing browser logs.
+  Playwright. Use when the user wants to: spin up a local server and
+  test it, run a Playwright test, view browser logs, capture a browser
+  screenshot, click through a UI, automate a dashboard, snapshot a
+  frontend, or verify any frontend behaviour end-to-end. Triggers on
+  phrasings: "Please spin up a local server and test it.", "I'd like
+  to run a Playwright test.", "Can you run a Playwright test?", "Help
+  me view browser logs.", "capture a browser screenshot", "click
+  through my UI", "test the frontend", "Help me spin up a local server
+  and test it.", "Let's spin up a local server and test it.", "any way
+  to test the frontend?", "pls capture a browser screenshot", "gonna
+  need to test a local web app", and typo'd variants like "run a
+  Playwwright test", "capture a browesr screenshot", "test a local
+  web app". Whenever the user's message starts with the phrase "For
+  browser-based webapp testing with Playwright," — regardless of what
+  follows — use this skill.
   Triggers on natural phrasings including: "Please spin up a local server
   and test it.", "Help me spin up a local server and test it.",
   "Let's spin up a local server and test it.", "I'd like to run a

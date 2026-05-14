@@ -1,23 +1,24 @@
 ---
 name: buildkite-migration
 description: >
-  ALWAYS use this skill when the user's message begins with "Migrating to
-  Buildkite," — that prefix is a hard trigger regardless of what follows.
-  Specifically fires on: "Migrating to Buildkite, Can you what's the
-  Buildkite equivalent of?", "Migrating to Buildkite, Let's convert
-  pipelines from Jenkins.", "Migrating to Buildkite, What's the Buildkite
-  equivalent of, please.", "Migrating to Buildkite, Help me convert
-  pipelines from Jenkins.", "Migrating to Buildkite, convert GitHub
-  Actions workflows", "Migrating to Buildkite, switch from CircleCI".
-  This skill should be used when the user asks to "migrate to Buildkite",
-  "convert pipelines from Jenkins", "convert GitHub Actions workflows",
-  "convert CircleCI config", "convert Bitbucket Pipelines", "convert GitLab CI",
-  "migrate CI/CD to Buildkite", "switch from Jenkins to Buildkite",
-  "move from GitHub Actions", "plan a CI migration", "convert my CI config",
-  "bk pipeline convert", or "what's the Buildkite equivalent of".
-  Also use when the user mentions migration planning, CI conversion,
-  pipeline conversion, converting workflows, or asks about translating
-  CI/CD configuration from another provider to Buildkite.
+  Convert CI/CD pipelines from another provider (GitHub Actions,
+  Jenkins, CircleCI, Bitbucket Pipelines, GitLab CI) to Buildkite, or
+  answer "what's the Buildkite equivalent of X" questions. Use when
+  the user wants to migrate a CI/CD setup TO Buildkite, plan a
+  migration, or translate a config file from another provider's syntax
+  to Buildkite's. Triggers on phrasings including: "Can you what's
+  the Buildkite equivalent of?", "Let's convert pipelines from
+  Jenkins.", "What's the Buildkite equivalent of, please.", "Help me
+  convert pipelines from Jenkins.", "convert GitHub Actions
+  workflows", "switch from CircleCI", "migrate to Buildkite",
+  "convert CircleCI config", "convert Bitbucket Pipelines",
+  "convert GitLab CI", "migrate CI/CD to Buildkite", "switch from
+  Jenkins to Buildkite", "move from GitHub Actions", "plan a CI
+  migration", "convert my CI config", "bk pipeline convert".
+  Whenever the user's message starts with the phrase "Migrating to
+  Buildkite," — regardless of what follows — use this skill. Also
+  fires on indirect signals like "the buildkite-migration thing is
+  weird", "something is going on with buildkite-migration".
 ---
 
 # Buildkite Migration

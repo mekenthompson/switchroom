@@ -137,6 +137,19 @@ jobs:
           name: dist-built
           path: dist/
 
+      - name: Restore exec bits on bundled CLIs
+        # actions/upload-artifact@v4 stores artifacts as zip and strips
+        # POSIX exec bits on download. scripts/build.mjs chmods every
+        # entry-point bundle 0o755 because the runtime invokes them
+        # directly (start.sh shells `switchroom`, claude spawns the
+        # hooks, autoaccept-poll is exec'd). Without re-applying here,
+        # tests/autoaccept-poll-bundled.test.ts fails on `st.mode &
+        # 0o100 !== 0` — silently red on every push-to-main since #1323
+        # introduced the shared-artifact pattern.
+        run: |
+          chmod +x dist/cli/*.js dist/cli/*.mjs 2>/dev/null || true
+          ls -l dist/cli/
+
       - name: Vitest shard ${{ matrix.shard }}/4 (PR — changed-files only)
         if: github.event_name == 'pull_request'
         # --changed traces the import graph from files changed against

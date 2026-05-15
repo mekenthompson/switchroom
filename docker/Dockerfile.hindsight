@@ -73,6 +73,18 @@ RUN OLD_UID=$(id -u hindsight) && NEW_UID=11000 \
 # Credential fetcher — small Node program reused by both the boot
 # fetch and the background refresh loop. Pulled out of the entrypoint
 # so both code paths exercise the exact same wire shape.
+#
+# Pre-create the parent dir before the COPY: buildkit's `--chmod` flag
+# propagates to ANY auto-created intermediate directories on the
+# multi-arch CI build path. That gave the parent `/usr/local/lib/switchroom`
+# mode 0644 (drw-r--r-- — no x/traverse bit), so the non-root
+# `hindsight` user (UID 11000) couldn't enter the dir at runtime and
+# the entrypoint died with `Cannot find module '...fetch-creds.cjs'` →
+# `boot credential fetch failed; refusing to boot hindsight` →
+# restart loop. Local single-arch builds didn't hit it because layer
+# ordering left an existing 0755 dir at that path. Pre-creating with
+# explicit mode pins both the dir and the file to the right shape.
+RUN mkdir -p /usr/local/lib/switchroom && chmod 0755 /usr/local/lib/switchroom
 COPY --chmod=0644 docker/hindsight-fetch-creds.cjs /usr/local/lib/switchroom/hindsight-fetch-creds.cjs
 
 # Entrypoint shim — runs the fetcher at boot, spawns a refresh sidecar,

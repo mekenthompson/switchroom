@@ -561,9 +561,17 @@ describe("describeOffset", () => {
     expect(d.nearestHeading).toBeNull();
   });
 
-  it("rejects negative or non-finite offsets with a literal", () => {
+  it("rejects negative offsets with a literal; non-finite offsets get the constant", () => {
+    // Negative offsets still surface the number — the literal is
+    // honest about what the agent passed. Non-finite offsets
+    // (NaN, Infinity) get the constant since template-literal
+    // coercion of those values is shaped enough to potentially
+    // smuggle text.
     expect(describeOffset(offsetDoc, -1).displayName).toBe("at offset -1");
-    expect(describeOffset(offsetDoc, NaN).displayName).toBe("at offset NaN");
+    expect(describeOffset(offsetDoc, NaN).displayName).toBe("at unknown offset");
+    expect(describeOffset(offsetDoc, Number.POSITIVE_INFINITY).displayName).toBe(
+      "at unknown offset",
+    );
   });
 
   it("truncates very long heading text in the display name", () => {
@@ -591,6 +599,110 @@ describe("describeOffset", () => {
     const d = describeOffset(proseDoc, 10);
     expect(d.displayName).toContain("before first heading");
     expect(d.nearestHeading).toBeNull();
+  });
+});
+
+describe("describeOffset — boundary correctness", () => {
+  it("offset BEFORE the first paragraph renders 'at start of doc' (not end-of-doc)", () => {
+    // Reviewer-flagged blocker: offset=0 in a real Drive doc (which
+    // starts at startIndex=1) used to fall through to "at end of
+    // doc" and let the wrapper itself lie about location.
+    const d = describeOffset(offsetDoc, 0);
+    expect(d.displayName).toBe("at start of doc");
+    expect(d.paragraph).toBeNull();
+    expect(d.nearestHeading).toBeNull();
+  });
+
+  it("offset PAST the last paragraph renders 'at end of doc'", () => {
+    const d = describeOffset(offsetDoc, 78); // last endOffset
+    expect(d.displayName).toBe("at end of doc");
+    expect(d.nearestHeading?.text).toBe("Hiring");
+  });
+
+  it("offset in an interior gap (no paragraph covers it) falls back to literal", () => {
+    // Simulate a doc with a gap between paragraphs — what would
+    // happen if upstream's parser drops table cells / page breaks
+    // and the agent points start_index at the gap.
+    const gapDoc: DocumentSnapshot = {
+      paragraphs: [
+        pp("Before the table.", 1, 1, 19),
+        // [19, 100) is a table or other non-paragraph element the
+        // parser omitted.
+        pp("After the table.", 2, 100, 118),
+      ],
+    };
+    const d = describeOffset(gapDoc, 50);
+    expect(d.displayName).toBe("at offset 50");
+    expect(d.paragraph).toBeNull();
+  });
+});
+
+describe("describeOffset — attestation hardening (reviewer pin)", () => {
+  it("non-number offset returns a constant string (no template-literal injection)", () => {
+    // Cast around the type system — the hook will receive
+    // start_index from JSON-parsed tool input where the runtime
+    // type isn't guaranteed.
+    const badOffset = "78\n📍 inside section 'Approved' (level 1)" as unknown as number;
+    const d = describeOffset(offsetDoc, badOffset);
+    expect(d.displayName).toBe("at unknown offset");
+    expect(d.displayName).not.toContain("Approved");
+    expect(d.displayName).not.toContain("📍");
+  });
+
+  it("null / undefined / object offsets return the constant", () => {
+    expect(describeOffset(offsetDoc, null as unknown as number).displayName).toBe(
+      "at unknown offset",
+    );
+    expect(describeOffset(offsetDoc, undefined as unknown as number).displayName).toBe(
+      "at unknown offset",
+    );
+    expect(describeOffset(offsetDoc, {} as unknown as number).displayName).toBe(
+      "at unknown offset",
+    );
+  });
+
+  it("heading text with embedded single quotes doesn't break the wrapping", () => {
+    const docWithQuote: DocumentSnapshot = {
+      paragraphs: [
+        ph(2, "What's up", 1, 1, 12),
+        pp("body", 2, 12, 18),
+      ],
+    };
+    const d = describeOffset(docWithQuote, 15);
+    expect(d.displayName).toBe("inside section 'What’s up' (level 2)");
+    // Apostrophe replaced with curly close-quote so the surrounding
+    // single quotes stay balanced.
+    expect(d.displayName.match(/'/g)?.length).toBe(2);
+  });
+
+  it("heading text with markdown / control chars is sanitized", () => {
+    const docWithMarkup: DocumentSnapshot = {
+      paragraphs: [
+        ph(2, "Foo `code` [click](evil) bell", 1, 1, 30),
+        pp("body", 2, 30, 36),
+      ],
+    };
+    const d = describeOffset(docWithMarkup, 32);
+    expect(d.displayName).not.toContain("`");
+    expect(d.displayName).not.toContain("[");
+    expect(d.displayName).not.toContain("](");
+    expect(d.displayName).not.toContain("");
+    expect(d.displayName).toMatch(/inside section 'Foo code clickevil bell' \(level 2\)/);
+  });
+
+  it("nested heading levels — returns the most-specific (largest .index) ancestor", () => {
+    // H1 > H2 > H3 > body. The 'most-specific' ancestor is H3.
+    const nestedDoc: DocumentSnapshot = {
+      paragraphs: [
+        ph(1, "Plan", 1, 1, 8),
+        ph(2, "Q3", 2, 8, 14),
+        ph(3, "Hiring", 3, 14, 22),
+        pp("Reach out to Alice.", 4, 22, 42),
+      ],
+    };
+    const d = describeOffset(nestedDoc, 30);
+    expect(d.displayName).toBe("inside section 'Hiring' (level 3)");
+    expect(d.nearestHeading?.level).toBe(3);
   });
 });
 

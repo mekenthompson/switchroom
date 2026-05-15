@@ -592,9 +592,18 @@ export function describeOffset(
   doc: DocumentSnapshot,
   offset: number,
 ): OffsetDescription {
-  if (!Number.isFinite(offset) || offset < 0) {
+  // Hard runtime guard on the agent-controlled value. The PreToolUse
+  // hook will pass `start_index` straight from a JSON-parsed tool
+  // input; if a non-number sneaks past TypeScript (e.g. via the JSON
+  // path), template-literal coercion would let the value land
+  // verbatim in `displayName`. That's an attestation hole — return a
+  // constant string instead.
+  if (typeof offset !== "number" || !Number.isFinite(offset) || offset < 0) {
     return {
-      displayName: `at offset ${offset}`,
+      displayName:
+        typeof offset === "number" && Number.isFinite(offset)
+          ? `at offset ${offset}`
+          : "at unknown offset",
       paragraph: null,
       nearestHeading: null,
     };
@@ -602,10 +611,41 @@ export function describeOffset(
 
   const located = findParagraphForOffset(doc, offset);
   if (located === null) {
-    // No offset metadata on any paragraph, or offset falls beyond
-    // the last paragraph's end. Both surface as a literal offset so
-    // the user at least sees the number from the tool call.
-    if (doc.paragraphs.length > 0 && hasOffsets(doc.paragraphs[doc.paragraphs.length - 1]!)) {
+    // Distinguish before-start, past-end, and "no metadata" — the
+    // earlier code treated all three as "at end of doc" which lets
+    // an offset=0 write be attested as end-of-doc (RFC §4.2 lie-by-
+    // wrapper). Now:
+    //   * No paragraph has offset metadata → literal fallback.
+    //   * Offset < first paragraph startOffset → "at start of doc".
+    //   * Offset >= last paragraph endOffset → "at end of doc".
+    //   * Offset in an interior gap (table cells, page breaks, etc.
+    //     between paragraphs) → literal fallback rather than
+    //     guessing — the parser is upstream's concern and we'd
+    //     rather mis-render than mis-attest.
+    if (doc.paragraphs.length === 0) {
+      return {
+        displayName: `at offset ${offset}`,
+        paragraph: null,
+        nearestHeading: null,
+      };
+    }
+    const first = doc.paragraphs[0]!;
+    const last = doc.paragraphs[doc.paragraphs.length - 1]!;
+    if (!hasOffsets(first) || !hasOffsets(last)) {
+      return {
+        displayName: `at offset ${offset}`,
+        paragraph: null,
+        nearestHeading: null,
+      };
+    }
+    if (offset < first.startOffset!) {
+      return {
+        displayName: "at start of doc",
+        paragraph: null,
+        nearestHeading: null,
+      };
+    }
+    if (offset >= last.endOffset!) {
       // For "end of doc" we want the *last* heading in the entire
       // document, regardless of its `.index` value. Pass Infinity
       // so the "strictly above" filter degenerates to "any
@@ -616,6 +656,9 @@ export function describeOffset(
         nearestHeading: nearestHeadingAbove(doc, Number.POSITIVE_INFINITY),
       };
     }
+    // Interior gap — surface the literal offset and let the user
+    // see the raw number rather than confidently attesting the
+    // wrong location.
     return {
       displayName: `at offset ${offset}`,
       paragraph: null,
@@ -716,8 +759,29 @@ function hasOffsets(p: Paragraph): p is Paragraph & { startOffset: number; endOf
   );
 }
 
+/**
+ * Sanitize doc-content text before embedding in the `displayName`
+ * string. The wrapper-attested name lands on the diff-preview card
+ * and (after PR-2) gets HTML-escaped by the gateway renderer — but
+ * defense in depth here keeps the *intermediate* form safe in the
+ * audit row, log lines, and any non-Telegram surface that doesn't
+ * apply its own escape.
+ *
+ * Strips: control chars, backticks (markdown code marker), brackets
+ * and parens that could form a markdown link. Escapes embedded
+ * single quotes so the surrounding `'…'` wrapping in the
+ * displayName ("on heading 'X' (level 2)") doesn't get
+ * unbalanced by a heading whose text already contains `'`.
+ */
 function truncateLine(s: string): string {
-  return ellipsize(s.replace(/\s+/g, " ").trim(), 60);
+  const cleaned = s
+    // eslint-disable-next-line no-control-regex -- intentional strip
+    .replace(/[\x00-\x1f\x7f]/g, " ")
+    .replace(/[`[\]()]/g, "")
+    .replace(/'/g, "’") // ' → ’ (curly close-single-quote)
+    .replace(/\s+/g, " ")
+    .trim();
+  return ellipsize(cleaned, 60);
 }
 
 function previewOfNeighborhood(

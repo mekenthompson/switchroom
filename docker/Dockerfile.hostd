@@ -61,7 +61,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       docker-ce-cli \
       docker-compose-plugin \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*.deb
 
 # Socket parent dir — keep 0o755 here so a stale Dockerfile-level
 # default can't override what the daemon enforces at runtime.

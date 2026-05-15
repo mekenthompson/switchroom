@@ -172,3 +172,66 @@ describe("interpretConnectPutResult", () => {
     expect(v.message.toLowerCase()).toContain("attest");
   });
 });
+
+describe("interpretRefGetResult", () => {
+  const { interpretRefGetResult } = _testing;
+
+  it("string entry → resolved value", () => {
+    const v = interpretRefGetResult("google_client_id", "google-oauth-client-id", {
+      kind: "ok",
+      entry: { kind: "string", value: "abc.apps.googleusercontent.com" },
+    });
+    expect(v).toEqual({ ok: true, value: "abc.apps.googleusercontent.com" });
+  });
+
+  it("non-string entry → hard error, no fallback", () => {
+    const v = interpretRefGetResult("google_client_secret", "k", {
+      kind: "ok",
+      entry: { kind: "binary", value: "deadbeef" },
+    });
+    expect(v.ok).toBe(false);
+    if (v.ok) throw new Error("unreachable");
+    expect(v.fallback).toBe(false);
+    if (v.fallback) throw new Error("unreachable");
+    expect(v.message).toContain("is not a string");
+    expect(v.message).toContain("kind=binary");
+  });
+
+  it("unreachable → fallback to direct read (the only fallback-eligible case)", () => {
+    const v = interpretRefGetResult("google_client_id", "k", {
+      kind: "unreachable",
+      msg: "no socket",
+    });
+    expect(v).toEqual({ ok: false, fallback: true });
+  });
+
+  it("not_found → hard error, NOT fallback (reached broker is authoritative)", () => {
+    const v = interpretRefGetResult("google_client_id", "google-oauth-client-id", {
+      kind: "not_found",
+      code: "UNKNOWN_KEY",
+      msg: "Key not found",
+    });
+    expect(v.ok).toBe(false);
+    if (v.ok) throw new Error("unreachable");
+    expect(v.fallback).toBe(false);
+    if (v.fallback) throw new Error("unreachable");
+    expect(v.message).toContain("google-oauth-client-id");
+    expect(v.message).toContain("[UNKNOWN_KEY]");
+  });
+
+  it("denied → hard error with operator-scope hint, NOT fallback", () => {
+    const v = interpretRefGetResult("google_client_secret", "google-oauth-client-secret", {
+      kind: "denied",
+      code: "DENIED",
+      msg: "scope excludes operator",
+    });
+    expect(v.ok).toBe(false);
+    if (v.ok) throw new Error("unreachable");
+    expect(v.fallback).toBe(false);
+    if (v.fallback) throw new Error("unreachable");
+    expect(v.message).toContain("[DENIED]");
+    expect(v.message.toLowerCase()).toContain("operator");
+    // Must not silently mask a real ACL/scope problem by reading the file.
+    expect(v.message).toContain("scope excludes operator");
+  });
+});

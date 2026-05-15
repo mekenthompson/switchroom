@@ -41,7 +41,7 @@ import {
   getEnabledAgentsForGoogleAccount,
   listGoogleAccounts,
 } from "./google-accounts-yaml.js";
-import type { PutResult } from "../vault/broker/client.js";
+import type { PutResult, GetResult } from "../vault/broker/client.js";
 import { withConfigError, getConfig, getConfigPath } from "./helpers.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 
@@ -599,6 +599,7 @@ function registerAccountAdd(accountParent: Command): void {
           { loadConfig, resolvePath },
           { getSecret },
           { isVaultReference, parseVaultReference },
+          { getViaBrokerStructured, statusViaBroker, resolveBrokerSocketPath },
         ] = await Promise.all([
           import("./drive.js"),
           import("../drive/oauth.js"),
@@ -606,6 +607,7 @@ function registerAccountAdd(accountParent: Command): void {
           import("../config/loader.js"),
           import("../vault/vault.js"),
           import("../vault/resolver.js"),
+          import("../vault/broker/client.js"),
         ]);
 
         const config = loadConfig();
@@ -637,16 +639,57 @@ function registerAccountAdd(accountParent: Command): void {
         const needsVault =
           isVaultReference(clientIdRaw) || isVaultReference(clientSecretRaw);
         if (needsVault) {
-          const vaultPath = resolvePath(
-            config.vault?.path ?? "~/.switchroom/vault.enc",
-          );
-          const passphrase =
-            process.env.SWITCHROOM_VAULT_PASSPHRASE ??
-            (await readHiddenLine("Vault passphrase: "));
-          const resolveRef = (raw: string, label: string): string => {
+          // Broker-first, mirroring `switchroom vault get`. On a host
+          // running the vault-broker, the broker owns vault.enc as root
+          // — a direct `getSecret` then fails with root:root EACCES
+          // (the same failure connect hit before #1347). When the
+          // broker is reachable + unlocked we read through it (the
+          // operator socket can read any key without an "operator"-
+          // excluding scope — connect writes these keys unscoped). We
+          // only fall back to a direct file read when there is no
+          // usable broker, in which case the file isn't broker-owned
+          // anyway so the direct read is correct (the documented
+          // `--no-broker` interactive path).
+          let brokerSocket: string | undefined;
+          try {
+            brokerSocket = resolveBrokerSocketPath({
+              vaultBrokerSocket: config.vault?.broker?.socket
+                ? resolvePath(config.vault.broker.socket)
+                : undefined,
+            });
+          } catch {
+            brokerSocket = resolveBrokerSocketPath();
+          }
+          const status = await statusViaBroker({ socket: brokerSocket });
+          const viaBroker = status !== null && status.unlocked;
+
+          let directVaultPath: string | undefined;
+          let directPassphrase: string | undefined;
+          const resolveRef = async (
+            raw: string,
+            label: string,
+          ): Promise<string> => {
             if (!isVaultReference(raw)) return raw;
             const key = parseVaultReference(raw);
-            const entry = getSecret(passphrase, vaultPath, key);
+
+            if (viaBroker) {
+              const result = await getViaBrokerStructured(key, {
+                socket: brokerSocket,
+              });
+              const verdict = interpretRefGetResult(label, key, result);
+              if (verdict.ok) return verdict.value;
+              if (!verdict.fallback) throw new Error(verdict.message);
+              // fallback: broker vanished between status and get — fall
+              // through to the direct path below.
+            }
+
+            directVaultPath ??= resolvePath(
+              config.vault?.path ?? "~/.switchroom/vault.enc",
+            );
+            directPassphrase ??=
+              process.env.SWITCHROOM_VAULT_PASSPHRASE ??
+              (await readHiddenLine("Vault passphrase: "));
+            const entry = getSecret(directPassphrase, directVaultPath, key);
             if (!entry) {
               throw new Error(
                 `${label} references vault key '${key}' but no such secret in vault.`,
@@ -659,8 +702,11 @@ function registerAccountAdd(accountParent: Command): void {
             }
             return entry.value;
           };
-          clientIdRaw = resolveRef(clientIdRaw, "google_client_id");
-          clientSecretRaw = resolveRef(clientSecretRaw, "google_client_secret");
+          clientIdRaw = await resolveRef(clientIdRaw, "google_client_id");
+          clientSecretRaw = await resolveRef(
+            clientSecretRaw,
+            "google_client_secret",
+          );
         }
 
         const oauthCfg = {
@@ -834,6 +880,65 @@ export function interpretConnectPutResult(
           `operator-passphrase attestation and the supplied passphrase ` +
           `did not attest. Re-run with the real vault passphrase (the ` +
           `one the broker is unlocked with).`,
+      };
+  }
+}
+
+/**
+ * Interpret a broker `get` result while resolving a `vault:` ref for
+ * `account add`. Pure + exported so the contract is unit-tested
+ * without a live broker.
+ *
+ * Three outcomes:
+ *   - { ok: true, value }              — string entry resolved.
+ *   - { ok: false, fallback: true }    — broker unreachable; caller
+ *                                        should fall through to the
+ *                                        direct-file read (legacy /
+ *                                        broker-disabled path).
+ *   - { ok: false, fallback: false }   — hard error (key missing,
+ *                                        wrong kind, or ACL/scope
+ *                                        denial) — abort with message.
+ *
+ * Only `unreachable` is fallback-eligible: a reached broker that says
+ * not_found / denied is authoritative — silently reading the file
+ * instead would mask a real misconfiguration (and reintroduce the
+ * root-owned-vault failure mode).
+ */
+export function interpretRefGetResult(
+  label: string,
+  key: string,
+  result: GetResult,
+):
+  | { ok: true; value: string }
+  | { ok: false; fallback: true }
+  | { ok: false; fallback: false; message: string } {
+  switch (result.kind) {
+    case "ok":
+      if (result.entry.kind !== "string") {
+        return {
+          ok: false,
+          fallback: false,
+          message: `${label} vault entry '${key}' is not a string (kind=${result.entry.kind}).`,
+        };
+      }
+      return { ok: true, value: result.entry.value };
+    case "unreachable":
+      return { ok: false, fallback: true };
+    case "not_found":
+      return {
+        ok: false,
+        fallback: false,
+        message: `${label} references vault key '${key}' but the broker has no such secret [${result.code}]: ${result.msg}.`,
+      };
+    case "denied":
+      return {
+        ok: false,
+        fallback: false,
+        message:
+          `${label} vault key '${key}' was refused by the broker ` +
+          `[${result.code}]: ${result.msg}. If the entry is scoped, it ` +
+          `must allow "operator"; re-store it unscoped via 'switchroom ` +
+          `auth google connect' or 'switchroom vault set ${key}'.`,
       };
   }
 }
@@ -1085,5 +1190,6 @@ export const _testing = {
   buildGoogleCredentials,
   oauthClientSetupGuidance,
   interpretConnectPutResult,
+  interpretRefGetResult,
 };
 

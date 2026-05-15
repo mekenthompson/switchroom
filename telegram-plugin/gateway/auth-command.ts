@@ -29,6 +29,11 @@
  */
 
 import type { ListStateData, AccountState } from './auth-line.js'
+import {
+  buildSnapshotsFromState,
+  renderAuthSnapshotFormat2,
+  buildSnapshotKeyboard,
+} from '../auth-snapshot-format.js'
 
 // ─── Parser ────────────────────────────────────────────────────────────────
 
@@ -236,12 +241,43 @@ export interface AuthCommandContext {
    * that never reach the destructive branches can skip wiring it.
    */
   chatId?: string
+  /**
+   * Optional Format 2 enricher — when supplied, the `show`/`list`
+   * paths probe live quota for every account (in parallel) so the
+   * snapshot renders the new health-grouped shape with real-time
+   * percentages and reset countdowns. When omitted the legacy
+   * ASCII table renders, which keeps tests + broker-only callers
+   * working without spinning up the Anthropic API path.
+   *
+   * Returns a parallel array (same length, same order as
+   * `state.accounts`) of QuotaResult — the gateway passes
+   * `accounts.map(a => fetchAccountQuota(a.label, {force: true}))`.
+   */
+  liveQuotas?: (
+    accounts: AccountState[],
+  ) => Promise<import('../quota-check.js').QuotaResult[]>
+  /** Operator timezone forwarded to the Format 2 renderer. */
+  tz?: string
 }
 
 export interface AuthCommandReply {
   text: string
   /** True when the reply contains HTML markup. */
   html: boolean
+  /**
+   * Optional inline keyboard (rows of buttons). Format 2 attaches a
+   * smart-keyboard here for the fleet snapshot — switch buttons for
+   * healthy non-active accounts, plus refresh/usage/+add. Caller
+   * translates to grammy's `reply_markup` shape. Empty/missing means
+   * no keyboard.
+   */
+  keyboard?: Array<
+    Array<{
+      text: string
+      callbackData?: string
+      insertText?: string
+    }>
+  >
 }
 
 /**
@@ -282,7 +318,35 @@ export async function handleAuthCommand(
   ) {
     try {
       const state = await ctx.client.listState()
-      return { text: renderShowText(state), html: true }
+      let liveQuotas: import('../quota-check.js').QuotaResult[] | undefined
+      let liveProbedAtMs: number | undefined
+      if (ctx.liveQuotas && state.accounts.length > 0) {
+        try {
+          liveQuotas = await ctx.liveQuotas(state.accounts)
+          liveProbedAtMs = Date.now()
+        } catch {
+          // Live probe failed — fall back to legacy table silently.
+          liveQuotas = undefined
+        }
+      }
+      // Build the smart keyboard only when we have live quota data —
+      // without it we can't classify health and the buttons could
+      // tempt the user into a blocked account. When omitted, the
+      // text still renders (legacy table); just no keyboard.
+      let keyboard: AuthCommandReply['keyboard']
+      if (liveQuotas && liveQuotas.length === state.accounts.length) {
+        const snapshots = buildSnapshotsFromState(state, liveQuotas)
+        keyboard = buildSnapshotKeyboard(snapshots)
+      }
+      return {
+        text: renderShowText(state, Date.now(), {
+          liveQuotas,
+          tz: ctx.tz,
+          liveProbedAtMs,
+        }),
+        html: true,
+        keyboard,
+      }
     } catch (err) {
       return {
         text: `<b>/auth show failed:</b> ${escapeHtml((err as Error)?.message ?? String(err))}`,
@@ -609,17 +673,64 @@ export function pickRotateTarget(state: ListStateData, now: number = Date.now())
  * Telegram (HTML, monospace blocks). Three sections, each suppressed
  * when empty.
  */
-export function renderShowText(state: ListStateData, now: number = Date.now()): string {
-  const lines: string[] = []
-  lines.push('<b>Auth — fleet snapshot</b>')
+export interface RenderShowOpts {
+  /** Optional live quota probes, parallel to state.accounts. When
+   *  present, the Accounts section uses Format 2 (health-grouped,
+   *  causal-runway). When absent (legacy callers, broker-only render),
+   *  falls back to the original ASCII table. */
+  liveQuotas?: import('../quota-check.js').QuotaResult[]
+  /** Operator timezone for absolute reset times in Format 2. */
+  tz?: string
+  /** Wall-clock ms when the live probes returned, used for "refreshed
+   *  Ns ago" footer. Omit to suppress that footer line. */
+  liveProbedAtMs?: number
+}
 
-  // Accounts table
-  if (state.accounts.length > 0) {
-    lines.push('')
-    lines.push('<b>Accounts</b>')
-    lines.push('<pre>')
-    lines.push(formatAccountsTable(state, now))
-    lines.push('</pre>')
+/**
+ * Render the fleet snapshot. Two shapes coexist transparently:
+ *
+ *   1. Format 2 (preferred) — when `opts.liveQuotas` is supplied:
+ *      health-grouped per-account view (🟢 HEALTHY / 🟡 THROTTLING /
+ *      🔴 BLOCKED), live percent + reset times, recommendation
+ *      footer. See `auth-snapshot-format.ts → renderAuthSnapshotFormat2`.
+ *
+ *   2. Legacy ASCII table — when no live data is available
+ *      (broker-only path, tests, or the live probe failed). Same
+ *      visual shape RFC §4.6 originally specified; preserved so the
+ *      broker can still answer `/auth show` with no Anthropic-API
+ *      round-trip.
+ *
+ * The Agents and Consumers tables render identically under both
+ * shapes — those tables don't depend on quota state.
+ */
+export function renderShowText(
+  state: ListStateData,
+  now: number = Date.now(),
+  opts: RenderShowOpts = {},
+): string {
+  const lines: string[] = []
+
+  if (state.accounts.length > 0 && opts.liveQuotas && opts.liveQuotas.length === state.accounts.length) {
+    // Format 2 path. Build snapshots, render the new shape inline at
+    // the top of the message — replaces the legacy "Auth — fleet
+    // snapshot" header + Accounts table.
+    const snapshots = buildSnapshotsFromState(state, opts.liveQuotas)
+    lines.push(
+      renderAuthSnapshotFormat2(snapshots, {
+        tz: opts.tz,
+        now: new Date(now),
+        liveProbedAtMs: opts.liveProbedAtMs,
+      }),
+    )
+  } else {
+    lines.push('<b>Auth — fleet snapshot</b>')
+    if (state.accounts.length > 0) {
+      lines.push('')
+      lines.push('<b>Accounts</b>')
+      lines.push('<pre>')
+      lines.push(formatAccountsTable(state, now))
+      lines.push('</pre>')
+    }
   }
 
   // Agents table

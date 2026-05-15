@@ -105,7 +105,10 @@ ALLOWLIST=(
   # is already swallowed there. Acceptable because the wizard messages
   # are tap-driven UI and a missed edit just leaves the previous state
   # visible (the user can re-tap).
-  "telegram-plugin/gateway/gateway.ts:9340-9890:vault grant wizard ctx.api.editMessageText already has .catch swallow"
+  # Range bumped 2026-05-15 for the auth-snapshot Format 2 PR
+  # (~120 lines added to handleAuthDashboardCallback shifted the
+  # vault wizard callsites further down).
+  "telegram-plugin/gateway/gateway.ts:9340-10000:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter
   # via DI. The gateway wires those adapters through robustApiCall (see

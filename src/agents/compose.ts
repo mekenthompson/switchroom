@@ -656,11 +656,16 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // Tests override this so phase fleets get unique names that can't
   // collide with a production install on the same host.
   const containerNamePrefix = opts.containerNamePrefix ?? "switchroom";
-  // Host-control daemon (RFC C, Phase 1) — opt-in via top-level
-  // host_control.enabled. When false (default) compose emits the
-  // same shape as before; when true, admin agents get an extra
-  // bind-mount line for the daemon's per-agent UDS.
-  const hostControlEnabled = config.host_control?.enabled === true;
+  // Host-control daemon (RFC C, Phase 2). Default-on since the Phase 2
+  // default-flip: the schema gives `host_control.enabled` a `.default(true)`
+  // and the block itself defaults to `{}`, so an absent block resolves to
+  // enabled=true. Use `!== false` semantics here so the compose generator
+  // matches the parsed-schema view even on the legacy test/code paths that
+  // construct config objects directly (bypassing Zod). Operators who want
+  // the legacy systemd-mode behaviour set `host_control: { enabled: false }`
+  // explicitly. When enabled, admin agents get an extra bind-mount line
+  // for the daemon's per-agent UDS.
+  const hostControlEnabled = config.host_control?.enabled !== false;
   // For existsSync() decisions on optional bind-mount sources (#907):
   // emission uses `homePrefix` (which may be the literal "${HOME}" so
   // sudo-bake works), but the existsSync probe must use the real host

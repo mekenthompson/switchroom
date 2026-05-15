@@ -1580,8 +1580,10 @@ describe("host-control daemon bind mount (RFC C Phase 1)", () => {
   // Admin agents get an extra per-agent UDS bind mount when
   // host_control.enabled is true AND the host-side directory
   // exists (compose `up` hard-fails on missing bind sources).
+  // Since RFC C Phase 2 default-flip the schema defaults `enabled`
+  // to true, so the bind mount appears when the block is absent.
 
-  it("does NOT emit the hostd bind mount when host_control.enabled is unset", async () => {
+  it("does NOT emit the hostd bind mount when host_control.enabled is explicitly false", async () => {
     const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
@@ -1589,10 +1591,33 @@ describe("host-control daemon bind mount (RFC C Phase 1)", () => {
     try {
       mkdirSync(join(tmp, ".switchroom/hostd/klanker"), { recursive: true });
       const out = generateCompose({
-        config: makeConfig({ klanker: { admin: true } }),
+        config: makeConfig(
+          { klanker: { admin: true } },
+          { host_control: { enabled: false } },
+        ),
         homeDir: tmp,
       });
       expect(out).not.toMatch(
+        /agent-klanker:[\s\S]*?\.switchroom\/hostd\/klanker:\/run\/switchroom\/hostd\/klanker/,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("emits the hostd bind mount when host_control is absent (default-on since RFC C Phase 2)", async () => {
+    const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "hostd-mount-default-on-"));
+    try {
+      mkdirSync(join(tmp, ".switchroom/hostd/klanker"), { recursive: true });
+      const out = generateCompose({
+        // No host_control block — schema default kicks in.
+        config: makeConfig({ klanker: { admin: true } }),
+        homeDir: tmp,
+      });
+      expect(out).toMatch(
         /agent-klanker:[\s\S]*?\.switchroom\/hostd\/klanker:\/run\/switchroom\/hostd\/klanker/,
       );
     } finally {

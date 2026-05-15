@@ -30,15 +30,23 @@ let _hostdEnabled: boolean | undefined;
  * Cached for the gateway's lifetime — config doesn't change without a
  * restart, and the file-read isn't free.
  *
+ * Default-on since the RFC C Phase 2 default-flip: the schema gives
+ * `host_control.enabled` a `.default(true)` and the block itself a
+ * `.default({})`, so any config parsed through Zod will have the
+ * field populated. We use `!== false` semantics here so this helper
+ * also matches the default-on view on paths that bypass the parser
+ * (tests with partial mocks, code that constructs configs directly).
+ *
  * Best-effort: if the config can't be loaded (gateway running in a
  * dir where loadConfig fails), returns false so the dispatch helper
- * falls through to the legacy spawn path.
+ * falls through to the legacy spawn path — better to fail closed
+ * than to attempt a hostd RPC against a daemon that might not exist.
  */
 export function isHostdEnabled(): boolean {
   if (_hostdEnabled !== undefined) return _hostdEnabled;
   try {
     const cfg = loadSwitchroomConfig();
-    _hostdEnabled = cfg.host_control?.enabled === true;
+    _hostdEnabled = cfg.host_control?.enabled !== false;
   } catch {
     _hostdEnabled = false;
   }

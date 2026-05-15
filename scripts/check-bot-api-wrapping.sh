@@ -92,7 +92,11 @@ ALLOWLIST=(
   # Re-bumped 2026-05-15 for the auth-snapshot Format 2 PR: card-path
   # `willAutoFallback` branching added a few lines just above this
   # block, shifting the permission send down ~5 lines.
-  "telegram-plugin/gateway/gateway.ts:2695-2940:permission-request keyboard; no thread_id"
+  # Re-bumped 2026-05-15 for the auth-ux follow-ups PR: auth:refresh
+  # throttle map + reaper added ~8 lines above this block; runAutoFallbackCheck
+  # deletion subtracted ~80 lines below — net shift varies between
+  # local + CI grep (line counting drift); widened window to 2960.
+  "telegram-plugin/gateway/gateway.ts:2695-2960:permission-request keyboard; no thread_id"
 
   # reply chunk-loop fallback after robustApiCall threw THREAD_NOT_FOUND.
   # The caller dropped the thread; this raw sendMessage retries on the

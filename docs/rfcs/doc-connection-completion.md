@@ -1,8 +1,16 @@
 # RFC E: Make Google Drive a real collaboration surface
 
-Status: Draft v3
+Status: Draft v3 (v3.1 amendment 2026-05-15 — implementation pivot in §4.2)
 Author: Ken (with Claude pair-design)
 Date: 2026-05-14
+
+**v3.1 amendment** (2026-05-15):
+- §4.2 — implementation shipped as **Path A Cut 2**: a Claude Code
+  PreToolUse hook intercepting upstream `taylorwilsdon/google_workspace_mcp`
+  write tools, not a purpose-built switchroom wrapper. Trade-off:
+  no Suggesting-mode default (upstream MCP doesn't expose it), but
+  the wrapper-attested anchor + metrics + diff-preview card all
+  ship as designed. See §4.2's pivot banner for the full delta.
 
 **v3 changes** (addressing PR #1227 review):
 - §3 dropped `extend-without-forking` JTBD claim (overstated — that JTBD is about adding new agents/skills/tools, not config-surface affordances inside an existing integration).
@@ -145,6 +153,72 @@ worse than either default and explicitly punted.
 trees (>100 top-level folders) are common. Ship paginated on day 1.
 
 ### 4.2 Write operations with Suggesting as the default (deferred from RFC D §12) — Phase 1
+
+> **Implementation pivot — Path A Cut 2 (2026-05-15).** §4.2 as
+> originally specified assumed switchroom would ship its own MCP
+> wrapper exposing `gdrive_suggest_edit` / `gdrive_apply_edit` /
+> `gdrive_create_doc` / `gdrive_append_to_doc` — purpose-built so the
+> wrapper could default writes to Drive's Suggesting mode and pre-
+> resolve every anchor before posting the diff-preview card.
+>
+> Implementation landed differently. Agents reach Drive via the
+> upstream `taylorwilsdon/google_workspace_mcp` server (pinned at
+> `f3c7dc5df2641c8545abc9e8f402d794f2853745`), which exposes 9
+> direct write tools (`modify_doc_text`, `find_and_replace_doc`,
+> `insert_doc_elements`, `insert_doc_image`, `batch_update_doc`,
+> `create_table_with_data`, `update_doc_headers_footers`,
+> `update_paragraph_style`, `manage_doc_tab`) and **no Suggesting
+> mode** at all. Building our own wrapper to add Suggesting was
+> scoped out — the upstream MCP is already shipped, our agents
+> already use it, and forking it would mean carrying the diff
+> indefinitely.
+>
+> The chosen mechanism is a **Claude Code PreToolUse hook**
+> registered against `^mcp__google-workspace__` write tools. The
+> hook intercepts every write, resolves the doc state (Docs API
+> `documents.get`), builds the wrapper-attested diff preview,
+> requests an approval through the kernel + gateway, polls until
+> the user taps Allow/Cancel, and returns `{decision:"block"}` if
+> denied. Same trust boundary as the §4.2 design — the wrapper still
+> attests the anchor + metrics — but no Suggesting affordance.
+>
+> **What this preserves from §4.2:**
+> - Wrapper-attested anchor name on the diff-preview card (`📍`
+>   line, computed via `describeOffset` over the Docs API
+>   `body.content[]` half-open ranges).
+> - Wrapper-attested diff metrics (`+lines / -lines`).
+> - Agent-supplied summary rendered below the wrapper truth.
+> - Same audit fidelity (`action: write` in the audit row).
+> - `[ 📖 Open in Drive ]` button per §4.3.
+>
+> **What this does NOT preserve:**
+> - Suggesting as the default. Every gated write is a direct write
+>   when applied — agents have no way to propose a non-destructive
+>   suggestion. (User can still revert via Drive's version history.)
+> - Two-button "Apply as suggestion" + "Apply directly" affordance.
+>   The card shows Allow / Cancel only.
+> - `doc:gdrive:suggest:*` scope namespace. Only `doc:gdrive:write:*`
+>   is wired up. Agents already holding a `read` grant can attempt
+>   writes — each one prompts.
+> - `gdrive_apply_edit` / `gdrive_create_doc` / `gdrive_append_to_doc`
+>   as named tools. Agents use the upstream tool names directly.
+>
+> **Closing the suggest-mode gap** would require either:
+> (a) forking upstream and adding a `--suggest` flag to the Docs
+> write methods (load-bearing diff to maintain; rejected for now);
+> (b) shipping a thin switchroom wrapper MCP that re-exports the
+> upstream tools with Suggesting-by-default behavior (still
+> requires the underlying Docs API to expose Suggesting — it does
+> via `suggestionsViewMode` on read, but for write, the API only
+> creates `Suggestions` if the requesting Drive account is not the
+> doc owner; agent-owned docs would still apply directly).
+>
+> Implementing PRs: **#1314** (reverse anchor, ancestrally bundled
+> into #1316), **#1316** (Docs API client + write-preview spec
+> builder), **#1318** (gateway IPC verb posting the diff-preview
+> card), **#1319** (PreToolUse hook + scaffold registration).
+> Card UX (no separate suggest/write modes — Allow/Cancel only) is
+> a v0.10.x decision, not the long-term RFC E §4.2 contract.
 
 **Today:** read-only by design. RFC D §12 stipulates writes need
 their own scope namespace so a read grant never silently authorizes

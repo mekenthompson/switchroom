@@ -587,26 +587,31 @@ shippable as four PRs (1a, 1b, 1c, 1d) for incremental review.
 - [x] Phase 1d — Recovery audit / digest / nudge formatters — #1300
 - [x] Cross-cutting — `docs/google-workspace.md` user guide
 
-### Outstanding follow-up wiring (before operator-visible end-to-end)
+### Follow-up wiring — all merged
 
 The Phase 1 plan deliberately followed a *ship-the-helper-then-wire*
 pattern (so each PR is independently reviewable and the
 kernel-agnostic surface area stabilises before the Telegram /
-kernel / MCP-server glue lands). The remaining pieces:
+kernel / MCP-server glue lands). All three follow-up pieces landed
+2026-05-15:
 
-- [ ] Gateway `drvpick:` callback dispatcher + `switchroom drive
-      folders <agent>` CLI verb (folder-picker glue — consumes #1296)
-- [ ] Reconciler-driver loop that iterates grants, fetches Drive
+- [x] Gateway `drvpick:` callback dispatcher + `switchroom drive
+      folders <agent>` CLI verb (folder-picker glue — consumes #1296) — #1308
+- [x] Reconciler-driver loop that iterates grants, fetches Drive
       metadata on a schedule, and fans recoveries through #1300's
-      audit-write + chat-nudge + staleness-digest paths
-- [ ] MCP-server tool registration that wires #1297's prep
-      functions to actual Google Docs `batchUpdate` calls (the
-      kernel-side double-request_id coordination — the
-      diff-preview card #1299 already expects this shape)
+      audit-write + chat-nudge + staleness-digest paths — #1307
+- [x] Write-side wiring — shipped as **Path A Cut 2** (PreToolUse
+      hook intercepting upstream `taylorwilsdon/google_workspace_mcp`
+      write tools instead of a purpose-built switchroom wrapper).
+      See §4.2's pivot banner for the trade-off. Three PRs:
+      Docs API client + write-preview spec builder (#1316),
+      gateway IPC verb that posts the diff-preview card (#1318),
+      PreToolUse hook + scaffold registration (#1319).
 
-These deliberately stay out of the Phase 1 PRs — each touches
-substantial Telegram-side surface area + the approval kernel and
-warrants its own review pass.
+End-to-end is operator-visible now; what remains is a real-world
+shakeout pass on a live agent (try `/folders`, tap to grant,
+attempt a suggest-mode write, confirm the diff-preview card +
+approval flow + Drive update all line up).
 
 ### Phase 2+
 

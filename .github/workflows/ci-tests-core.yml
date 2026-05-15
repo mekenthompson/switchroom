@@ -50,11 +50,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ─── Path-change filter (skip-as-pass pattern, #1320 followup) ────
-  # Workflow ALWAYS runs so the required `vitest (1-4)` check fires
-  # on every PR. The real jobs are if:-gated on this output and
-  # report `skipped` (= success for branch protection) when no
-  # vitest-relevant paths changed.
+  # ─── Path-change filter (sentinel pattern) ────────────────────────
+  # Real work runs in the `vitest-shard` matrix (path-gated, may skip).
+  # The branch-protection-required context is the `vitest` SENTINEL
+  # below — it ALWAYS runs and aggregates the shards, so a docs-only
+  # PR (shards skipped) still reports pass instead of blocking (#1343).
+  # NOTE: branch protection must require `vitest` (the sentinel), NOT
+  # the old `vitest (1..4)` matrix contexts — see the PR description
+  # for the one-time required-status-checks retune.
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 1
@@ -109,7 +112,10 @@ jobs:
           if-no-files-found: error
 
   # ─── Sharded vitest run ───────────────────────────────────────────
-  vitest:
+  # Renamed vitest → vitest-shard so the required context is the
+  # always-running `vitest` sentinel, not the path-skippable matrix
+  # contexts `vitest (1..4)` (those blocked docs-only PRs, #1343).
+  vitest-shard:
     needs: [changes, build-dist]
     if: github.event_name == 'push' || needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
@@ -182,3 +188,29 @@ jobs:
           path: coverage/
           if-no-files-found: ignore
           retention-days: 7
+
+  # ─── Sentinel ─────────────────────────────────────────────────────
+  # Branch-protection-required context. ALWAYS runs and aggregates the
+  # 4 shards. `needs.vitest-shard.result` is success only if every
+  # matrix shard succeeded, failure if any failed, skipped if the whole
+  # matrix was path-skipped (irrelevant PR → pass). Branch protection
+  # must require `vitest` (this job), NOT `vitest (1..4)`.
+  vitest:
+    needs: [changes, vitest-shard]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Verdict
+        run: |
+          c='${{ needs.changes.result }}'
+          r='${{ needs.vitest-shard.result }}'
+          if [ "$c" = "failure" ] || [ "$c" = "cancelled" ]; then
+            echo "::error::changes=$c — path-filter infra failed; can't trust skip"
+            exit 1
+          fi
+          if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+            echo "::error::vitest-shard=$r — a shard failed, blocking"
+            exit 1
+          fi
+          echo "changes=$c vitest-shard=$r → pass (all shards green, or skipped on irrelevant PR)"

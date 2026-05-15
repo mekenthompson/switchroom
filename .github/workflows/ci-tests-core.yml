@@ -1,19 +1,33 @@
 name: ci-tests-core
 
-# Vitest core suite. Mirrors Buildkite :vitest: Core tests, with 4-way
-# matrix sharding for parallelism. Single sequential BK step (~10 min)
-# becomes 4 parallel ~3 min shards on GHA.
+# Vitest core suite. Three GHA-native optimisations on top of the
+# Buildkite shape:
 #
-# Sharding determinism: `vitest --shard X/Y` hashes test file paths so a
-# given file always lands in the same shard for a given Y. Adding a test
-# file may re-balance, but every file still gets run exactly once across
-# the matrix.
+#   1. Build `dist/` ONCE in a precursor job + share via artifact.
+#      Several integration tests (cli.issues, run-hook, boot-self-test)
+#      shell out to dist/cli/switchroom.js. Pre-#1320 every shard
+#      rebuilt independently (~5-10s × 4 = 20-40s wasted). Now the
+#      build job uploads dist/ as an artifact and each shard downloads
+#      it — total build cost is paid once.
 #
-# Fork-pool tuning: vitest.config.ts honours VITEST_MAX_FORKS (default 4).
-# 4 shards × 4 forks on a 2-core GHA runner = 16 concurrent workers per
-# runner, OOM/thrash territory. Set VITEST_MAX_FORKS=2 in matrix env to
-# keep the box honest. 4×2 = 8 workers/runner, still oversubscribed but
-# manageable (each shard is also working on ~25% of the suite).
+#   2. `vitest --changed` on PRs. Vitest traces the import graph and
+#      runs only test files affected by changed source. A typical
+#      one-file PR runs ~5-50 tests instead of ~3000, slashing
+#      ci-tests-core from ~1m10s to ~20-30s on the common case.
+#      Push to main runs the full suite — we don't gamble on main.
+#
+#   3. 4-way matrix sharding (carryover from #1320). With --changed
+#      the per-shard surface drops to a handful of files; shards still
+#      run in parallel for the few cases where many tests are affected.
+#
+# Sharding determinism: `vitest --shard X/Y` hashes test file paths so
+# a given file always lands in the same shard for a given Y. The
+# --changed filter applies first, then sharding splits the survivors.
+#
+# Fork-pool tuning: VITEST_MAX_FORKS=2 honored by vitest.config.ts.
+# On a 2-vCPU runner that's 2 concurrent workers per shard, with all
+# 4 shards running on separate runners (matrix-parallel, not
+# co-located). Net: comfortable, not oversubscribed.
 
 on:
   pull_request:
@@ -42,7 +56,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ─── Build dist/ once, share with all shards ──────────────────────
+  build-dist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up workspace
+        uses: ./.github/actions/setup-switchroom
+
+      - name: Build dist/
+        run: bun scripts/build.mjs
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-built
+          path: dist/
+          # 1-day retention is plenty — the artifact is consumed by
+          # the shard jobs that fire within minutes.
+          retention-days: 1
+          if-no-files-found: error
+
+  # ─── Sharded vitest run ───────────────────────────────────────────
   vitest:
+    needs: build-dist
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:
@@ -50,33 +90,46 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     env:
-      # Stub bot token — same rationale as BK pipeline.yml:103. Tests
-      # never actually poll Telegram; this just lets import of server.ts
-      # via cross-package coverage avoid the "TELEGRAM_BOT_TOKEN required"
-      # exit path.
       TELEGRAM_BOT_TOKEN: "123456:stub-for-tests"
-      # Cap fork concurrency — see header note. Honored by vitest.config.ts.
       VITEST_MAX_FORKS: "2"
     steps:
       - name: Checkout
+        # fetch-depth: 0 is required so `vitest --changed` can resolve
+        # the merge-base against the PR's target branch. The default
+        # shallow clone (depth: 1) breaks --changed silently — vitest
+        # falls back to running everything, defeating the optimisation.
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up workspace
-        # install-jq=true — tests/boot-self-test.test.ts shells boot-self-test.sh
-        # which jq-parses `switchroom auth heal --json`. Same fix as
-        # .buildkite/pipeline.yml:128-135.
+        # install-jq=true — tests/boot-self-test.test.ts shells
+        # boot-self-test.sh which jq-parses `switchroom auth heal --json`.
         uses: ./.github/actions/setup-switchroom
         with:
           install-jq: "true"
 
-      - name: Build dist/
-        # Several integration tests (cli.issues, run-hook, boot-self-test)
-        # shell out to dist/cli/switchroom.js. Build is ~1s — every shard
-        # rebuilds rather than caching the artifact (cache overhead would
-        # exceed the rebuild time).
-        run: bun scripts/build.mjs
+      - name: Download dist artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-built
+          path: dist/
 
-      - name: Vitest shard ${{ matrix.shard }}/4
+      - name: Vitest shard ${{ matrix.shard }}/4 (PR — changed-files only)
+        if: github.event_name == 'pull_request'
+        # --changed traces the import graph from files changed against
+        # the PR base; vitest runs every test that transitively depends
+        # on a changed module. --passWithNoTests is mandatory: when a
+        # shard's slice happens to contain zero affected tests, the
+        # default behaviour is exit 1.
+        run: |
+          bunx vitest run \
+            --shard ${{ matrix.shard }}/4 \
+            --changed origin/${{ github.base_ref }} \
+            --passWithNoTests
+
+      - name: Vitest shard ${{ matrix.shard }}/4 (push to main — full suite)
+        if: github.event_name == 'push'
         run: bunx vitest run --shard ${{ matrix.shard }}/4
 
       - name: Upload coverage (if produced)

@@ -59,12 +59,47 @@ export interface ScheduleRestartResult {
   error?: string;
 }
 
+/**
+ * RFC E §4.2 Cut 2 — sent by the gateway to acknowledge that a
+ * Drive-write approval card has been posted (or that posting
+ * failed). The Drive-write PreToolUse hook (a separate process)
+ * uses the `request_id` to poll the kernel's `approval_lookup` for
+ * the verdict; if posting fails, the hook fails closed.
+ *
+ * Why response-shaped: the hook is synchronous from Claude Code's
+ * perspective (PreToolUse blocks the tool call). The hook can't
+ * return its `decision: "approve" | "block"` until either the
+ * card has been posted (so the user can decide) OR posting failed
+ * (so the hook can return block immediately). A response message
+ * is the cleanest way to surface that.
+ */
+export interface DriveApprovalPostedEvent {
+  type: "drive_approval_posted";
+  /** Same correlation_id the client sent on the request. */
+  correlationId: string;
+  ok: boolean;
+  /**
+   * Kernel request_id the hook will pass to `approval_lookup` once
+   * it starts polling. Only present when `ok: true`.
+   */
+  requestId?: string;
+  /**
+   * Unix-ms expiry of the kernel request, mirrors the ttl_ms the
+   * gateway used. Hook uses this as its polling deadline. Only
+   * present when `ok: true`.
+   */
+  expiresAtMs?: number;
+  /** Diagnostic detail on failure. */
+  reason?: string;
+}
+
 export type GatewayToClient =
   | InboundMessage
   | PermissionEvent
   | StatusEvent
   | ToolCallResult
-  | ScheduleRestartResult;
+  | ScheduleRestartResult
+  | DriveApprovalPostedEvent;
 
 // === Bridge (Client) -> Gateway messages ===
 
@@ -189,6 +224,51 @@ export interface InjectInboundMessage {
   inbound: InboundMessage;
 }
 
+/**
+ * RFC E §4.2 Cut 2 — sent by the Drive-write PreToolUse hook to
+ * the gateway to register a diff-preview approval card with the
+ * kernel + post it to Telegram. The hook waits on the
+ * corresponding `drive_approval_posted` reply (matching
+ * `correlationId`), then polls `approval_lookup` for the verdict.
+ *
+ * The `preview` payload is shaped like
+ * `src/drive/diff-preview.ts:DiffPreviewInput`. We don't restate
+ * the full shape on the wire — the IPC validator does a structural
+ * check (required fields present, types right) and the gateway-side
+ * consumer feeds it straight to `buildDiffPreview()` which is
+ * already defensive against malformed inputs.
+ *
+ * Trust model: same as `inject_inbound` — the gateway socket lives
+ * inside the agent container, only that-UID processes can connect,
+ * so the hook is as trusted as anything else in the container.
+ */
+export interface RequestDriveApprovalMessage {
+  type: "request_drive_approval";
+  /**
+   * Hook-generated correlation id (any unique string ≤ 64 chars).
+   * Echoed back in `drive_approval_posted` so the hook can match
+   * the response if multiple Drive-write taps are in flight.
+   */
+  correlationId: string;
+  /**
+   * Target agent the gateway serves. Defense in depth — the gateway
+   * verifies this matches its own SWITCHROOM_AGENT_NAME and refuses
+   * cross-agent requests.
+   */
+  agentName: string;
+  /**
+   * DiffPreviewInput payload — see `src/drive/diff-preview.ts`.
+   * Carried as an opaque object on the wire; the gateway
+   * deserialises it via `buildDiffPreview()`.
+   */
+  preview: Record<string, unknown>;
+  /**
+   * TTL for the kernel approval request, in ms. Hook typically
+   * passes 5 min; gateway clamps to a sensible range.
+   */
+  ttlMs?: number;
+}
+
 export type ClientToGateway =
   | RegisterMessage
   | ToolCallMessage
@@ -199,4 +279,5 @@ export type ClientToGateway =
   | OperatorEventForward
   | PtyPartialForward
   | UpdatePlaceholderMessage
-  | InjectInboundMessage;
+  | InjectInboundMessage
+  | RequestDriveApprovalMessage;

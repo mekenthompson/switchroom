@@ -8,6 +8,7 @@ import type {
   PermissionRequestForward,
   PtyPartialForward,
   RegisterMessage,
+  RequestDriveApprovalMessage,
   ScheduleRestartMessage,
   SessionEventForward,
   ToolCallMessage,
@@ -40,6 +41,18 @@ export interface IpcServerOptions {
    * inline scheduler simply ignore inject_inbound messages.
    */
   onInjectInbound?: (client: IpcClient, msg: InjectInboundMessage) => void;
+  /**
+   * RFC E §4.2 Cut 2 — Drive-write PreToolUse hook asks the gateway
+   * to register a kernel approval request + post a diff-preview
+   * card to Telegram. Handler is expected to send a
+   * `drive_approval_posted` event back over the same connection
+   * (`client.send(...)`). Optional: gateways without the hook
+   * configured ignore these messages.
+   */
+  onRequestDriveApproval?: (
+    client: IpcClient,
+    msg: RequestDriveApprovalMessage,
+  ) => Promise<void>;
   log?: (msg: string) => void;
   /**
    * How long (in ms) to wait without a heartbeat before force-closing the
@@ -192,6 +205,23 @@ export function validateClientMessage(msg: unknown): msg is ClientToGateway {
         && typeof inb.meta === "object"
         && inb.meta !== null;
     }
+    case "request_drive_approval": {
+      // RFC E §4.2 Cut 2. Validate the wire-shaped fields the
+      // gateway will route on; the inner `preview` is treated as
+      // an opaque object and gets defensively re-validated by
+      // `buildDiffPreview()` downstream.
+      if (typeof m.correlationId !== "string"
+        || (m.correlationId as string).length === 0
+        || (m.correlationId as string).length > 64) return false;
+      if (typeof m.agentName !== "string"
+        || !AGENT_NAME_RE.test(m.agentName as string)) return false;
+      if (typeof m.preview !== "object" || m.preview === null) return false;
+      if (m.ttlMs !== undefined
+        && (typeof m.ttlMs !== "number"
+          || !Number.isFinite(m.ttlMs)
+          || (m.ttlMs as number) < 0)) return false;
+      return true;
+    }
     default:
       return false;
   }
@@ -210,6 +240,7 @@ export function createIpcServer(options: IpcServerOptions): IpcServer {
     onOperatorEvent,
     onPtyPartial,
     onInjectInbound,
+    onRequestDriveApproval,
     log = () => {},
     heartbeatTimeoutMs = 30_000,
   } = options;
@@ -297,6 +328,44 @@ export function createIpcServer(options: IpcServerOptions): IpcServer {
         break;
       case "inject_inbound":
         if (onInjectInbound) onInjectInbound(client, msg as InjectInboundMessage);
+        break;
+      case "request_drive_approval":
+        if (onRequestDriveApproval) {
+          // Handler is async — fire-and-forget here; the handler
+          // is responsible for sending its `drive_approval_posted`
+          // response (success or failure) back to the client.
+          onRequestDriveApproval(client, msg as RequestDriveApprovalMessage).catch(
+            (err) => {
+              log(
+                `request_drive_approval handler threw (client=${client.id}): ${(err as Error).message}`,
+              );
+              try {
+                client.send({
+                  type: "drive_approval_posted",
+                  correlationId: (msg as RequestDriveApprovalMessage).correlationId,
+                  ok: false,
+                  reason: `gateway handler error: ${(err as Error).message}`,
+                });
+              } catch {
+                /* best effort */
+              }
+            },
+          );
+        } else {
+          // No handler wired — fail closed and tell the hook so it
+          // can fall back to blocking the tool. Better than leaving
+          // the hook timing out.
+          try {
+            client.send({
+              type: "drive_approval_posted",
+              correlationId: (msg as RequestDriveApprovalMessage).correlationId,
+              ok: false,
+              reason: "gateway not configured for Drive-write approval",
+            });
+          } catch {
+            /* best effort */
+          }
+        }
         break;
       case "update_placeholder":
         // Legacy recall.py IPC — placeholder UX was removed in #553 PR 5.

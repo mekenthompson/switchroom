@@ -8577,7 +8577,7 @@ bot.command('audit', async ctx => {
   if (arg === '' || arg === 'help' || arg === '--help') {
     await switchroomReply(
       ctx,
-      'Usage: <code>/audit hostd [--tail N] [--agent &lt;name&gt;] [--op &lt;verb&gt;] [--error]</code>',
+      'Usage: <code>/audit hostd [--tail N] [--agent &lt;name&gt;] [--op &lt;verb&gt;] [--error] [--verbose]</code>',
       { html: true },
     )
     return
@@ -8604,6 +8604,7 @@ bot.command('audit', async ctx => {
   for (let i = 1; i < tokens.length; i++) {
     const t = tokens[i]!
     if (t === '--error') { argv.push('--error'); continue }
+    if (t === '--verbose') { argv.push('--verbose'); continue }
     if (t === '--tail' || t === '--agent' || t === '--op') {
       const v = tokens[++i]
       if (v == null) {
@@ -8633,7 +8634,7 @@ bot.command('audit', async ctx => {
     await switchroomReply(
       ctx,
       `Unknown flag <code>${escapeHtmlForTg(t)}</code>. ` +
-      `Allowed: <code>--tail</code>, <code>--agent</code>, <code>--op</code>, <code>--error</code>.`,
+      `Allowed: <code>--tail</code>, <code>--agent</code>, <code>--op</code>, <code>--error</code>, <code>--verbose</code>.`,
       { html: true },
     )
     return

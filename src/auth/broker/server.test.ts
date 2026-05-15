@@ -18,6 +18,7 @@ import { join } from "node:path";
 import * as net from "node:net";
 
 import { AuthBroker } from "./server.js";
+import { AuthBrokerClient } from "./client.js";
 import type { Identity } from "./peercred.js";
 import { decodeResponse, encodeRequest } from "./protocol.js";
 import type { SwitchroomConfig } from "../../config/schema.js";
@@ -1261,6 +1262,53 @@ describe("AuthBroker — probe-quota", () => {
       expect(seenTokens).toContain("Bearer at-secondary");
     } finally {
       globalThis.fetch = origFetch;
+      broker.stop();
+    }
+  });
+
+  it("AuthBrokerClient.probeQuota revives reset fields into Date (regression: /auth show target.getTime crash)", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, { active: "default", agents: { ziggy: {} } });
+    seedAccount(h, "default", { expiresAt: 9_999_999_999_999 });
+
+    const reset5hEpoch = Math.floor(Date.now() / 1000) + 3600;
+    const reset7dEpoch = Math.floor(Date.now() / 1000) + 86_400;
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, _init?: RequestInit): Promise<Response> => {
+      return new Response("ok", {
+        status: 200,
+        headers: {
+          "anthropic-ratelimit-unified-5h-utilization": "0.20",
+          "anthropic-ratelimit-unified-7d-utilization": "0.10",
+          "anthropic-ratelimit-unified-5h-reset": String(reset5hEpoch),
+          "anthropic-ratelimit-unified-7d-reset": String(reset7dEpoch),
+        },
+      });
+    }) as typeof fetch;
+
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    const client = new AuthBrokerClient({ socket: join(h.socketRoot, "ziggy", "sock") });
+    try {
+      await broker.start();
+      const data = await client.probeQuota(["default"]);
+      const entry = data.results[0];
+      expect(entry?.result.ok).toBe(true);
+      if (!entry || !entry.result.ok) throw new Error("probe failed");
+      // The core regression: these MUST be real Dates, not ISO strings.
+      // Pre-fix the wire value survived as a string and `.getTime()` in
+      // auth-snapshot-format.ts threw "target.getTime is not a function".
+      expect(entry.result.data.fiveHourResetAt).toBeInstanceOf(Date);
+      expect(entry.result.data.sevenDayResetAt).toBeInstanceOf(Date);
+      expect(entry.result.data.fiveHourResetAt?.getTime()).toBe(reset5hEpoch * 1000);
+      expect(entry.result.data.sevenDayResetAt?.getTime()).toBe(reset7dEpoch * 1000);
+    } finally {
+      globalThis.fetch = origFetch;
+      await client.close();
       broker.stop();
     }
   });

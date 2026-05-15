@@ -51,6 +51,21 @@ import {
 
 const DEFAULT_TIMEOUT_MS = 5000;
 
+/**
+ * Revive a wire value back into `Date | null`. The broker serialises
+ * Date fields to ISO strings over NDJSON (JSON has no Date type); a
+ * blind `as` cast leaves them as strings, so `.getTime()` in the
+ * format layer throws. Accepts Date (already revived), string/number
+ * (epoch or ISO), or null/undefined. Invalid dates collapse to null
+ * rather than producing an `Invalid Date` that crashes formatters.
+ */
+function reviveDate(v: Date | string | number | null | undefined): Date | null {
+  if (v == null) return null;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 /** Resolved operator socket — bind-mount target from the broker container. */
 function operatorSocketPath(home: string = homedir()): string {
   return join(home, ".switchroom", "state", "auth-broker-operator", "sock");
@@ -351,7 +366,19 @@ export class AuthBrokerClient {
       accounts: [...accounts],
       ...(timeoutMs !== undefined ? { timeoutMs } : {}),
     });
-    return data as ProbeQuotaData;
+    // JSON.parse does not revive Date. The broker serialises
+    // fiveHourResetAt/sevenDayResetAt as Date → ISO string on the wire,
+    // so the typed `Date | null` is a lie until we revive here. Without
+    // this, every `.getTime()` in the format layer (auth-snapshot-format,
+    // /auth show) throws "target.getTime is not a function".
+    const parsed = data as ProbeQuotaData;
+    for (const entry of parsed.results) {
+      if (entry.result.ok) {
+        entry.result.data.fiveHourResetAt = reviveDate(entry.result.data.fiveHourResetAt);
+        entry.result.data.sevenDayResetAt = reviveDate(entry.result.data.sevenDayResetAt);
+      }
+    }
+    return parsed;
   }
 
   async setActive(account: string): Promise<SetActiveData> {

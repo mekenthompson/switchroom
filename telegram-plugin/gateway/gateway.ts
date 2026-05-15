@@ -213,6 +213,7 @@ import {
 import {
   fetchQuota,
   formatQuotaBlock,
+  type QuotaResult,
 } from '../quota-check.js'
 import {
   loadLockout,
@@ -2785,6 +2786,7 @@ const ipcServer: IpcServer = createIpcServer({
             restartAgeMs: markerAgeMs,
             restartReasonDetail: cleanMarker?.reason,
             loadAccounts: () => loadAccountsForBootCard(agentSlug),
+            probeQuotaViaBroker: (t) => probeQuotaForBootCard(agentSlug, t),
             tmuxSupervisor: process.env.SWITCHROOM_TMUX_SUPERVISOR === '1',
             dockerMode: process.env.SWITCHROOM_RUNTIME === 'docker',
           }, ackMsgId).then(handle => {
@@ -7958,6 +7960,7 @@ async function buildLiveProbeRows(agentName: string): Promise<StatusProbeRow[]> 
       gatewayInfo: { pid: process.pid, startedAtMs: GATEWAY_STARTED_AT_MS },
       tmuxSupervisor: process.env.SWITCHROOM_TMUX_SUPERVISOR === '1',
       dockerMode: process.env.SWITCHROOM_RUNTIME === 'docker',
+      probeQuotaViaBroker: (t) => probeQuotaForBootCard(agentName, t),
     })
     const rows: StatusProbeRow[] = []
     // Render order matches the boot card's PROBE_KEYS so the two
@@ -9170,6 +9173,33 @@ async function loadAccountsForBootCard(agent: string): Promise<ListStateData | n
     return await client.listState()
   } catch (err) {
     process.stderr.write(`telegram gateway: boot-card auth probe failed: ${(err as Error)?.message ?? String(err)}\n`)
+    return null
+  }
+}
+
+/**
+ * Canonical boot-card quota probe (#1336): resolve this agent's
+ * effective account, then have the broker probe Anthropic server-side.
+ * Returns null on any failure (broker unreachable, no active account)
+ * so `probeQuota` falls back to a direct probe. Mirrors
+ * `loadAccountsForBootCard`'s broker-client + swallow-to-null shape,
+ * and the override→account→active resolution used by auth-line.ts.
+ */
+async function probeQuotaForBootCard(
+  agent: string,
+  timeoutMs?: number,
+): Promise<QuotaResult | null> {
+  try {
+    const client = await getAuthBrokerClient(agent)
+    if (!client) return null
+    const state = await client.listState()
+    const entry = state.agents.find((a) => a.name === agent)
+    const label = entry?.override ?? entry?.account ?? state.active
+    if (!label) return null
+    const { results } = await client.probeQuota([label], timeoutMs)
+    return results.find((r) => r.label === label)?.result ?? null
+  } catch (err) {
+    process.stderr.write(`telegram gateway: boot-card quota probe failed: ${(err as Error)?.message ?? String(err)}\n`)
     return null
   }
 }
@@ -13443,6 +13473,7 @@ void (async () => {
                       restartAgeMs: markerAgeMs,
                       restartReasonDetail: cleanMarker?.reason,
                       loadAccounts: () => loadAccountsForBootCard(agentSlug),
+                      probeQuotaViaBroker: (t) => probeQuotaForBootCard(agentSlug, t),
                       tmuxSupervisor: process.env.SWITCHROOM_TMUX_SUPERVISOR === '1',
                       dockerMode: process.env.SWITCHROOM_RUNTIME === 'docker',
                     }, ackMsgId)

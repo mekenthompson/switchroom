@@ -1,0 +1,74 @@
+name: ci-tests-plugin
+
+# Bun test suite for telegram-plugin/ (bun-runtime-only tests that vitest
+# can't load). Mirrors Buildkite :telegram: Plugin tests (402).
+#
+# Skip-as-pass pattern (#1320 followup): see ci-lint.yml header.
+#
+# Workspace install discipline: we do NOT `cd telegram-plugin && bun install`.
+# telegram-plugin is a bun workspace of the root, and the root install via
+# the composite action already brings in its deps via the hoisted node_modules.
+# A per-package install creates a shadow `@mtcute/node` that breaks
+# vi.mock-based driver tests — see .buildkite/pipeline.yml:137-152 for the
+# full diagnosis. Tests run against the hoisted root install.
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-tests-plugin-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            relevant:
+              - 'telegram-plugin/**'
+              - 'package.json'
+              - 'bun.lock'
+              - 'telegram-plugin/package.json'
+              - 'telegram-plugin/bun.lock'
+              - '.github/actions/setup-switchroom/**'
+              - '.github/workflows/ci-tests-plugin.yml'
+
+  bun-test:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.relevant == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      TELEGRAM_BOT_TOKEN: "123456:stub-for-tests"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up workspace
+        uses: ./.github/actions/setup-switchroom
+
+      - name: Bun test (telegram-plugin)
+        # Same explicit dir list as Buildkite — running `bun test` with no
+        # args recurses into telegram-plugin/uat/scenarios/ which fail
+        # without TELEGRAM_API_ID/HASH. The dir list scopes to the unit
+        # surface only.
+        working-directory: telegram-plugin
+        run: |
+          bun test \
+            admin-commands gateway registry secret-detect tests \
+            channel-envelope-safety.test.ts

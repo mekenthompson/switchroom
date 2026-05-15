@@ -61,6 +61,8 @@ export const ADMIN_COMMAND_NAMES = new Set<string>([
   // Per-agent ops that read shared fleet state via the switchroom CLI
   'memory',
   'topics',
+  // Observability of privileged-verb history
+  'audit',
 ])
 
 /**

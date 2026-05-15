@@ -1721,6 +1721,16 @@ export const DOCKER_TELEGRAM_PLUGIN_PATH = "/opt/switchroom/telegram-plugin";
 export const DOCKER_HOOKS_PATH = `${DOCKER_TELEGRAM_PLUGIN_PATH}/hooks`;
 
 /**
+ * In-image path for hooks bundled from src/ TypeScript at build time
+ * (rather than copied from telegram-plugin/hooks/*.mjs source).
+ * Today: only the RFC E §4.2 Cut 2 drive-write hook lives here. The
+ * bundle is emitted by `scripts/build.mjs` to `dist/cli/*.mjs` and
+ * baked into the agent image at `/opt/switchroom/hooks/` (see
+ * docker/Dockerfile.agent).
+ */
+export const DOCKER_BUNDLED_HOOKS_PATH = "/opt/switchroom/hooks";
+
+/**
  * In-image path where Dockerfile.agent COPYs the `bin/*-hook.sh` family
  * (run-hook.sh, timezone-hook.sh, workspace-stable-hook.sh,
  * workspace-dynamic-hook.sh, user-profile-refresh-hook.sh). Same
@@ -2855,6 +2865,32 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
                 `node "${join(DOCKER_HOOKS_PATH, "subagent-tracker-pretool.mjs")}"`,
               ),
               timeout: 10,
+            },
+          ],
+        },
+        {
+          // RFC E §4.2 Cut 2 — gates upstream Drive write tools behind
+          // a Telegram diff-preview approval card. Scoped matcher so
+          // the hook only runs for `mcp__google-workspace__*` tools,
+          // avoiding the cost of stdin parse + broker call on every
+          // tool fire. Timeout = approval TTL + slack.
+          //
+          // Path is DOCKER_BUNDLED_HOOKS_PATH (not DOCKER_HOOKS_PATH)
+          // because this hook is bundled via scripts/build.mjs from
+          // src/cli/drive-write-pretool.ts — it imports src/drive/*
+          // helpers that aren't otherwise available inside the agent
+          // image. Built output lives at /opt/switchroom/hooks/.
+          matcher: "^mcp__google-workspace__",
+          hooks: [
+            {
+              type: "command",
+              command: wrap(
+                "hook:drive-write-pretool",
+                `node "${join(DOCKER_BUNDLED_HOOKS_PATH, "drive-write-pretool.mjs")}"`,
+              ),
+              // Claude Code timeout is in seconds. 5min approval TTL
+              // + 30s slack so a near-timeout grant still lands cleanly.
+              timeout: 5 * 60 + 30,
             },
           ],
         },

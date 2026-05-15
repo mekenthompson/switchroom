@@ -78,14 +78,31 @@ ALLOWLIST=(
   # `message_thread_id` (parse_mode + reply_markup only).
   # Range bumped 2026-05 for #1115 vault-approval-posture insertions
   # (~100 lines added to gateway).
-  "telegram-plugin/gateway/gateway.ts:2250-2310:operator-event broadcast; no thread_id in opts"
+  # Re-bumped 2026-05-15 for the auth-snapshot Format 2 PR's
+  # `wouldFireFleetAutoFallback` synchronous-check insertion (~10
+  # lines added between the modelUnavailable detection and the
+  # broadcast loop).
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler (callsite now ~2331).
+  # Re-bumped 2026-05-15 post-#1328 (/audit hostd) + #1329 (auth-ux
+  # follow-ups) — broadcast loop now at ~2334 after combined drift.
+  "telegram-plugin/gateway/gateway.ts:2250-2350:operator-event broadcast; no thread_id in opts"
 
   # permission-request keyboard send. opts only has reply_markup. No thread_id.
   # Range bumped 2026-05-13 for stuck-turn-recovery v2 cleanup expansion
   # (~100 lines total added around line 2510).
   # Range bumped 2026-05-15 for #1292 tool-aware silence-poke fallback
   # (~32 lines added in onSessionEvent + ctx threading).
-  "telegram-plugin/gateway/gateway.ts:2695-2920:permission-request keyboard; no thread_id"
+  # Re-bumped 2026-05-15 for the auth-snapshot Format 2 PR: card-path
+  # `willAutoFallback` branching added a few lines just above this
+  # block, shifting the permission send down ~5 lines.
+  # Re-bumped 2026-05-15 for the auth-ux follow-ups PR: auth:refresh
+  # throttle map + reaper added ~8 lines above this block; runAutoFallbackCheck
+  # deletion subtracted ~80 lines below — net shift varies between
+  # local + CI grep (line counting drift); widened window to 2960.
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler integration.
+  # Re-bumped 2026-05-15 for RFC E §4.2 PR-2C drive PreToolUse hook
+  # (#1319) — added ~2 more lines above this block.
+  "telegram-plugin/gateway/gateway.ts:2695-3000:permission-request keyboard; no thread_id"
 
   # reply chunk-loop fallback after robustApiCall threw THREAD_NOT_FOUND.
   # The caller dropped the thread; this raw sendMessage retries on the
@@ -93,7 +110,12 @@ ALLOWLIST=(
   # phantom second deletion.
   # Range bumped 2026-05-15 for #1292 tool-aware silence-poke fallback
   # (~32 lines added earlier in the file shift this band down).
-  "telegram-plugin/gateway/gateway.ts:3160-3400:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
+  # Re-bumped 2026-05-15 for the auth-snapshot Format 2 PR
+  # (insertions earlier in the file shifted the chunk-loop down).
+  # Re-bumped 2026-05-15 post-Path-A-Cut-2 (drive-write IPC handler
+  # added ~60 lines higher up; chunk-loop callsite shifted further to ~3451).
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler.
+  "telegram-plugin/gateway/gateway.ts:3160-3500:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
   # Range bumped 2026-05-13 for stuck-turn-recovery (#1136) v2 cleanup
@@ -105,7 +127,17 @@ ALLOWLIST=(
   # is already swallowed there. Acceptable because the wizard messages
   # are tap-driven UI and a missed edit just leaves the previous state
   # visible (the user can re-tap).
-  "telegram-plugin/gateway/gateway.ts:9340-9890:vault grant wizard ctx.api.editMessageText already has .catch swallow"
+  # Range bumped 2026-05-15 for the auth-snapshot Format 2 PR
+  # (~180 lines added across handleAuthDashboardCallback +
+  # fireFleetAutoFallback re-entry guard shifted the vault wizard
+  # callsites further down).
+  # Re-bumped 2026-05-15 post-Path-A-Cut-2 (drive-write IPC handler
+  # added ~60 lines).
+  # Re-bumped 2026-05-15 for the /audit hostd command insertion
+  # (~85 lines added near line 8475 shifted the vault wizard callsites
+  # further down past the prior 10100 ceiling).
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler integration.
+  "telegram-plugin/gateway/gateway.ts:9340-10300:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter
   # via DI. The gateway wires those adapters through robustApiCall (see

@@ -1,0 +1,58 @@
+name: ci-tests-race-long
+
+# RFC-faithful race-test long mode for tests/docker/broker-ipc-race.test.ts.
+# Fast-mode (45 lookups @ 200ms ≈ 9s) runs in ci-tests-core.yml; long mode
+# (45 lookups @ 2s ≈ 90s) is gated behind SWITCHROOM_RACE_LONG=1 so dev
+# iteration stays snappy. CI runs it on every PR that touches the broker
+# surface so the RFC-faithful pattern is actually exercised.
+#
+# Mirrors Buildkite :stopwatch: Race test (long mode). Soft-fail via
+# continue-on-error — the test self-skips when docker is unavailable,
+# we don't want that to block PRs.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "tests/docker/broker-ipc-race.test.ts"
+      - "tests/docker/**"
+      - "src/vault/broker/**"
+      - "src/kernel/**"
+      - "src/scheduler/**"
+      - "scripts/build.mjs"
+      - "vitest.config.ts"
+      - ".github/actions/setup-switchroom/**"
+      - ".github/workflows/ci-tests-race-long.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-tests-race-long-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  race-long:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      TELEGRAM_BOT_TOKEN: "123456:stub-for-tests"
+      SWITCHROOM_RACE_LONG: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up workspace
+        uses: ./.github/actions/setup-switchroom
+
+      - name: Build dist/
+        run: bun scripts/build.mjs
+
+      - name: Race test (long mode)
+        # Test self-skips cleanly when docker is unavailable. Mark
+        # continue-on-error so an infrastructure-flavoured fail doesn't
+        # block the PR (Buildkite uses soft_fail for the same reason).
+        continue-on-error: true
+        run: bunx vitest run tests/docker/broker-ipc-race.test.ts

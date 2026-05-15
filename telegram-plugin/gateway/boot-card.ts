@@ -499,7 +499,7 @@ export async function runAllProbes(opts: RunProbesOpts): Promise<ProbeMap> {
   const slug = opts.agentSlug ?? opts.agentName
 
   await Promise.allSettled([
-    probeAccount(opts.agentDir, { agentName: opts.agentSlug ?? opts.agentName }).then(r => { probes.account = r }),
+    probeAccount(opts.agentDir).then(r => { probes.account = r }),
     probeAgentProcess(slug, { execFileImpl: opts.probeExecFileImpl, tmuxSupervisor: opts.tmuxSupervisor, dockerMode: opts.dockerMode }).then(r => { probes.agent = r }),
     probeGateway(opts.gatewayInfo).then(r => { probes.gateway = r }),
     probeQuota(claudeDir, opts.agentDir, opts.fetchImpl).then(r => { probes.quota = r }),

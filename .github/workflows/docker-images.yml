@@ -67,7 +67,12 @@ jobs:
           bun install
           npm run build
 
-      - name: Set up QEMU (for arm64 cross-build)
+      - name: Set up QEMU (only when arm64 build runs)
+        # QEMU is only needed for cross-arch arm64 emulation on amd64
+        # hosts. PR builds are amd64-only (see `platforms` below), so
+        # skip the QEMU setup — saves ~5s + cuts the resulting image
+        # surface area.
+        if: github.event_name != 'pull_request'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -101,7 +106,11 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.base
-          platforms: linux/amd64,linux/arm64
+          # PR validation: amd64 only — arm64 via QEMU is ~3-4 min per
+          # image and PRs don't merge until amd64 is green anyway. Full
+          # multi-arch matrix runs on push to main + tags where the
+          # arm64 artifact is consumed by operators.
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           tags: ${{ steps.tags.outputs.tags }}
           push: ${{ github.event_name != 'pull_request' }}
           cache-from: type=gha,scope=base
@@ -154,7 +163,8 @@ jobs:
           bun install
           npm run build
 
-      - name: Set up QEMU (for arm64 cross-build)
+      - name: Set up QEMU (only when arm64 build runs)
+        if: github.event_name != 'pull_request'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -192,7 +202,7 @@ jobs:
         with:
           context: .
           file: ${{ matrix.image.file }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           tags: ${{ steps.tags.outputs.tags }}
           push: ${{ github.event_name != 'pull_request' }}
           build-args: |
@@ -211,7 +221,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU (for arm64 cross-build)
+      - name: Set up QEMU (only when arm64 build runs)
+        if: github.event_name != 'pull_request'
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
@@ -244,7 +255,7 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile.hindsight
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           tags: ${{ steps.tags.outputs.tags }}
           push: ${{ github.event_name != 'pull_request' }}
           cache-from: type=gha,scope=hindsight

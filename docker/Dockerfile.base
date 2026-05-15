@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # switchroom/base — shared image for agent / broker / kernel / scheduler.
 #
 # Multi-arch: declare TARGETARCH so buildx (linux/amd64 + linux/arm64) picks
@@ -48,7 +49,18 @@ RUN echo "switchroom/base building for arch=${TARGETARCH}" >&2
 #   tree, file                 — directory orientation + content sniffing
 #   dnsutils, iputils-ping,
 #   netcat-openbsd             — network connectivity debugging trio
-RUN apt-get update \
+# BuildKit cache mounts persist /var/cache/apt + /var/lib/apt/lists across
+# layer-cache invalidations. The default debian docker-clean hook deletes
+# downloaded .debs after each apt-get install — the `rm -f docker-clean`
+# line disables that so the cache actually accumulates. `sharing=locked`
+# serialises concurrent buildx layers writing to the same cache. On a cold
+# CI build with no buildkit cache yet, the apt download phase still runs
+# fully; on warm builds (cache-from=gha hit, but layer hash changed e.g.
+# via a Dockerfile edit) the .debs are reused → ~25-30s saved.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    rm -f /etc/apt/apt.conf.d/docker-clean \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
       tini \
       tmux \
@@ -81,8 +93,7 @@ RUN apt-get update \
       dnsutils \
       iputils-ping \
       netcat-openbsd \
- && ln -sf /usr/bin/fdfind /usr/local/bin/fd \
- && rm -rf /var/lib/apt/lists/*
+ && ln -sf /usr/bin/fdfind /usr/local/bin/fd
 
 # GitHub CLI (`gh`) — promoted to Tier 1 because `gh auth login` is
 # table stakes once Layer 1's persistent HOME makes the credentials
@@ -91,14 +102,15 @@ RUN apt-get update \
 # cli.github.com/manual/installation). Keyring goes in
 # /usr/share/keyrings (modern Debian convention) rather than
 # apt-key (deprecated).
-RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
  && chmod 644 /usr/share/keyrings/githubcli-archive-keyring.gpg \
  && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
       > /etc/apt/sources.list.d/github-cli.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends gh \
- && rm -rf /var/lib/apt/lists/* \
  && gh --version >&2
 
 # Pin claude CLI version in the base image so every agent / scheduler
@@ -119,7 +131,12 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # Default `default` so local `docker build` (no build-arg) still
 # works deterministically.
 ARG CACHE_BUST=default
-RUN echo "cache-bust=${CACHE_BUST}" > /dev/null \
+# Cache the npm download dir so a CACHE_BUST-driven re-run only pays the
+# version-resolve + install cost, not the ~30s re-download. /root/.npm is
+# npm's content-addressed tarball cache — invariant across CACHE_BUST
+# bumps.
+RUN --mount=type=cache,target=/root/.npm,sharing=locked \
+    echo "cache-bust=${CACHE_BUST}" > /dev/null \
  && npm install -g @anthropic-ai/claude-code@latest \
  && claude --version >&2
 

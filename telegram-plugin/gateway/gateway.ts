@@ -95,6 +95,8 @@ import {
 import type { AuthBrokerClient } from './auth-command.js'
 import type { ListStateData } from './auth-line.js'
 import { getAuthBrokerClient, addAccountViaBroker } from './auth-broker-client.js'
+import { resolveAuthBrokerSocketPath } from '../../src/auth/broker/client.js'
+import { createFleetFallbackGate } from '../fleet-fallback-gate.js'
 import {
   pendingAuthAddFlows,
   startAccountAuthSession,
@@ -125,6 +127,8 @@ import {
   formatModelUnavailableCard,
   resolveModelUnavailableFromOperatorEvent,
 } from '../model-unavailable.js'
+import { runFleetAutoFallback } from '../auto-fallback-fleet.js'
+import { fetchAccountQuota } from '../quota-check.js'
 import { startRestartWatchdog } from './restart-watchdog.js'
 import { validateStringArray } from './access-validator.js'
 
@@ -162,6 +166,11 @@ import {
   type AgentMetadata, type AuthSummary, type StatusProbeRow,
 } from '../welcome-text.js'
 import {
+  type BrokerStateView,
+  type ClaudeJsonView,
+  buildAuthSummaryFromBroker,
+} from './auth-status-adapter.js'
+import {
   isContextExhaustionText,
   shouldArmOrphanedReplyTimeout,
   ORPHANED_REPLY_TIMEOUT_MS,
@@ -188,27 +197,35 @@ import { sweepActiveReactions } from '../active-reactions-sweep.js'
 import { flushOnAgentDisconnect } from './disconnect-flush.js'
 import { PreambleSuppressor } from './preamble-suppressor.js'
 import {
+  fetchFolderPage,
+  FolderListCache,
+} from '../../src/drive/folder-list.js'
+import { loadFromAuthBroker } from '../../src/drive/wrapper-broker.js'
+import {
+  handleFoldersCommand,
+  handleFolderPickerCallback,
+  type FolderPickerHandlerDeps,
+} from './folder-picker-handler.js'
+import {
+  approvalConsume as kernelApprovalConsume,
+  approvalRecord as kernelApprovalRecord,
+  approvalRequest as kernelApprovalRequest,
+} from '../../src/vault/approvals/client.js'
+import {
   fetchQuota,
   formatQuotaBlock,
 } from '../quota-check.js'
 import {
-  evaluateFallbackTrigger,
-  performAutoFallback,
-  emptyLockout,
   loadLockout,
-  nextLockout,
-  saveLockout,
   DEFAULT_FALLBACK_COOLDOWN_MS,
-  type LockoutRecord,
   type LockoutPersistOps,
 } from '../auto-fallback.js'
-import { markSlotQuotaExhausted, DEFAULT_SLOT } from '../../src/auth/accounts.js'
-import { fallbackToNextSlot, currentActiveSlot, type AuthCodeOutcome } from '../../src/auth/manager.js'
+import { DEFAULT_SLOT } from '../../src/auth/accounts.js'
+import { currentActiveSlot, type AuthCodeOutcome } from '../../src/auth/manager.js'
 import { injectSlashCommand as injectSlashCommandImpl } from '../../src/agents/inject.js'
 import { handleInjectCommand } from './inject-handler.js'
 import { type BannerState } from '../slot-banner.js'
 import { refreshBanner } from '../slot-banner-driver.js'
-import { dispatchFallbackNotification } from '../auto-fallback-dispatcher.js'
 import { loadConfig as loadSwitchroomConfig } from '../../src/config/loader.js'; import { resolveAgentConfig } from '../../src/config/merge.js'
 import {
   tryHostdDispatch,
@@ -223,6 +240,8 @@ import type { AgentAudit } from '../welcome-text.js'
 import { shouldSweepChatAtBoot } from './boot-sweep-filter.js'
 
 import { createIpcServer, type IpcClient, type IpcServer } from './ipc-server.js'
+import { handleRequestDriveApproval } from './drive-write-approval.js'
+import { buildDiffPreviewCard } from './diff-preview-card.js'
 import { createPendingInboundBuffer } from './pending-inbound-buffer.js'
 import {
   buildVaultGrantApprovedInbound,
@@ -1986,6 +2005,13 @@ const awaitingAuthCodeAt = new Map<string, number>()
 const AUTH_CODE_CONTEXT_TTL_MS = 5 * 60_000 // 5 min — OAuth code lifetime
 const DEFERRED_SECRET_TTL_MS = 24 * 60 * 60_000 // 24 h — ignored one-tap cards
 
+// Freshness throttle for `auth:refresh` taps. Keyed by `<chat_id>:<message_id>`
+// so two different snapshot messages throttle independently. Each refresh
+// fan-fires N live api.anthropic.com probes (one per account), so we cap
+// rapid re-taps to one per AUTH_REFRESH_THROTTLE_MS.
+const lastAuthRefreshAtMs = new Map<string, number>()
+const AUTH_REFRESH_THROTTLE_MS = 5_000
+
 // ─── TTL reaper ───────────────────────────────────────────────────────────
 // Pending state maps above all grow whenever a flow starts and only shrink
 // when the flow completes. Users abandoning a flow (closing Telegram, losing
@@ -2048,6 +2074,12 @@ const pendingStateReaper = setInterval(() => {
   }
   for (const [k, v] of awaitingAuthCodeAt) {
     if (now - v > AUTH_CODE_CONTEXT_TTL_MS) awaitingAuthCodeAt.delete(k)
+  }
+  // Auth-refresh throttle entries decay quickly (5s window); sweep
+  // anything older than 60s so abandoned snapshot messages don't pin
+  // their key forever.
+  for (const [k, v] of lastAuthRefreshAtMs) {
+    if (now - v > 60_000) lastAuthRefreshAtMs.delete(k)
   }
   // /auth rm two-step confirm window — self-expires at `expiresAt`.
   for (const [k, v] of pendingAuthRmFlows) {
@@ -2253,11 +2285,33 @@ function emitGatewayOperatorEvent(event: OperatorEvent): void {
   let renderedText: string
   let renderedKeyboard: ReturnType<typeof renderOperatorEvent>['keyboard'] | undefined
   if (modelUnavailable) {
+    // Two questions, asked synchronously to avoid the "card promises
+    // an announcement that never arrives" trap:
+    //   1. Is this a kind that AUTO-fallback can address?
+    //   2. Will the dispatcher actually fire (vs. dedup-drop)?
+    // Card text branches on the AND. wouldFireFleetAutoFallback is a
+    // pure read of the dedup state; calling fireFleetAutoFallback only
+    // when both are true keeps the card honest.
+    const isAutoKind =
+      modelUnavailable.kind === 'quota_exhausted' || modelUnavailable.kind === 'overload'
+    const willActuallyFire = isAutoKind && wouldFireFleetAutoFallback()
     process.stderr.write(
-      `telegram gateway: operator-event suppressing-raw-stderr-for-model-unavailable agent=${agent} kind=${kind} detected=${modelUnavailable.kind}\n`,
+      `telegram gateway: operator-event suppressing-raw-stderr-for-model-unavailable agent=${agent} kind=${kind} detected=${modelUnavailable.kind} autoKind=${isAutoKind} willFire=${willActuallyFire}\n`,
     )
-    renderedText = formatModelUnavailableCard(modelUnavailable, agent)
+    renderedText = formatModelUnavailableCard(modelUnavailable, agent, {
+      autoFallbackInFlight: willActuallyFire,
+    })
     renderedKeyboard = undefined
+    // Trigger fleet-wide auto-fallback. Pre-fix this branch only
+    // rendered the card; the fallback machinery was unreachable from
+    // here. We fire-and-forget so card delivery is never blocked on
+    // broker / API latency. The fallback's own announcement is sent
+    // separately with the causal-shape headline ("5-hour limit on
+    // ken" instead of generic "quota exhausted") — see
+    // auth-snapshot-format.ts → renderFallbackAnnouncement.
+    if (willActuallyFire) {
+      void fireFleetAutoFallback(agent)
+    }
   } else {
     try {
       const r = renderOperatorEvent(event)
@@ -3009,6 +3063,69 @@ const ipcServer: IpcServer = createIpcServer({
    * Logs every fire so an operator can correlate the agent's
    * transcript turn against the scheduler's audit row by `prompt_key`.
    */
+  async onRequestDriveApproval(client: IpcClient, msg) {
+    // RFC E §4.2 Cut 2 — Drive-write PreToolUse hook is asking the
+    // gateway to post a diff-preview card so the user can decide.
+    await handleRequestDriveApproval(client, msg, {
+      agentName: getMyAgentName(),
+      loadAllowFrom: () => loadAccess().allowFrom,
+      loadTargetChat: () => {
+        const access = loadAccess()
+        const operator = access.allowFrom[0]
+        if (operator === undefined) return null
+        // For DM-paired setups the target chat IS the operator's
+        // user id. For group setups the gateway already has a topic
+        // routing surface (see how /folders posts) — this picks the
+        // DM path which is the common case; group-routing follow-up
+        // can extend this.
+        return { chatId: operator }
+      },
+      registerApproval: async (args) => {
+        const r = await kernelApprovalRequest({
+          agent_unit: args.agent_unit,
+          scope: args.scope,
+          action: args.action,
+          approver_set: args.approver_set,
+          why: args.why,
+          ttl_ms: args.ttl_ms,
+        })
+        if (r === null || r.state === 'rate_limited') return null
+        return {
+          request_id: r.request_id,
+          expires_at_ms: r.expires_at,
+        }
+      },
+      postCard: async (args) => {
+        try {
+          const sent = await robustApiCall(
+            () =>
+              bot.api.sendMessage(args.chatId, args.text, {
+                parse_mode: 'HTML',
+                ...(args.threadId !== undefined
+                  ? { message_thread_id: args.threadId }
+                  : {}),
+                reply_markup: args.replyMarkup as never,
+              }),
+            {
+              chat_id: String(args.chatId),
+              verb: 'drive-approval-card',
+              ...(args.threadId !== undefined ? { threadId: args.threadId } : {}),
+            },
+          )
+          return { messageId: (sent as { message_id: number }).message_id }
+        } catch (err) {
+          process.stderr.write(
+            `telegram gateway: drive-approval postCard failed: ${(err as Error).message}\n`,
+          )
+          return null
+        }
+      },
+      buildCard: ({ preview, suggestRequestId }) =>
+        buildDiffPreviewCard({ preview, suggestRequestId }),
+      log: (m) => process.stderr.write(`telegram gateway: drive-approval — ${m}\n`),
+    })
+  },
+
   onInjectInbound(_client: IpcClient, msg: InjectInboundMessage) {
     const promptKey = typeof msg.inbound.meta?.prompt_key === 'string'
       ? msg.inbound.meta.prompt_key
@@ -7773,13 +7890,13 @@ function buildAgentAudit(agentName: string): AgentAudit | undefined {
 }
 
 // Build an AgentMetadata snapshot for the current agent by shelling out
-// to `switchroom agent list --json` and `switchroom auth status --json`.
-// TODO(rfc-h): the `auth status` verb was retired by RFC H. The shell
-// fails silently and `authSummary` lands as null — /status renders
-// without auth detail. Replace with an `auth show --json` adapter that
-// maps the new fleet-broker shape to the per-agent AuthSummary fields.
+// to `switchroom agent list --json` and `switchroom auth show --json`.
 // Best-effort — any missing piece renders as a placeholder in the text
-// templates rather than blocking the reply.
+// templates rather than blocking the reply. RFC H retired the per-agent
+// `auth status --json` shape; auth state is now derived from the
+// broker's fleet-wide `ListStateData` payload via
+// `buildAuthSummaryFromBroker`, with billingType pulled from the
+// agent's `.claude.json` (the broker doesn't track plan tier).
 async function buildAgentMetadata(agentName: string): Promise<AgentMetadata> {
   type AgentListResp = {
     agents: Array<{
@@ -7789,24 +7906,22 @@ async function buildAgentMetadata(agentName: string): Promise<AgentMetadata> {
       model?: string | null;
     }>
   }
-  type AuthStatusResp = {
-    agents: Array<{
-      name: string; authenticated: boolean; auth_source: string | null;
-      subscription_type: string | null; expires_in: string | null;
-    }>
-  }
   const list = switchroomExecJson<AgentListResp>(['agent', 'list'])
-  const auth = switchroomExecJson<AuthStatusResp>(['auth', 'status'])
+  const brokerState = switchroomExecJson<BrokerStateView>(['auth', 'show'])
   const a = list?.agents?.find(x => x.name === agentName) ?? null
-  const au = auth?.agents?.find(x => x.name === agentName) ?? null
-  const authSummary: AuthSummary | null = au
-    ? {
-        authenticated: au.authenticated,
-        subscription_type: au.subscription_type,
-        expires_in: au.expires_in,
-        auth_source: au.auth_source,
-      }
-    : null
+  let claudeJson: ClaudeJsonView | null = null
+  try {
+    const agentDir = resolveAgentDirFromEnv()
+    if (agentDir) {
+      const raw = readFileSync(join(agentDir, '.claude', '.claude.json'), 'utf8')
+      claudeJson = JSON.parse(raw) as ClaudeJsonView
+    }
+  } catch { /* leave null — billingType becomes null in the summary */ }
+  const authSummary: AuthSummary | null = buildAuthSummaryFromBroker(
+    brokerState,
+    agentName,
+    claudeJson,
+  )
   return {
     agentName,
     model: a?.model ?? null,
@@ -8449,6 +8564,81 @@ bot.command('upgrade', async ctx => {
   )
 })
 
+// /audit hostd — tail/filter the hostd audit log. Mirrors `/vault audit`
+// in spirit (operator observability over a privileged subsystem from any
+// admin DM). Admin-gated via ADMIN_COMMAND_NAMES. Reads the audit JSONL
+// at ~/.switchroom/host-control-audit.log directly — no hostd RPC needed
+// because the file is shared via the host bind mount on docker installs.
+bot.command('audit', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const arg = (ctx.match ?? '').trim()
+  if (arg === '' || arg === 'help' || arg === '--help') {
+    await switchroomReply(
+      ctx,
+      'Usage: <code>/audit hostd [--tail N] [--agent &lt;name&gt;] [--op &lt;verb&gt;] [--error]</code>',
+      { html: true },
+    )
+    return
+  }
+  const tokens = arg.split(/\s+/)
+  const sub = tokens[0]
+  if (sub !== 'hostd') {
+    await switchroomReply(
+      ctx,
+      `Unknown audit target <code>${escapeHtmlForTg(sub ?? '')}</code>. ` +
+      `Supported: <code>hostd</code>.`,
+      { html: true },
+    )
+    return
+  }
+  // Build the CLI argv for switchroom hostd audit. Validate each
+  // operator-supplied value to keep argv injection out of the picture.
+  const ALLOWED_OPS = new Set([
+    'agent_start', 'agent_stop', 'agent_restart', 'apply',
+    'update_check', 'update_apply', 'update_status', 'upgrade_status',
+    'get_status', 'doctor', 'fleet_state',
+  ])
+  const argv: string[] = ['hostd', 'audit']
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!
+    if (t === '--error') { argv.push('--error'); continue }
+    if (t === '--tail' || t === '--agent' || t === '--op') {
+      const v = tokens[++i]
+      if (v == null) {
+        await switchroomReply(ctx, `Flag <code>${t}</code> requires a value.`, { html: true })
+        return
+      }
+      if (t === '--tail' && !/^[0-9]{1,4}$/.test(v)) {
+        await switchroomReply(ctx, `<code>--tail</code> must be an integer (1-9999).`, { html: true })
+        return
+      }
+      if (t === '--agent' && !/^[a-z][a-z0-9-]{0,62}$/i.test(v)) {
+        await switchroomReply(ctx, `<code>--agent</code> name has an invalid shape.`, { html: true })
+        return
+      }
+      if (t === '--op' && !ALLOWED_OPS.has(v)) {
+        await switchroomReply(
+          ctx,
+          `Unknown hostd verb <code>${escapeHtmlForTg(v)}</code>. ` +
+          `Known: ${[...ALLOWED_OPS].sort().map(o => `<code>${o}</code>`).join(', ')}.`,
+          { html: true },
+        )
+        return
+      }
+      argv.push(t, v)
+      continue
+    }
+    await switchroomReply(
+      ctx,
+      `Unknown flag <code>${escapeHtmlForTg(t)}</code>. ` +
+      `Allowed: <code>--tail</code>, <code>--agent</code>, <code>--op</code>, <code>--error</code>.`,
+      { html: true },
+    )
+    return
+  }
+  await runSwitchroomCommand(ctx, argv, `hostd audit${argv.length > 2 ? ' …' : ''}`)
+})
+
 // ─── /approve, /deny, /pending ────────────────────────────────────────────
 // Slash-command alternatives to the inline-button approval flow (useful for
 // desktop-only sessions and power-users). Share pendingPermissions state
@@ -8512,6 +8702,59 @@ async function handlePermissionSlash(ctx: Context, behavior: 'allow' | 'deny'): 
 bot.command('approve', async ctx => handlePermissionSlash(ctx, 'allow'))
 bot.command('deny', async ctx => handlePermissionSlash(ctx, 'deny'))
 
+// ─── Drive folder picker (RFC E §4.1) ───────────────────────────────────
+// /folders — post a Telegram picker card listing this agent's top-level
+// Drive folders. Tap [Allow] on a folder to grant the agent
+// allow_always at doc:gdrive:folder/<id>/**; tap [Browse] to drill in.
+//
+// Authorisation: same dmCommandGate as the other operator slash
+// commands — only allowFrom users can post-trigger.
+
+const folderPickerCache = new FolderListCache()
+
+function buildFolderPickerDeps(): FolderPickerHandlerDeps {
+  const agentName = getMyAgentName()
+  return {
+    agentName,
+    cache: folderPickerCache,
+    fetchPage: async ({ parent_id, page_token }) => {
+      const handle = await loadFromAuthBroker()
+      if (handle === null) {
+        throw new Error(
+          `auth-broker unreachable for agent ${agentName} — is the broker container running?`,
+        )
+      }
+      return fetchFolderPage({
+        access_token: handle.access_token,
+        ...(parent_id !== undefined ? { parent_id } : {}),
+        ...(page_token !== undefined ? { page_token } : {}),
+      })
+    },
+    approvalRequest: async (args) => {
+      const r = await kernelApprovalRequest({
+        agent_unit: args.agent_unit,
+        scope: args.scope,
+        action: args.action,
+        approver_set: args.approver_set,
+        ...(args.why !== null && args.why !== undefined ? { why: args.why } : {}),
+        ...(args.ttl_ms !== null && args.ttl_ms !== undefined ? { ttl_ms: args.ttl_ms } : {}),
+      })
+      if (r === null || r.state === 'rate_limited') return null
+      return { request_id: r.request_id }
+    },
+    approvalConsume: async (id) => {
+      const r = await kernelApprovalConsume(id)
+      return r !== null && r.consumed
+    },
+    approvalRecord: async (args) => kernelApprovalRecord(args),
+  }
+}
+
+bot.command('folders', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  await handleFoldersCommand(ctx, buildFolderPickerDeps())
+})
+
 // /pending — list current pending permission prompts with their ids, so the
 // user can target a specific one via /approve <id> or /deny <id>.
 // Restricted to access.allowFrom DMs to match /approve and /deny — it
@@ -8543,40 +8786,18 @@ bot.command('interrupt', async ctx => {
   await runSwitchroomCommand(ctx, ['agent', 'interrupt', name], `interrupt ${name}`)
 })
 
-// Shared auto-fallback state. `lockout` is a per-process in-memory
-// guard against rapid re-fire between the scheduled poll and any
-// manual trigger (see telegram-plugin/auto-fallback.ts).
-//
-// Pre-#417 fix this was always emptyLockout() at process start, so a
-// gateway restart inside the cooldown window reset the timer and a
-// quota-flap on the recovering slot could re-trigger fallback the
-// moment the gateway came back. We now seed from disk on first use
-// and persist on every transition. Errors are swallowed: losing the
-// lockout file just degrades to in-memory-only behaviour.
+// Persist-ops bundle for the legacy auto-fallback lockout file. The
+// only remaining reader is `isAutoFallbackCooldownActive` (line ~2030)
+// — used by the pending-restart drain cap to defer a forced restart
+// stacking on top of an in-flight slot rotation. The legacy poller
+// that USED to write this file was retired alongside this refactor;
+// existing on-disk lockouts age out via DEFAULT_FALLBACK_COOLDOWN_MS.
 const lockoutOps: LockoutPersistOps = {
   readFileSync: (p, enc) => readFileSync(p, enc),
   writeFileSync: (p, data, opts) => writeFileSync(p, data, opts),
   existsSync: (p) => existsSync(p),
   mkdirSync: (p, opts) => mkdirSync(p, opts),
   joinPath: (...parts) => join(...parts),
-}
-let autoFallbackLockout: LockoutRecord = emptyLockout()
-let autoFallbackLockoutSeeded = false
-function seedAutoFallbackLockoutIfNeeded(agentDir: string): void {
-  if (autoFallbackLockoutSeeded) return
-  autoFallbackLockoutSeeded = true
-  try {
-    autoFallbackLockout = loadLockout(agentDir, lockoutOps)
-  } catch (err) {
-    process.stderr.write(`telegram gateway: auto-fallback lockout seed failed (using empty): ${(err as Error).message}\n`)
-  }
-}
-function persistLockout(agentDir: string): void {
-  try {
-    saveLockout(agentDir, autoFallbackLockout, lockoutOps)
-  } catch (err) {
-    process.stderr.write(`telegram gateway: auto-fallback lockout persist failed: ${(err as Error).message}\n`)
-  }
 }
 
 // Pinned slot-banner state (#421). One banner per gateway process,
@@ -8608,91 +8829,123 @@ async function refreshPinnedBanner(reason: string): Promise<void> {
   }
 }
 
-type AutoFallbackCheckResult =
-  | { kind: 'no-action'; reason: string; decision: 'noop' | 'fallback-skipped' }
-  | { kind: 'executed'; previousSlot: string; newSlot: string }
-  | { kind: 'exhausted-all'; activeSlot: string }
-  | { kind: 'error'; message: string }
+/**
+ * Re-entry guard + dedup window for `fireFleetAutoFallback`. The state
+ * was lifted into `fleet-fallback-gate.ts` so it can be tested in
+ * isolation (gateway.ts module state was unreachable from vitest). The
+ * gate ALSO enforces the broker-reachability honesty contract: when the
+ * broker is down, `wouldFire()` returns false so the model-unavailable
+ * card stays honest instead of advertising a swap that would bail with
+ * `reason=no-broker-client`.
+ */
+const FLEET_FALLBACK_DEDUP_MS = 30_000
 
-async function runAutoFallbackCheck(opts: { trigger: 'scheduled' | 'manual' }): Promise<AutoFallbackCheckResult> {
-  // All log lines in this path use the `[autofallback]` tag so a single
-  // grep against journalctl reconstructs the full decision history of
-  // a slot rotation: `journalctl -u switchroom-<agent>-gateway -g autofallback`.
+/** Synchronous reachability check for the auth-broker UDS. Used by the
+ *  fleet-fallback gate to keep the model-unavailable card honest: if the
+ *  broker socket isn't bound, the dispatcher would bail with
+ *  `reason=no-broker-client`, so `wouldFire()` should return false and
+ *  the card should fall back to the manual `/auth use <label>` hint. */
+function isAuthBrokerSocketReachable(): boolean {
   try {
-    const agentDir = resolveAgentDirFromEnv()
-    if (!agentDir) {
-      return { kind: 'no-action', reason: 'no agent dir', decision: 'noop' }
-    }
-    const agentName = getMyAgentName()
-    seedAutoFallbackLockoutIfNeeded(agentDir)
-    const active = currentActiveSlot(agentDir)
-    const quota = await fetchQuota({ claudeConfigDir: join(agentDir, '.claude') })
-    const decision = evaluateFallbackTrigger({
-      quota,
-      activeSlot: active,
-      now: Date.now(),
-      lockout: autoFallbackLockout,
-    })
-    if (decision.action !== 'fallback') {
+    return existsSync(resolveAuthBrokerSocketPath())
+  } catch {
+    return false
+  }
+}
+
+const fleetFallbackGate = createFleetFallbackGate({
+  dedupMs: FLEET_FALLBACK_DEDUP_MS,
+  brokerReachable: isAuthBrokerSocketReachable,
+})
+
+function wouldFireFleetAutoFallback(): boolean {
+  return fleetFallbackGate.wouldFire()
+}
+
+/**
+ * Fleet-wide auto-fallback dispatcher (RFC H follow-up).
+ *
+ * Wired from the model-unavailable card render path so a quota-out
+ * event on ANY agent immediately triggers a fleet-wide swap (via
+ * broker.setActive — same path /auth use takes), not the per-agent
+ * legacy `runAutoFallbackCheck`. Pre-fix, the card path never called
+ * any fallback machinery; the scheduled poller (60-min interval, only
+ * fires on utilization headers) was the only trigger and missed
+ * hard-rejection events.
+ *
+ * Concurrency: collapses concurrent triggers via the in-flight
+ * promise above. Subsequent calls within `FLEET_FALLBACK_DEDUP_MS` of
+ * a recent fire are dropped silently — the broadcast announcement is
+ * the user-visible signal that the swap happened, no need to repeat.
+ *
+ * Fire-and-forget: never throws into the caller's flow. Posts the
+ * causal-shape announcement to every chat in `loadAccess().allowFrom`
+ * so the user sees the outcome inline with the original "Model
+ * unavailable" card.
+ */
+async function fireFleetAutoFallback(triggerAgent: string): Promise<void> {
+  return fleetFallbackGate.fire(
+    () => doFireFleetAutoFallback(triggerAgent),
+    (err) => {
       process.stderr.write(
-        `telegram gateway: [autofallback] noop trigger=${opts.trigger} agent=${agentName} active=${active ?? 'none'} reason=${decision.reason}\n`,
+        `telegram gateway: [fleet-fallback] error agent=${triggerAgent}: ${(err as Error)?.message ?? err}\n`,
       )
-      return { kind: 'no-action', reason: decision.reason, decision: 'noop' }
+    },
+  )
+}
+
+/** Returns true iff the dispatcher actually performed a swap (and the
+ *  user-visible announcement was broadcast). False on no-op /
+ *  error / idempotent-skip — caller uses this to decide whether to
+ *  arm the post-fire suppression window. */
+async function doFireFleetAutoFallback(triggerAgent: string): Promise<boolean> {
+  try {
+    const client = await getAuthBrokerClient(triggerAgent)
+    if (!client) {
+      process.stderr.write(
+        `telegram gateway: [fleet-fallback] skipped agent=${triggerAgent} reason=no-broker-client\n`,
+      )
+      return false
     }
-    process.stderr.write(
-      `telegram gateway: [autofallback] decision=fallback trigger=${opts.trigger} agent=${agentName} active=${active ?? 'none'} reason=${decision.triggerReason} util=${decision.utilizationPct?.toFixed(1) ?? 'n/a'}%\n`,
+    const state = await client.listState()
+    // Probe live quota for every account in parallel. force:true
+    // bypasses the 5-min in-process cache — we want the freshest data
+    // for the swap decision, not a cached stale read.
+    const quotas = await Promise.all(
+      state.accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
     )
-    const plan = performAutoFallback({
-      agentDir,
-      agentName,
-      decision,
-      deps: { currentActiveSlot, markSlotQuotaExhausted, fallbackToNextSlot },
+    const tz = process.env.SWITCHROOM_TIMEZONE ?? process.env.TZ ?? 'UTC'
+    const outcome = await runFleetAutoFallback({
+      state,
+      quotas,
+      setActive: (label) => client.setActive(label),
+      triggerAgent,
+      tz,
     })
-    const ownerChatId = loadAccess().allowFrom[0]
-    await dispatchFallbackNotification({
-      bot,
-      ownerChatId,
-      plan,
-      onError: (err) => {
-        process.stderr.write(`telegram gateway: [autofallback] notify failed trigger=${opts.trigger} agent=${agentName}: ${err}\n`)
-      },
-    })
-    if (plan.kind === 'executed') {
-      try { assertSafeAgentName(plan.agentName) }
-      catch {
-        process.stderr.write(`telegram gateway: [autofallback] invalid-agent-name agent=${plan.agentName}\n`)
-        return { kind: 'error', message: `invalid agent name: ${plan.agentName}` }
-      }
-      try {
-        // Preemptive failover (utilization-over-threshold / explicit) waits
-        // for the active turn to drain. Reactive failover (429-response)
-        // hard-restarts because the request that triggered it has already
-        // failed — there's no in-flight turn worth preserving. See #420.
-        const restartArgs = ['agent', 'restart', plan.agentName]
-        if (plan.triggerReason !== '429-response') {
-          restartArgs.push('--graceful-restart')
-        }
-        process.stderr.write(
-          `telegram gateway: [autofallback] executed agent=${plan.agentName} prev=${plan.previousSlot} next=${plan.newSlot} restart=${plan.triggerReason === '429-response' ? 'hard' : 'graceful'}\n`,
-        )
-        switchroomExec(restartArgs)
-      } catch (err) {
-        process.stderr.write(`telegram gateway: [autofallback] restart failed agent=${plan.agentName}: ${err}\n`)
-      }
-      autoFallbackLockout = nextLockout(plan.previousSlot, Date.now())
-      persistLockout(agentDir)
-      void refreshPinnedBanner('auto-fallback')
-      return { kind: 'executed', previousSlot: plan.previousSlot, newSlot: plan.newSlot }
+    process.stderr.write(
+      `telegram gateway: [fleet-fallback] outcome=${outcome.kind} agent=${triggerAgent}` +
+        (outcome.kind === 'switched' ? ` old=${outcome.oldLabel} new=${outcome.newLabel}` : '') +
+        '\n',
+    )
+    // Post the announcement to every authorized chat. Mirrors the
+    // operator-event broadcast pattern (line ~2290) — DM-only opts
+    // (no message_thread_id) so THREAD_NOT_FOUND can't fire here;
+    // wrap in swallowingApiCall anyway per the codebase rule.
+    const access = loadAccess()
+    if (access.allowFrom.length === 0) return outcome.kind === 'switched'
+    const opts = { parse_mode: 'HTML' as const }
+    for (const chat_id of access.allowFrom) {
+      void swallowingApiCall(
+        () => bot.api.sendMessage(chat_id, outcome.announcement, opts),
+        { chat_id, verb: 'fleet-fallback:notify' },
+      )
     }
-    process.stderr.write(
-      `telegram gateway: [autofallback] exhausted-all agent=${agentName} active=${plan.activeSlot}\n`,
-    )
-    autoFallbackLockout = nextLockout(plan.activeSlot, Date.now())
-    persistLockout(agentDir)
-    return { kind: 'exhausted-all', activeSlot: plan.activeSlot }
+    return outcome.kind === 'switched'
   } catch (err) {
-    process.stderr.write(`telegram gateway: [autofallback] ${opts.trigger} poll error: ${err}\n`)
-    return { kind: 'error', message: String((err as Error).message ?? err) }
+    process.stderr.write(
+      `telegram gateway: [fleet-fallback] error agent=${triggerAgent}: ${(err as Error)?.message ?? err}\n`,
+    )
+    return false
   }
 }
 
@@ -8751,15 +9004,6 @@ async function runCreditWatch(): Promise<void> {
     process.stderr.write(`telegram gateway: credit-watch state persist failed: ${err}\n`)
   }
 }
-
-// /authfallback was removed in v0.6.12 — it duplicated the work of
-// the dashboard's Switch primary picker (operator-facing surface) and
-// the auto-fallback poller (transparent on-quota-wall case).
-// Operators who want to manually shuffle the active credential now
-// use the picker. The `runAutoFallbackCheck` function and the
-// `case 'fallback':` callback dispatch stay in the codebase: any
-// pinned messages from earlier versions still work, and the
-// auto-fallback poller still calls runAutoFallbackCheck directly.
 
 bot.command("auth", async ctx => {
   if (!isAuthorizedSender(ctx)) return
@@ -8854,8 +9098,46 @@ bot.command("auth", async ctx => {
     isAdmin,
     client,
     chatId,
+    // Format 2 enricher — probe live quota for every account in
+    // parallel so the snapshot reflects current Anthropic-side
+    // utilization, not the broker's potentially-days-stale
+    // disk-cached `quota.json`. force:true bypasses the 5-min
+    // in-process cache for this call. ~500-800ms per account
+    // serial; in parallel ~800ms total for typical 3-account
+    // fleets — acceptable for an interactive command.
+    liveQuotas: async (accounts) =>
+      Promise.all(
+        accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
+      ),
+    tz: process.env.SWITCHROOM_TIMEZONE ?? process.env.TZ,
   })
-  await switchroomReply(ctx, reply.text, { html: reply.html })
+  // Translate the handler's optional keyboard shape into grammy's
+  // `reply_markup`. Buttons with `callbackData` become callback_data;
+  // buttons with `insertText` become switch_inline_query_current_chat
+  // (taps paste the slash-command into the user's input). Keep a
+  // safe default for buttons missing both (shouldn't happen).
+  if (reply.keyboard && reply.keyboard.length > 0) {
+    // Build via grammy's InlineKeyboard so the type is correct
+    // for switchroomReply's reply_markup field — no `as never`
+    // cast needed.
+    const kb = new InlineKeyboard()
+    for (let i = 0; i < reply.keyboard.length; i++) {
+      const row = reply.keyboard[i]!
+      for (const b of row) {
+        if (b.callbackData) kb.text(b.text, b.callbackData)
+        else if (b.insertText) kb.switchInlineCurrent(b.text, b.insertText)
+        else kb.text(b.text, 'auth:noop')
+      }
+      // grammy's row terminator — except after the last row.
+      if (i < reply.keyboard.length - 1) kb.row()
+    }
+    await switchroomReply(ctx, reply.text, {
+      html: reply.html,
+      reply_markup: kb,
+    })
+  } else {
+    await switchroomReply(ctx, reply.text, { html: reply.html })
+  }
 })
 
 // Boot-card auth-row loader (issue #708, RFC H rewire). Queries the
@@ -10483,12 +10765,149 @@ async function handleOperatorEventCallback(ctx: Context, data: string): Promise<
 // stub so any stale pinned message that fires an `auth:*` tap is
 // silently dismissed instead of crashing the gateway.
 async function handleAuthDashboardCallback(ctx: Context): Promise<void> {
+  const data = ctx.callbackQuery?.data ?? ''
+  const currentAgent = getMyAgentName()
+
+  // auth:use:<label> — fleet-wide swap via broker.setActive (same path
+  // /auth use takes from chat). Admin-gated via the broker's own
+  // per-agent admin flag.
+  if (data.startsWith('auth:use:')) {
+    const label = data.slice('auth:use:'.length)
+    if (!label) {
+      try { await ctx.answerCallbackQuery({ text: 'Missing account label.', show_alert: false }) } catch { /* */ }
+      return
+    }
+    try {
+      const client = await getAuthBrokerClient(currentAgent)
+      if (!client) {
+        try { await ctx.answerCallbackQuery({ text: 'Broker unreachable.', show_alert: true }) } catch { /* */ }
+        return
+      }
+      const result = await client.setActive(label)
+      try {
+        await ctx.answerCallbackQuery({
+          text: `Switched fleet → ${result.active} (${result.fanned.length} agents)`,
+          show_alert: false,
+        })
+      } catch { /* toast may fail on stale tap */ }
+      // Edit the source message to reflect the new active. Leaving
+      // the old keyboard intact would tempt a double-tap; we replace
+      // the text + drop the keyboard so the user has to /auth again
+      // to see fresh state.
+      const msg = ctx.callbackQuery?.message
+      if (msg) {
+        // Wrap in swallowingApiCall per #1075 — stale callback-source
+        // messages (deleted topic, expired) shouldn't crash the swap.
+        await swallowingApiCall(
+          () =>
+            bot.api.editMessageText(
+              msg.chat.id,
+              msg.message_id,
+              `<b>Active account →</b> <code>${escapeHtmlForTg(result.active)}</code>\n` +
+                `<i>Re-mirrored credentials for ${result.fanned.length} agent${result.fanned.length === 1 ? '' : 's'}.</i>\n\n` +
+                `<i>Tap /auth to see updated quota for the new active account.</i>`,
+              { parse_mode: 'HTML' },
+            ),
+          { chat_id: String(msg.chat.id), verb: 'auth:use:edit' },
+        )
+      }
+    } catch (err) {
+      const msg = (err as Error)?.message ?? String(err)
+      try {
+        await ctx.answerCallbackQuery({
+          text: `Switch failed: ${msg.slice(0, 180)}`,
+          show_alert: true,
+        })
+      } catch { /* */ }
+    }
+    return
+  }
+
+  // auth:refresh — re-render the /auth snapshot in-place with a fresh
+  // live probe. Replaces the message body; keyboard stays.
+  if (data === 'auth:refresh') {
+    // Freshness throttle: each refresh fan-fires N live api.anthropic.com
+    // probes (one per account, force=true bypasses the 5-min cache).
+    // Without this, a user double-tapping the ↻ button burns through
+    // their account's RPM budget on duplicate work. Cap at one per
+    // AUTH_REFRESH_THROTTLE_MS per (chat, message) pair.
+    const refreshMsg = ctx.callbackQuery?.message
+    if (refreshMsg) {
+      const key = `${refreshMsg.chat.id}:${refreshMsg.message_id}`
+      const lastAtMs = lastAuthRefreshAtMs.get(key) ?? 0
+      const sinceLastMs = Date.now() - lastAtMs
+      if (sinceLastMs < AUTH_REFRESH_THROTTLE_MS) {
+        const waitS = Math.ceil((AUTH_REFRESH_THROTTLE_MS - sinceLastMs) / 1000)
+        try {
+          await ctx.answerCallbackQuery({
+            text: `Just refreshed — try again in ${waitS}s`,
+            show_alert: false,
+          })
+        } catch { /* */ }
+        return
+      }
+      lastAuthRefreshAtMs.set(key, Date.now())
+    }
+    try {
+      const client = await getAuthBrokerClient(currentAgent)
+      if (!client) {
+        try { await ctx.answerCallbackQuery({ text: 'Broker unreachable.', show_alert: true }) } catch { /* */ }
+        return
+      }
+      const state = await client.listState()
+      const quotas = await Promise.all(
+        state.accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
+      )
+      const tz = process.env.SWITCHROOM_TIMEZONE ?? process.env.TZ ?? 'UTC'
+      const { renderAuthSnapshotFormat2, buildSnapshotsFromState, buildSnapshotKeyboard } = await import(
+        '../auth-snapshot-format.js'
+      )
+      const snapshots = buildSnapshotsFromState(state, quotas)
+      const text = renderAuthSnapshotFormat2(snapshots, {
+        tz,
+        now: new Date(),
+        liveProbedAtMs: Date.now(),
+      })
+      const kbRows = buildSnapshotKeyboard(snapshots)
+      const inline_keyboard = kbRows.map((row) =>
+        row.map((b) => {
+          if (b.callbackData) return { text: b.text, callback_data: b.callbackData }
+          if (b.insertText) return { text: b.text, switch_inline_query_current_chat: b.insertText }
+          return { text: b.text, callback_data: 'auth:noop' }
+        }),
+      )
+      const msg = ctx.callbackQuery?.message
+      if (msg) {
+        await swallowingApiCall(
+          () =>
+            bot.api.editMessageText(msg.chat.id, msg.message_id, text, {
+              parse_mode: 'HTML',
+              reply_markup: { inline_keyboard },
+            }),
+          { chat_id: String(msg.chat.id), verb: 'auth:refresh:edit' },
+        )
+      }
+      try { await ctx.answerCallbackQuery({ text: 'Refreshed.', show_alert: false }) } catch { /* */ }
+    } catch (err) {
+      const msg = (err as Error)?.message ?? String(err)
+      try {
+        await ctx.answerCallbackQuery({
+          text: `Refresh failed: ${msg.slice(0, 180)}`,
+          show_alert: true,
+        })
+      } catch { /* */ }
+    }
+    return
+  }
+
+  // Unknown auth:* — likely from a too-old message. Dismiss with a
+  // hint pointing at the canonical re-render verb.
   try {
     await ctx.answerCallbackQuery({
-      text: "This button is from the old /auth dashboard (removed in RFC H). Send /auth show instead.",
+      text: 'Unknown auth button. Send /auth for current state.',
       show_alert: false,
     })
-  } catch { /* tap from a too-old message — drop */ }
+  } catch { /* */ }
 }
 
 // /reauth was removed in v0.6.13 — the `/auth` dashboard's
@@ -10899,6 +11318,44 @@ bot.command('issues', async ctx => {
 
 bot.command('usage', async ctx => {
   if (!isAuthorizedSender(ctx)) return
+  // Format 2 path: enumerate every account in the broker's known set,
+  // probe live quota in parallel, render the health-grouped snapshot.
+  // Falls back to the legacy single-agent shape when the broker is
+  // unreachable, since /usage was historically callable against any
+  // agent regardless of fleet state.
+  const currentAgent = getMyAgentName()
+  try {
+    const client = await getAuthBrokerClient(currentAgent)
+    if (client) {
+      const state = await client.listState()
+      if (state.accounts.length > 0) {
+        const quotas = await Promise.all(
+          state.accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
+        )
+        const { renderAuthSnapshotFormat2, buildSnapshotsFromState } = await import(
+          '../auth-snapshot-format.js'
+        )
+        const tz = process.env.SWITCHROOM_TIMEZONE ?? process.env.TZ ?? 'UTC'
+        const snapshots = buildSnapshotsFromState(state, quotas)
+        const text = renderAuthSnapshotFormat2(snapshots, {
+          tz,
+          now: new Date(),
+          liveProbedAtMs: Date.now(),
+        })
+        await switchroomReply(ctx, text, { html: true })
+        return
+      }
+    }
+  } catch (err) {
+    process.stderr.write(
+      `telegram gateway: /usage Format 2 path failed agent=${currentAgent}: ${(err as Error)?.message ?? err}\n`,
+    )
+    // fall through to legacy single-agent path
+  }
+
+  // Legacy single-agent path — kept as a graceful fallback when the
+  // broker is unreachable (post-RFC-H rewire boot timing, broken
+  // socket bind, etc.). Same shape /usage shipped with originally.
   const agentDir = resolveAgentDirFromEnv()
   if (!agentDir) {
     await switchroomReply(ctx, '<b>/usage:</b> cannot resolve agent dir.', { html: true })
@@ -11020,6 +11477,29 @@ bot.on('callback_query:data', async ctx => {
   if (data.startsWith('apv:')) {
     const { handleApprovalCallback } = await import('./approval-callback.js')
     await handleApprovalCallback(ctx, data)
+    return
+  }
+
+  // RFC E §4.1: drvpick:<verb>:<agent>[:<...>] — folder-picker card taps.
+  // open / enter / back / refresh re-render the card in place;
+  // grant writes an allow_always kernel decision at
+  // doc:gdrive:folder/<id>/** and edits the card to a confirmation.
+  //
+  // Auth gate: the picker grant is an OPERATOR action (mirrors the
+  // `op:`/`vd:`/`vg:` family, not the `apv:` agent-approval shape).
+  // Mirror those patterns — refuse callbacks from anyone outside
+  // `access.allowFrom`. Without this, a group member who isn't in
+  // the operator allowlist could still tap [✅ Allow "<folder>"] on
+  // a card that landed in the group and write an `allow_always`
+  // decision attributed to themselves.
+  if (data.startsWith('drvpick:')) {
+    const access = loadAccess()
+    const senderId = String(ctx.from?.id ?? '')
+    if (!access.allowFrom.includes(senderId)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' })
+      return
+    }
+    await handleFolderPickerCallback(ctx, data, buildFolderPickerDeps())
     return
   }
 
@@ -12962,23 +13442,6 @@ void (async () => {
             process.stderr.write(`telegram gateway: writeSessionMarker failed: ${err}\n`)
           }
         } catch {}
-
-        // Auto-fallback on quota exhaustion. Periodically polls
-        // the active slot's rate-limit headers; when utilization >= 99.5%
-        // or a 429 is observed, marks the slot exhausted, swaps to the
-        // next healthy slot via src/auth, restarts the agent, and posts
-        // a notification to the owner chat. See telegram-plugin/auto-fallback.ts
-        // for the pure decision logic + notification builder.
-        //
-        // Default poll cadence: every 60 minutes. Set
-        // SWITCHROOM_AUTO_FALLBACK_POLL_MS=0 to disable the background
-        // poller. Pre-v0.6.12 a manual `/authfallback` typed command
-        // also ran the same check; that command was removed in favour
-        // of the `/auth` dashboard's Switch primary picker.
-        const AUTO_FALLBACK_POLL_MS = Number(process.env.SWITCHROOM_AUTO_FALLBACK_POLL_MS ?? 60 * 60_000)
-        if (AUTO_FALLBACK_POLL_MS > 0) {
-          setInterval(() => { void runAutoFallbackCheck({ trigger: 'scheduled' }) }, AUTO_FALLBACK_POLL_MS).unref()
-        }
 
         // Credit-exhaustion watcher (#348). Reads `<agentDir>/.claude/.claude.json`
         // for `cachedExtraUsageDisabledReason`. Fires a Telegram notification

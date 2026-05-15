@@ -121,16 +121,10 @@ const TOKEN_EXPIRING_SOON_DAYS = 7
  */
 export async function probeAccount(
   agentDir: string,
-  opts: { agentName?: string } = {},
 ): Promise<ProbeResult> {
   return withTimeout('Account', (async (): Promise<ProbeResult> => {
     const claudeDir = join(agentDir, '.claude')
     const claudeJsonPath = join(claudeDir, '.claude.json')
-    // Fall back to the literal placeholder only when no agentName is plumbed
-    // through — the renderer's <code> escape will keep that safe in Telegram
-    // HTML, but real call sites should always pass the name so users can
-    // tap-to-copy a working command.
-    const agentRef = opts.agentName ?? '<agent>'
     let cfg: ClaudeJson = {}
     try {
       const raw = readFileSync(claudeJsonPath, 'utf8')
@@ -145,7 +139,10 @@ export async function probeAccount(
         status: 'degraded',
         label: 'Account',
         detail: 'not signed in',
-        nextStep: `Run \`switchroom auth login ${agentRef}\` to start the OAuth flow`,
+        // RFC H: auth is fleet-wide. Recovery is `auth add` + `auth use` —
+        // the broker then fans the active label out to every agent. There
+        // is no per-agent `auth login` verb anymore.
+        nextStep: 'Run `switchroom auth add <label> --from-oauth` then `switchroom auth use <label>` to authenticate the fleet',
       }
     }
 
@@ -176,9 +173,9 @@ export async function probeAccount(
     }
 
     const nextStep = status === 'fail'
-      ? `OAuth token expired — run \`switchroom auth login ${agentRef}\` to re-authenticate`
+      ? 'OAuth token expired — broker should auto-refresh; force with `switchroom auth refresh` or `switchroom auth add <label> --from-oauth --replace` if the refresh token is also bad'
       : status === 'degraded'
-        ? `Token expiring soon — run \`switchroom auth login ${agentRef}\` before it lapses`
+        ? 'Token expiring soon — broker auto-refreshes < 60min before expiry; force now with `switchroom auth refresh`'
         : undefined
     return {
       status,

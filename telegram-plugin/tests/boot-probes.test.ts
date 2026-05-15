@@ -896,42 +896,40 @@ describe('probeAccount — nextStep agent-name interpolation', () => {
     }
   })
 
-  it('not-signed-in hint interpolates agentName instead of <agent>', async () => {
+  it('not-signed-in hint points at RFC H fleet-wide auth verbs', async () => {
     tmpDir = setupAgentDir({})
-    const result = await probeAccount(tmpDir, { agentName: 'finn' })
+    const result = await probeAccount(tmpDir)
     expect(result.status).toBe('degraded')
     expect(result.detail).toBe('not signed in')
     expect(result.nextStep).toBeDefined()
-    expect(result.nextStep).toContain('switchroom auth login finn')
-    expect(result.nextStep).not.toContain('<agent>')
+    expect(result.nextStep).toContain('switchroom auth add')
+    expect(result.nextStep).toContain('--from-oauth')
+    expect(result.nextStep).toContain('switchroom auth use')
+    // RFC H: hint must not point at the retired per-agent `auth login` verb.
+    expect(result.nextStep).not.toContain('auth login')
   })
 
-  it('expired-token hint interpolates agentName', async () => {
+  it('expired-token hint points at broker auto-refresh + manual fallback', async () => {
     tmpDir = setupAgentDir(
       { oauthAccount: { emailAddress: 'me@example.com', billingType: 'max' } },
       { expiresAt: Date.now() - 86_400_000 }, // expired yesterday
     )
-    const result = await probeAccount(tmpDir, { agentName: 'klanker' })
+    const result = await probeAccount(tmpDir)
     expect(result.status).toBe('fail')
-    expect(result.nextStep).toContain('switchroom auth login klanker')
-    expect(result.nextStep).not.toContain('<agent>')
+    expect(result.nextStep).toContain('switchroom auth refresh')
+    expect(result.nextStep).toContain('--replace')
+    expect(result.nextStep).not.toContain('auth login')
   })
 
-  it('expiring-soon hint interpolates agentName', async () => {
+  it('expiring-soon hint points at broker auto-refresh window', async () => {
     tmpDir = setupAgentDir(
       { oauthAccount: { emailAddress: 'me@example.com', billingType: 'max' } },
       { expiresAt: Date.now() + 3 * 86_400_000 }, // 3 days left (< 7)
     )
-    const result = await probeAccount(tmpDir, { agentName: 'lawgpt' })
-    expect(result.status).toBe('degraded')
-    expect(result.nextStep).toContain('switchroom auth login lawgpt')
-    expect(result.nextStep).not.toContain('<agent>')
-  })
-
-  it('falls back to <agent> placeholder when no agentName provided (backwards-compat)', async () => {
-    tmpDir = setupAgentDir({})
     const result = await probeAccount(tmpDir)
-    expect(result.nextStep).toContain('<agent>')
+    expect(result.status).toBe('degraded')
+    expect(result.nextStep).toContain('switchroom auth refresh')
+    expect(result.nextStep).not.toContain('auth login')
   })
 })
 

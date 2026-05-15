@@ -216,20 +216,21 @@ export interface FormatCardOptions {
   slot?: string | null
   /** Anchor for relative-time formatting. Tests pin this; prod omits it. */
   now?: Date
+  /**
+   * True when the gateway has concurrently fired
+   * `fireFleetAutoFallback` for this event. Switches the card body
+   * from "What to try" (manual commands) to "Auto-failover in
+   * progress" so the user doesn't manually `/auth use` while a
+   * fleet swap is mid-flight. Caller MUST pass this when invoking
+   * the dispatcher in parallel — otherwise the card lies.
+   */
+  autoFallbackInFlight?: boolean
 }
 
 /**
  * Render the actionable ⚠️ card for a detected model-unavailable event.
  * HTML-formatted for Telegram. Stable shape so snapshot tests remain
  * meaningful when the suggestion list shifts.
- *
- *   ⚠️ <b>Model unavailable</b> on agent <b>name</b>
- *   Reason: quota exhausted (resets in 5h)
- *
- *   <b>What to try</b>
- *   • <code>/authfallback</code> — switch to the next account slot
- *   • <code>/auth add</code> — attach another subscription
- *   • <code>/usage</code> — show quota breakdown
  */
 export function formatModelUnavailableCard(
   detection: ModelUnavailableDetection,
@@ -243,11 +244,26 @@ export function formatModelUnavailableCard(
     `⚠️ <b>Model unavailable</b> on agent <b>${escHtml(agent)}</b>${slotPart}`,
     `Reason: ${reason}`,
     '',
-    '<b>What to try</b>',
-    '• <code>/authfallback</code> — switch to the next account slot',
-    '• <code>/auth add</code> — attach another subscription',
-    '• <code>/usage</code> — show quota breakdown',
   ]
+  if (opts.autoFallbackInFlight) {
+    // Quiet variant — the gateway already kicked off a fleet-wide
+    // swap; a follow-up announcement (causal-shape) will land within
+    // ~1s. Mention it explicitly so the user knows not to react.
+    lines.push(
+      '<i>Auto-failover in progress — see the announcement below.</i>',
+    )
+  } else {
+    // Default — kinds where auto-fallback can't help (network)
+    // or pre-Format-2 callers. Also: `/authfallback` is no longer
+    // a verb (post-RFC-H); `/auth use <label>` is the canonical
+    // fleet-wide swap.
+    lines.push(
+      '<b>What to try</b>',
+      '• <code>/auth use &lt;label&gt;</code> — switch the fleet to a healthy account',
+      '• <code>/auth add</code> — attach another subscription',
+      '• <code>/usage</code> — show quota breakdown',
+    )
+  }
   return lines.join('\n')
 }
 

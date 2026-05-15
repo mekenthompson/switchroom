@@ -55,6 +55,7 @@ Each field type has specific merge behavior when values exist at multiple layers
 | `settings_raw` | deep merge | Escape hatch: raw settings.json overrides |
 | `claude_md_raw` | concatenate | Escape hatch: append to CLAUDE.md on scaffold |
 | `cli_args` | concatenate | Escape hatch: extra `exec claude` flags |
+| `google_workspace` | deep merge | Google Drive/Docs/Sheets/Calendar integration. `google_client_id` / `google_client_secret` are install-wide (top level only); `tier` + `approvers` cascade per-agent. See § Google Workspace below. |
 
 ## Built-in MCP Servers
 
@@ -386,6 +387,39 @@ non-zero only when every refresh attempt failed AND nothing was already
 fresh — partial failures stay visible without taking the timer down.
 
 Source: `src/auth/token-refresh.ts`.
+
+## Google Workspace (`google_workspace:`)
+
+Centralizes the Google OAuth client + the Drive/Docs/Sheets/Calendar
+tier knob. The legacy RFC D key `drive:` is an accepted alias (identical
+shape); the loader errors if both are set to different values.
+
+```yaml
+google_workspace:
+  google_client_id: "vault:google-oauth-client-id"
+  google_client_secret: "vault:google-oauth-client-secret"
+  approvers: [123456789]      # ≥1 Telegram numeric user id
+  tier: core                  # core | extended | complete
+```
+
+| Field | Cascade | Notes |
+|---|---|---|
+| `google_client_id` | top level only | OAuth client id. Literal or `vault:<key>` ref. One client per install (Google ToS) — **not** per-agent. Env override: `SWITCHROOM_GOOGLE_CLIENT_ID`. |
+| `google_client_secret` | top level only | OAuth client secret. Literal or `vault:<key>` ref. Env override: `SWITCHROOM_GOOGLE_CLIENT_SECRET`. |
+| `approvers` | override (per-agent may narrow) | ≥1 Telegram numeric user id authorized to approve Drive onboarding. Env override: `SWITCHROOM_APPROVER_USER_ID`. |
+| `tier` | override | Upstream `google_workspace_mcp` tool tier. `core` (default, ~16 tools: Drive+Docs+Sheets+Calendar), `extended` (~40: +Slides/Forms/Tasks/Chat), `complete` (~60+: +Gmail — not recommended; Gmail's per-thread approval shape is unsuitable today, see RFC G §5). |
+
+The block is optional. When absent, `switchroom auth google account
+add` and the rest of the fleet Drive surface error with a guided
+next-step (run `switchroom auth google connect`, the one-time
+onboarding wizard). The wizard writes this block for you. Full setup
+walkthrough — including the GCP Console steps and why switchroom ships
+no shared client — is in `docs/google-workspace.md` § Prerequisite.
+
+`google_client_id` / `google_client_secret` are deliberately top-level
+only: one OAuth client per switchroom install. A per-agent
+`google_workspace:` override may narrow `approvers` or pick a different
+`tier`, but not the client credentials (RFC G Phase 1).
 
 ## Escape Hatches
 

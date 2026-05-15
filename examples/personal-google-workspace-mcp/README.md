@@ -6,9 +6,14 @@ tools to **your own Claude Code session on the host** (not to switchroom
 agents).
 
 It is intentionally **separate from the agent-side feature.** Agents get
-Workspace access via `switchroom auth google connect <agent>` (RFC G
-§4.5, available after Phase 3 lands). This example is for the
-operator's pair-design loop with their own host-side `claude`.
+Workspace access via `switchroom auth google connect` →
+`switchroom auth google account add` (RFC G §4.5, shipped) — see
+[`docs/google-workspace.md`](../../docs/google-workspace.md) for the
+fleet setup. **Do not reuse this example's OAuth client for the
+fleet:** different trust posture (approval-kernel-mediated vs.
+single-identity), and switchroom expects its own client. This example
+is only for the operator's pair-design loop with their own host-side
+`claude`.
 
 > **Why two paths?** Agents run inside switchroom containers with
 > approval-kernel-mediated tool access; the per-agent OAuth posture is

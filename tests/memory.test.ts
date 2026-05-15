@@ -249,6 +249,11 @@ describe("generateHindsightComposeSnippet (broker-fed, #1245)", () => {
     expect(snippet).not.toContain("HINDSIGHT_API_LLM_API_KEY");
   });
 
+  it("pins HINDSIGHT_API_LLM_MODEL to the switchroom-default sonnet", () => {
+    const snippet = generateHindsightComposeSnippet();
+    expect(snippet).toContain("HINDSIGHT_API_LLM_MODEL=claude-sonnet-4-6");
+  });
+
   it("bind-mounts the auth-broker consumer socket volume + tmpfs for creds", () => {
     const snippet = generateHindsightComposeSnippet();
     expect(snippet).toContain("auth-broker-hindsight-sock:/run/switchroom/auth-broker");

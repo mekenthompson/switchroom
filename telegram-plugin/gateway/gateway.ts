@@ -95,6 +95,8 @@ import {
 import type { AuthBrokerClient } from './auth-command.js'
 import type { ListStateData } from './auth-line.js'
 import { getAuthBrokerClient, addAccountViaBroker } from './auth-broker-client.js'
+import { resolveAuthBrokerSocketPath } from '../../src/auth/broker/client.js'
+import { createFleetFallbackGate } from '../fleet-fallback-gate.js'
 import {
   pendingAuthAddFlows,
   startAccountAuthSession,
@@ -194,23 +196,16 @@ import {
   formatQuotaBlock,
 } from '../quota-check.js'
 import {
-  evaluateFallbackTrigger,
-  performAutoFallback,
-  emptyLockout,
   loadLockout,
-  nextLockout,
-  saveLockout,
   DEFAULT_FALLBACK_COOLDOWN_MS,
-  type LockoutRecord,
   type LockoutPersistOps,
 } from '../auto-fallback.js'
-import { markSlotQuotaExhausted, DEFAULT_SLOT } from '../../src/auth/accounts.js'
-import { fallbackToNextSlot, currentActiveSlot, type AuthCodeOutcome } from '../../src/auth/manager.js'
+import { DEFAULT_SLOT } from '../../src/auth/accounts.js'
+import { currentActiveSlot, type AuthCodeOutcome } from '../../src/auth/manager.js'
 import { injectSlashCommand as injectSlashCommandImpl } from '../../src/agents/inject.js'
 import { handleInjectCommand } from './inject-handler.js'
 import { type BannerState } from '../slot-banner.js'
 import { refreshBanner } from '../slot-banner-driver.js'
-import { dispatchFallbackNotification } from '../auto-fallback-dispatcher.js'
 import { loadConfig as loadSwitchroomConfig } from '../../src/config/loader.js'; import { resolveAgentConfig } from '../../src/config/merge.js'
 import {
   tryHostdDispatch,
@@ -1993,6 +1988,13 @@ const awaitingAuthCodeAt = new Map<string, number>()
 const AUTH_CODE_CONTEXT_TTL_MS = 5 * 60_000 // 5 min — OAuth code lifetime
 const DEFERRED_SECRET_TTL_MS = 24 * 60 * 60_000 // 24 h — ignored one-tap cards
 
+// Freshness throttle for `auth:refresh` taps. Keyed by `<chat_id>:<message_id>`
+// so two different snapshot messages throttle independently. Each refresh
+// fan-fires N live api.anthropic.com probes (one per account), so we cap
+// rapid re-taps to one per AUTH_REFRESH_THROTTLE_MS.
+const lastAuthRefreshAtMs = new Map<string, number>()
+const AUTH_REFRESH_THROTTLE_MS = 5_000
+
 // ─── TTL reaper ───────────────────────────────────────────────────────────
 // Pending state maps above all grow whenever a flow starts and only shrink
 // when the flow completes. Users abandoning a flow (closing Telegram, losing
@@ -2055,6 +2057,12 @@ const pendingStateReaper = setInterval(() => {
   }
   for (const [k, v] of awaitingAuthCodeAt) {
     if (now - v > AUTH_CODE_CONTEXT_TTL_MS) awaitingAuthCodeAt.delete(k)
+  }
+  // Auth-refresh throttle entries decay quickly (5s window); sweep
+  // anything older than 60s so abandoned snapshot messages don't pin
+  // their key forever.
+  for (const [k, v] of lastAuthRefreshAtMs) {
+    if (now - v > 60_000) lastAuthRefreshAtMs.delete(k)
   }
   // /auth rm two-step confirm window — self-expires at `expiresAt`.
   for (const [k, v] of pendingAuthRmFlows) {
@@ -8710,40 +8718,18 @@ bot.command('interrupt', async ctx => {
   await runSwitchroomCommand(ctx, ['agent', 'interrupt', name], `interrupt ${name}`)
 })
 
-// Shared auto-fallback state. `lockout` is a per-process in-memory
-// guard against rapid re-fire between the scheduled poll and any
-// manual trigger (see telegram-plugin/auto-fallback.ts).
-//
-// Pre-#417 fix this was always emptyLockout() at process start, so a
-// gateway restart inside the cooldown window reset the timer and a
-// quota-flap on the recovering slot could re-trigger fallback the
-// moment the gateway came back. We now seed from disk on first use
-// and persist on every transition. Errors are swallowed: losing the
-// lockout file just degrades to in-memory-only behaviour.
+// Persist-ops bundle for the legacy auto-fallback lockout file. The
+// only remaining reader is `isAutoFallbackCooldownActive` (line ~2030)
+// — used by the pending-restart drain cap to defer a forced restart
+// stacking on top of an in-flight slot rotation. The legacy poller
+// that USED to write this file was retired alongside this refactor;
+// existing on-disk lockouts age out via DEFAULT_FALLBACK_COOLDOWN_MS.
 const lockoutOps: LockoutPersistOps = {
   readFileSync: (p, enc) => readFileSync(p, enc),
   writeFileSync: (p, data, opts) => writeFileSync(p, data, opts),
   existsSync: (p) => existsSync(p),
   mkdirSync: (p, opts) => mkdirSync(p, opts),
   joinPath: (...parts) => join(...parts),
-}
-let autoFallbackLockout: LockoutRecord = emptyLockout()
-let autoFallbackLockoutSeeded = false
-function seedAutoFallbackLockoutIfNeeded(agentDir: string): void {
-  if (autoFallbackLockoutSeeded) return
-  autoFallbackLockoutSeeded = true
-  try {
-    autoFallbackLockout = loadLockout(agentDir, lockoutOps)
-  } catch (err) {
-    process.stderr.write(`telegram gateway: auto-fallback lockout seed failed (using empty): ${(err as Error).message}\n`)
-  }
-}
-function persistLockout(agentDir: string): void {
-  try {
-    saveLockout(agentDir, autoFallbackLockout, lockoutOps)
-  } catch (err) {
-    process.stderr.write(`telegram gateway: auto-fallback lockout persist failed: ${(err as Error).message}\n`)
-  }
 }
 
 // Pinned slot-banner state (#421). One banner per gateway process,
@@ -8775,46 +8761,37 @@ async function refreshPinnedBanner(reason: string): Promise<void> {
   }
 }
 
-type AutoFallbackCheckResult =
-  | { kind: 'no-action'; reason: string; decision: 'noop' | 'fallback-skipped' }
-  | { kind: 'executed'; previousSlot: string; newSlot: string }
-  | { kind: 'exhausted-all'; activeSlot: string }
-  | { kind: 'error'; message: string }
-
 /**
- * Re-entry guard for `fireFleetAutoFallback`. Without this, N
- * concurrent agent turns hitting 429 within ~1s each fire a separate
- * fleet swap — N broadcasts, N broker writes, N quota probes per
- * account, possibly oscillating swap targets. The guard collapses
- * concurrent triggers from the same agent into one in-flight
- * promise, and suppresses re-fires for `FLEET_FALLBACK_DEDUP_MS`
- * after the most recent successful trigger (the suppression survives
- * the announcement → user-side observed swap; if quota is still bad
- * the next event will fire after the window closes).
+ * Re-entry guard + dedup window for `fireFleetAutoFallback`. The state
+ * was lifted into `fleet-fallback-gate.ts` so it can be tested in
+ * isolation (gateway.ts module state was unreachable from vitest). The
+ * gate ALSO enforces the broker-reachability honesty contract: when the
+ * broker is down, `wouldFire()` returns false so the model-unavailable
+ * card stays honest instead of advertising a swap that would bail with
+ * `reason=no-broker-client`.
  */
 const FLEET_FALLBACK_DEDUP_MS = 30_000
-let fleetFallbackInFlight: Promise<void> | null = null
-/** Wall-clock ms of the last ACTUAL swap (kind: 'switched' from
- *  runFleetAutoFallback). Skipped no-ops (no broker client, no
- *  eligible target, idempotent skip) DO NOT update this — the user
- *  hasn't seen a swap announcement, so suppressing future fires
- *  off a non-event would create the "card lies" gap. */
-let fleetFallbackLastFiredAtMs = 0
 
-/**
- * Pure read of the dedup state. Returns true when a fresh
- * `fireFleetAutoFallback` call would actually invoke the dispatcher
- * (vs. being short-circuited by the in-flight or post-fire window).
- *
- * Used by the model-unavailable card render path to decide whether to
- * advertise "Auto-failover in progress" — calling
- * `fireFleetAutoFallback` and blindly trusting the announcement to
- * land would lie when the dispatcher dedup-drops.
- */
+/** Synchronous reachability check for the auth-broker UDS. Used by the
+ *  fleet-fallback gate to keep the model-unavailable card honest: if the
+ *  broker socket isn't bound, the dispatcher would bail with
+ *  `reason=no-broker-client`, so `wouldFire()` should return false and
+ *  the card should fall back to the manual `/auth use <label>` hint. */
+function isAuthBrokerSocketReachable(): boolean {
+  try {
+    return existsSync(resolveAuthBrokerSocketPath())
+  } catch {
+    return false
+  }
+}
+
+const fleetFallbackGate = createFleetFallbackGate({
+  dedupMs: FLEET_FALLBACK_DEDUP_MS,
+  brokerReachable: isAuthBrokerSocketReachable,
+})
+
 function wouldFireFleetAutoFallback(): boolean {
-  if (fleetFallbackInFlight) return false
-  const sinceLastMs = Date.now() - fleetFallbackLastFiredAtMs
-  return sinceLastMs >= FLEET_FALLBACK_DEDUP_MS
+  return fleetFallbackGate.wouldFire()
 }
 
 /**
@@ -8839,36 +8816,14 @@ function wouldFireFleetAutoFallback(): boolean {
  * unavailable" card.
  */
 async function fireFleetAutoFallback(triggerAgent: string): Promise<void> {
-  // Dedup: collapse concurrent fires into the in-flight promise.
-  if (fleetFallbackInFlight) {
-    process.stderr.write(
-      `telegram gateway: [fleet-fallback] dropped (in-flight) agent=${triggerAgent}\n`,
-    )
-    return fleetFallbackInFlight
-  }
-  // Dedup: suppress re-fires within the post-trigger window. The
-  // broker write + announcement broadcast already informed every
-  // user surface of the swap — a second swap N seconds later
-  // would oscillate targets and spam.
-  const sinceLastMs = Date.now() - fleetFallbackLastFiredAtMs
-  if (sinceLastMs < FLEET_FALLBACK_DEDUP_MS) {
-    process.stderr.write(
-      `telegram gateway: [fleet-fallback] dropped (dedup ${sinceLastMs}ms < ${FLEET_FALLBACK_DEDUP_MS}ms) agent=${triggerAgent}\n`,
-    )
-    return
-  }
-  // Stamp `lastFiredAtMs` ONLY on actual swaps (kind: 'switched').
-  // No-ops (no broker, no eligible target, idempotent skip, error)
-  // do NOT arm the suppression window — otherwise a transient
-  // broker hiccup would block the next 30s of legitimate fires.
-  fleetFallbackInFlight = doFireFleetAutoFallback(triggerAgent)
-    .then((didSwap) => {
-      if (didSwap) fleetFallbackLastFiredAtMs = Date.now()
-    })
-    .finally(() => {
-      fleetFallbackInFlight = null
-    })
-  return fleetFallbackInFlight
+  return fleetFallbackGate.fire(
+    () => doFireFleetAutoFallback(triggerAgent),
+    (err) => {
+      process.stderr.write(
+        `telegram gateway: [fleet-fallback] error agent=${triggerAgent}: ${(err as Error)?.message ?? err}\n`,
+      )
+    },
+  )
 }
 
 /** Returns true iff the dispatcher actually performed a swap (and the
@@ -8923,88 +8878,6 @@ async function doFireFleetAutoFallback(triggerAgent: string): Promise<boolean> {
       `telegram gateway: [fleet-fallback] error agent=${triggerAgent}: ${(err as Error)?.message ?? err}\n`,
     )
     return false
-  }
-}
-
-async function runAutoFallbackCheck(opts: { trigger: 'scheduled' | 'manual' }): Promise<AutoFallbackCheckResult> {
-  // All log lines in this path use the `[autofallback]` tag so a single
-  // grep against journalctl reconstructs the full decision history of
-  // a slot rotation: `journalctl -u switchroom-<agent>-gateway -g autofallback`.
-  try {
-    const agentDir = resolveAgentDirFromEnv()
-    if (!agentDir) {
-      return { kind: 'no-action', reason: 'no agent dir', decision: 'noop' }
-    }
-    const agentName = getMyAgentName()
-    seedAutoFallbackLockoutIfNeeded(agentDir)
-    const active = currentActiveSlot(agentDir)
-    const quota = await fetchQuota({ claudeConfigDir: join(agentDir, '.claude') })
-    const decision = evaluateFallbackTrigger({
-      quota,
-      activeSlot: active,
-      now: Date.now(),
-      lockout: autoFallbackLockout,
-    })
-    if (decision.action !== 'fallback') {
-      process.stderr.write(
-        `telegram gateway: [autofallback] noop trigger=${opts.trigger} agent=${agentName} active=${active ?? 'none'} reason=${decision.reason}\n`,
-      )
-      return { kind: 'no-action', reason: decision.reason, decision: 'noop' }
-    }
-    process.stderr.write(
-      `telegram gateway: [autofallback] decision=fallback trigger=${opts.trigger} agent=${agentName} active=${active ?? 'none'} reason=${decision.triggerReason} util=${decision.utilizationPct?.toFixed(1) ?? 'n/a'}%\n`,
-    )
-    const plan = performAutoFallback({
-      agentDir,
-      agentName,
-      decision,
-      deps: { currentActiveSlot, markSlotQuotaExhausted, fallbackToNextSlot },
-    })
-    const ownerChatId = loadAccess().allowFrom[0]
-    await dispatchFallbackNotification({
-      bot,
-      ownerChatId,
-      plan,
-      onError: (err) => {
-        process.stderr.write(`telegram gateway: [autofallback] notify failed trigger=${opts.trigger} agent=${agentName}: ${err}\n`)
-      },
-    })
-    if (plan.kind === 'executed') {
-      try { assertSafeAgentName(plan.agentName) }
-      catch {
-        process.stderr.write(`telegram gateway: [autofallback] invalid-agent-name agent=${plan.agentName}\n`)
-        return { kind: 'error', message: `invalid agent name: ${plan.agentName}` }
-      }
-      try {
-        // Preemptive failover (utilization-over-threshold / explicit) waits
-        // for the active turn to drain. Reactive failover (429-response)
-        // hard-restarts because the request that triggered it has already
-        // failed — there's no in-flight turn worth preserving. See #420.
-        const restartArgs = ['agent', 'restart', plan.agentName]
-        if (plan.triggerReason !== '429-response') {
-          restartArgs.push('--graceful-restart')
-        }
-        process.stderr.write(
-          `telegram gateway: [autofallback] executed agent=${plan.agentName} prev=${plan.previousSlot} next=${plan.newSlot} restart=${plan.triggerReason === '429-response' ? 'hard' : 'graceful'}\n`,
-        )
-        switchroomExec(restartArgs)
-      } catch (err) {
-        process.stderr.write(`telegram gateway: [autofallback] restart failed agent=${plan.agentName}: ${err}\n`)
-      }
-      autoFallbackLockout = nextLockout(plan.previousSlot, Date.now())
-      persistLockout(agentDir)
-      void refreshPinnedBanner('auto-fallback')
-      return { kind: 'executed', previousSlot: plan.previousSlot, newSlot: plan.newSlot }
-    }
-    process.stderr.write(
-      `telegram gateway: [autofallback] exhausted-all agent=${agentName} active=${plan.activeSlot}\n`,
-    )
-    autoFallbackLockout = nextLockout(plan.activeSlot, Date.now())
-    persistLockout(agentDir)
-    return { kind: 'exhausted-all', activeSlot: plan.activeSlot }
-  } catch (err) {
-    process.stderr.write(`telegram gateway: [autofallback] ${opts.trigger} poll error: ${err}\n`)
-    return { kind: 'error', message: String((err as Error).message ?? err) }
   }
 }
 
@@ -9063,15 +8936,6 @@ async function runCreditWatch(): Promise<void> {
     process.stderr.write(`telegram gateway: credit-watch state persist failed: ${err}\n`)
   }
 }
-
-// /authfallback was removed in v0.6.12 — it duplicated the work of
-// the dashboard's Switch primary picker (operator-facing surface) and
-// the auto-fallback poller (transparent on-quota-wall case).
-// Operators who want to manually shuffle the active credential now
-// use the picker. The `runAutoFallbackCheck` function and the
-// `case 'fallback':` callback dispatch stay in the codebase: any
-// pinned messages from earlier versions still work, and the
-// auto-fallback poller still calls runAutoFallbackCheck directly.
 
 bot.command("auth", async ctx => {
   if (!isAuthorizedSender(ctx)) return
@@ -10894,6 +10758,28 @@ async function handleAuthDashboardCallback(ctx: Context): Promise<void> {
   // auth:refresh — re-render the /auth snapshot in-place with a fresh
   // live probe. Replaces the message body; keyboard stays.
   if (data === 'auth:refresh') {
+    // Freshness throttle: each refresh fan-fires N live api.anthropic.com
+    // probes (one per account, force=true bypasses the 5-min cache).
+    // Without this, a user double-tapping the ↻ button burns through
+    // their account's RPM budget on duplicate work. Cap at one per
+    // AUTH_REFRESH_THROTTLE_MS per (chat, message) pair.
+    const refreshMsg = ctx.callbackQuery?.message
+    if (refreshMsg) {
+      const key = `${refreshMsg.chat.id}:${refreshMsg.message_id}`
+      const lastAtMs = lastAuthRefreshAtMs.get(key) ?? 0
+      const sinceLastMs = Date.now() - lastAtMs
+      if (sinceLastMs < AUTH_REFRESH_THROTTLE_MS) {
+        const waitS = Math.ceil((AUTH_REFRESH_THROTTLE_MS - sinceLastMs) / 1000)
+        try {
+          await ctx.answerCallbackQuery({
+            text: `Just refreshed — try again in ${waitS}s`,
+            show_alert: false,
+          })
+        } catch { /* */ }
+        return
+      }
+      lastAuthRefreshAtMs.set(key, Date.now())
+    }
     try {
       const client = await getAuthBrokerClient(currentAgent)
       if (!client) {
@@ -13465,23 +13351,6 @@ void (async () => {
             process.stderr.write(`telegram gateway: writeSessionMarker failed: ${err}\n`)
           }
         } catch {}
-
-        // Auto-fallback on quota exhaustion. Periodically polls
-        // the active slot's rate-limit headers; when utilization >= 99.5%
-        // or a 429 is observed, marks the slot exhausted, swaps to the
-        // next healthy slot via src/auth, restarts the agent, and posts
-        // a notification to the owner chat. See telegram-plugin/auto-fallback.ts
-        // for the pure decision logic + notification builder.
-        //
-        // Default poll cadence: every 60 minutes. Set
-        // SWITCHROOM_AUTO_FALLBACK_POLL_MS=0 to disable the background
-        // poller. Pre-v0.6.12 a manual `/authfallback` typed command
-        // also ran the same check; that command was removed in favour
-        // of the `/auth` dashboard's Switch primary picker.
-        const AUTO_FALLBACK_POLL_MS = Number(process.env.SWITCHROOM_AUTO_FALLBACK_POLL_MS ?? 60 * 60_000)
-        if (AUTO_FALLBACK_POLL_MS > 0) {
-          setInterval(() => { void runAutoFallbackCheck({ trigger: 'scheduled' }) }, AUTO_FALLBACK_POLL_MS).unref()
-        }
 
         // Credit-exhaustion watcher (#348). Reads `<agentDir>/.claude/.claude.json`
         // for `cachedExtraUsageDisabledReason`. Fires a Telegram notification

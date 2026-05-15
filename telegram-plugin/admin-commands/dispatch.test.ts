@@ -41,7 +41,7 @@ describe('parseCommandName', () => {
 
 describe('ADMIN_COMMAND_NAMES', () => {
   it('contains the fleet-management admin commands', () => {
-    const required = ['agents', 'logs', 'restart', 'update', 'reconcile', 'stop', 'agentstart', 'grant', 'dangerous', 'permissions', 'vault']
+    const required = ['agents', 'logs', 'restart', 'update', 'reconcile', 'stop', 'agentstart', 'grant', 'dangerous', 'permissions', 'vault', 'audit']
     for (const cmd of required) {
       expect(ADMIN_COMMAND_NAMES.has(cmd)).toBe(true)
     }

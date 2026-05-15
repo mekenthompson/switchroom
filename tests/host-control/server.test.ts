@@ -603,6 +603,66 @@ describe("hostd server — Phase 2 fleet mutations + lock", () => {
     }
   });
 
+  it("update_apply: writes a durable terminal audit row with stderr_tail on subprocess failure (#22)", async () => {
+    // The whole point of #22: a failed fleet mutation must be
+    // diagnosable from the on-disk audit log ALONE, because hostd's
+    // in-memory status map is wiped on every container recreate
+    // (which `switchroom update`'s refresh-hostd step does on every
+    // run). Before #22 the stderr lived only in the status map and
+    // the audit log carried just result/exit_code.
+    const failStub = join(tmp, "switchroom-fail-stub.sh");
+    writeFileSync(
+      failStub,
+      `#!/bin/sh\necho "stdout breadcrumb"\n` +
+        `echo "switchroom apply failed: EACCES /state/agent/start.sh" 1>&2\n` +
+        `exit 1\n`,
+    );
+    chmodSync(failStub, 0o755);
+    await server.stop();
+    server = new (await import("../../src/host-control/server.js")).HostdServer({
+      homeDir: tmp,
+      agentUids: { klanker: 10001, bob: 10002 },
+      config: { agents: { klanker: { admin: true }, bob: {} } },
+      switchroomBin: failStub,
+      auditLogPath: join(tmp, "audit.log"),
+      allowNonLinux: true,
+    });
+    await server.start();
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/klanker/sock"))!;
+
+    const started = await hostdRequest(
+      { socketPath: sock },
+      { v: 1, op: "update_apply", request_id: "ua-term-1", args: {} },
+    );
+    expect(started.result).toBe("started");
+
+    // Let the spawn finish + the .finally() terminal-audit write land.
+    await new Promise((r) => setTimeout(r, 800));
+
+    const { readFileSync } = await import("node:fs");
+    const rows = readFileSync(join(tmp, "audit.log"), "utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+
+    const terminal = rows.find(
+      (r) => r.request_id === "ua-term-1" && r.phase === "terminal",
+    );
+    expect(terminal).toBeDefined();
+    expect(terminal!.result).toBe("error");
+    expect(terminal!.exit_code).toBe(1);
+    expect(String(terminal!.stderr_tail)).toContain("EACCES /state/agent/start.sh");
+    expect(String(terminal!.stdout_tail)).toContain("stdout breadcrumb");
+    // The synchronous request-path row is still there too (started).
+    const startedRow = rows.find(
+      (r) => r.request_id === "ua-term-1" && r.phase === undefined,
+    );
+    expect(startedRow).toBeDefined();
+    expect(startedRow!.result).toBe("started");
+  });
+
   // ── Phase 3 admin observability — agent_logs / agent_exec ─────────────
   it("agent_logs: shells out to docker and returns stdout_tail (admin cross-agent)", async () => {
     // Swap to a "docker" stub that echoes its argv so we can assert

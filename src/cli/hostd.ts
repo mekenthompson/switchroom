@@ -379,12 +379,14 @@ export function registerHostdCommand(program: Command): void {
     .option("--agent <name>", "Filter to a specific caller agent")
     .option("--op <verb>", "Filter to a specific hostd verb (e.g. update_apply, agent_restart)")
     .option("--error", "Show only failed (error/denied) entries")
+    .option("--verbose", "Show the captured stderr / error tail under each failed row")
     .option("--path <file>", "Override audit log path (for debugging)")
     .action((opts: {
       tail?: string;
       agent?: string;
       op?: string;
       error?: boolean;
+      verbose?: boolean;
       path?: string;
     }) => {
       const logPath = opts.path ?? defaultAuditLogPath();
@@ -428,8 +430,10 @@ export function registerHostdCommand(program: Command): void {
         "dur".padStart(8);
       console.log(chalk.dim(header));
       console.log(chalk.dim("─".repeat(header.length)));
-      for (const line of formatForCli(entries)) {
-        if (line.includes(" error ") || line.includes(" denied ")) {
+      for (const line of formatForCli(entries, { verbose: !!opts.verbose })) {
+        if (line.startsWith("    ")) {
+          console.log(chalk.dim(line));
+        } else if (line.includes(" error ") || line.includes(" denied ")) {
           console.log(chalk.red(line));
         } else if (line.includes(" started ")) {
           console.log(chalk.yellow(line));

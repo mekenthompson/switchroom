@@ -818,6 +818,10 @@ export class HostdServer {
         entry.error = (err as Error).message;
       })
       .finally(() => {
+        // Durable terminal row — fire-and-forget, must not throw into
+        // the finally. Written before the lock release so the audit
+        // record exists even if a racing mutation recreates state.
+        void this.writeTerminalAudit(entry);
         // Release the lock IF we're still the one holding it. A test
         // (or a future code path) that reset the daemon's state
         // mid-call shouldn't have its replacement lock clobbered.
@@ -886,16 +890,29 @@ export class HostdServer {
     }
   }
 
+  private auditLogPath(): string {
+    return (
+      this.opts.auditLogPath ??
+      join(this.opts.homeDir, ".switchroom", "host-control-audit.log")
+    );
+  }
+
+  /** Append one JSONL row. Best-effort: a failed append logs to
+   *  stderr but never throws into the request path. */
+  private async appendAuditRow(row: Record<string, unknown>): Promise<void> {
+    const path = this.auditLogPath();
+    await mkdir(dirname(path), { recursive: true }).catch(() => undefined);
+    await appendFile(path, JSON.stringify(row) + "\n").catch((err) => {
+      process.stderr.write(`hostd: audit append failed: ${(err as Error).message}\n`);
+    });
+  }
+
   private async writeAudit(args: {
     caller: SocketIdentity;
     req: HostdRequest;
     resp: HostdResponse;
   }): Promise<void> {
-    const path =
-      this.opts.auditLogPath ??
-      join(this.opts.homeDir, ".switchroom", "host-control-audit.log");
-    await mkdir(dirname(path), { recursive: true }).catch(() => undefined);
-    const row = {
+    await this.appendAuditRow({
       ts: new Date().toISOString(),
       op: args.req.op,
       caller:
@@ -906,10 +923,43 @@ export class HostdServer {
       result: args.resp.result,
       exit_code: args.resp.exit_code,
       duration_ms: args.resp.duration_ms,
+      // Persist the output tails so a failed fleet-mutation can be
+      // diagnosed AFTER hostd is recreated. The in-memory status map
+      // dies on every container recreate (which `switchroom update`'s
+      // refresh-hostd step does on every run), so without this the
+      // stderr of a failed `update_apply` is unrecoverable — you'd
+      // have to reproduce the failure and race the next recreate.
+      // Only emitted when present so the common (started/ok) rows
+      // stay compact.
+      ...(args.resp.stdout_tail ? { stdout_tail: args.resp.stdout_tail } : {}),
+      ...(args.resp.stderr_tail ? { stderr_tail: args.resp.stderr_tail } : {}),
       error: args.resp.error,
-    };
-    await appendFile(path, JSON.stringify(row) + "\n").catch((err) => {
-      process.stderr.write(`hostd: audit append failed: ${(err as Error).message}\n`);
+    });
+  }
+
+  /** Durable terminal-outcome row for an async fleet mutation
+   *  (update_apply / apply). Written directly from the spawn
+   *  completion handler so the record does NOT depend on a
+   *  get_status poll happening to land after the subprocess exits
+   *  and before the next hostd recreate. `phase: "terminal"`
+   *  distinguishes it from the synchronous `started` row the
+   *  request path already wrote for the same request_id. */
+  private async writeTerminalAudit(entry: StatusEntry): Promise<void> {
+    await this.appendAuditRow({
+      ts: new Date().toISOString(),
+      op: entry.op,
+      phase: "terminal",
+      caller:
+        entry.caller.kind === "agent"
+          ? { kind: "agent", name: entry.caller.name }
+          : { kind: "operator" },
+      request_id: entry.request_id,
+      result: entry.result,
+      exit_code: entry.exit_code,
+      duration_ms: (entry.finished_at ?? Date.now()) - entry.started_at,
+      ...(entry.stdout_tail ? { stdout_tail: entry.stdout_tail } : {}),
+      ...(entry.stderr_tail ? { stderr_tail: entry.stderr_tail } : {}),
+      ...(entry.error ? { error: entry.error } : {}),
     });
   }
 

@@ -25,6 +25,12 @@ export interface AuditEntry {
   exit_code: number | null;
   duration_ms: number;
   error?: string;
+  /** "terminal" on the durable async-mutation outcome row written by
+   *  hostd's spawn-completion handler. Absent on the synchronous
+   *  request-path rows. */
+  phase?: string;
+  stdout_tail?: string;
+  stderr_tail?: string;
 }
 
 export interface AuditFilters {
@@ -76,6 +82,9 @@ export function parseAuditLine(line: string): AuditEntry | null {
     duration_ms: o.duration_ms,
   };
   if (typeof o.error === "string") entry.error = o.error;
+  if (typeof o.phase === "string") entry.phase = o.phase;
+  if (typeof o.stdout_tail === "string") entry.stdout_tail = o.stdout_tail;
+  if (typeof o.stderr_tail === "string") entry.stderr_tail = o.stderr_tail;
   return entry;
 }
 
@@ -127,25 +136,51 @@ function shortTs(ts: string): string {
   return ts.replace("T", " ").replace(/\.\d+Z$/, "").slice(0, 19);
 }
 
-/** Plain-text formatter for CLI stdout. Fixed-width columns. */
-export function formatForCli(entries: readonly AuditEntry[]): string[] {
+/** Indent every line of a tail blob so it reads as a sub-block under
+ *  its row. Caps total length so one pathological entry can't flood
+ *  the terminal / a Telegram message. */
+function indentTail(label: string, blob: string, max = 1600): string[] {
+  const clipped =
+    blob.length > max ? blob.slice(blob.length - max) + "\n…(truncated)" : blob;
+  const body = clipped
+    .split("\n")
+    .map((l) => `    │ ${l}`)
+    .join("\n");
+  return [`    ${label}:`, body];
+}
+
+/** Plain-text formatter for CLI stdout. Fixed-width columns. When
+ *  `verbose` is set, error / terminal rows that carry a captured
+ *  stderr (or error message) get an indented sub-block beneath them
+ *  — this is the whole point of persisting the tails: a failed
+ *  `update_apply` is diagnosable from the durable log alone. */
+export function formatForCli(
+  entries: readonly AuditEntry[],
+  opts: { verbose?: boolean } = {},
+): string[] {
   const out: string[] = [];
   for (const e of entries) {
     const ts = shortTs(e.ts).padEnd(20);
     const caller = shortCaller(e.caller).padEnd(15);
-    const op = e.op.padEnd(16);
+    const op = (e.phase === "terminal" ? `${e.op}✓` : e.op).padEnd(16);
     const result = e.result.padEnd(10);
     const exit = e.exit_code == null ? "  -" : String(e.exit_code).padStart(3);
     const ms = `${e.duration_ms}ms`.padStart(8);
     out.push(`${ts} ${caller} ${op} ${result} ${exit} ${ms}`);
+    if (opts.verbose) {
+      if (e.stderr_tail) out.push(...indentTail("stderr", e.stderr_tail));
+      else if (e.error) out.push(...indentTail("error", e.error));
+    }
   }
   return out;
 }
 
 /** Telegram-flavoured formatter — same columns, suited for fenced code
  *  block. Caller wraps in <pre>…</pre>. */
-export function formatForTelegram(entries: readonly AuditEntry[]): string {
+export function formatForTelegram(
+  entries: readonly AuditEntry[],
+  opts: { verbose?: boolean } = {},
+): string {
   if (entries.length === 0) return "(no matching entries)";
-  const lines = formatForCli(entries);
-  return lines.join("\n");
+  return formatForCli(entries, opts).join("\n");
 }

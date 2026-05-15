@@ -255,7 +255,11 @@ export function startHindsight(ports?: { apiPort: number; uiPort: number }): voi
     "-v", `${HINDSIGHT_BROKER_SOCK_VOLUME}:/run/switchroom/auth-broker`,
     // Tmpfs for the dotfile written by the entrypoint shim. Lives in RAM
     // only — the broker remains the single writer of OAuth state on disk.
-    "--tmpfs", "/run/claude-creds:rw,mode=0700",
+    // `uid=` + `gid=` are required because the image's `USER hindsight`
+    // (UID 11000, pinned in Dockerfile.hindsight) runs the entrypoint;
+    // without explicit ownership, tmpfs mounts root-owned and the
+    // entrypoint's `chmod 0700` fails EACCES → restart-loop.
+    "--tmpfs", `/run/claude-creds:rw,mode=0700,uid=${HINDSIGHT_DEFAULT_UID},gid=${HINDSIGHT_DEFAULT_UID}`,
     ...envArgs,
     HINDSIGHT_IMAGE,
   ];
@@ -332,7 +336,7 @@ export function generateHindsightComposeSnippet(): string {
     "      - switchroom-hindsight-data:/home/hindsight/.pg0",
     `      - ${HINDSIGHT_BROKER_SOCK_VOLUME}:/run/switchroom/auth-broker`,
     "    tmpfs:",
-    "      - /run/claude-creds:rw,mode=0700",
+    `      - /run/claude-creds:rw,mode=0700,uid=${HINDSIGHT_DEFAULT_UID},gid=${HINDSIGHT_DEFAULT_UID}`,
     "    restart: unless-stopped",
     "",
     "volumes:",

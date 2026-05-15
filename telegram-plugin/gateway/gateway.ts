@@ -9098,17 +9098,31 @@ bot.command("auth", async ctx => {
     isAdmin,
     client,
     chatId,
-    // Format 2 enricher — probe live quota for every account in
-    // parallel so the snapshot reflects current Anthropic-side
-    // utilization, not the broker's potentially-days-stale
-    // disk-cached `quota.json`. force:true bypasses the 5-min
-    // in-process cache for this call. ~500-800ms per account
-    // serial; in parallel ~800ms total for typical 3-account
-    // fleets — acceptable for an interactive command.
-    liveQuotas: async (accounts) =>
-      Promise.all(
-        accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
-      ),
+    // Format 2 enricher — live quota probe via the broker (#1336).
+    // Pre-broker this read `~/.switchroom/accounts/<label>/credentials.json`
+    // off the agent's HOME, which post-RFC-H is never populated (broker
+    // writes only the per-agent .claude/.credentials.json mirror) — so
+    // every account showed "no credentials.json or accessToken" in
+    // /auth show. The broker is the source of truth for tokens and now
+    // does the Anthropic probe server-side via `probe-quota`. Tokens
+    // never leave the broker container.
+    liveQuotas: async (accounts) => {
+      try {
+        const { results } = await client.probeQuota(accounts.map((a) => a.label))
+        // Preserve input order (broker also preserves it, but be defensive).
+        return accounts.map((a) => {
+          const hit = results.find((r) => r.label === a.label)
+          if (!hit) return { ok: false as const, reason: "broker returned no result for account" }
+          return hit.result
+        })
+      } catch (err) {
+        // Surface a uniform per-account failure so the dashboard renders
+        // gracefully (label badge stays UNKNOWN) instead of falling back
+        // to the legacy table.
+        const reason = `broker probe-quota failed: ${(err as Error)?.message ?? String(err)}`
+        return accounts.map(() => ({ ok: false as const, reason }))
+      }
+    },
     tz: process.env.SWITCHROOM_TIMEZONE ?? process.env.TZ,
   })
   // Translate the handler's optional keyboard shape into grammy's

@@ -242,6 +242,39 @@ export const ListGoogleAccountsRequestSchema = z.object({
   id: z.string().min(1),
 });
 
+/**
+ * Probe live Anthropic quota for a set of accounts. The broker reads
+ * each account's stored accessToken from `~/.switchroom/accounts/
+ * <label>/credentials.json` (its source of truth, only the broker has
+ * a HOME with this path) and probes the upstream `/v1/messages`
+ * endpoint per account, returning the parsed rate-limit-utilization
+ * headers.
+ *
+ * Why this op exists: the gateway lives in the agent container; the
+ * legacy probe path read `credentials.json` off the agent's local
+ * HOME, which post-RFC-H no longer holds the account-level
+ * credentials (the broker writes only the `.claude/.credentials.json`
+ * mirror to agent HOMEs). With nothing to read, every account showed
+ * "quota probe failed: no credentials.json or accessToken" in
+ * `/auth show`. probe-quota routes the probe through the broker
+ * (which DOES have the file) without exposing the accessToken to
+ * the gateway.
+ *
+ * ACL: agent + operator identities accepted (consumer identities
+ * don't render dashboards). No per-account ACL — `accounts` must
+ * be a subset of `listAccounts()`; unknown labels return a failure
+ * result for that label, never a hard error.
+ */
+export const ProbeQuotaRequestSchema = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  op: z.literal("probe-quota"),
+  id: z.string().min(1),
+  /** Account labels to probe. Order is preserved in the response. */
+  accounts: z.array(z.string().min(1)).min(1).max(32),
+  /** Override probe timeout per account (ms). Defaults to 10s. */
+  timeoutMs: z.number().int().positive().max(60_000).optional(),
+});
+
 export const RequestSchema = z.discriminatedUnion("op", [
   GetCredentialsRequestSchema,
   ListStateRequestSchema,
@@ -252,6 +285,7 @@ export const RequestSchema = z.discriminatedUnion("op", [
   RmAccountRequestSchema,
   SetOverrideRequestSchema,
   ListGoogleAccountsRequestSchema,
+  ProbeQuotaRequestSchema,
 ]);
 
 export type Request = z.infer<typeof RequestSchema>;

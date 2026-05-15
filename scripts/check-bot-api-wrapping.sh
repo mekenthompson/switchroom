@@ -98,6 +98,8 @@ ALLOWLIST=(
   # deletion subtracted ~80 lines below — net shift varies between
   # local + CI grep (line counting drift); widened window to 2960.
   # Re-bumped 2026-05-15 for #1308 folder-picker handler integration.
+  # Re-bumped 2026-05-15 for RFC E §4.2 PR-2C drive PreToolUse hook
+  # (#1319) — added ~2 more lines above this block.
   "telegram-plugin/gateway/gateway.ts:2695-2960:permission-request keyboard; no thread_id"
 
   # reply chunk-loop fallback after robustApiCall threw THREAD_NOT_FOUND.

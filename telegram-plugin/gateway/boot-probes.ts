@@ -17,7 +17,7 @@ import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 
 import { readQuotaCache, writeQuotaCache } from './quota-cache.js'
-import { fetchQuota, formatQuotaLine } from '../quota-check.js'
+import { fetchQuota, formatQuotaLine, type QuotaResult } from '../quota-check.js'
 
 const execFile = promisify(execFileCb)
 
@@ -46,6 +46,25 @@ export interface ProbeResult {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 const PROBE_TIMEOUT_MS = 2000
+
+/**
+ * Quota is the one probe that legitimately needs a network round-trip.
+ * The boot card is NOT blocked on probes — it's posted immediately and
+ * probe rows edit in at the 6s settle window (see boot-card.ts
+ * SETTLE_WINDOW_MS) — so the old 1.8s direct-fetch budget was a
+ * self-inflicted abort, not a real constraint. Post-#1336 the broker
+ * owns the canonical probe; the gateway just awaits a local UDS
+ * round-trip while the broker does the Anthropic call server-side.
+ *
+ *   BROKER   — passed to client.probeQuota(); the broker's server-side
+ *              /v1/messages timeout.
+ *   DIRECT   — fallback direct fetch when the broker is unreachable
+ *              (non-docker, boot-time socket race). Still bounded.
+ *   OUTER    — withTimeout() guard; must exceed BROKER + UDS RTT.
+ */
+const QUOTA_BROKER_TIMEOUT_MS = 7000
+const QUOTA_DIRECT_FALLBACK_TIMEOUT_MS = 5000
+const QUOTA_PROBE_OUTER_TIMEOUT_MS = 9000
 
 /**
  * Race a probe against a hard timeout. Returns a fail ProbeResult if the
@@ -831,6 +850,14 @@ export async function probeQuota(
   claudeConfigDir: string,
   _agentDir: string,
   fetchImpl: typeof fetch = fetch,
+  opts: {
+    /** Canonical path (#1336): the broker probes Anthropic server-side
+     *  for this agent's effective account. Returns null when the broker
+     *  is unreachable / no active account → caller falls back to a
+     *  direct probe. Injected from gateway.ts (probeQuotaForBootCard);
+     *  omitted in non-docker / unit tests. */
+    brokerProbe?: (timeoutMs?: number) => Promise<QuotaResult | null>
+  } = {},
 ): Promise<ProbeResult> {
   return withTimeout('Quota', (async (): Promise<ProbeResult> => {
     const cached = readQuotaCache()
@@ -838,35 +865,50 @@ export async function probeQuota(
       return cached
     }
 
-    // The fallback per-agent token path is `accounts/default/.oauth-token`;
-    // fetchQuota's own resolver only checks the top-level `.oauth-token`,
-    // so prefer that, and if it's missing surface the same degraded row
-    // we did before (no live probe — that's a setup issue, not a runtime
-    // one).
-    let claudeDirForProbe: string | null = null
-    for (const candidate of [
-      claudeConfigDir,
-      join(claudeConfigDir, 'accounts', 'default'),
-    ]) {
-      if (existsSync(join(candidate, '.oauth-token'))) {
-        claudeDirForProbe = candidate
-        break
-      }
-    }
-    if (!claudeDirForProbe) {
-      return {
-        status: 'degraded',
-        label: 'Quota',
-        detail: 'no OAuth token',
-        nextStep: 'No OAuth token on disk — register a fleet account: `switchroom auth add <label> --from-oauth` then `switchroom auth use <label>` (RFC H)',
+    // Prefer the broker (canonical since #1336). It does the /v1/messages
+    // call server-side with its own timeout; we just await the local UDS
+    // round-trip. Reset Dates are revived at the client boundary
+    // (src/auth/broker/client.ts) so formatQuotaLine is safe.
+    let probe: QuotaResult | null = null
+    if (opts.brokerProbe) {
+      try {
+        probe = await opts.brokerProbe(QUOTA_BROKER_TIMEOUT_MS)
+      } catch {
+        probe = null
       }
     }
 
-    const probe = await fetchQuota({
-      claudeConfigDir: claudeDirForProbe,
-      fetchImpl,
-      timeoutMs: 1800,
-    })
+    if (!probe) {
+      // Fallback: broker absent/unreachable (non-docker install, or a
+      // boot-time socket race). Direct probe — the per-agent token path
+      // is `accounts/default/.oauth-token`; fetchQuota's resolver only
+      // checks the top-level `.oauth-token`, so prefer that. Missing
+      // token is a setup issue, surfaced as the same degraded row.
+      let claudeDirForProbe: string | null = null
+      for (const candidate of [
+        claudeConfigDir,
+        join(claudeConfigDir, 'accounts', 'default'),
+      ]) {
+        if (existsSync(join(candidate, '.oauth-token'))) {
+          claudeDirForProbe = candidate
+          break
+        }
+      }
+      if (!claudeDirForProbe) {
+        return {
+          status: 'degraded',
+          label: 'Quota',
+          detail: 'no OAuth token',
+          nextStep: 'No OAuth token on disk — register a fleet account: `switchroom auth add <label> --from-oauth` then `switchroom auth use <label>` (RFC H)',
+        }
+      }
+      probe = await fetchQuota({
+        claudeConfigDir: claudeDirForProbe,
+        fetchImpl,
+        timeoutMs: QUOTA_DIRECT_FALLBACK_TIMEOUT_MS,
+      })
+    }
+
     if (!probe.ok) {
       // Auth rejection from /v1/messages is a strong signal — the same
       // endpoint claude itself uses. Other errors are surfaced verbatim
@@ -889,7 +931,7 @@ export async function probeQuota(
     }
     writeQuotaCache(result)
     return result
-  })())
+  })(), QUOTA_PROBE_OUTER_TIMEOUT_MS)
 }
 
 // ─── Probe: Hindsight ────────────────────────────────────────────────────────

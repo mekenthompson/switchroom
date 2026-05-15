@@ -33,6 +33,7 @@
  */
 
 import type { ProbeResult, GatewayRuntimeInfo } from './boot-probes.js'
+import type { QuotaResult } from '../quota-check.js'
 import type { ListStateData } from './auth-line.js'
 import { renderAuthLine } from './auth-line.js'
 import {
@@ -469,6 +470,15 @@ export interface RunProbesOpts {
     | ListStateData
     | null
     | Promise<ListStateData | null>
+  /**
+   * Canonical quota source (#1336): probes this agent's effective
+   * account via the broker (server-side /v1/messages). Returns null
+   * when the broker is unreachable / no active account → `probeQuota`
+   * falls back to a direct probe. Wired from gateway.ts
+   * (`probeQuotaForBootCard`); omitted in non-docker / unit tests where
+   * the direct fallback preserves prior behaviour.
+   */
+  probeQuotaViaBroker?: (timeoutMs?: number) => Promise<QuotaResult | null>
   /** When true, resolve the agent PID via cgroup walk instead of MainPID
    *  (which is the tmux server pid under tmux supervisor). */
   tmuxSupervisor?: boolean
@@ -502,7 +512,7 @@ export async function runAllProbes(opts: RunProbesOpts): Promise<ProbeMap> {
     probeAccount(opts.agentDir).then(r => { probes.account = r }),
     probeAgentProcess(slug, { execFileImpl: opts.probeExecFileImpl, tmuxSupervisor: opts.tmuxSupervisor, dockerMode: opts.dockerMode }).then(r => { probes.agent = r }),
     probeGateway(opts.gatewayInfo).then(r => { probes.gateway = r }),
-    probeQuota(claudeDir, opts.agentDir, opts.fetchImpl).then(r => { probes.quota = r }),
+    probeQuota(claudeDir, opts.agentDir, opts.fetchImpl, { brokerProbe: opts.probeQuotaViaBroker }).then(r => { probes.quota = r }),
     probeHindsight(opts.bankName, opts.fetchImpl).then(r => { probes.hindsight = r }),
     probeScheduler(slug, { dockerMode: opts.dockerMode }).then(r => { probes.scheduler = r }),
     probeBroker(undefined, { dockerMode: opts.dockerMode }).then(r => { probes.broker = r }),

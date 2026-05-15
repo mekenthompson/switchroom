@@ -253,7 +253,11 @@ function registerConnect(googleParent: Command, program: Command): void {
             { kind: "string", value },
             { socket: brokerSocket, passphrase },
           );
-          const verdict = interpretConnectPutResult(key, result);
+          const verdict = interpretConnectPutResult(
+            key,
+            result,
+            config.vault?.broker?.enabled === false,
+          );
           if (!verdict.ok) {
             throw new Error(verdict.message);
           }
@@ -680,7 +684,17 @@ function registerAccountAdd(accountParent: Command): void {
               if (verdict.ok) return verdict.value;
               if (!verdict.fallback) throw new Error(verdict.message);
               // fallback: broker vanished between status and get — fall
-              // through to the direct path below.
+              // through to the direct path below. Don't do it silently
+              // (mirrors the yellow notice `vault get` prints on the
+              // same transition); a direct read of a broker-owned vault
+              // can EACCES, so the operator should know why we're now
+              // prompting for the passphrase.
+              console.error(
+                chalk.yellow(
+                  `  vault-broker became unreachable mid-request — ` +
+                    `falling back to a direct vault read for '${key}'.`,
+                ),
+              );
             }
 
             directVaultPath ??= resolvePath(
@@ -846,20 +860,34 @@ export function oauthClientSetupGuidance(reason: string): string {
 export function interpretConnectPutResult(
   key: string,
   result: PutResult,
+  brokerDisabled = false,
 ): { ok: true } | { ok: false; message: string } {
   switch (result.kind) {
     case "ok":
       return { ok: true };
     case "unreachable":
+      // Two very different causes, two different next steps. If the
+      // operator deliberately runs vault.broker.enabled:false, telling
+      // them to restart the broker is useless — point them at the
+      // manual seed path (the documented `--no-broker` direct write,
+      // which is correct there because the file isn't broker-owned).
       return {
         ok: false,
-        message:
-          `Vault broker is unreachable (${result.msg}); '${key}' was not ` +
-          `stored. connect writes secrets through the broker, not the ` +
-          `vault file. Check it on the host — 'switchroom vault broker ` +
-          `status'; if wedged, 'docker compose -p switchroom restart ` +
-          `vault-broker' — then re-run 'switchroom auth google connect' ` +
-          `(the write is idempotent).`,
+        message: brokerDisabled
+          ? `'${key}' was not stored: connect writes secrets through the ` +
+            `vault-broker, but vault.broker.enabled is false in your ` +
+            `config (${result.msg}). On a broker-disabled host, seed the ` +
+            `two keys directly instead — 'switchroom vault set ` +
+            `--no-broker google-oauth-client-id' and ' --no-broker ` +
+            `google-oauth-client-secret' — then add the google_workspace: ` +
+            `block by hand (docs/google-workspace.md § Prerequisite). Or ` +
+            `enable the broker and re-run 'switchroom auth google connect'.`
+          : `Vault broker is unreachable (${result.msg}); '${key}' was ` +
+            `not stored. connect writes secrets through the broker, not ` +
+            `the vault file. Check it on the host — 'switchroom vault ` +
+            `broker status'; if wedged, 'docker compose -p switchroom ` +
+            `restart vault-broker' — then re-run 'switchroom auth google ` +
+            `connect' (the write is idempotent).`,
       };
     case "denied":
       return {

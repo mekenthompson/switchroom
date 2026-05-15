@@ -79,7 +79,30 @@ export const DRIVE_READONLY_SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
   "https://www.googleapis.com/auth/drive.metadata.readonly",
 ];
+
+// Opt-in write scope set. `drive.file` is least-privilege: it grants
+// create + edit ONLY for files the app itself creates (or that the user
+// explicitly opens with it) — it does NOT grant edit of arbitrary
+// pre-existing user files (that would be the full `drive` scope). The
+// read scopes are retained so the collab loop (browse folders, read an
+// existing doc, draft a NEW doc next to it) still works. A read grant
+// never silently becomes a write grant (RFC D §12) — callers must
+// explicitly request these (the `--write` flag on `account add`).
+export const DRIVE_WRITE_SCOPES = [
+  ...DRIVE_READONLY_SCOPES,
+  "https://www.googleapis.com/auth/drive.file",
+];
 const DEFAULT_SCOPES = DRIVE_READONLY_SCOPES;
+
+/**
+ * Pick the OAuth scope set for `auth google account add`. Default is
+ * read-only; write is strictly opt-in (RFC D §12 — a read grant must
+ * never silently authorize writes). Pure + exported so the
+ * default-is-read invariant is unit-pinned.
+ */
+export function selectDriveAccountScopes(write: boolean): string[] {
+  return write ? DRIVE_WRITE_SCOPES : DRIVE_READONLY_SCOPES;
+}
 
 export interface DriveCliDeps {
   /** Test seam: substitute the OAuth flow runner. */

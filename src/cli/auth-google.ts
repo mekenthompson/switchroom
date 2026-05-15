@@ -161,17 +161,15 @@ function registerConnect(googleParent: Command, program: Command): void {
         console.log(
           "    4. Credentials → Create credentials → OAuth client ID →",
         );
-        console.log(
-          '       Application type: "TVs and Limited Input devices".',
-        );
+        console.log('       Application type: "Desktop app".');
         console.log(
           chalk.gray(
-            "\n  Must be the TVs-and-Limited-Input type, NOT Desktop: agents\n" +
-              "  authorize via Google's device-code flow (you approve from\n" +
-              "  your phone), which only that client type supports. The\n" +
-              "  examples/personal-google-workspace-mcp/ host client is a\n" +
-              "  separate Desktop client for a different surface — the fleet\n" +
-              "  needs its own.\n",
+            "\n  Must be Desktop app. Google's device-code flow does NOT\n" +
+              "  support Drive scopes (it returns invalid_scope), and OOB is\n" +
+              "  retired — so Drive auth uses the loopback flow, which\n" +
+              "  requires a Desktop client. On a headless server you complete\n" +
+              "  the one browser step over an SSH port-forward (the CLI\n" +
+              "  prints the exact URL + port).\n",
           ),
         );
 
@@ -588,22 +586,28 @@ function registerAccountAdd(accountParent: Command): void {
   accountParent
     .command("add <account>")
     .description(
-      "Mint a Google OAuth refresh token for <account> and register it with the auth-broker. Three-tier OAuth: device-code → OOB-paste → desktop-loopback (RFC D §3, RFC G §4.5).",
+      "Mint a Google OAuth refresh token for <account> and register it with the auth-broker. For Drive scopes the effective flow is desktop-loopback (device-code returns invalid_scope for Drive; OOB is retired) — use a Desktop OAuth client; on a headless host complete the browser step over an SSH port-forward. Add --write for create/edit (drive.file); default is read-only.",
     )
     .option(
       "--replace",
       "Overwrite existing credentials for <account> (default refuses if account already registered)",
       false,
     )
+    .option(
+      "--write",
+      "Request Drive WRITE scope (drive.file: create + edit app-created files) in addition to read. Default is read-only — a read grant never silently becomes a write grant. Re-consent an existing account with `--replace --write`.",
+      false,
+    )
     .action(
-      withConfigError(async (account: string, opts: { replace?: boolean }) => {
+      withConfigError(
+        async (account: string, opts: { replace?: boolean; write?: boolean }) => {
         const normalizedAccount = validateAndNormalizeAccountEmail(account);
 
         // Lazy-import the OAuth flow + vault resolver — they pull in
         // sizeable trees (Drive scaffolding, AES vault) that the
         // sibling enable/disable/list verbs don't need.
         const [
-          { runDriveOAuthFlow, DRIVE_READONLY_SCOPES },
+          { runDriveOAuthFlow, selectDriveAccountScopes },
           { selectInitialTier },
           { brokerCall },
           { loadConfig, resolvePath },
@@ -729,21 +733,42 @@ function registerAccountAdd(accountParent: Command): void {
           );
         }
 
+        const accountScopes = selectDriveAccountScopes(opts.write ?? false);
         const oauthCfg = {
           client_id: clientIdRaw,
           client_secret: clientSecretRaw,
-          scopes: DRIVE_READONLY_SCOPES,
+          scopes: accountScopes,
         };
+        if (opts.write) {
+          console.log(
+            chalk.yellow(
+              "  Requesting Drive WRITE scope (drive.file — create/edit app-created files).",
+            ),
+          );
+        }
         // OAuthEnv is a shaped subset of process.env — picking the
         // fields the selector reads (rather than passing process.env
         // wholesale) keeps the call typed.
+        //
+        // `account add` ALWAYS requests Drive scopes, and for Drive the
+        // device-code and OOB tiers are dead ends (Google returns
+        // invalid_scope for Drive on device-code; OOB was retired in
+        // 2022). On a headless host the generic ladder doesn't recover —
+        // the OOB tier blocks on an un-answerable paste prompt and
+        // nextTier() dead-ends at null before loopback. So default the
+        // initial tier to desktop-loopback here (the one flow that works
+        // for Drive); the operator can still override via
+        // SWITCHROOM_DRIVE_OAUTH_TIER. selectInitialTier honours the
+        // override ahead of its headless-avoidance, so loopback is
+        // selected even headless (operator completes the browser step
+        // over an SSH port-forward to the printed 127.0.0.1:<port>).
         const oauthEnv = {
           DISPLAY: process.env.DISPLAY,
           WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY,
           SSH_CONNECTION: process.env.SSH_CONNECTION,
           SSH_TTY: process.env.SSH_TTY,
           SWITCHROOM_DRIVE_OAUTH_TIER:
-            process.env.SWITCHROOM_DRIVE_OAUTH_TIER,
+            process.env.SWITCHROOM_DRIVE_OAUTH_TIER ?? "desktop_loopback",
         };
         const initialTier = selectInitialTier(oauthEnv);
 
@@ -776,7 +801,7 @@ function registerAccountAdd(accountParent: Command): void {
           tokens,
           clientId: clientIdRaw,
           accountEmail: normalizedAccount,
-          fallbackScope: DRIVE_READONLY_SCOPES.join(" "),
+          fallbackScope: accountScopes.join(" "),
         });
 
         await brokerCall(async (client) => {
@@ -830,10 +855,10 @@ export function oauthClientSetupGuidance(reason: string): string {
     "    switchroom auth google connect",
     "",
     "  Manual: at https://console.cloud.google.com create an OAuth",
-    '  client of type "TVs and Limited Input devices" (NOT Desktop —',
-    "  agents authorize via the device-code flow, which only that type",
-    "  supports), enable the Drive/Docs/Sheets/Calendar APIs, add",
-    "  yourself as a test user, then:",
+    '  client of type "Desktop app" (Drive uses the loopback flow —',
+    "  device-code returns invalid_scope for Drive and OOB is retired),",
+    "  enable the Drive/Docs/Sheets/Calendar APIs, add yourself as a",
+    "  test user, then:",
     "",
     "    switchroom vault set google-oauth-client-id",
     "    switchroom vault set google-oauth-client-secret",

@@ -1,10 +1,29 @@
 /**
  * Google Drive OAuth flow — three-tier auto-selection (RFC C §3).
  *
- * Tier preference (in order):
- *   1. RFC 8628 device-code (preferred — works over SSH, no port binding).
- *   2. OOB-paste (fallback — Google may reject device-code for Drive scopes).
- *   3. Desktop loopback (last resort — only when a local browser is reachable).
+ * Generic tier ladder (in order):
+ *   1. RFC 8628 device-code (works over SSH, no port binding).
+ *   2. OOB-paste.
+ *   3. Desktop loopback (needs a reachable browser / SSH port-forward).
+ *
+ * **Drive-scope reality (load-bearing — verified empirically):** for the
+ * Drive scopes switchroom requests, tiers 1 and 2 are dead ends — Google
+ * returns `invalid_scope` for Drive on the device-code endpoint, and the
+ * OOB redirect (`urn:ietf:wg:oauth:2.0:oob`) was retired by Google in
+ * 2022 (HTTP 400 `invalid_request`). The generic ladder does NOT
+ * self-recover on a headless host: #1352 keeps device-code's rejection
+ * from crashing, but the next tier (OOB) then blocks on an
+ * un-answerable paste prompt and `nextTier()` returns `null` before
+ * loopback — so an unguided headless Drive `account add` aborts without
+ * ever trying loopback. The only Drive-viable flow is
+ * **desktop-loopback with a Desktop OAuth client**. Therefore
+ * `account add` defaults its initial tier to `desktop_loopback` for
+ * Drive (see `src/cli/auth-google.ts`; operator-overridable via
+ * `SWITCHROOM_DRIVE_OAUTH_TIER`), and `selectInitialTier` honours that
+ * override ahead of its headless-avoidance — so loopback is selected
+ * even headless, and the operator completes the one browser step over
+ * an SSH port-forward to the printed `127.0.0.1:<port>`. The generic
+ * ladder stays accurate for any future non-Drive scope set.
  *
  * Auto-detect headlessness from env: if `$DISPLAY` and `$WAYLAND_DISPLAY` are
  * both empty AND we are inside an SSH session (`$SSH_CONNECTION` present),

@@ -114,17 +114,18 @@ If you'd rather do it by hand (the wizard automates exactly this):
    **Google Drive, Docs, Sheets, and Calendar** APIs; under *OAuth
    consent screen* pick **External**, add yourself as a **Test user**;
    under *Credentials → Create credentials → OAuth client ID* choose
-   **"TVs and Limited Input devices"**. Copy the client id and secret.
+   **"Desktop app"**. Copy the client id and secret.
 
-   > **Client type matters.** It must be **TVs and Limited Input
-   > devices**, not Desktop. `switchroom auth google account add`
-   > authorizes via Google's device-code flow (you approve from your
-   > phone — ideal for a headless 24/7 server), and Google only
-   > supports device-code for that client type. A Desktop client gets
-   > `invalid_client` / "Invalid client type." This is **different
-   > from** `examples/personal-google-workspace-mcp/`, which uses a
-   > Desktop client with browser loopback for the operator's own
-   > host-side Claude Code — a different surface with a different flow.
+   > **Client type matters — Desktop app.** Drive auth uses Google's
+   > **loopback** flow, which requires a Desktop client. The other two
+   > flows are dead ends for Drive: **device-code** returns
+   > `invalid_scope` for Drive scopes (Google does not allow Drive on
+   > device flow), and **OOB** was retired by Google in 2022. On a
+   > **headless server** you complete the single browser step over an
+   > SSH port-forward — `switchroom auth google account add` prints the
+   > exact URL and `localhost` port; you `ssh -L <port>:127.0.0.1:<port>`,
+   > open the URL, approve. Same Desktop+loopback shape the
+   > `examples/personal-google-workspace-mcp/` host MCP uses.
 2. **Vault the secrets** so they never land in YAML:
 
    ```bash
@@ -155,33 +156,47 @@ If you'd rather do it by hand (the wizard automates exactly this):
 switchroom auth google account add ken-personal
 ```
 
-This runs Google's device-code flow:
+This runs Google's **loopback** flow (device-code and OOB do not work
+for Drive — see the client-type note above):
 
-1. Prints a URL + 6-digit user code. Open the URL on any device, paste
-   the code, sign into Google.
-2. Polls Google every 5s until you complete the flow.
-3. Stores the refresh token in `~/.switchroom/auth-broker/` (encrypted
-   at rest — same machine-bound vault posture as the rest of switchroom).
+1. Prints a consent URL and binds an ephemeral `127.0.0.1:<port>`
+   listener.
+2. Open the URL, sign in, approve. On a headless server, first
+   `ssh -L <port>:127.0.0.1:<port> …` so the browser callback reaches
+   the listener.
+3. The listener exchanges the code and stores the refresh token in the
+   broker (encrypted at rest — same machine-bound vault posture as the
+   rest of switchroom).
 4. Account is now visible in `switchroom auth google account list`.
 
 If you have multiple Google accounts to attach, repeat with different
 labels (`ken-personal`, `ken-work`, etc.). The label is just for your
 own reference — agents reference accounts by label, not by Google email.
 
-### Scopes
+### Scopes — read by default, write is opt-in
 
-Default scopes (Workspace tier `core`):
+`account add` requests **read-only** scopes by default:
 
-- `drive.readonly` — list folders, list files, read doc bodies
-- `docs.readonly` — read Google Docs content + structure
-- `sheets.readonly` — read Sheet cell values
-- `userinfo.email` — identity sanity check on the refresh
+- `drive.readonly` — read doc/sheet bodies
+- `drive.metadata.readonly` — list folders + files
 
-Wider tiers (`extended`, `complete`) add write scopes, Calendar, Gmail.
-The tier knob lives in the `google_workspace:` config block (see
-"Configuration cascade" below) and the cascade rules are the same as
-every other config field — `docs/configuration.md` covers the
-general cascade model.
+A read grant **never silently becomes a write grant** (RFC D §12). To
+let agents *create and edit* docs (e.g. draft a new doc into a folder),
+pass `--write`:
+
+```bash
+switchroom auth google account add ken-personal --write
+# re-consent an already-connected account to add write:
+switchroom auth google account add ken-personal --replace --write
+```
+
+`--write` adds **`drive.file`** — least-privilege: agents can create
+files and edit files **they create**, but cannot edit your pre-existing
+unrelated Drive files (that would be the full `drive` scope, which
+switchroom deliberately does not request). It does **not** change
+behaviour for read-only accounts. The Workspace `tier` knob
+(`core`/`extended`/`complete`) controls which upstream MCP *tools* are
+exposed — it is independent of these OAuth scopes.
 
 ### Removing an account
 

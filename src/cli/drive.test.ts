@@ -36,7 +36,13 @@ vi.mock("../vault/vault.js", () => ({
   ),
 }));
 
-import { __test, type DriveCliDeps } from "./drive.js";
+import {
+  __test,
+  selectDriveAccountScopes,
+  DRIVE_READONLY_SCOPES,
+  DRIVE_WRITE_SCOPES,
+  type DriveCliDeps,
+} from "./drive.js";
 import type { WaitForApprovalResult } from "../vault/approvals/wait.js";
 import type { TokenResponse } from "../drive/oauth.js";
 
@@ -420,5 +426,26 @@ describe("drive disconnect", () => {
     const { deps, exit } = makeDeps();
     await __test.runDisconnect({ agentName: "ghost" }, deps);
     expect(exit.code).toBe(4);
+  });
+});
+
+describe("selectDriveAccountScopes", () => {
+  it("defaults to read-only — a read grant never silently becomes write", () => {
+    const s = selectDriveAccountScopes(false);
+    expect(s).toEqual(DRIVE_READONLY_SCOPES);
+    expect(s).not.toContain("https://www.googleapis.com/auth/drive.file");
+  });
+
+  it("write=true adds drive.file (least-privilege) and keeps read scopes", () => {
+    const s = selectDriveAccountScopes(true);
+    expect(s).toEqual(DRIVE_WRITE_SCOPES);
+    expect(s).toContain("https://www.googleapis.com/auth/drive.file");
+    // Read scopes retained so the browse+read collab loop still works.
+    expect(s).toContain("https://www.googleapis.com/auth/drive.readonly");
+    expect(s).toContain(
+      "https://www.googleapis.com/auth/drive.metadata.readonly",
+    );
+    // Least-privilege: NOT the full read/write `drive` scope.
+    expect(s).not.toContain("https://www.googleapis.com/auth/drive");
   });
 });

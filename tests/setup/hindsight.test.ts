@@ -101,6 +101,20 @@ describe("hindsight broker-fed mode (#1245)", () => {
     expect(envPairs).toContain("HINDSIGHT_API_LLM_PROVIDER=claude-code");
   });
 
+  it("pins HINDSIGHT_API_LLM_MODEL to the switchroom default sonnet", () => {
+    // Without this override the upstream hindsight image silently picks
+    // its own default (an older date-pinned sonnet from
+    // PROVIDER_DEFAULT_MODELS in /app/api/hindsight_api/config.py) and
+    // drifts behind the rest of the fleet on every upstream pull.
+    startHindsight({ apiPort: 8888, uiPort: 9999 });
+    const args = findRunArgs();
+    const envPairs: string[] = [];
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-e") envPairs.push(args[i + 1] as string);
+    }
+    expect(envPairs).toContain("HINDSIGHT_API_LLM_MODEL=claude-sonnet-4-6");
+  });
+
   it("uses the switchroom-hindsight image, not upstream", () => {
     startHindsight({ apiPort: 8888, uiPort: 9999 });
     const args = findRunArgs();

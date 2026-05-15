@@ -303,6 +303,17 @@ async function ensureHostMountSources(config: SwitchroomConfig): Promise<void> {
   if (!existsSync(auditLogPath)) {
     writeFileSync(auditLogPath, "", { mode: 0o644 });
   }
+
+  // host-control-audit.log: same pattern as vault-audit.log — hostd
+  // is the writer (from inside its own container at /host-home),
+  // admin agents bind-mount it :ro so `/audit hostd` (#1328) can
+  // tail the privileged-verb history from DM. Pre-create here so
+  // docker compose `up` doesn't hard-fail on a missing :ro source
+  // before hostd has handled its first request.
+  const hostdAuditLogPath = join(home, ".switchroom", "host-control-audit.log");
+  if (!existsSync(hostdAuditLogPath)) {
+    writeFileSync(hostdAuditLogPath, "", { mode: 0o644 });
+  }
 }
 
 /**

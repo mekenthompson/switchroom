@@ -2,12 +2,12 @@
 
 Status: new
 Source of truth in code:
-- `src/agents/compose.ts:727` — `vault-broker` service block
-- `src/agents/compose.ts:898` — `approval-kernel` service block
-- `src/agents/compose.ts:971-1065` — `switchroom-auth-broker` service block
+- `src/agents/compose.ts:733` — `vault-broker:` service block
+- `src/agents/compose.ts:904` — `approval-kernel:` service block
+- `src/agents/compose.ts:978` — `switchroom-auth-broker:` service block (ends ~1069)
 - `src/agents/compose.ts:36-37` — `AGENT_UID_MIN=10001` / `AGENT_UID_MAX=10999`
-- `src/agents/compose.ts:171` — `allocateAgentUid()` (deterministic name hash)
-- `src/agents/compose.ts:1169` — `network_mode: host` on agent containers
+- `src/agents/compose.ts:171` — `allocateAgentUid()` (deterministic name hash; range math `:185-186`)
+- `src/agents/compose.ts:1167` — `network_mode: host` comment; emitted at `~:1174`
 - `profiles/_base/start.sh.hbs` — `tini → start.sh → tmux → bash → claude` + 3 sidecars
 - `src/cli/hostd.ts:50` — `HOSTD_COMPOSE_PROJECT = "switchroom-hostd"` (separate project)
 

@@ -3,7 +3,7 @@
 Status: new
 Source of truth in code:
 - `src/auth/broker/server.ts:1-14` — "sole writer of per-agent `<agentDir>/.claude/.credentials.json`", three peer classes (agent 0660→agent UID / consumer 0600 / operator 0600)
-- `src/agents/compose.ts:971-1065` — singleton service: bind-presence healthcheck, `user 0:0`, `cap_drop ALL` + `cap_add CHOWN/FOWNER/DAC_READ_SEARCH/DAC_OVERRIDE`, `--operator-uid` flag
+- `src/agents/compose.ts:978` — `switchroom-auth-broker:` singleton service (block ends ~1069): bind-presence healthcheck, `user "0:0"`, `cap_drop ALL` + `cap_add CHOWN/FOWNER/DAC_READ_SEARCH/DAC_OVERRIDE`, `--operator-uid` flag
 - `src/auth/broker/server.ts` `socketPathToName` — path-as-identity (same as vault-broker `peercred.ts`)
 - `src/auth/broker/google-provider.ts`, `anthropic-provider.ts` — refresh-loop owners
 - `docs/rfcs/auth-broker.md` — design intent only (RFC = intent; the citations above are the shipped contract)

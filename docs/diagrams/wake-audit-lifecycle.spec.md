@@ -6,14 +6,14 @@ mechanisms into one box labelled "start.sh sources env · SWITCHROOM_PENDING_*".
 That misrepresents the current boot. Regenerate to this spec.)
 
 Source of truth in code:
-- `profiles/_base/start.sh.hbs:253-305` — resume policy (`SWITCHROOM_RESUME_MODE`: handoff default / auto / continue / none)
-- `profiles/_base/start.sh.hbs:322-347` — `SWITCHROOM_SESSION_MODE` (continue|handoff|fresh|cold) for the greeting panel
-- `profiles/_base/start.sh.hbs:349-373` — `.pending-turn.env` → `SWITCHROOM_PENDING_TURN` (sourced + `rm`, fires once)
-- `profiles/_base/start.sh.hbs:375-399` — `.wake-audit-pending` sentinel (written every boot into `$TELEGRAM_STATE_DIR`)
-- `profiles/_base/start.sh.hbs:401-463` — handoff merge into `--append-system-prompt`
+- `profiles/_base/start.sh.hbs:253` ("Session resume policy") — `SWITCHROOM_RESUME_MODE`: handoff default / auto / continue / none
+- `profiles/_base/start.sh.hbs:322` ("Session-mode signal") — `SWITCHROOM_SESSION_MODE` (continue|handoff|fresh|cold) for the greeting panel
+- `profiles/_base/start.sh.hbs:349` ("Pending-turn signal") — `.pending-turn.env` → `SWITCHROOM_PENDING_TURN` (sourced + `rm`, fires once)
+- `profiles/_base/start.sh.hbs:375` ("Wake audit sentinel") — `.wake-audit-pending` written every boot into `$TELEGRAM_STATE_DIR`
+- `profiles/_base/start.sh.hbs:402` ("Session handoff briefing") — handoff merge into `--append-system-prompt` (handoff-briefing.sh invoked at `:432-434`)
 - `src/cli/handoff.ts` + `src/agents/handoff-summarizer.ts` — Stop-hook `.handoff.md` (LLM session summary)
-- `handoff-briefing.sh` (invoked at `start.sh.hbs:432-435`) — `.handoff-briefing.md` (live: Telegram tail + Hindsight recall + today's daily memory)
-- `profiles/_shared/telegram-style.md.hbs` "Wake audit" — the 3-signal check + `.wake-audit-last-completed` dedup
+- `handoff-briefing.sh` — `.handoff-briefing.md` (live: Telegram tail + Hindsight recall + today's daily memory)
+- `skills/switchroom-runtime/SKILL.md:83-118` — the 3-signal check + `.wake-audit-last-completed` conversation-aware dedup (name-referenced at `start.sh.hbs:396`)
 
 Headline: "Things die. Switchroom comes back, with receipts." (unchanged)
 Footer:   "Guardrail against silent dropped work — fires less than once a week on a healthy system." (unchanged)

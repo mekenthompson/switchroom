@@ -5,9 +5,17 @@ The committed `progress-card-anatomy.jpg` has two defects to fix on
 regeneration; the card structure itself still matches the renderer.
 
 Source of truth in code:
-- `telegram-plugin/progress-card.ts` — pinned progress-card renderer
+- `telegram-plugin/card-format.ts` — shared card formatters (`formatDuration:39`, `escapeHtml:55`, `truncate:60`)
+- `telegram-plugin/subagent-watcher.ts` — `PARENT` rollup + in-flight subagent rows (`:482`, `:389`)
+- `telegram-plugin/stream-reply-handler.ts` — reply/stream assembly into the card
 - `docs/telegram-plugin.md` (streaming-modes section) — header/footer semantics
 - `telegram-plugin/gateway/diff-preview-card.ts` — the *sibling* card type (NOT a progress card)
+
+> Stale-path note: `telegram-plugin/progress-card.ts` does **not** exist.
+> The name persists in `CLAUDE.md` and `card-format.ts:4` as a repo-wide
+> stale reference; rendering actually lives in the modules above. Do not
+> re-introduce the dead path on regeneration (tracked separately for the
+> CLAUDE.md/comment cleanup — out of scope for this docs PR).
 
 Defects to correct:
 1. **Typo**: callout text reads "In-flight row with filled **bollid**" →

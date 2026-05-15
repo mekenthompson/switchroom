@@ -30,6 +30,14 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [main]
+  # Manual re-trigger. GHA marks a run failed (no auto-retry) when its
+  # jobs sit queued past the hosted-runner scheduling window during a
+  # capacity blip; `gh run rerun` then refuses ("cannot be retried")
+  # once the run is stale. Without a manual entrypoint the only way to
+  # republish `:latest` is another push to main. workflow_dispatch
+  # gives `gh workflow run docker-images.yml --ref main` as the
+  # recovery lever. (#1336 queue-fail surfaced this gap.)
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -94,7 +102,7 @@ jobs:
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             TAG_VERSION="${GITHUB_REF#refs/tags/}"
             echo "tags=${IMAGE}:${TAG_VERSION},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+          elif [[ ( "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ) && "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "tags=${IMAGE}:latest,${IMAGE}:sha-${SHA_SHORT}" >> "$GITHUB_OUTPUT"
           else
             # PR builds: synthesize a non-pushed tag for build-only mode.
@@ -188,7 +196,7 @@ jobs:
             TAG_VERSION="${GITHUB_REF#refs/tags/}"
             echo "tags=${IMAGE}:${TAG_VERSION},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
             echo "base=${BASE}:${TAG_VERSION}" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+          elif [[ ( "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ) && "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "tags=${IMAGE}:latest,${IMAGE}:sha-${SHA_SHORT}" >> "$GITHUB_OUTPUT"
             echo "base=${BASE}:sha-${SHA_SHORT}" >> "$GITHUB_OUTPUT"
           else
@@ -244,7 +252,7 @@ jobs:
           if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             TAG_VERSION="${GITHUB_REF#refs/tags/}"
             echo "tags=${IMAGE}:${TAG_VERSION},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
-          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+          elif [[ ( "${{ github.event_name }}" == "push" || "${{ github.event_name }}" == "workflow_dispatch" ) && "${{ github.ref }}" == "refs/heads/main" ]]; then
             echo "tags=${IMAGE}:latest,${IMAGE}:sha-${SHA_SHORT}" >> "$GITHUB_OUTPUT"
           else
             echo "tags=${IMAGE}:pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"

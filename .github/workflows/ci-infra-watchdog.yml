@@ -1,0 +1,131 @@
+# ci-infra-watchdog — alert backstop for the #1336 failure class.
+#
+# When a gating workflow fails on `main` it is usually a real red.
+# But during a GitHub-hosted-runner capacity blip, jobs can sit
+# queued past the scheduling window and GHA force-fails the run
+# *before any test executes* (the #1336 / 2026-05-15 incident).
+# Stale runs then refuse `gh run rerun` and — until #1340 — there
+# was no manual lever, so main stayed red silently until the next
+# unrelated push.
+#
+# This workflow does NOT auto-recover (deliberately scoped to
+# alert-only). It distinguishes an infra force-fail from a genuine
+# regression by a single robust signal: a real failure has at least
+# one job whose conclusion is "failure"; an infra/queue force-fail
+# has none (every job skipped/cancelled/never-scheduled). On the
+# infra signature it opens (or de-dupes onto) a GitHub issue so the
+# maintainer hears about it in minutes instead of hours.
+#
+# Known gap: the watchdog itself runs on hosted runners and could
+# also be starved in a severe outage. Accepted — this is a backstop,
+# not a guarantee. Auto-requeue was explicitly out of scope.
+name: ci-infra-watchdog
+
+on:
+  workflow_run:
+    workflows:
+      - ci-lint
+      - ci-tests-core
+      - ci-tests-python
+      - ci-tests-plugin
+      - ci-tests-race-long
+      - docker-e2e
+      - docker-images
+    types: [completed]
+
+permissions:
+  contents: read
+  actions: read
+  issues: write
+
+concurrency:
+  # Serialize per failing commit so the four-workflows-fail-at-once
+  # case (exactly #1336) collapses to one issue + comments, not a
+  # create race.
+  group: ci-infra-watchdog-${{ github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+
+jobs:
+  alert-on-infra-fail:
+    # Only post-merge red on the canonical repo's main.
+    if: >-
+      github.repository == 'switchroom/switchroom' &&
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Classify failure and alert if infra signature
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          WF_NAME: ${{ github.event.workflow_run.name }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+          RUN_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          set -euo pipefail
+
+          # --paginate --slurp walks every page and wraps them as
+          # [{page1},{page2},...]; flatten .[].jobs[] so a run with
+          # >100 jobs whose failures land on page 2+ is still counted.
+          # Without this a large matrix could undercount failures to 0
+          # and mis-classify a genuine red as an infra force-fail —
+          # the exact false-positive that defeats this watchdog.
+          jobs_json="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" --paginate --slurp)"
+          failed_jobs="$(echo "$jobs_json" | jq '[.[].jobs[] | select(.conclusion=="failure")] | length')"
+
+          if [ "${failed_jobs:-0}" -ne 0 ]; then
+            echo "Run $RUN_ID ($WF_NAME): $failed_jobs job(s) reported failure — genuine red, not an infra force-fail. No alert."
+            exit 0
+          fi
+
+          echo "Infra signature: $WF_NAME @ $HEAD_SHA concluded '$RUN_CONCLUSION' with 0 failing jobs (jobs skipped/queued/never-scheduled)."
+
+          # Idempotent label.
+          gh label create ci-infra-failure \
+            --repo "$REPO" \
+            --color B60205 \
+            --description "Main CI red from infra/queue force-fail, not a code regression" \
+            2>/dev/null || true
+
+          existing="$(gh issue list --repo "$REPO" --state open --label ci-infra-failure \
+            --json number,title \
+            --jq "[.[] | select(.title | contains(\"$HEAD_SHA\"))][0].number // empty")"
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "$REPO" \
+              --body "Another infra/queue force-fail on the same commit: **$WF_NAME** — run: $RUN_URL"
+            echo "Commented on existing issue #$existing"
+            exit 0
+          fi
+
+          {
+            printf '%s\n' "Automated infra alert — this is NOT a code or test regression."
+            printf '%s\n' ""
+            printf '%s\n' "Workflow \"$WF_NAME\" failed on main @ $HEAD_SHA, but no job reported"
+            printf '%s\n' "a failure — every job was skipped, cancelled, or never scheduled."
+            printf '%s\n' "That is the GitHub hosted-runner queue force-fail signature (jobs"
+            printf '%s\n' "sit queued past the scheduling window and GHA fails the run before"
+            printf '%s\n' "tests execute), or a workflow startup error. Either way, the test"
+            printf '%s\n' "code never ran, so main is red on infra, not on the commit."
+            printf '%s\n' ""
+            printf '%s\n' "Failed run: $RUN_URL"
+            printf '%s\n' ""
+            printf '%s\n' "Recovery (workflow_dispatch was wired in #1340):"
+            printf '%s\n' "    gh workflow run <workflow-file>.yml --ref main"
+            printf '%s\n' "Re-dispatch the affected workflow(s), confirm green, then close"
+            printf '%s\n' "this issue. If it recurs immediately, suspect a real GHA outage"
+            printf '%s\n' "(check https://www.githubstatus.com) rather than re-dispatching"
+            printf '%s\n' "in a loop."
+            printf '%s\n' ""
+            printf '%s\n' "cc @mekenthompson"
+          } > /tmp/ci-infra-alert.md
+
+          gh issue create --repo "$REPO" \
+            --title "CI infra: main red without job execution @ $HEAD_SHA" \
+            --label ci-infra-failure \
+            --body-file /tmp/ci-infra-alert.md
+          echo "Opened new infra-alert issue."

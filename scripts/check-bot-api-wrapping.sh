@@ -82,7 +82,8 @@ ALLOWLIST=(
   # `wouldFireFleetAutoFallback` synchronous-check insertion (~10
   # lines added between the modelUnavailable detection and the
   # broadcast loop).
-  "telegram-plugin/gateway/gateway.ts:2250-2330:operator-event broadcast; no thread_id in opts"
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler (callsite now ~2331).
+  "telegram-plugin/gateway/gateway.ts:2250-2350:operator-event broadcast; no thread_id in opts"
 
   # permission-request keyboard send. opts only has reply_markup. No thread_id.
   # Range bumped 2026-05-13 for stuck-turn-recovery v2 cleanup expansion
@@ -109,6 +110,7 @@ ALLOWLIST=(
   # (insertions earlier in the file shifted the chunk-loop down).
   # Re-bumped 2026-05-15 post-Path-A-Cut-2 (drive-write IPC handler
   # added ~60 lines higher up; chunk-loop callsite shifted further to ~3451).
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler.
   "telegram-plugin/gateway/gateway.ts:3160-3500:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).

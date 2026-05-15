@@ -8541,6 +8541,81 @@ bot.command('upgrade', async ctx => {
   )
 })
 
+// /audit hostd — tail/filter the hostd audit log. Mirrors `/vault audit`
+// in spirit (operator observability over a privileged subsystem from any
+// admin DM). Admin-gated via ADMIN_COMMAND_NAMES. Reads the audit JSONL
+// at ~/.switchroom/host-control-audit.log directly — no hostd RPC needed
+// because the file is shared via the host bind mount on docker installs.
+bot.command('audit', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  const arg = (ctx.match ?? '').trim()
+  if (arg === '' || arg === 'help' || arg === '--help') {
+    await switchroomReply(
+      ctx,
+      'Usage: <code>/audit hostd [--tail N] [--agent &lt;name&gt;] [--op &lt;verb&gt;] [--error]</code>',
+      { html: true },
+    )
+    return
+  }
+  const tokens = arg.split(/\s+/)
+  const sub = tokens[0]
+  if (sub !== 'hostd') {
+    await switchroomReply(
+      ctx,
+      `Unknown audit target <code>${escapeHtmlForTg(sub ?? '')}</code>. ` +
+      `Supported: <code>hostd</code>.`,
+      { html: true },
+    )
+    return
+  }
+  // Build the CLI argv for switchroom hostd audit. Validate each
+  // operator-supplied value to keep argv injection out of the picture.
+  const ALLOWED_OPS = new Set([
+    'agent_start', 'agent_stop', 'agent_restart', 'apply',
+    'update_check', 'update_apply', 'update_status', 'upgrade_status',
+    'get_status', 'doctor', 'fleet_state',
+  ])
+  const argv: string[] = ['hostd', 'audit']
+  for (let i = 1; i < tokens.length; i++) {
+    const t = tokens[i]!
+    if (t === '--error') { argv.push('--error'); continue }
+    if (t === '--tail' || t === '--agent' || t === '--op') {
+      const v = tokens[++i]
+      if (v == null) {
+        await switchroomReply(ctx, `Flag <code>${t}</code> requires a value.`, { html: true })
+        return
+      }
+      if (t === '--tail' && !/^[0-9]{1,4}$/.test(v)) {
+        await switchroomReply(ctx, `<code>--tail</code> must be an integer (1-9999).`, { html: true })
+        return
+      }
+      if (t === '--agent' && !/^[a-z][a-z0-9-]{0,62}$/i.test(v)) {
+        await switchroomReply(ctx, `<code>--agent</code> name has an invalid shape.`, { html: true })
+        return
+      }
+      if (t === '--op' && !ALLOWED_OPS.has(v)) {
+        await switchroomReply(
+          ctx,
+          `Unknown hostd verb <code>${escapeHtmlForTg(v)}</code>. ` +
+          `Known: ${[...ALLOWED_OPS].sort().map(o => `<code>${o}</code>`).join(', ')}.`,
+          { html: true },
+        )
+        return
+      }
+      argv.push(t, v)
+      continue
+    }
+    await switchroomReply(
+      ctx,
+      `Unknown flag <code>${escapeHtmlForTg(t)}</code>. ` +
+      `Allowed: <code>--tail</code>, <code>--agent</code>, <code>--op</code>, <code>--error</code>.`,
+      { html: true },
+    )
+    return
+  }
+  await runSwitchroomCommand(ctx, argv, `hostd audit${argv.length > 2 ? ' …' : ''}`)
+})
+
 // ─── /approve, /deny, /pending ────────────────────────────────────────────
 // Slash-command alternatives to the inline-button approval flow (useful for
 // desktop-only sessions and power-users). Share pendingPermissions state

@@ -91,7 +91,8 @@ The wizard:
 
 1. Walks you through the GCP Console screens (create project → enable
    Drive/Docs/Sheets/Calendar APIs → OAuth consent screen, add yourself
-   as a test user → create a **Desktop** OAuth client).
+   as a test user → create an OAuth client of type **"TVs and Limited
+   Input devices"**).
 2. Prompts for the client id + secret and stores them in the vault
    **via the vault-broker** (`google-oauth-client-id` /
    `google-oauth-client-secret`) — the broker owns `vault.enc`, so the
@@ -113,7 +114,17 @@ If you'd rather do it by hand (the wizard automates exactly this):
    **Google Drive, Docs, Sheets, and Calendar** APIs; under *OAuth
    consent screen* pick **External**, add yourself as a **Test user**;
    under *Credentials → Create credentials → OAuth client ID* choose
-   **Desktop app**. Copy the client id and secret.
+   **"TVs and Limited Input devices"**. Copy the client id and secret.
+
+   > **Client type matters.** It must be **TVs and Limited Input
+   > devices**, not Desktop. `switchroom auth google account add`
+   > authorizes via Google's device-code flow (you approve from your
+   > phone — ideal for a headless 24/7 server), and Google only
+   > supports device-code for that client type. A Desktop client gets
+   > `invalid_client` / "Invalid client type." This is **different
+   > from** `examples/personal-google-workspace-mcp/`, which uses a
+   > Desktop client with browser loopback for the operator's own
+   > host-side Claude Code — a different surface with a different flow.
 2. **Vault the secrets** so they never land in YAML:
 
    ```bash

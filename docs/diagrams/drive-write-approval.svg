@@ -19,8 +19,8 @@
     <circle cx="1060" cy="660" r="3" fill="#C8302C" opacity="0.5"/>
   </g>
 
-  <text x="600" y="60" text-anchor="middle" font-size="18" font-weight="700" fill="#23282F">Editing a Google Doc is a gated tool call too.</text>
-  <text x="600" y="772" text-anchor="middle" font-size="11" font-weight="500" font-style="italic" fill="#5A6069">Same kernel, same TTL, same audit — a diff you approve before it lands in Drive.</text>
+  <text x="600" y="64" text-anchor="middle" font-size="18" font-weight="700" fill="#23282F">Editing a Google Doc is a gated tool call too.</text>
+  <text x="600" y="748" text-anchor="middle" font-size="11" font-weight="500" font-style="italic" fill="#5A6069">Same kernel, same TTL, same audit — a diff you approve before it lands in Drive.</text>
 
   <!-- 1 agent · Drive write intent (dark) -->
   <g transform="rotate(-1.2 220 360)">

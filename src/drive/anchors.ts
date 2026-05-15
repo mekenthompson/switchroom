@@ -79,6 +79,16 @@ export interface HeadingParagraph {
   text: string;
   /** Stable per-doc index — what the wrapper uses to address insert/delete. */
   index: number;
+  /**
+   * Optional inclusive char-range covering this paragraph in the Docs
+   * API `body.content[]` model. Required for `describeOffset()` to
+   * find which paragraph an arbitrary character offset (the unit
+   * `taylorwilsdon/google_workspace_mcp` write tools take as
+   * `start_index`/`end_index`) lands in. Optional so the
+   * resolver-direction tests don't need to specify ranges.
+   */
+  startOffset?: number;
+  endOffset?: number;
 }
 
 export interface TextParagraph {
@@ -87,6 +97,9 @@ export interface TextParagraph {
   text: string;
   /** Stable per-doc index — what the wrapper uses to address insert/delete. */
   index: number;
+  /** See `HeadingParagraph.startOffset`. */
+  startOffset?: number;
+  endOffset?: number;
 }
 
 export interface DocumentSnapshot {
@@ -529,4 +542,193 @@ function outOfRange(
 
 function invalidAnchor(message: string): ResolveResult {
   return { ok: false, error: { code: "INVALID_ANCHOR", message } };
+}
+
+// ────────────────────────────────────────────────────────────────────────
+// Reverse direction — character offset → wrapper-attested location
+// ────────────────────────────────────────────────────────────────────────
+//
+// The forward path (resolveAnchor) is "agent gives an anchor name,
+// wrapper computes the doc position." Reverse goes the other way:
+// "upstream MCP write tool gives a `start_index` (Docs API character
+// offset), wrapper computes the human-readable location the agent
+// can't override." This is the load-bearing piece of the PreToolUse
+// hook gating mcp__google-workspace__* writes — the user has to see
+// where the edit lands, attested by the wrapper, before they tap
+// Allow.
+//
+// taylorwilsdon/google_workspace_mcp tools all take character
+// offsets (`start_index`, `end_index`) into the Docs API's
+// flat character stream. `documents.get` returns each paragraph
+// with its own `startIndex`/`endIndex` range in that stream;
+// `parseDocsApiResponse` (callsite, not here) flattens that into
+// our `DocumentSnapshot` with `startOffset`/`endOffset` per
+// paragraph. `describeOffset` then locates which paragraph
+// contains the requested offset and renders the heading-based
+// display name.
+
+export interface OffsetDescription {
+  /** Human-readable, wrapper-attested. Goes on the `📍` line of the diff-preview card. */
+  displayName: string;
+  /** The paragraph the offset lands in, or null if the snapshot has no offset metadata. */
+  paragraph: Paragraph | null;
+  /** Nearest heading at or above the located paragraph, if any. */
+  nearestHeading: HeadingParagraph | null;
+}
+
+/**
+ * Locate which paragraph contains a Docs-API character offset and
+ * render a wrapper-attested display name like `after heading
+ * 'Goals' (level 2)` or `inside section 'Hiring'` or `at end of
+ * doc`.
+ *
+ * Falls back to a literal `at offset N` when the snapshot has no
+ * `startOffset`/`endOffset` metadata — the hook prefers the
+ * structured form when Drive returned full paragraph ranges, and
+ * the literal form when it couldn't (e.g. `documents.get` quota
+ * error and the hook proceeds without doc context).
+ */
+export function describeOffset(
+  doc: DocumentSnapshot,
+  offset: number,
+): OffsetDescription {
+  if (!Number.isFinite(offset) || offset < 0) {
+    return {
+      displayName: `at offset ${offset}`,
+      paragraph: null,
+      nearestHeading: null,
+    };
+  }
+
+  const located = findParagraphForOffset(doc, offset);
+  if (located === null) {
+    // No offset metadata on any paragraph, or offset falls beyond
+    // the last paragraph's end. Both surface as a literal offset so
+    // the user at least sees the number from the tool call.
+    if (doc.paragraphs.length > 0 && hasOffsets(doc.paragraphs[doc.paragraphs.length - 1]!)) {
+      // For "end of doc" we want the *last* heading in the entire
+      // document, regardless of its `.index` value. Pass Infinity
+      // so the "strictly above" filter degenerates to "any
+      // heading", and the largest-index one wins.
+      return {
+        displayName: "at end of doc",
+        paragraph: null,
+        nearestHeading: nearestHeadingAbove(doc, Number.POSITIVE_INFINITY),
+      };
+    }
+    return {
+      displayName: `at offset ${offset}`,
+      paragraph: null,
+      nearestHeading: null,
+    };
+  }
+
+  // If the located paragraph IS a heading, the agent is editing the
+  // heading line itself — surface that directly so the user sees
+  // they're touching the section title, not the body.
+  if (located.kind === "heading") {
+    return {
+      displayName: `on heading '${truncateLine(located.text)}' (${ordinalLevel(located.level)})`,
+      paragraph: located,
+      nearestHeading: located,
+    };
+  }
+
+  const heading = nearestHeadingAbove(doc, located.index);
+  if (heading === null) {
+    // No heading above — either an unheaded doc or the edit lands
+    // before the first heading.
+    const preview = previewOfNeighborhood(doc, located.index);
+    return {
+      displayName: preview
+        ? `before first heading (near "${preview}")`
+        : `before first heading`,
+      paragraph: located,
+      nearestHeading: null,
+    };
+  }
+
+  return {
+    displayName: `inside section '${truncateLine(heading.text)}' (${ordinalLevel(heading.level)})`,
+    paragraph: located,
+    nearestHeading: heading,
+  };
+}
+
+/**
+ * Find the paragraph whose char-range covers `offset`. Returns null
+ * when no paragraph has offset metadata, or when `offset` lies
+ * past the last paragraph's `endOffset`.
+ *
+ * Linear walk — doc paragraph counts are O(100s) for the realistic
+ * case; binary search would be premature.
+ */
+export function findParagraphForOffset(
+  doc: DocumentSnapshot,
+  offset: number,
+): Paragraph | null {
+  for (const p of doc.paragraphs) {
+    if (!hasOffsets(p)) continue;
+    // Docs API ranges are half-open: paragraph covers [startIndex, endIndex).
+    // Replicate that semantics so an offset that's the exact endOffset
+    // of paragraph N lands in paragraph N+1 (the join-point).
+    if (offset >= p.startOffset! && offset < p.endOffset!) {
+      return p;
+    }
+  }
+  return null;
+}
+
+/**
+ * Find the heading with the largest `.index` that's STRICTLY less
+ * than `paragraphPosition` (i.e. strictly above). Returns null when
+ * no such heading exists.
+ *
+ * Semantics work in terms of the paragraph `.index` field — not
+ * the position in `doc.paragraphs[]`. Mirrors how the forward
+ * resolvers index into the doc, and lets callers reason in the
+ * same coordinate system the agent-facing tools use.
+ *
+ * Callers should typically NOT call this with a heading's own
+ * `.index` and expect to get that heading back — the "strictly
+ * above" semantics deliberately excludes self. See `describeOffset`
+ * for the offset-lands-on-a-heading case, which short-circuits
+ * before calling here.
+ */
+export function nearestHeadingAbove(
+  doc: DocumentSnapshot,
+  paragraphPosition: number,
+): HeadingParagraph | null {
+  let best: HeadingParagraph | null = null;
+  for (const p of doc.paragraphs) {
+    if (p.kind !== "heading") continue;
+    if (p.index >= paragraphPosition) continue;
+    if (best === null || p.index > best.index) best = p;
+  }
+  return best;
+}
+
+function hasOffsets(p: Paragraph): p is Paragraph & { startOffset: number; endOffset: number } {
+  return (
+    typeof p.startOffset === "number" &&
+    typeof p.endOffset === "number" &&
+    p.endOffset > p.startOffset
+  );
+}
+
+function truncateLine(s: string): string {
+  return ellipsize(s.replace(/\s+/g, " ").trim(), 60);
+}
+
+function previewOfNeighborhood(
+  doc: DocumentSnapshot,
+  paragraphIndex: number,
+): string | null {
+  for (let i = 0; i < doc.paragraphs.length; i++) {
+    const p = doc.paragraphs[i]!;
+    if (p.index === paragraphIndex && p.text.trim().length > 0) {
+      return truncateLine(p.text);
+    }
+  }
+  return null;
 }

@@ -10,6 +10,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  describeOffset,
+  findParagraphForOffset,
+  nearestHeadingAbove,
   resolveAnchor,
   type DocumentSnapshot,
   type HeadingParagraph,
@@ -417,5 +420,195 @@ describe("resolved displayName never contains agent-controlled text", () => {
       unheadedDoc,
     );
     expect(r.ok && r.resolved.displayName).toContain("We agreed to ship by Q3.");
+  });
+});
+
+// ────────────────────────────────────────────────────────────────────────
+// Reverse direction — describeOffset / findParagraphForOffset
+// ────────────────────────────────────────────────────────────────────────
+//
+// Used by the PreToolUse hook on Drive write tools to translate
+// upstream's character `start_index` into a wrapper-attested
+// location string like "inside section 'Hiring' (level 2)".
+
+/**
+ * Build a paragraph with explicit char-offset metadata. Mirrors the
+ * Docs API's flat-stream char-range model that `documents.get`
+ * returns (each `body.content[]` element has `startIndex`/`endIndex`).
+ */
+function ph(
+  level: number,
+  text: string,
+  index: number,
+  startOffset: number,
+  endOffset: number,
+): HeadingParagraph {
+  return { kind: "heading", level, text, index, startOffset, endOffset };
+}
+
+function pp(
+  text: string,
+  index: number,
+  startOffset: number,
+  endOffset: number,
+): TextParagraph {
+  return { kind: "text", text, index, startOffset, endOffset };
+}
+
+/**
+ * Realistic char-range doc — a Q3 plan with a body paragraph, two
+ * H2 sections, and a body paragraph under each.
+ *
+ *   offsets   paragraph
+ *   1..18     [H1] "Q3 Plan"
+ *   18..36    Intro paragraph.
+ *   36..44    [H2] "Goals"
+ *   44..62    Ship the picker.
+ *   62..72    [H2] "Hiring"
+ *   72..78    TBD.
+ *
+ * Open intervals match Docs API: an offset that's exactly endOffset
+ * of one paragraph lands in the next.
+ */
+const offsetDoc: DocumentSnapshot = {
+  paragraphs: [
+    ph(1, "Q3 Plan", 1, 1, 18),
+    pp("Intro paragraph.", 2, 18, 36),
+    ph(2, "Goals", 3, 36, 44),
+    pp("Ship the picker.", 4, 44, 62),
+    ph(2, "Hiring", 5, 62, 72),
+    pp("TBD.", 6, 72, 78),
+  ],
+};
+
+describe("findParagraphForOffset", () => {
+  it("returns the paragraph whose [start, end) range covers the offset", () => {
+    expect(findParagraphForOffset(offsetDoc, 1)?.index).toBe(1);
+    expect(findParagraphForOffset(offsetDoc, 17)?.index).toBe(1);
+    expect(findParagraphForOffset(offsetDoc, 18)?.index).toBe(2); // join-point lands in next
+    expect(findParagraphForOffset(offsetDoc, 50)?.index).toBe(4);
+    expect(findParagraphForOffset(offsetDoc, 77)?.index).toBe(6);
+  });
+
+  it("returns null past the last paragraph end", () => {
+    expect(findParagraphForOffset(offsetDoc, 78)).toBeNull();
+    expect(findParagraphForOffset(offsetDoc, 9999)).toBeNull();
+  });
+
+  it("returns null when no paragraph has offset metadata", () => {
+    expect(findParagraphForOffset(headedDoc, 50)).toBeNull();
+  });
+});
+
+describe("nearestHeadingAbove", () => {
+  it("walks backward from a position to the nearest heading", () => {
+    expect(nearestHeadingAbove(offsetDoc, 6)?.text).toBe("Hiring"); // body under Hiring
+    expect(nearestHeadingAbove(offsetDoc, 4)?.text).toBe("Goals"); // body under Goals
+    expect(nearestHeadingAbove(offsetDoc, 5)?.text).toBe("Goals"); // 5 itself is Hiring; "above" excludes it
+  });
+
+  it("returns null when no heading exists above", () => {
+    expect(nearestHeadingAbove(offsetDoc, 1)).toBeNull(); // position 1 is the H1 itself; nothing above
+    expect(nearestHeadingAbove(offsetDoc, 0)).toBeNull(); // before everything
+  });
+
+  it("with a large position-argument returns the last (highest-index) heading", () => {
+    expect(nearestHeadingAbove(offsetDoc, 9999)?.text).toBe("Hiring");
+    expect(nearestHeadingAbove(offsetDoc, Number.POSITIVE_INFINITY)?.text).toBe("Hiring");
+  });
+});
+
+describe("describeOffset", () => {
+  it("renders 'inside section <heading>' for a body offset under a heading", () => {
+    const d = describeOffset(offsetDoc, 50);
+    expect(d.displayName).toBe("inside section 'Goals' (level 2)");
+    expect(d.paragraph?.index).toBe(4);
+    expect(d.nearestHeading?.text).toBe("Goals");
+  });
+
+  it("renders 'on heading <X>' when the offset lands on the heading line itself", () => {
+    const d = describeOffset(offsetDoc, 40); // inside the [H2] "Goals" range
+    expect(d.displayName).toBe("on heading 'Goals' (level 2)");
+    expect(d.nearestHeading?.text).toBe("Goals");
+  });
+
+  it("renders 'before first heading' when the offset is before any heading", () => {
+    // Build a doc whose first paragraph is body text, not a heading.
+    const preHeadingDoc: DocumentSnapshot = {
+      paragraphs: [
+        pp("Cover note paragraph.", 1, 1, 22),
+        ph(1, "Heading later", 2, 22, 36),
+        pp("Body.", 3, 36, 42),
+      ],
+    };
+    const d = describeOffset(preHeadingDoc, 5);
+    expect(d.displayName).toContain("before first heading");
+    expect(d.displayName).toContain("Cover note");
+    expect(d.nearestHeading).toBeNull();
+  });
+
+  it("renders 'at end of doc' when offset is past the last paragraph end", () => {
+    const d = describeOffset(offsetDoc, 78);
+    expect(d.displayName).toBe("at end of doc");
+    expect(d.nearestHeading?.text).toBe("Hiring");
+  });
+
+  it("falls back to a literal offset when the snapshot has no range metadata", () => {
+    // `headedDoc` is the existing forward-resolver fixture, no offsets.
+    const d = describeOffset(headedDoc, 1234);
+    expect(d.displayName).toBe("at offset 1234");
+    expect(d.paragraph).toBeNull();
+    expect(d.nearestHeading).toBeNull();
+  });
+
+  it("rejects negative or non-finite offsets with a literal", () => {
+    expect(describeOffset(offsetDoc, -1).displayName).toBe("at offset -1");
+    expect(describeOffset(offsetDoc, NaN).displayName).toBe("at offset NaN");
+  });
+
+  it("truncates very long heading text in the display name", () => {
+    const longName = "A very long heading title that exceeds the ellipsis budget by a comfortable margin";
+    const doc: DocumentSnapshot = {
+      paragraphs: [
+        ph(2, longName, 1, 1, 100),
+        pp("body", 2, 100, 110),
+      ],
+    };
+    const d = describeOffset(doc, 105);
+    // Expect inside-section to truncate at 60 chars + ellipsis.
+    expect(d.displayName).toContain("'");
+    expect(d.displayName).toContain("…");
+    expect(d.displayName.length).toBeLessThan(longName.length + 30);
+  });
+
+  it("handles a doc with no headings at all (unheaded prose)", () => {
+    const proseDoc: DocumentSnapshot = {
+      paragraphs: [
+        pp("Meeting notes line 1.", 1, 1, 22),
+        pp("Meeting notes line 2.", 2, 22, 44),
+      ],
+    };
+    const d = describeOffset(proseDoc, 10);
+    expect(d.displayName).toContain("before first heading");
+    expect(d.nearestHeading).toBeNull();
+  });
+});
+
+describe("describeOffset — attestation invariant (RFC E §4.2)", () => {
+  it("displayName is computed from the doc snapshot, never from agent input", () => {
+    // The agent-controlled value here is `offset`. It cannot inject
+    // text into displayName beyond appearing as the literal number
+    // in the fallback path — and the fallback only fires when no
+    // doc metadata is available.
+    const d = describeOffset(offsetDoc, 50);
+    expect(d.displayName).not.toContain("50"); // structured path; offset doesn't appear
+    expect(d.displayName).toBe("inside section 'Goals' (level 2)");
+  });
+
+  it("fallback literal contains the offset but no other agent-controlled text", () => {
+    const d = describeOffset(headedDoc, 1234);
+    expect(d.displayName).toBe("at offset 1234");
+    // No room for an agent to inject anything else — the format is
+    // pinned to "at offset <number>".
   });
 });

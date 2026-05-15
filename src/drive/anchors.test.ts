@@ -547,6 +547,22 @@ describe("describeOffset", () => {
     expect(d.nearestHeading).toBeNull();
   });
 
+  it("'before first heading' preview wraps in single quotes (apostrophe-balanced)", () => {
+    // The body preview is wrapped in `'…'` so truncateLine's `'`→`’`
+    // substitution keeps the wrapping balanced even when the body
+    // contains literal apostrophes.
+    const preHeadingDoc: DocumentSnapshot = {
+      paragraphs: [
+        pp("It's a cover note.", 1, 1, 19),
+        ph(1, "Later", 2, 19, 27),
+      ],
+    };
+    const d = describeOffset(preHeadingDoc, 5);
+    expect(d.displayName).toBe("before first heading (near 'It’s a cover note.')");
+    expect(d.displayName.match(/'/g)?.length).toBe(2);
+    expect(d.displayName.match(/"/g)).toBeNull();
+  });
+
   it("renders 'at end of doc' when offset is past the last paragraph end", () => {
     const d = describeOffset(offsetDoc, 78);
     expect(d.displayName).toBe("at end of doc");

@@ -684,7 +684,12 @@ export function describeOffset(
     const preview = previewOfNeighborhood(doc, located.index);
     return {
       displayName: preview
-        ? `before first heading (near "${preview}")`
+        // Same single-quote wrapping as the other displayName shapes
+        // so truncateLine's `'` → `’` substitution covers the
+        // body-text-contains-quote case symmetrically (otherwise a
+        // body line with a literal `"` would unbalance the
+        // parenthetical).
+        ? `before first heading (near '${preview}')`
         : `before first heading`,
       paragraph: located,
       nearestHeading: null,

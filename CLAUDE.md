@@ -301,6 +301,40 @@ npm run test:watch       # vitest --watch
 The build output (`dist/`) is what `switchroom` resolves when installed
 globally. During local work on src/, prefer `bun run dev` over rebuilding.
 
+## CI
+
+**GitHub Actions is primary and gating.** `main` is branch-protected
+with 15 required GHA checks: `lint`, `bun-test`, `unittest`, `vitest
+(1..4)`, `e2e`, `build-base`, `build-hindsight`, and `build-dependents
+(×5)` (agent, broker, kernel, auth-broker, hostd). A PR cannot merge
+to `main` until all 15 are green — including for repo admins (admin
+bypass is off; `enforce_admins` will be flipped on if we ever need to
+self-discipline harder). Auto-merge is enabled repo-wide, so a PR
+with `--auto` enabled will merge itself the moment the last required
+check turns green.
+
+When checking PR state, `gh pr checks <n>` is the source of truth.
+Look at:
+- The named checks above (must be `pass`).
+- `mergeStateStatus` — `CLEAN` means ready, `BLOCKED` means a required
+  check is pending or failed, `DIRTY` means there's a merge conflict
+  with `main`, `UNSTABLE` is the not-yet-required-checks state and is
+  usually fine to merge if the required ones are green.
+
+**Buildkite is informational only.** It still runs UAT fuzz,
+`race-long`, and skill evals (`evals-trigger` / `evals-quality` /
+`evals-summary`) — workflows not yet on GHA. Its `buildkite/switchroom`
+check is NOT in the required-checks list, so a red Buildkite does not
+block merge. Treat a Buildkite failure as a signal worth investigating
+(hosted-agent flakes happen — see #1318 timeout history) but not as a
+merge gate.
+
+Required-check tuning (`gh api -X PUT
+repos/switchroom/switchroom/branches/main/protection/required_status_checks`)
+needs a follow-up PR if a new workflow lands that should gate merges —
+GHA workflows added after the protection was configured do NOT
+auto-add themselves to the required list.
+
 ## Conventions
 
 - **Language:** TypeScript, ES modules, Node ≥ 20.11. Strict TS config.

@@ -82,7 +82,8 @@ ALLOWLIST=(
   # `wouldFireFleetAutoFallback` synchronous-check insertion (~10
   # lines added between the modelUnavailable detection and the
   # broadcast loop).
-  "telegram-plugin/gateway/gateway.ts:2250-2330:operator-event broadcast; no thread_id in opts"
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler (callsite now ~2331).
+  "telegram-plugin/gateway/gateway.ts:2250-2350:operator-event broadcast; no thread_id in opts"
 
   # permission-request keyboard send. opts only has reply_markup. No thread_id.
   # Range bumped 2026-05-13 for stuck-turn-recovery v2 cleanup expansion
@@ -96,6 +97,7 @@ ALLOWLIST=(
   # throttle map + reaper added ~8 lines above this block; runAutoFallbackCheck
   # deletion subtracted ~80 lines below — net shift varies between
   # local + CI grep (line counting drift); widened window to 2960.
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler integration.
   "telegram-plugin/gateway/gateway.ts:2695-2960:permission-request keyboard; no thread_id"
 
   # reply chunk-loop fallback after robustApiCall threw THREAD_NOT_FOUND.
@@ -108,6 +110,7 @@ ALLOWLIST=(
   # (insertions earlier in the file shifted the chunk-loop down).
   # Re-bumped 2026-05-15 post-Path-A-Cut-2 (drive-write IPC handler
   # added ~60 lines higher up; chunk-loop callsite shifted further to ~3451).
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler.
   "telegram-plugin/gateway/gateway.ts:3160-3500:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
@@ -129,6 +132,7 @@ ALLOWLIST=(
   # Re-bumped 2026-05-15 for the /audit hostd command insertion
   # (~85 lines added near line 8475 shifted the vault wizard callsites
   # further down past the prior 10100 ceiling).
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler integration.
   "telegram-plugin/gateway/gateway.ts:9340-10300:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter

@@ -237,9 +237,6 @@ import { shouldSweepChatAtBoot } from './boot-sweep-filter.js'
 import { createIpcServer, type IpcClient, type IpcServer } from './ipc-server.js'
 import { handleRequestDriveApproval } from './drive-write-approval.js'
 import { buildDiffPreviewCard } from './diff-preview-card.js'
-import {
-  approvalRequest as kernelApprovalRequest,
-} from '../../src/vault/approvals/client.js'
 import { createPendingInboundBuffer } from './pending-inbound-buffer.js'
 import {
   buildVaultGrantApprovedInbound,

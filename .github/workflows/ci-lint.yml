@@ -2,15 +2,15 @@ name: ci-lint
 
 # Type-check + 3 lint scripts. Mirrors Buildkite step :lock: Type check.
 #
-# Skip-as-pass pattern (#1320 followup):
-#   Workflow ALWAYS runs on every PR so the `lint` check fires. The
-#   precursor `changes` job uses dorny/paths-filter to compute whether
-#   anything lint-relevant changed; the real `lint` job is `if:`-gated
-#   on that output and reports `skipped` (= success for branch
-#   protection) on irrelevant PRs. Net effect is the same compute
-#   saving as the old workflow-level paths: filter, without the
-#   "never reported" trap that blocks doc-only PRs on classic branch
-#   protection.
+# Sentinel pattern (corrects the #1331 if:-skip approach):
+#   A skipped *required* status check is NOT success on classic branch
+#   protection — it blocks (proven by #1343, a docs-only PR, hard-
+#   BLOCKED). So the real work runs in `lint-run` (path-gated, may
+#   skip), and the required context `lint` is a SENTINEL job that
+#   ALWAYS runs and reports success when lint-run succeeded OR skipped,
+#   failure only when lint-run actually failed. Branch protection keeps
+#   requiring `lint` — now always-reporting — so doc/CI-only PRs merge
+#   without --admin while real lint failures still block.
 
 on:
   pull_request:
@@ -59,7 +59,7 @@ jobs:
               - '.github/actions/setup-switchroom/**'
               - '.github/workflows/ci-lint.yml'
 
-  lint:
+  lint-run:
     needs: changes
     # Push to main: always run (don't gamble on main).
     # PR: gate on changed paths.
@@ -77,3 +77,30 @@ jobs:
         # `bun lint` = tsc --noEmit + plugin-references + bot-api-wrapping +
         # bun-test-imports. Same command path as Buildkite.
         run: bun lint
+
+  # ─── Sentinel ─────────────────────────────────────────────────────
+  # The branch-protection-required context. ALWAYS runs (if: always(),
+  # no path gate) so it always reports. Pass when lint-run succeeded or
+  # was skipped (irrelevant PR); fail only when lint-run truly failed
+  # or was cancelled.
+  lint:
+    needs: [changes, lint-run]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Verdict
+        run: |
+          c='${{ needs.changes.result }}'
+          r='${{ needs.lint-run.result }}'
+          # If the path-filter job itself broke, lint-run is skipped for
+          # an infra reason (not "irrelevant PR") — don't false-green.
+          if [ "$c" = "failure" ] || [ "$c" = "cancelled" ]; then
+            echo "::error::changes=$c — path-filter infra failed; can't trust skip"
+            exit 1
+          fi
+          if [ "$r" = "failure" ] || [ "$r" = "cancelled" ]; then
+            echo "::error::lint-run=$r — real lint failure, blocking"
+            exit 1
+          fi
+          echo "changes=$c lint-run=$r → pass (ran=success, or skipped on irrelevant PR)"

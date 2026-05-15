@@ -147,6 +147,24 @@ describe("interpretConnectPutResult", () => {
     expect(v.message.toLowerCase()).not.toContain("vault.enc");
   });
 
+  it("unreachable + broker deliberately disabled → manual-seed guidance, not 'restart the broker'", () => {
+    const v = interpretConnectPutResult(
+      "google-oauth-client-id",
+      { kind: "unreachable", msg: "broker disabled" },
+      true,
+    );
+    expect(v.ok).toBe(false);
+    if (v.ok) throw new Error("unreachable");
+    expect(v.message).toContain("vault.broker.enabled is false");
+    // Broker-disabled host: --no-broker direct seed is the CORRECT path
+    // here (file isn't broker-owned), so it must be offered.
+    expect(v.message).toContain("--no-broker");
+    expect(v.message).toContain("google-oauth-client-secret");
+    expect(v.message).toContain("docs/google-workspace.md");
+    // Don't tell them to restart a broker they intentionally don't run.
+    expect(v.message).not.toContain("docker compose");
+  });
+
   it("denied → surfaces code/msg and the passphrase-mismatch hint", () => {
     const v = interpretConnectPutResult("google-oauth-client-secret", {
       kind: "denied",

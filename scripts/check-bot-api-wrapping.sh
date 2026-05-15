@@ -96,6 +96,7 @@ ALLOWLIST=(
   # throttle map + reaper added ~8 lines above this block; runAutoFallbackCheck
   # deletion subtracted ~80 lines below — net shift varies between
   # local + CI grep (line counting drift); widened window to 2960.
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler integration.
   "telegram-plugin/gateway/gateway.ts:2695-2960:permission-request keyboard; no thread_id"
 
   # reply chunk-loop fallback after robustApiCall threw THREAD_NOT_FOUND.
@@ -129,6 +130,7 @@ ALLOWLIST=(
   # Re-bumped 2026-05-15 for the /audit hostd command insertion
   # (~85 lines added near line 8475 shifted the vault wizard callsites
   # further down past the prior 10100 ceiling).
+  # Re-bumped 2026-05-15 for #1308 folder-picker handler integration.
   "telegram-plugin/gateway/gateway.ts:9340-10300:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter

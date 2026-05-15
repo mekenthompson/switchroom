@@ -225,6 +225,11 @@ import type { AgentAudit } from '../welcome-text.js'
 import { shouldSweepChatAtBoot } from './boot-sweep-filter.js'
 
 import { createIpcServer, type IpcClient, type IpcServer } from './ipc-server.js'
+import { handleRequestDriveApproval } from './drive-write-approval.js'
+import { buildDiffPreviewCard } from './diff-preview-card.js'
+import {
+  approvalRequest as kernelApprovalRequest,
+} from '../../src/vault/approvals/client.js'
 import { createPendingInboundBuffer } from './pending-inbound-buffer.js'
 import {
   buildVaultGrantApprovedInbound,
@@ -3033,6 +3038,69 @@ const ipcServer: IpcServer = createIpcServer({
    * Logs every fire so an operator can correlate the agent's
    * transcript turn against the scheduler's audit row by `prompt_key`.
    */
+  async onRequestDriveApproval(client: IpcClient, msg) {
+    // RFC E §4.2 Cut 2 — Drive-write PreToolUse hook is asking the
+    // gateway to post a diff-preview card so the user can decide.
+    await handleRequestDriveApproval(client, msg, {
+      agentName: getMyAgentName(),
+      loadAllowFrom: () => loadAccess().allowFrom,
+      loadTargetChat: () => {
+        const access = loadAccess()
+        const operator = access.allowFrom[0]
+        if (operator === undefined) return null
+        // For DM-paired setups the target chat IS the operator's
+        // user id. For group setups the gateway already has a topic
+        // routing surface (see how /folders posts) — this picks the
+        // DM path which is the common case; group-routing follow-up
+        // can extend this.
+        return { chatId: operator }
+      },
+      registerApproval: async (args) => {
+        const r = await kernelApprovalRequest({
+          agent_unit: args.agent_unit,
+          scope: args.scope,
+          action: args.action,
+          approver_set: args.approver_set,
+          why: args.why,
+          ttl_ms: args.ttl_ms,
+        })
+        if (r === null || r.state === 'rate_limited') return null
+        return {
+          request_id: r.request_id,
+          expires_at_ms: r.expires_at,
+        }
+      },
+      postCard: async (args) => {
+        try {
+          const sent = await robustApiCall(
+            () =>
+              bot.api.sendMessage(args.chatId, args.text, {
+                parse_mode: 'HTML',
+                ...(args.threadId !== undefined
+                  ? { message_thread_id: args.threadId }
+                  : {}),
+                reply_markup: args.replyMarkup as never,
+              }),
+            {
+              chat_id: String(args.chatId),
+              verb: 'drive-approval-card',
+              ...(args.threadId !== undefined ? { threadId: args.threadId } : {}),
+            },
+          )
+          return { messageId: (sent as { message_id: number }).message_id }
+        } catch (err) {
+          process.stderr.write(
+            `telegram gateway: drive-approval postCard failed: ${(err as Error).message}\n`,
+          )
+          return null
+        }
+      },
+      buildCard: ({ preview, suggestRequestId }) =>
+        buildDiffPreviewCard({ preview, suggestRequestId }),
+      log: (m) => process.stderr.write(`telegram gateway: drive-approval — ${m}\n`),
+    })
+  },
+
   onInjectInbound(_client: IpcClient, msg: InjectInboundMessage) {
     const promptKey = typeof msg.inbound.meta?.prompt_key === 'string'
       ? msg.inbound.meta.prompt_key

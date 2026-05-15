@@ -326,8 +326,11 @@ describe("Principles/consistency — every operator approval card uses the same 
     for (const m of gatewaySrc.matchAll(/callback_data:\s*[`'"]([a-z]+):/gi)) {
       prefixUses.add(m[1]!);
     }
-    // Expected set as of #1012 Phase 1.
-    const expectedPrefixes = ["vrs", "vra", "vrd", "vd", "vg", "op"];
+    // Expected set as of #1012 Phase 1; `auth:` added when the
+    // /auth snapshot Format 2 PR re-introduced inline-keyboard
+    // buttons (auth:use:<label>, auth:refresh) — handled by
+    // handleAuthDashboardCallback at the dispatcher.
+    const expectedPrefixes = ["vrs", "vra", "vrd", "vd", "vg", "op", "auth"];
     for (const p of expectedPrefixes) {
       expect(
         gatewaySrc,

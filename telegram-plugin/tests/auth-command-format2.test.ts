@@ -1,0 +1,156 @@
+/**
+ * Integration test for the Format 2 wiring through `renderShowText` +
+ * `handleAuthCommand`. The pure formatter has dedicated tests in
+ * auth-snapshot-format.test.ts; here we cover the seam between the
+ * legacy ASCII-table path and the new health-grouped path.
+ *
+ * Headline guarantees:
+ *
+ *   1. With no liveQuotas, renderShowText produces the legacy ASCII
+ *      table shape (back-compat preserved).
+ *   2. With liveQuotas matching state.accounts.length, renderShowText
+ *      produces the Format 2 health-grouped shape (Recommendation
+ *      footer present, ASCII column header absent).
+ *   3. handleAuthCommand attaches a keyboard ONLY when liveQuotas is
+ *      supplied AND yields one quota per account (no half-rendered
+ *      buttons under partial-failure).
+ *   4. The keyboard emitted by handleAuthCommand never references a
+ *      blocked or unknown-health account in a switch button (smart-
+ *      hide rule, integration variant of the unit test in
+ *      auth-snapshot-format.test.ts).
+ */
+import { describe, it, expect, vi } from 'vitest';
+import { renderShowText, handleAuthCommand } from '../gateway/auth-command.js';
+import type { AuthBrokerClient, AuthCommandContext } from '../gateway/auth-command.js';
+import type { ListStateData } from '../../src/auth/broker/client.js';
+import type { QuotaResult, QuotaUtilization } from '../quota-check.js';
+
+function quota(part: Partial<QuotaUtilization>): QuotaUtilization {
+  return {
+    fiveHourUtilizationPct: 0,
+    sevenDayUtilizationPct: 0,
+    fiveHourResetAt: null,
+    sevenDayResetAt: null,
+    representativeClaim: null,
+    overageStatus: null,
+    overageDisabledReason: null,
+    ...part,
+  };
+}
+
+function qOk(part: Partial<QuotaUtilization>): QuotaResult {
+  return { ok: true, data: quota(part) };
+}
+
+const NOW_MS = new Date('2026-05-15T00:53:00Z').getTime();
+
+const FIXTURE_STATE: ListStateData = {
+  active: 'you@x',
+  fallback_order: ['ken@x', 'me@x', 'you@x'],
+  accounts: [
+    { label: 'ken@x', exhausted: false },
+    { label: 'me@x', exhausted: false },
+    { label: 'you@x', exhausted: false },
+  ],
+  agents: [{ name: 'carrie', account: 'you@x', override: null }],
+  consumers: [],
+};
+
+const FIXTURE_QUOTAS: QuotaResult[] = [
+  qOk({ fiveHourUtilizationPct: 0, sevenDayUtilizationPct: 23 }),
+  qOk({ sevenDayUtilizationPct: 100 }), // blocked
+  qOk({ fiveHourUtilizationPct: 8, sevenDayUtilizationPct: 20 }),
+];
+
+function mockClient(over: Partial<AuthBrokerClient> = {}): AuthBrokerClient {
+  return {
+    listState: vi.fn(async () => FIXTURE_STATE),
+    setActive: vi.fn(async (label: string) => ({ active: label, fanned: ['carrie'] })),
+    rmAccount: vi.fn(async (label: string) => ({ label })),
+    refreshAccount: vi.fn(async (label: string) => ({ account: label })),
+    setOverride: vi.fn(async (agent: string, account: string | null) => ({ agent, account })),
+    ...over,
+  };
+}
+
+describe('renderShowText — Format 2 vs legacy', () => {
+  it('falls back to legacy ASCII table when no liveQuotas given', () => {
+    const out = renderShowText(FIXTURE_STATE, NOW_MS);
+    expect(out).toContain('<b>Auth — fleet snapshot</b>');
+    expect(out).toContain('ACCOUNT');
+    expect(out).toContain('STATUS');
+    expect(out).toContain('EXPIRES');
+    expect(out).not.toContain('🔋');
+    expect(out).not.toContain('Recommendation:');
+  });
+
+  it('renders Format 2 when liveQuotas length matches accounts length', () => {
+    const out = renderShowText(FIXTURE_STATE, NOW_MS, {
+      liveQuotas: FIXTURE_QUOTAS,
+      tz: 'UTC',
+      liveProbedAtMs: NOW_MS,
+    });
+    expect(out).toContain('🔋 <b>Auth — fleet status</b>');
+    expect(out).toContain('Recommendation:');
+    expect(out).toContain('🔴 <b>BLOCKED</b>');
+    expect(out).toContain('🟢 <b>HEALTHY</b>');
+    // Legacy ASCII column headers should be absent
+    expect(out).not.toContain('ACCOUNT     STATUS');
+  });
+
+  it('falls back to legacy when liveQuotas length disagrees with accounts (defensive)', () => {
+    const out = renderShowText(FIXTURE_STATE, NOW_MS, {
+      liveQuotas: FIXTURE_QUOTAS.slice(0, 2), // wrong length
+    });
+    expect(out).not.toContain('🔋');
+    expect(out).toContain('ACCOUNT');
+  });
+});
+
+describe('handleAuthCommand — keyboard attachment', () => {
+  function makeCtx(overrides: Partial<AuthCommandContext> = {}): AuthCommandContext {
+    return {
+      agentName: 'carrie',
+      isAdmin: true,
+      client: mockClient(),
+      chatId: 'chat-1',
+      ...overrides,
+    };
+  }
+
+  it('attaches NO keyboard when liveQuotas is omitted (legacy callers)', async () => {
+    const reply = await handleAuthCommand({ kind: 'show' }, makeCtx());
+    expect(reply.keyboard).toBeUndefined();
+    expect(reply.text).toContain('ACCOUNT'); // legacy table
+  });
+
+  it('attaches a smart keyboard when liveQuotas yields one result per account', async () => {
+    const reply = await handleAuthCommand(
+      { kind: 'show' },
+      makeCtx({ liveQuotas: async () => FIXTURE_QUOTAS, tz: 'UTC' }),
+    );
+    expect(reply.keyboard).toBeDefined();
+    const allButtonText = reply.keyboard!.flat().map((b) => b.text);
+    // Switch button should exist for ken@x (healthy, not active)
+    expect(allButtonText).toContain('Switch fleet → ken@x');
+    // me@x is blocked — must NOT appear as a switch target
+    expect(allButtonText).not.toContain('Switch fleet → me@x');
+    // Bottom row hardware
+    expect(allButtonText).toContain('↻ Refresh');
+    expect(allButtonText).toContain('/usage');
+    expect(allButtonText).toContain('+ Add');
+  });
+
+  it('attaches no keyboard when the live probe throws (graceful degrade)', async () => {
+    const reply = await handleAuthCommand(
+      { kind: 'show' },
+      makeCtx({
+        liveQuotas: async () => {
+          throw new Error('network down');
+        },
+      }),
+    );
+    expect(reply.keyboard).toBeUndefined();
+    expect(reply.text).toContain('ACCOUNT'); // legacy table fallback
+  });
+});

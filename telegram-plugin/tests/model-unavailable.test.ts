@@ -154,7 +154,7 @@ describe('formatModelUnavailableCard — actionable card', () => {
     return resetAt ? { kind, resetAt, raw: 'test' } : { kind, raw: 'test' }
   }
 
-  it('quota_exhausted with reset → snapshot-stable card', () => {
+  it('quota_exhausted with reset → snapshot-stable card (manual-action shape)', () => {
     const card = formatModelUnavailableCard(
       detection('quota_exhausted', new Date('2026-05-03T13:00:00Z')),
       'gymbro',
@@ -165,10 +165,28 @@ describe('formatModelUnavailableCard — actionable card', () => {
       Reason: quota exhausted (resets in 5h)
 
       <b>What to try</b>
-      • <code>/authfallback</code> — switch to the next account slot
+      • <code>/auth use &lt;label&gt;</code> — switch the fleet to a healthy account
       • <code>/auth add</code> — attach another subscription
       • <code>/usage</code> — show quota breakdown"
     `)
+  })
+
+  it('autoFallbackInFlight=true → quiet variant (no manual command list)', () => {
+    // Regression for the "lying card" bug — when the gateway has
+    // already kicked off `fireFleetAutoFallback`, the card MUST NOT
+    // list manual commands the user shouldn't run. Otherwise the
+    // user manually types /auth use while a fleet swap is mid-flight,
+    // racing two writes through the broker.
+    const card = formatModelUnavailableCard(
+      detection('quota_exhausted', new Date('2026-05-03T13:00:00Z')),
+      'gymbro',
+      { now: NOW, autoFallbackInFlight: true },
+    )
+    expect(card).toContain('Auto-failover in progress')
+    expect(card).not.toContain('What to try')
+    expect(card).not.toContain('/auth use')
+    expect(card).not.toContain('/auth add')
+    expect(card).not.toContain('/authfallback')
   })
 
   it('overload without reset omits the parenthetical', () => {
@@ -183,11 +201,14 @@ describe('formatModelUnavailableCard — actionable card', () => {
     expect(card).not.toContain('(resets')
   })
 
-  it('always includes the three actionable suggestions', () => {
+  it('default (no autoFallback) variant includes the actionable suggestions', () => {
     const card = formatModelUnavailableCard(detection('quota_exhausted'), 'gymbro', { now: NOW })
-    expect(card).toContain('<code>/authfallback</code>')
+    expect(card).toContain('<code>/auth use')
     expect(card).toContain('<code>/auth add</code>')
     expect(card).toContain('<code>/usage</code>')
+    // Regression — `/authfallback` is no longer a verb (post-RFC-H);
+    // pre-fix the card lied by suggesting it.
+    expect(card).not.toContain('/authfallback')
   })
 
   it('names the slot in the header when one is supplied', () => {
@@ -283,9 +304,13 @@ describe('integration — gateway suppresses raw stderr in favour of the card', 
     // The actionable card replaces the raw verbatim error.
     expect(card).toContain('Model unavailable')
     expect(card).toContain('quota exhausted')
-    expect(card).toContain('/authfallback')
+    // Post-RFC-H: `/authfallback` is no longer a verb. The default
+    // (non-auto-fallback) card now points at `/auth use <label>` —
+    // the canonical fleet-wide swap.
+    expect(card).toContain('/auth use')
     expect(card).toContain('/auth add')
     expect(card).toContain('/usage')
+    expect(card).not.toContain('/authfallback')
 
     // And the raw stderr text never appears in the user-facing card.
     expect(card).not.toContain('out of extra usage')

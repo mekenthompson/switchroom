@@ -32,19 +32,6 @@ name: ci-tests-core
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "src/**"
-      - "tests/**"
-      - "telegram-plugin/**/*.ts"
-      - "scripts/build.mjs"
-      - "vitest.config.ts"
-      - "tsconfig.json"
-      - "package.json"
-      - "bun.lock"
-      - "telegram-plugin/package.json"
-      - "telegram-plugin/bun.lock"
-      - ".github/actions/setup-switchroom/**"
-      - ".github/workflows/ci-tests-core.yml"
   push:
     branches: [main]
 
@@ -56,8 +43,42 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ─── Path-change filter (skip-as-pass pattern, #1320 followup) ────
+  # Workflow ALWAYS runs so the required `vitest (1-4)` check fires
+  # on every PR. The real jobs are if:-gated on this output and
+  # report `skipped` (= success for branch protection) when no
+  # vitest-relevant paths changed.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            relevant:
+              - 'src/**'
+              - 'tests/**'
+              - 'telegram-plugin/**/*.ts'
+              - 'scripts/build.mjs'
+              - 'vitest.config.ts'
+              - 'tsconfig.json'
+              - 'package.json'
+              - 'bun.lock'
+              - 'telegram-plugin/package.json'
+              - 'telegram-plugin/bun.lock'
+              - '.github/actions/setup-switchroom/**'
+              - '.github/workflows/ci-tests-core.yml'
+
   # ─── Build dist/ once, share with all shards ──────────────────────
   build-dist:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -82,7 +103,8 @@ jobs:
 
   # ─── Sharded vitest run ───────────────────────────────────────────
   vitest:
-    needs: build-dist
+    needs: [changes, build-dist]
+    if: github.event_name == 'push' || needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     strategy:

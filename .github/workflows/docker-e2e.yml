@@ -28,19 +28,6 @@ name: docker-e2e
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "src/vault/**"
-      - "src/cli/apply.ts"
-      - "src/agents/compose.ts"
-      - "src/agent-scheduler/**"
-      - "docker/Dockerfile.base"
-      - "docker/Dockerfile.broker"
-      - "docker/Dockerfile.kernel"
-      - "docker/Dockerfile.agent"
-      - "docker/Dockerfile.auth-broker"
-      - "src/auth/broker/**"
-      - "tests/docker/**"
-      - ".github/workflows/docker-e2e.yml"
   push:
     branches: [main]
 
@@ -52,7 +39,40 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ─── Path-change filter (skip-as-pass pattern, #1320 followup) ────
+  # Workflow ALWAYS runs so the required `e2e` check fires on every
+  # PR. Real job is if:-gated and reports `skipped` (= success for
+  # branch protection) on PRs that don't touch image-affecting paths.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            relevant:
+              - 'src/vault/**'
+              - 'src/cli/apply.ts'
+              - 'src/agents/compose.ts'
+              - 'src/agent-scheduler/**'
+              - 'docker/Dockerfile.base'
+              - 'docker/Dockerfile.broker'
+              - 'docker/Dockerfile.kernel'
+              - 'docker/Dockerfile.agent'
+              - 'docker/Dockerfile.auth-broker'
+              - 'src/auth/broker/**'
+              - 'tests/docker/**'
+              - '.github/workflows/docker-e2e.yml'
+
   e2e:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

@@ -192,6 +192,21 @@ import { sweepActiveReactions } from '../active-reactions-sweep.js'
 import { flushOnAgentDisconnect } from './disconnect-flush.js'
 import { PreambleSuppressor } from './preamble-suppressor.js'
 import {
+  fetchFolderPage,
+  FolderListCache,
+} from '../../src/drive/folder-list.js'
+import { loadFromAuthBroker } from '../../src/drive/wrapper-broker.js'
+import {
+  handleFoldersCommand,
+  handleFolderPickerCallback,
+  type FolderPickerHandlerDeps,
+} from './folder-picker-handler.js'
+import {
+  approvalConsume as kernelApprovalConsume,
+  approvalRecord as kernelApprovalRecord,
+  approvalRequest as kernelApprovalRequest,
+} from '../../src/vault/approvals/client.js'
+import {
   fetchQuota,
   formatQuotaBlock,
 } from '../quota-check.js'
@@ -222,9 +237,6 @@ import { shouldSweepChatAtBoot } from './boot-sweep-filter.js'
 import { createIpcServer, type IpcClient, type IpcServer } from './ipc-server.js'
 import { handleRequestDriveApproval } from './drive-write-approval.js'
 import { buildDiffPreviewCard } from './diff-preview-card.js'
-import {
-  approvalRequest as kernelApprovalRequest,
-} from '../../src/vault/approvals/client.js'
 import { createPendingInboundBuffer } from './pending-inbound-buffer.js'
 import {
   buildVaultGrantApprovedInbound,
@@ -8687,6 +8699,59 @@ async function handlePermissionSlash(ctx: Context, behavior: 'allow' | 'deny'): 
 bot.command('approve', async ctx => handlePermissionSlash(ctx, 'allow'))
 bot.command('deny', async ctx => handlePermissionSlash(ctx, 'deny'))
 
+// ─── Drive folder picker (RFC E §4.1) ───────────────────────────────────
+// /folders — post a Telegram picker card listing this agent's top-level
+// Drive folders. Tap [Allow] on a folder to grant the agent
+// allow_always at doc:gdrive:folder/<id>/**; tap [Browse] to drill in.
+//
+// Authorisation: same dmCommandGate as the other operator slash
+// commands — only allowFrom users can post-trigger.
+
+const folderPickerCache = new FolderListCache()
+
+function buildFolderPickerDeps(): FolderPickerHandlerDeps {
+  const agentName = getMyAgentName()
+  return {
+    agentName,
+    cache: folderPickerCache,
+    fetchPage: async ({ parent_id, page_token }) => {
+      const handle = await loadFromAuthBroker()
+      if (handle === null) {
+        throw new Error(
+          `auth-broker unreachable for agent ${agentName} — is the broker container running?`,
+        )
+      }
+      return fetchFolderPage({
+        access_token: handle.access_token,
+        ...(parent_id !== undefined ? { parent_id } : {}),
+        ...(page_token !== undefined ? { page_token } : {}),
+      })
+    },
+    approvalRequest: async (args) => {
+      const r = await kernelApprovalRequest({
+        agent_unit: args.agent_unit,
+        scope: args.scope,
+        action: args.action,
+        approver_set: args.approver_set,
+        ...(args.why !== null && args.why !== undefined ? { why: args.why } : {}),
+        ...(args.ttl_ms !== null && args.ttl_ms !== undefined ? { ttl_ms: args.ttl_ms } : {}),
+      })
+      if (r === null || r.state === 'rate_limited') return null
+      return { request_id: r.request_id }
+    },
+    approvalConsume: async (id) => {
+      const r = await kernelApprovalConsume(id)
+      return r !== null && r.consumed
+    },
+    approvalRecord: async (args) => kernelApprovalRecord(args),
+  }
+}
+
+bot.command('folders', async ctx => {
+  if (!isAuthorizedSender(ctx)) return
+  await handleFoldersCommand(ctx, buildFolderPickerDeps())
+})
+
 // /pending — list current pending permission prompts with their ids, so the
 // user can target a specific one via /approve <id> or /deny <id>.
 // Restricted to access.allowFrom DMs to match /approve and /deny — it
@@ -11409,6 +11474,29 @@ bot.on('callback_query:data', async ctx => {
   if (data.startsWith('apv:')) {
     const { handleApprovalCallback } = await import('./approval-callback.js')
     await handleApprovalCallback(ctx, data)
+    return
+  }
+
+  // RFC E §4.1: drvpick:<verb>:<agent>[:<...>] — folder-picker card taps.
+  // open / enter / back / refresh re-render the card in place;
+  // grant writes an allow_always kernel decision at
+  // doc:gdrive:folder/<id>/** and edits the card to a confirmation.
+  //
+  // Auth gate: the picker grant is an OPERATOR action (mirrors the
+  // `op:`/`vd:`/`vg:` family, not the `apv:` agent-approval shape).
+  // Mirror those patterns — refuse callbacks from anyone outside
+  // `access.allowFrom`. Without this, a group member who isn't in
+  // the operator allowlist could still tap [✅ Allow "<folder>"] on
+  // a card that landed in the group and write an `allow_always`
+  // decision attributed to themselves.
+  if (data.startsWith('drvpick:')) {
+    const access = loadAccess()
+    const senderId = String(ctx.from?.id ?? '')
+    if (!access.allowFrom.includes(senderId)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' })
+      return
+    }
+    await handleFolderPickerCallback(ctx, data, buildFolderPickerDeps())
     return
   }
 

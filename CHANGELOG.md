@@ -1,5 +1,77 @@
 # Changelog
 
+## v0.11.0 — Drive write-preview lands + hindsight production-hardening + GHA primary CI
+
+The RFC E (Google Drive) write-preview path goes end-to-end: a PreToolUse hook intercepts Drive writes, posts a diff-preview card to Telegram, and waits for approval before letting the model proceed. Hindsight ships its first real-deploy survival kit after a single install loop surfaced five separate latent bugs. CI flips to GitHub Actions as primary (Buildkite stays as a backup) and picks up shared-dist + cache speedups.
+
+### Headline benefits
+
+- **Drive write-preview, end-to-end (RFC E §4.2).** When the model wants to mutate a Drive file (`docs:edit`, `docs:append`, `sheets:update`, `sheets:append`), a PreToolUse hook (#1319) intercepts the call, builds a write-preview spec via the Docs API client (#1316), renders a diff card in Telegram (#1299), and gates the actual write on operator approval (#1295 ships the Open-in-Drive button on granted cards). The reconciler driver (#1307, #1300) closes the loop on background recovery for orphaned approval requests. Folder picker primitives (#1296) and the `/folders` slash command (#1308) let an operator pin Drive scopes per agent. Scope namespace (#1290) and edit-prep helpers (#1297) round out the surface.
+- **Hindsight production-hardening.** Five-bug fix from the first real install (#1309) covering CI matrix gaps, Dockerfile uv-vs-pip drift, COPY-chmod dir-mode propagation, tmpfs UID/GID, and per-consumer volume-name prefix mismatch. Stateless MCP (#1326) closes the failure class where bouncing hindsight strands every agent's MCP session. Earlier in the same install loop: pre-create the parent dir before `COPY --chmod` (#1315), use `uv pip install` instead of the nonexistent venv pip (#1311), pin the LLM model to `claude-sonnet-4-6` (#1312), publish `switchroom-hindsight` to GHCR (#1310), query the auth-broker container for the hindsight socket (#1313).
+- **Hostd Phase 2 gateway swap (#1306).** Telegram-side `/update apply` now talks to the host-control daemon over UDS instead of trying to docker-shell-out from inside the agent container. Closes the silent failure when an operator triggered apply from chat and got an opaque exit-127 instead of a clean error. `/audit hostd` (#1328) gives the operator a read-only command + CLI to inspect the hostd audit log.
+- **GHA as primary CI (#1320).** Dual-run alongside Buildkite landed last release; this release flips the badges (#1322), gates main on the GHA checks, and adds the skip-as-pass pattern (#1331) so narrow-scope PRs don't get blocked by path-filtered required checks. Shared-dist + vitest --changed + docker image cache (#1323) take the typical PR-build wall-clock down materially. Docker image builds skip arm64 on PRs and gain cache mounts (#1330).
+- **Telegram-plugin polish.** Silence-poke state drain on flush-backstop turn-end (#1293), post-reply tail flush on substantive terminal text after a soft-commit reply (#1298), sandbox-hint false-positive suppression on successful tools (#1304), tool-aware silence-poke fallback message (#1301).
+- **Auth UX (#1317 / #1329).** New Format 2 `/auth` panel + causal auto-fallback. Four follow-ups stabilize the gate primitive, broker honesty, refresh throttle, and retire the legacy poller.
+
+### Changes
+
+#### Features
+
+- **feat(drive):** Folder picker primitives — list + cache + card (#1296)
+- **feat(drive):** Folder-picker Telegram glue — `/folders` + `drvpick:` callbacks (#1308)
+- **feat(drive):** RFC E §4.2 scope namespace `doc:gdrive:suggest:*` (#1290)
+- **feat(drive):** Edit-preparation helpers for the four MCP write tools (#1297)
+- **feat(drive):** Open-in-Drive button on granted approval cards (#1295)
+- **feat(drive):** Telegram renderer for the diff-preview card (#1299)
+- **feat(drive):** Docs API client + write-preview spec builder — RFC E §4.2 PR-2A (#1316)
+- **feat(drive):** Gateway IPC verb that posts the diff-preview card — PR-2B (#1318)
+- **feat(drive):** PreToolUse hook + scaffold registration — PR-2C (#1319)
+- **feat(drive):** Reconciler driver loop, kernel-agnostic core — RFC E §4.4 (#1307)
+- **feat(drive):** Recovery wiring helpers — audit + digest + nudge (#1300)
+- **feat(hostd):** Complete Phase 2 gateway swap — close silent `/update apply` (#1306)
+- **feat(audit):** `/audit hostd` Telegram command + `switchroom hostd audit` CLI (#1328)
+- **feat(auth-ux):** Format 2 `/auth` + causal auto-fallback + dispatch fix (#1317)
+
+#### Fixes
+
+- **fix(hindsight):** Five PR #1266 bugs surfaced by the first real deploy (#1309)
+- **fix(hindsight):** Enable stateless MCP so hindsight bounces don't strand agent retain (#1326)
+- **fix(hindsight):** Pre-create `/usr/local/lib/switchroom` with 0755 — dir-mode bug (#1315)
+- **fix(hindsight):** Use `uv pip install` instead of nonexistent venv `pip` (#1311)
+- **fix(hindsight):** Pin LLM model to `claude-sonnet-4-6` — switchroom default (#1312)
+- **fix(doctor):** Query auth-broker container for hindsight socket, not host (#1313)
+- **fix(rfch):** Harmonise boot-probe hints + `/status` auth panel on RFC H verbs (#1327)
+- **fix(auth-ux):** Four follow-ups to #1317 — gate primitive + broker honesty + refresh throttle + retire poller (#1329)
+- **fix(telegram-plugin):** Drain silence-poke state on flush-backstop turn-end (#1293)
+- **fix(telegram-plugin):** Flush post-reply tail when model emits substantive terminal text after a soft-commit reply (#1298)
+- **fix(telegram-plugin):** Tool-aware silence-poke fallback message (#1301)
+- **fix(telegram-plugin):** Suppress sandbox-hint false positives on successful tools (#1304)
+- **fix(ci):** Three GHA followups — plugin test relocation, evals cache, docker-e2e composite (#1321)
+- **fix(ci):** Restore exec bits on shared dist/ artifact (#1332)
+
+#### CI / Performance
+
+- **ci(gha):** Dual-run CI on GitHub Actions alongside Buildkite (#1320)
+- **ci(gha):** Skip-as-pass pattern for flexible required checks on narrow-scope PRs (#1331)
+- **ci(docker-images):** Publish `switchroom-hindsight` to GHCR (#1310)
+- **perf(ci):** Three speedups — shared dist/, `vitest --changed`, docker image cache (#1323)
+- **perf(docker):** Three image-build optimisations — skip arm64 on PRs, cache mounts, COPY reorder (#1330)
+
+#### Docs / chore
+
+- **docs:** Drop retired `switchroom-scheduler` references (#1294)
+- **docs(drive):** `google-workspace.md` user guide + RFC G/E tracking refresh (#1302)
+- **docs(rfc-e):** §4.2 amendment — Path A Cut 2 implementation pivot (#1324)
+- **docs(readme):** Swap Buildkite badges for GitHub Actions (#1322)
+- **docs(claudemd):** Add CI section — GHA primary + gating, Buildkite informational (#1325)
+- **chore(auth-fallback,docs):** Retire dead exports + tick RFC E checklist (#1333)
+
+### Upgrade notes
+
+- **`switchroom update` handles the rollout.** Pulls new images (broker, kernel, agent, auth-broker, hostd, hindsight), regenerates compose, recreates containers, stamps restart markers, and runs doctor. No manual `docker compose` is needed.
+- **Hindsight host migration.** The v0.10.0 → v0.11.0 update changes the per-consumer broker-socket volume name from `switchroom_auth-broker-hindsight-sock` to `auth-broker-hindsight-sock` (#1309). After `switchroom update`, the old prefixed volume is orphaned; `docker volume rm switchroom_auth-broker-hindsight-sock` cleans it up. The canonical `switchroom memory setup` path now works without any manual `docker run -v ...` workaround.
+- **MCP stateless mode.** Hindsight's MCP server now runs in stateless HTTP mode by default (#1326). Operators with bespoke MCP clients that need streaming can override via `docker run -e HINDSIGHT_API_MCP_STATELESS=false`.
+
 ## v0.10.0 — Google Workspace via the auth-broker + RFC H tail-fixes
 
 RFC G Phase 3b lands: a Google account is a first-class auth slot alongside the Anthropic accounts RFC H introduced in v0.9.0. The same broker that owns Anthropic OAuth refresh now owns Google OAuth refresh, per-account ACLs, and per-agent / per-consumer credential fan-out. Plus a tail of RFC-H hardening closing two silent-failure regressions that bit the 2026-05-14 install-validation loop.

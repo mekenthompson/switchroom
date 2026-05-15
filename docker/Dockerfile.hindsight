@@ -41,9 +41,12 @@ RUN npm install -g @anthropic-ai/claude-code@latest \
 # Install claude-agent-sdk into the same venv the hindsight API runs from.
 # The upstream start-all.sh activates this venv before launching uvicorn,
 # so `from claude_agent_sdk import query` resolves to this install.
-# `uv pip install` is faster than plain pip and the venv is already
-# uv-managed by upstream.
-RUN /app/api/.venv/bin/pip install --no-cache-dir claude-agent-sdk \
+#
+# Upstream builds the venv with `uv sync` and never installs pip into it
+# (only uv-managed binaries land in /app/api/.venv/bin/). So we use
+# `uv pip install` against the existing venv via VIRTUAL_ENV — same
+# package manager the venv is already authored by, no pip required.
+RUN VIRTUAL_ENV=/app/api/.venv uv pip install --no-cache-dir claude-agent-sdk \
  && /app/api/.venv/bin/python -c "from claude_agent_sdk import query; print('claude-agent-sdk ok')" >&2
 
 # Pin the upstream `hindsight` user to UID 11000 to match

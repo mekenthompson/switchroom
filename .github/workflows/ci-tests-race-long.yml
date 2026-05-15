@@ -25,6 +25,13 @@ on:
       - ".github/workflows/ci-tests-race-long.yml"
   push:
     branches: [main]
+  # Manual recovery lever. GHA marks a run failed (no auto-retry) when
+  # its jobs sit queued past the hosted-runner scheduling window during
+  # a capacity blip; `gh run rerun` then refuses ("cannot be retried")
+  # on the stale run. workflow_dispatch gives `gh workflow run
+  # ci-tests-race-long.yml --ref main` as the re-trigger. (#1336
+  # queue-fail surfaced this gap.)
+  workflow_dispatch:
 
 permissions:
   contents: read

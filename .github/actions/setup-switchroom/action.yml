@@ -6,9 +6,9 @@ description: |
   This is the ONLY install path. Do NOT add a second
   `cd telegram-plugin && bun install` — telegram-plugin is a bun workspace
   of the root, and a per-package install creates a shadow `@mtcute/node`
-  that breaks vi.mock-based tests in cross-package coverage. See the long
-  comment block in .buildkite/pipeline.yml:137 for the full diagnosis (we
-  spent 10+ red builds on main before that was caught).
+  that breaks vi.mock-based tests in cross-package coverage. We spent
+  10+ red builds on main before that root cause was caught — keep the
+  single root `bun install`.
 
 inputs:
   bun-version:

@@ -1,9 +1,8 @@
 name: ci-evals
 
-# Skills evals — trigger routing + quality. Mirrors Buildkite
-# :compass: + :sparkles: + :bar_chart: steps.
+# Skills evals — trigger routing + quality.
 #
-# Auth precedence (same as BK pipeline.yml:483-489):
+# Auth precedence:
 #   1. ANTHROPIC_API_KEY (separate billing pool)
 #   2. CLAUDE_CODE_OAUTH_TOKEN (subscription, weekly cap)
 #   3. neither → step exits 0 (clean no-op)

@@ -346,6 +346,14 @@ const BATCH_UPDATE_OP_TYPES = new Set<string>([
   "update_document_style",
   "update_section_style",
   "create_header_footer",
+  // Round-3 review followup — additional valid upstream ops the
+  // initial pin missed. Without these, legit agent calls collapse
+  // to "?" on the card (under-accurate, not forgery). Source:
+  // `taylorwilsdon/google_workspace_mcp` `gdocs/docs_tools.py:1242-1248`.
+  "insert_image",
+  "insert_doc_tab",
+  "delete_doc_tab",
+  "update_doc_tab",
 ]);
 
 function batchUpdateDoc(

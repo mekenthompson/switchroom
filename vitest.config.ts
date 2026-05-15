@@ -25,15 +25,6 @@ for (const k of [
   delete process.env[k];
 }
 
-// Buildkite Test Engine: only attach the collector reporter when the
-// analytics token is present. Locally (and in CI jobs without the token)
-// we fall back to vitest's default reporter so `npm test` stays quiet
-// and doesn't spam "Missing BUILDKITE_ANALYTICS_TOKEN" to stderr.
-const reporters: (string | [string, Record<string, unknown>])[] = ["default"];
-if (process.env.BUILDKITE_ANALYTICS_TOKEN) {
-  reporters.push("buildkite-test-collector/vitest/reporter");
-}
-
 // Cap the worker pool. Default is one fork per CPU (16 on this box), and each
 // fork can hold ~900MB. Six agents simultaneously running `npm test` at the
 // default would demand ~80GB of RAM — enough to OOM a 60GB box even with
@@ -67,7 +58,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
-    reporters,
+    reporters: ["default"],
     pool: "forks",
     poolOptions: {
       forks: {
@@ -124,9 +115,9 @@ export default defineConfig({
       // on the default test path. Invoke via `bun run test:uat` from
       // telegram-plugin/. Mocked-mtcute unit tests for the UAT driver
       // live in `tests/uat-*.test.ts` (run under vitest) rather than
-      // co-located, because the buildkite pipeline runs `bun test` from
-      // `telegram-plugin/` and bun's vitest shim is partial — coverage
-      // discussion in PR #994.
+      // co-located, because CI runs `bun test` from `telegram-plugin/`
+      // and bun's vitest shim is partial — coverage discussion in
+      // PR #994.
       "**/telegram-plugin/uat/**",
       "**/telegram-plugin/tests/history.test.ts",
       // history-reaper.test.ts uses bun:sqlite + bun:test (#1073) —

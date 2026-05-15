@@ -15,6 +15,8 @@ import {
   revokeRefreshToken,
   runLoopbackOAuth,
   buildLoopbackAuthUrl,
+  requestDeviceCode,
+  OAuthTierRejected,
 } from "./oauth.js";
 
 const cfg = {
@@ -229,6 +231,70 @@ describe("OOB-paste flow", () => {
     ) as unknown as typeof fetch;
     const tok = await exchangeOobCode(cfg, "pasted-code", fakeFetch);
     expect(tok.refresh_token).toBe("rt");
+  });
+});
+
+describe("requestDeviceCode — tier-rejection classification", () => {
+  const resp = (status: number, body: unknown) =>
+    mock(async () =>
+      new Response(typeof body === "string" ? body : JSON.stringify(body), {
+        status,
+      }),
+    ) as unknown as typeof fetch;
+
+  it("200 → returns the device-code response", async () => {
+    const f = resp(200, {
+      device_code: "dc",
+      user_code: "UC",
+      verification_url: "https://g/v",
+      expires_in: 1800,
+      interval: 5,
+    });
+    const r = await requestDeviceCode(cfg, f);
+    expect(r.device_code).toBe("dc");
+  });
+
+  it("401 invalid_client (\"Invalid client type\") → OAuthTierRejected, not a hard error", async () => {
+    // Exactly what Google returns for a Desktop/Web client hitting the
+    // device endpoint — must fall through, not crash.
+    const f = resp(401, {
+      error: "invalid_client",
+      error_description: "Invalid client type.",
+    });
+    await expect(requestDeviceCode(cfg, f)).rejects.toBeInstanceOf(
+      OAuthTierRejected,
+    );
+  });
+
+  it("400 / 403 still classify as OAuthTierRejected (unchanged)", async () => {
+    await expect(
+      requestDeviceCode(cfg, resp(400, { error: "invalid_scope" })),
+    ).rejects.toBeInstanceOf(OAuthTierRejected);
+    await expect(
+      requestDeviceCode(cfg, resp(403, { error: "disabled_client" })),
+    ).rejects.toBeInstanceOf(OAuthTierRejected);
+  });
+
+  it("401 WITHOUT invalid_client → hard Error (don't over-broaden)", async () => {
+    let err: unknown;
+    try {
+      await requestDeviceCode(cfg, resp(401, { error: "something_else" }));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(OAuthTierRejected);
+  });
+
+  it("500 → hard Error (a server fault is not a tier rejection)", async () => {
+    let err: unknown;
+    try {
+      await requestDeviceCode(cfg, resp(500, "upstream boom"));
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(OAuthTierRejected);
   });
 });
 

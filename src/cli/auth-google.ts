@@ -161,11 +161,17 @@ function registerConnect(googleParent: Command, program: Command): void {
         console.log(
           "    4. Credentials → Create credentials → OAuth client ID →",
         );
-        console.log("       Application type: Desktop app.");
+        console.log(
+          '       Application type: "TVs and Limited Input devices".',
+        );
         console.log(
           chalk.gray(
-            "\n  NOT the examples/personal-google-workspace-mcp/ client — that's\n" +
-              "  a separate host-side surface; the fleet needs its own client.\n",
+            "\n  Must be the TVs-and-Limited-Input type, NOT Desktop: agents\n" +
+              "  authorize via Google's device-code flow (you approve from\n" +
+              "  your phone), which only that client type supports. The\n" +
+              "  examples/personal-google-workspace-mcp/ host client is a\n" +
+              "  separate Desktop client for a different surface — the fleet\n" +
+              "  needs its own.\n",
           ),
         );
 
@@ -823,9 +829,11 @@ export function oauthClientSetupGuidance(reason: string): string {
     "",
     "    switchroom auth google connect",
     "",
-    "  Manual: create a Desktop OAuth client at",
-    "  https://console.cloud.google.com (enable the Drive/Docs/Sheets/",
-    "  Calendar APIs, add yourself as a test user), then:",
+    "  Manual: at https://console.cloud.google.com create an OAuth",
+    '  client of type "TVs and Limited Input devices" (NOT Desktop —',
+    "  agents authorize via the device-code flow, which only that type",
+    "  supports), enable the Drive/Docs/Sheets/Calendar APIs, add",
+    "  yourself as a test user, then:",
     "",
     "    switchroom vault set google-oauth-client-id",
     "    switchroom vault set google-oauth-client-secret",

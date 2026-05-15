@@ -177,9 +177,21 @@ export async function requestDeviceCode(
   });
   if (!res.ok) {
     const text = await res.text();
-    // Google returns 403 / 400 with `invalid_scope` or `disabled_client` when
-    // device-code is not whitelisted for the requested scopes.
-    if (res.status === 400 || res.status === 403) {
+    // Tier-rejection signals — all mean "this client/scope combo can't
+    // do device-code; fall through to the next tier" rather than a hard
+    // crash:
+    //   - 400 / 403 (invalid_scope / disabled_client): device-code not
+    //     whitelisted for the requested scopes.
+    //   - 401 invalid_client ("Invalid client type."): the OAuth client
+    //     is a Desktop/Web type, not "TVs and Limited Input devices".
+    //     Common operator mistake (setup docs historically said
+    //     "Desktop app"); the desktop_loopback tier handles those
+    //     clients, so fall through instead of dumping a raw stack.
+    if (
+      res.status === 400 ||
+      res.status === 403 ||
+      (res.status === 401 && /invalid_client/.test(text))
+    ) {
       throw new OAuthTierRejected(
         `device_code rejected (${res.status}): ${text}`,
       );

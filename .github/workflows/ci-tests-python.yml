@@ -1,0 +1,33 @@
+name: ci-tests-python
+
+# Python tests for vendored Hindsight scripts. Mirrors Buildkite
+# :snake: Python tests (Hindsight scripts). No bun, no node — pure
+# python3 stdlib unittest.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "vendor/hindsight-memory/scripts/**"
+      - ".github/workflows/ci-tests-python.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-tests-python-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run unittest discover
+        working-directory: vendor/hindsight-memory/scripts
+        run: python3 -m unittest discover tests/

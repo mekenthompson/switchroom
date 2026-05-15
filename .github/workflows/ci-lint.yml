@@ -1,27 +1,20 @@
 name: ci-lint
 
 # Type-check + 3 lint scripts. Mirrors Buildkite step :lock: Type check.
-# Triggers narrowly so docs-only / profile-only PRs skip entirely.
 #
-# Dual-run: this runs alongside Buildkite, status check is named distinctly
-# (`ci-lint / lint`) so branch protection can keep BK as the required check
-# while we monitor GHA.
+# Skip-as-pass pattern (#1320 followup):
+#   Workflow ALWAYS runs on every PR so the `lint` check fires. The
+#   precursor `changes` job uses dorny/paths-filter to compute whether
+#   anything lint-relevant changed; the real `lint` job is `if:`-gated
+#   on that output and reports `skipped` (= success for branch
+#   protection) on irrelevant PRs. Net effect is the same compute
+#   saving as the old workflow-level paths: filter, without the
+#   "never reported" trap that blocks doc-only PRs on classic branch
+#   protection.
 
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "**/*.ts"
-      - "**/*.tsx"
-      - "tsconfig.json"
-      - "package.json"
-      - "bun.lock"
-      - "telegram-plugin/package.json"
-      - "telegram-plugin/bun.lock"
-      - "scripts/check-*.mjs"
-      - "scripts/check-bot-api-wrapping.sh"
-      - ".github/actions/setup-switchroom/**"
-      - ".github/workflows/ci-lint.yml"
   push:
     branches: [main]
 
@@ -33,7 +26,37 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            relevant:
+              - '**/*.ts'
+              - '**/*.tsx'
+              - 'tsconfig.json'
+              - 'package.json'
+              - 'bun.lock'
+              - 'telegram-plugin/package.json'
+              - 'telegram-plugin/bun.lock'
+              - 'scripts/check-*.mjs'
+              - 'scripts/check-bot-api-wrapping.sh'
+              - '.github/actions/setup-switchroom/**'
+              - '.github/workflows/ci-lint.yml'
+
   lint:
+    needs: changes
+    # Push to main: always run (don't gamble on main).
+    # PR: gate on changed paths.
+    if: github.event_name == 'push' || needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

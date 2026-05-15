@@ -1425,6 +1425,19 @@ function emitAgentService(
         `      - ${homePrefix}/.switchroom/vault-audit.log:/state/agent/home/.switchroom/vault-audit.log:ro`,
       );
     }
+    // Same shape, for the hostd audit log (#1328): admin DMs can run
+    // `/audit hostd` to tail the privileged-verb history. Hostd is the
+    // sole writer (its own container with --cap-drop=ALL + appendFile);
+    // mounting :ro keeps a compromised admin agent from rewriting
+    // history. Same existsSync guard as the vault audit log — hostd
+    // creates the file lazily on the first privileged-verb request, so
+    // a fresh install may not have it yet and compose `up` would
+    // hard-fail on a missing :ro source.
+    if (existsSync(`${hostHomeForChecks}/.switchroom/host-control-audit.log`)) {
+      lines.push(
+        `      - ${homePrefix}/.switchroom/host-control-audit.log:/state/agent/home/.switchroom/host-control-audit.log:ro`,
+      );
+    }
     // Host-control daemon socket (#1164 follow-up — RFC C).
     // ADMIN-ONLY and gated on `host_control.enabled: true`. The
     // daemon (a systemd user unit on the host) binds the per-agent

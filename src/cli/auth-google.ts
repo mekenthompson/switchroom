@@ -749,13 +749,26 @@ function registerAccountAdd(accountParent: Command): void {
         // OAuthEnv is a shaped subset of process.env — picking the
         // fields the selector reads (rather than passing process.env
         // wholesale) keeps the call typed.
+        //
+        // `account add` ALWAYS requests Drive scopes, and for Drive the
+        // device-code and OOB tiers are dead ends (Google returns
+        // invalid_scope for Drive on device-code; OOB was retired in
+        // 2022). On a headless host the generic ladder doesn't recover —
+        // the OOB tier blocks on an un-answerable paste prompt and
+        // nextTier() dead-ends at null before loopback. So default the
+        // initial tier to desktop-loopback here (the one flow that works
+        // for Drive); the operator can still override via
+        // SWITCHROOM_DRIVE_OAUTH_TIER. selectInitialTier honours the
+        // override ahead of its headless-avoidance, so loopback is
+        // selected even headless (operator completes the browser step
+        // over an SSH port-forward to the printed 127.0.0.1:<port>).
         const oauthEnv = {
           DISPLAY: process.env.DISPLAY,
           WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY,
           SSH_CONNECTION: process.env.SSH_CONNECTION,
           SSH_TTY: process.env.SSH_TTY,
           SWITCHROOM_DRIVE_OAUTH_TIER:
-            process.env.SWITCHROOM_DRIVE_OAUTH_TIER,
+            process.env.SWITCHROOM_DRIVE_OAUTH_TIER ?? "desktop_loopback",
         };
         const initialTier = selectInitialTier(oauthEnv);
 

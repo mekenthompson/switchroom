@@ -84,6 +84,22 @@ describe("selectInitialTier", () => {
       }),
     ).toBe("desktop_loopback");
   });
+
+  // Load-bearing for the `account add` Drive default: the override must
+  // win even on a headless host (no DISPLAY, inside SSH), ahead of the
+  // headless-avoidance. account add defaults the env to
+  // desktop_loopback for Drive precisely because device-code/OOB are
+  // dead ends for Drive and the ladder otherwise dead-ends headless.
+  it("override beats headless-avoidance (desktop_loopback on a headless SSH host)", () => {
+    expect(
+      selectInitialTier({
+        DISPLAY: undefined,
+        WAYLAND_DISPLAY: undefined,
+        SSH_CONNECTION: "10.0.0.2 5 10.0.0.1 22",
+        SWITCHROOM_DRIVE_OAUTH_TIER: "desktop_loopback",
+      }),
+    ).toBe("desktop_loopback");
+  });
 });
 
 describe("nextTier", () => {

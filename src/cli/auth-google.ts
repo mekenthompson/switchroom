@@ -586,7 +586,7 @@ function registerAccountAdd(accountParent: Command): void {
   accountParent
     .command("add <account>")
     .description(
-      "Mint a Google OAuth refresh token for <account> and register it with the auth-broker. Three-tier OAuth: device-code → OOB-paste → desktop-loopback (RFC D §3, RFC G §4.5).",
+      "Mint a Google OAuth refresh token for <account> and register it with the auth-broker. For Drive scopes the effective flow is desktop-loopback (device-code returns invalid_scope for Drive; OOB is retired) — use a Desktop OAuth client; on a headless host complete the browser step over an SSH port-forward. Add --write for create/edit (drive.file); default is read-only.",
     )
     .option(
       "--replace",

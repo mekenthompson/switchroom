@@ -91,8 +91,8 @@ The wizard:
 
 1. Walks you through the GCP Console screens (create project → enable
    Drive/Docs/Sheets/Calendar APIs → OAuth consent screen, add yourself
-   as a test user → create an OAuth client of type **"TVs and Limited
-   Input devices"**).
+   as a test user → create an OAuth client of type **"Desktop app"**
+   — Drive uses the loopback flow; see the client-type note below).
 2. Prompts for the client id + secret and stores them in the vault
    **via the vault-broker** (`google-oauth-client-id` /
    `google-oauth-client-secret`) — the broker owns `vault.enc`, so the

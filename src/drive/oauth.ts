@@ -1,10 +1,23 @@
 /**
  * Google Drive OAuth flow — three-tier auto-selection (RFC C §3).
  *
- * Tier preference (in order):
- *   1. RFC 8628 device-code (preferred — works over SSH, no port binding).
- *   2. OOB-paste (fallback — Google may reject device-code for Drive scopes).
- *   3. Desktop loopback (last resort — only when a local browser is reachable).
+ * Generic tier ladder (in order):
+ *   1. RFC 8628 device-code (works over SSH, no port binding).
+ *   2. OOB-paste.
+ *   3. Desktop loopback (needs a reachable browser / SSH port-forward).
+ *
+ * **Drive-scope reality (load-bearing — verified empirically):** for the
+ * Drive scopes switchroom requests, tiers 1 and 2 are dead ends — Google
+ * returns `invalid_scope` for Drive on the device-code endpoint, and the
+ * OOB redirect (`urn:ietf:wg:oauth:2.0:oob`) was retired by Google in
+ * 2022 (HTTP 400 `invalid_request`). So for Drive the effective working
+ * tier is **desktop-loopback with a Desktop OAuth client**; on a headless
+ * host the operator completes the one browser step over an SSH
+ * port-forward to the printed `127.0.0.1:<port>`. The ladder still
+ * degrades gracefully (#1352 maps the device-code rejection to a
+ * tier-fallthrough, not a crash), so the runtime is correct — it just
+ * lands on loopback after two no-op attempts. The generic ladder stays
+ * accurate for any future non-Drive scope set.
  *
  * Auto-detect headlessness from env: if `$DISPLAY` and `$WAYLAND_DISPLAY` are
  * both empty AND we are inside an SSH session (`$SSH_CONNECTION` present),

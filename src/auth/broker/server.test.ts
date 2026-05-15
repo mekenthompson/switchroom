@@ -1206,6 +1206,90 @@ describe("AuthBroker — list-state", () => {
   });
 });
 
+describe("AuthBroker — probe-quota", () => {
+  it("returns per-account quota results using stored access tokens", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, {
+      active: "default",
+      agents: { ziggy: {} },
+    });
+    // seedAccount auto-derives accessToken as `at-${label}` (helper above).
+    seedAccount(h, "default", { expiresAt: 9_999_999_999_999 });
+    seedAccount(h, "secondary", { expiresAt: 9_999_999_999_998 });
+
+    // Stub fetch — capture the Authorization header to confirm broker
+    // used the per-account token, and return synthetic rate-limit headers.
+    const seenTokens: string[] = [];
+    const origFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: string, init?: RequestInit): Promise<Response> => {
+      const headers = init?.headers as Record<string, string>;
+      const auth = headers["authorization"] ?? "";
+      seenTokens.push(auth);
+      const tok = auth.replace(/^Bearer /, "");
+      const util5h = tok === "at-default" ? "0.12" : "0.85";
+      const util7d = tok === "at-default" ? "0.05" : "0.40";
+      return new Response("ok", {
+        status: 200,
+        headers: {
+          "anthropic-ratelimit-unified-5h-utilization": util5h,
+          "anthropic-ratelimit-unified-7d-utilization": util7d,
+        },
+      });
+    }) as typeof fetch;
+
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    try {
+      await broker.start();
+      const resp = await rpc(join(h.socketRoot, "ziggy", "sock"), {
+        v: 1, id: "1", op: "probe-quota",
+        accounts: ["default", "secondary"],
+      }) as { ok: boolean; data: { results: Array<{ label: string; result: { ok: boolean; data?: { fiveHourUtilizationPct: number } } }> } };
+      expect(resp.ok).toBe(true);
+      expect(resp.data.results).toHaveLength(2);
+      expect(resp.data.results[0]?.label).toBe("default");
+      expect(resp.data.results[0]?.result.ok).toBe(true);
+      expect(resp.data.results[0]?.result.data?.fiveHourUtilizationPct).toBeCloseTo(12, 3);
+      expect(resp.data.results[1]?.label).toBe("secondary");
+      expect(resp.data.results[1]?.result.data?.fiveHourUtilizationPct).toBeCloseTo(85, 3);
+      // Confirm tokens were used as bearers — never leaked back to caller.
+      expect(seenTokens).toContain("Bearer at-default");
+      expect(seenTokens).toContain("Bearer at-secondary");
+    } finally {
+      globalThis.fetch = origFetch;
+      broker.stop();
+    }
+  });
+
+  it("returns a per-label failure result when account has no stored credentials", async () => {
+    const h = makeHarness();
+    const config = makeConfig(h, { active: "default", agents: { ziggy: {} } });
+    seedAccount(h, "default", { expiresAt: 9_999_999_999_999 });
+    const broker = new AuthBroker(config, {
+      home: h.home,
+      stateDir: h.stateDir,
+      socketRoot: h.socketRoot,
+      disableRefreshLoop: true,
+    });
+    try {
+      await broker.start();
+      const resp = await rpc(join(h.socketRoot, "ziggy", "sock"), {
+        v: 1, id: "1", op: "probe-quota",
+        accounts: ["nonexistent"],
+      }) as { ok: boolean; data: { results: Array<{ label: string; result: { ok: boolean; reason?: string } }> } };
+      expect(resp.ok).toBe(true);
+      expect(resp.data.results[0]?.result.ok).toBe(false);
+      expect(resp.data.results[0]?.result.reason).toMatch(/no credentials/i);
+    } finally {
+      broker.stop();
+    }
+  });
+});
+
 describe("AuthBroker — drift detection", () => {
   it("seeds sha-index after add-account so a subsequent boot doesn't trip", async () => {
     const h = makeHarness();

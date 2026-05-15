@@ -40,6 +40,7 @@ import { dirname, join, resolve } from "node:path";
 
 import { allocateAgentUid } from "../../agents/compose.js";
 import { resolveAgentsDir } from "../../config/loader.js";
+import { fetchQuota, type QuotaResult } from "../quota.js";
 import type { AuthConfig, AuthConsumer, SwitchroomConfig } from "../../config/schema.js";
 import { atomicWriteFileSync, atomicWriteJsonSync } from "../../util/atomic.js";
 import {
@@ -787,6 +788,15 @@ export class AuthBroker {
         case "list-google-accounts":
           await this.opListGoogleAccounts(socket, reqId, identity);
           break;
+        case "probe-quota":
+          await this.opProbeQuota(
+            socket,
+            reqId,
+            identity,
+            req.accounts,
+            req.timeoutMs,
+          );
+          break;
       }
     } catch (err) {
       socket.write(
@@ -924,6 +934,61 @@ export class AuthBroker {
       .sort((a, b) => a.account.localeCompare(b.account));
     this.audit({ op: "list-google-accounts", identity, ok: true });
     socket.write(encodeSuccess(id, { accounts }));
+  }
+
+  /**
+   * Probe live Anthropic quota for a set of accounts. Reads each
+   * account's stored accessToken (broker-owned source of truth at
+   * `~/.switchroom/accounts/<label>/credentials.json`) and calls
+   * Anthropic's `/v1/messages` with the OAuth-CLI header shape;
+   * returns the parsed rate-limit-utilization headers.
+   *
+   * Why the broker owns this: the gateway lives in the agent
+   * container and post-RFC-H has no access to account-level
+   * credentials.json (the broker fanout writes only the per-agent
+   * `.claude/.credentials.json` mirror, not the account-level
+   * source). Doing the probe broker-side keeps accessTokens off
+   * the gateway entirely.
+   *
+   * Probes run in parallel across the input list. Each individual
+   * failure becomes a `{ ok: false, reason }` entry — the op never
+   * hard-errors unless the request itself is malformed.
+   *
+   * Audit fires once per probe with `op: "probe-quota"` and the
+   * account label; per-account success/failure is captured in
+   * `error` field so dashboards can attribute failures.
+   */
+  private async opProbeQuota(
+    socket: net.Socket,
+    id: string,
+    identity: Identity,
+    accounts: readonly string[],
+    timeoutMs?: number,
+  ): Promise<void> {
+    const results = await Promise.all(
+      accounts.map(async (label): Promise<{ label: string; result: QuotaResult }> => {
+        const creds = readAccountCredentials(label, this.home);
+        const token = creds?.claudeAiOauth?.accessToken;
+        if (!token) {
+          const result: QuotaResult = {
+            ok: false,
+            reason: "no credentials for account in broker store",
+          };
+          this.audit({ op: "probe-quota", identity, account: label, ok: false, error: "missing-credentials" });
+          return { label, result };
+        }
+        const result = await fetchQuota({ accessToken: token, timeoutMs });
+        this.audit({
+          op: "probe-quota",
+          identity,
+          account: label,
+          ok: result.ok,
+          error: result.ok ? undefined : result.reason,
+        });
+        return { label, result };
+      }),
+    );
+    socket.write(encodeSuccess(id, { results }));
   }
 
   private async opSetActive(

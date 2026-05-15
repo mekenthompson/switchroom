@@ -170,7 +170,7 @@ jobs:
         #      compose-project pattern `phase<digit><letter>-...` used
         #      by broker-ipc-race + per-agent-isolation. Filter now
         #      covers both shapes.
-        run: bash .buildkite/docker-snapshot-gate.sh
+        run: bash scripts/ci/docker-snapshot-gate.sh
 
       - name: Capture broker / kernel logs on failure
         if: failure()

@@ -105,7 +105,7 @@ const { existsSync, writeFileSync, unlinkSync } = require('node:fs');
 // module". To bridge: at `beforeAll` we run `bun build` on `flock.ts`
 // and stash the resulting single-file CJS bundle in a per-suite tmp
 // dir, then hand that path to the worker. Bun is a hard prereq of the
-// repo and the Buildkite pipeline (see `.buildkite/pipeline.yml`), so
+// repo and CI (see `.github/workflows/`), so
 // this doesn't add a new dependency.
 const FLOCK_SRC_PATH = new URL("./flock.ts", import.meta.url).pathname;
 let FLOCK_MODULE_PATH: string;

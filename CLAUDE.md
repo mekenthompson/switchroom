@@ -321,13 +321,13 @@ Look at:
   with `main`, `UNSTABLE` is the not-yet-required-checks state and is
   usually fine to merge if the required ones are green.
 
-**Buildkite is informational only.** It still runs UAT fuzz,
-`race-long`, and skill evals (`evals-trigger` / `evals-quality` /
-`evals-summary`) — workflows not yet on GHA. Its `buildkite/switchroom`
-check is NOT in the required-checks list, so a red Buildkite does not
-block merge. Treat a Buildkite failure as a signal worth investigating
-(hosted-agent flakes happen — see #1318 timeout history) but not as a
-merge gate.
+**Buildkite is retired** (PR for retirement: ci/retire-buildkite,
+2026-05-15). UAT fuzz / race-long / evals are now on GHA
+(`ci-uat`, `ci-tests-race-long`, `ci-evals`). The legacy
+`.buildkite/` directory was removed; the three load-bearing shell
+scripts (`docker-snapshot-gate.sh`, `annotate-evals.sh`,
+`publish-badges.sh`) moved to `scripts/ci/` and the GHA workflows
+were updated to reference the new paths.
 
 Required-check tuning (`gh api -X PUT
 repos/switchroom/switchroom/branches/main/protection/required_status_checks`)

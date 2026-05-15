@@ -3,13 +3,12 @@ name: ci-tests-python
 # Python tests for vendored Hindsight scripts. Mirrors Buildkite
 # :snake: Python tests (Hindsight scripts). No bun, no node — pure
 # python3 stdlib unittest.
+#
+# Skip-as-pass pattern (#1320 followup): see ci-lint.yml header.
 
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "vendor/hindsight-memory/scripts/**"
-      - ".github/workflows/ci-tests-python.yml"
   push:
     branches: [main]
 
@@ -21,7 +20,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Filter changed paths
+        id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            relevant:
+              - 'vendor/hindsight-memory/scripts/**'
+              - '.github/workflows/ci-tests-python.yml'
+
   unittest:
+    needs: changes
+    if: github.event_name == 'push' || needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

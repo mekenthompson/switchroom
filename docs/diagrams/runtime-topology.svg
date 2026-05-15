@@ -1,0 +1,116 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" font-family="'Inter', system-ui, -apple-system, sans-serif">
+  <defs>
+    <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#14171C" flood-opacity="0.18"/>
+    </filter>
+    <marker id="arrowCord" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C8302C"/>
+    </marker>
+  </defs>
+
+  <!-- Canvas -->
+  <rect width="1200" height="800" fill="#FAF7EF"/>
+
+  <!-- Accent dots (shared coords across the set) -->
+  <g>
+    <circle cx="80" cy="80" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="1120" cy="80" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="80" cy="720" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="1120" cy="720" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="140" cy="140" r="3" fill="#C8302C" opacity="0.5"/>
+    <circle cx="1060" cy="660" r="3" fill="#C8302C" opacity="0.5"/>
+  </g>
+
+  <!-- Headline / footer -->
+  <text x="600" y="64" text-anchor="middle" font-size="18" font-weight="700" fill="#23282F">One box. Many agents. Three brokers, one host daemon.</text>
+  <text x="600" y="770" text-anchor="middle" font-size="11" font-weight="500" font-style="italic" fill="#5A6069">Docker is distribution and isolation — claude runs unmodified inside.</text>
+
+  <!-- Container A: docker compose project=switchroom -->
+  <rect x="72" y="96" width="800" height="624" rx="20" fill="none" stroke="#EDE7D7" stroke-width="2"/>
+  <text x="92" y="124" font-size="12" font-weight="700" fill="#8A8F98" letter-spacing="0.5">docker compose · project=switchroom</text>
+
+  <!-- vault-broker (secondary +0.8) -->
+  <g transform="rotate(0.8 250 200)">
+    <rect x="110" y="150" width="280" height="100" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5" filter="url(#cardShadow)"/>
+    <rect x="110" y="150" width="6" height="100" rx="3" fill="#B8873A"/>
+    <text x="132" y="182" font-size="16" font-weight="700" fill="#23282F">vault-broker</text>
+    <text x="132" y="206" font-size="12" font-weight="500" fill="#5A6069">root singleton · per-agent UDS</text>
+    <text x="132" y="226" font-size="12" font-weight="500" fill="#5A6069">machine-id auto-unlock</text>
+  </g>
+
+  <!-- approval-kernel (secondary +0.8) -->
+  <g transform="rotate(0.8 250 330)">
+    <rect x="110" y="282" width="280" height="100" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5" filter="url(#cardShadow)"/>
+    <rect x="110" y="282" width="6" height="100" rx="3" fill="#B8873A"/>
+    <text x="132" y="314" font-size="16" font-weight="700" fill="#23282F">approval-kernel</text>
+    <text x="132" y="338" font-size="12" font-weight="500" fill="#5A6069">root singleton · SQLite</text>
+    <text x="132" y="358" font-size="12" font-weight="500" fill="#5A6069">+ per-agent UDS</text>
+  </g>
+
+  <!-- auth-broker (secondary +0.8, brass highlight — newest, RFC H) -->
+  <g transform="rotate(0.8 250 470)">
+    <rect x="110" y="414" width="280" height="116" rx="14" fill="#FFFFFF" stroke="#E8B657" stroke-width="2" filter="url(#cardShadow)"/>
+    <rect x="110" y="414" width="6" height="116" rx="3" fill="#E8B657"/>
+    <text x="132" y="446" font-size="16" font-weight="700" fill="#23282F">auth-broker</text>
+    <text x="132" y="446" font-size="10" font-weight="700" fill="#B8873A" dx="92">RFC H</text>
+    <text x="132" y="470" font-size="12" font-weight="500" fill="#5A6069">sole writer of .credentials.json</text>
+    <text x="132" y="490" font-size="12" font-weight="500" fill="#5A6069">OAuth refresh loop</text>
+    <text x="132" y="510" font-size="12" font-weight="500" fill="#5A6069">holds fleet auth.active</text>
+  </g>
+
+  <!-- agent ×N: stacked offset darks behind to imply N, focal -1.2 -->
+  <g transform="rotate(-1.2 620 410)">
+    <rect x="486" y="186" width="320" height="408" rx="14" fill="#14171C" opacity="0.35"/>
+    <rect x="478" y="178" width="320" height="408" rx="14" fill="#14171C" opacity="0.6"/>
+    <rect x="470" y="170" width="320" height="408" rx="14" fill="#14171C" stroke="#23282F" stroke-width="1.5" filter="url(#cardShadow)"/>
+    <text x="494" y="204" font-size="16" font-weight="700" fill="#FAF7EF">agent-&lt;name&gt;  ✕ N</text>
+    <text x="494" y="226" font-size="11" font-weight="500" fill="#8A8F98">per-agent UID 10001–10999 · network_mode: host</text>
+
+    <text x="494" y="262" font-size="11" font-weight="700" fill="#5A6069" letter-spacing="0.5">PROCESS TREE</text>
+    <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="12.5" fill="#E8B657">
+      <text x="494" y="290">tini  (PID 1)</text>
+      <text x="510" y="312">└ start.sh</text>
+      <text x="526" y="334">└ tmux -L switchroom-&lt;name&gt;</text>
+      <text x="542" y="356">└ bash -l</text>
+      <text x="558" y="378">└ claude</text>
+    </g>
+
+    <line x1="494" y1="400" x2="766" y2="400" stroke="#23282F" stroke-width="1"/>
+    <text x="494" y="426" font-size="11" font-weight="700" fill="#5A6069" letter-spacing="0.5">SIDECARS  (forked by start.sh)</text>
+    <g font-size="12" fill="#B8BCC3">
+      <text x="494" y="450">• telegram-plugin gateway</text>
+      <text x="494" y="472">• autoaccept-poll</text>
+      <text x="494" y="494">• agent-scheduler  (cron, Phase 4)</text>
+    </g>
+    <text x="494" y="544" font-size="11" font-weight="500" font-style="italic" fill="#8A8F98">claude runs unmodified — Docker only</text>
+    <text x="494" y="562" font-size="11" font-weight="500" font-style="italic" fill="#8A8F98">isolates &amp; distributes it.</text>
+  </g>
+
+  <!-- Container B: separate compose project=switchroom-hostd -->
+  <rect x="912" y="300" width="216" height="220" rx="16" fill="none" stroke="#EDE7D7" stroke-width="1.5" stroke-dasharray="6 4"/>
+  <text x="924" y="324" font-size="11" font-weight="700" fill="#8A8F98">project=switchroom-hostd</text>
+  <g transform="rotate(-0.6 1020 410)">
+    <rect x="930" y="344" width="180" height="150" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5" filter="url(#cardShadow)"/>
+    <text x="950" y="376" font-size="16" font-weight="700" fill="#23282F">hostd</text>
+    <text x="950" y="400" font-size="11" font-weight="500" fill="#5A6069">own compose project</text>
+    <text x="950" y="418" font-size="11" font-weight="500" fill="#5A6069">/var/run/docker.sock</text>
+    <text x="950" y="436" font-size="11" font-weight="500" fill="#5A6069">mounted</text>
+    <text x="950" y="466" font-size="10.5" font-weight="500" font-style="italic" fill="#8A8F98">survives `compose -p</text>
+    <text x="950" y="482" font-size="10.5" font-weight="500" font-style="italic" fill="#8A8F98">switchroom down`</text>
+  </g>
+
+  <!-- Edges: brokers → agent (cord primary-flow) -->
+  <path d="M390,196 C430,196 440,250 466,300" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <path d="M390,330 C420,330 435,360 466,372" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <path d="M390,466 C420,466 438,440 466,420" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <text x="404" y="250" font-size="10.5" font-weight="500" fill="#C8302C">per-agent sock → chowned to UID</text>
+
+  <!-- Edge: agent gateway → hostd (crosses A/B boundary) -->
+  <path d="M790,420 C860,420 880,420 928,420" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <text x="812" y="408" font-size="10.5" font-weight="500" fill="#C8302C">UDS — /update apply, audit</text>
+
+  <!-- Leader callout: path-as-identity -->
+  <line x1="250" y1="600" x2="250" y2="648" stroke="#8A8F98" stroke-width="1.4" stroke-dasharray="2 4"/>
+  <text x="110" y="668" font-size="11" font-weight="500" fill="#5A6069">Path-as-identity: the broker authorizes by the bind path</text>
+  <text x="110" y="686" font-size="11" font-weight="500" fill="#5A6069">&lt;agent&gt;/sock — never a wire payload.</text>
+</svg>

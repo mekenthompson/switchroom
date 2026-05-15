@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" font-family="'Inter', system-ui, -apple-system, sans-serif">
+  <defs>
+    <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#14171C" flood-opacity="0.18"/>
+    </filter>
+    <marker id="arrowCord" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C8302C"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="800" fill="#FAF7EF"/>
+
+  <g>
+    <circle cx="80" cy="80" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="1120" cy="80" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="80" cy="720" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="1120" cy="720" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="140" cy="140" r="3" fill="#C8302C" opacity="0.5"/>
+    <circle cx="1060" cy="660" r="3" fill="#C8302C" opacity="0.5"/>
+  </g>
+
+  <text x="600" y="64" text-anchor="middle" font-size="18" font-weight="700" fill="#23282F">Every gated tool call. User-confirmed in Telegram. TTL'd. Audited.</text>
+
+  <!-- 1 agent · claude REPL (dark) -->
+  <g transform="rotate(-1.2 240 380)">
+    <rect x="96" y="250" width="288" height="260" rx="14" fill="#14171C" stroke="#23282F" stroke-width="1.5" filter="url(#cardShadow)"/>
+    <text x="118" y="284" font-size="15" font-weight="700" fill="#FAF7EF">agent · claude REPL</text>
+    <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="12" fill="#B8BCC3">
+      <text x="118" y="318">$ Edit src/auth/login.ts</text>
+      <text x="118" y="340" fill="#E8B657">Paused — awaiting approval</text>
+      <text x="118" y="372">Tool:   Edit</text>
+      <text x="118" y="392">File:   src/auth/login.ts</text>
+      <text x="118" y="412">Diff:   +12 / -8 lines</text>
+      <text x="118" y="432">Status: blocked on kernel</text>
+    </g>
+    <text x="118" y="478" font-size="11" font-weight="500" font-style="italic" fill="#5A6069">elapsed 12s</text>
+  </g>
+
+  <!-- 2 approval kernel (plain, focal) -->
+  <g transform="rotate(-1.2 600 380)">
+    <rect x="460" y="240" width="280" height="290" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5" filter="url(#cardShadow)"/>
+    <text x="482" y="276" font-size="16" font-weight="700" fill="#23282F">approval kernel</text>
+    <text x="482" y="298" font-size="11.5" font-weight="500" fill="#5A6069">SQLite + IPC broker (per-agent UDS)</text>
+    <line x1="482" y1="312" x2="718" y2="312" stroke="#EDE7D7" stroke-width="1"/>
+    <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="12">
+      <text x="482" y="336" fill="#8A8F98">id   tool   state    ttl</text>
+      <text x="482" y="360" fill="#23282F">a91  Edit   pending  —</text>
+      <text x="482" y="382" fill="#23282F">a90  Bash   granted  15m</text>
+      <text x="482" y="404" fill="#23282F">a89  Write  denied   —</text>
+      <text x="482" y="426" fill="#23282F">a88  Edit   granted  5s</text>
+    </g>
+    <line x1="482" y1="446" x2="718" y2="446" stroke="#EDE7D7" stroke-width="1"/>
+    <text x="482" y="472" font-size="10.5" font-weight="500" font-style="italic" fill="#5A6069">Grants are TTL'd. One-off allow does</text>
+    <text x="482" y="488" font-size="10.5" font-weight="500" font-style="italic" fill="#5A6069">not silently become forever.</text>
+  </g>
+
+  <!-- 3 phone (Telegram) -->
+  <g transform="rotate(0.8 950 390)">
+    <rect x="850" y="170" width="220" height="440" rx="26" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="2" filter="url(#cardShadow)"/>
+    <rect x="930" y="184" width="60" height="8" rx="4" fill="#EDE7D7"/>
+    <rect x="868" y="212" width="184" height="370" rx="10" fill="#14171C"/>
+    <text x="884" y="246" font-size="13" font-weight="700" fill="#FAF7EF">@worker wants to edit</text>
+    <rect x="884" y="262" width="152" height="92" rx="6" fill="#23282F"/>
+    <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="10" fill="#B8BCC3">
+      <text x="894" y="282">src/auth/login.ts</text>
+      <text x="894" y="302" fill="#C8302C">- if (user.legacy)</text>
+      <text x="894" y="318" fill="#C8302C">-   useOldSession()</text>
+      <text x="894" y="334" fill="#4A9B8E">+ const s = start()</text>
+    </g>
+    <rect x="884" y="372" width="72" height="34" rx="8" fill="#4A9B8E"/>
+    <text x="920" y="394" text-anchor="middle" font-size="12" font-weight="700" fill="#FAF7EF">Allow</text>
+    <rect x="964" y="372" width="72" height="34" rx="8" fill="#C8302C"/>
+    <text x="1000" y="394" text-anchor="middle" font-size="12" font-weight="700" fill="#FAF7EF">Deny</text>
+    <text x="884" y="430" font-size="10" font-weight="500" fill="#8A8F98">scope: this call · ttl 15m · always</text>
+  </g>
+
+  <!-- Steps -->
+  <!-- ① agent → kernel (brass) -->
+  <path d="M384,360 C410,360 430,360 458,360" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <circle cx="421" cy="330" r="16" fill="#E8B657"/>
+  <text x="421" y="335" text-anchor="middle" font-size="13" font-weight="700" fill="#FAF7EF">1</text>
+  <text x="358" y="306" font-size="10.5" font-weight="500" fill="#5A6069">agent → kernel: tool call</text>
+
+  <!-- ② kernel → phone (cord) -->
+  <path d="M740,330 C780,310 810,300 848,300" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <circle cx="795" cy="288" r="16" fill="#C8302C"/>
+  <text x="795" y="293" text-anchor="middle" font-size="13" font-weight="700" fill="#FAF7EF">2</text>
+  <text x="744" y="270" font-size="10.5" font-weight="500" fill="#5A6069">kernel → phone: push card</text>
+
+  <!-- ③ phone → kernel (cord) -->
+  <path d="M848,470 C808,490 778,500 742,478" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <circle cx="795" cy="510" r="16" fill="#C8302C"/>
+  <text x="795" y="515" text-anchor="middle" font-size="13" font-weight="700" fill="#FAF7EF">3</text>
+  <text x="744" y="540" font-size="10.5" font-weight="500" fill="#5A6069">phone → kernel: user taps allow</text>
+
+  <!-- ④ kernel → agent (teal) -->
+  <path d="M458,440 C430,460 410,470 386,452" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <circle cx="421" cy="490" r="16" fill="#4A9B8E"/>
+  <text x="421" y="495" text-anchor="middle" font-size="13" font-weight="700" fill="#FAF7EF">4</text>
+  <text x="356" y="520" font-size="10.5" font-weight="500" fill="#5A6069">kernel → agent: tool resumes</text>
+</svg>

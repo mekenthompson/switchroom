@@ -40,6 +40,7 @@ import {
   type Result,
 } from "./protocol.js";
 import { socketPathToIdentity, type SocketIdentity } from "./peercred.js";
+import { redact } from "../secret-detect/redact.js";
 
 /** Subset of switchroom.yaml the daemon reads. */
 export interface ServerConfig {
@@ -103,6 +104,13 @@ export class HostdServer {
   // need N servers. Map: bindPath → Server.
   private servers = new Map<string, Server>();
   private statusByRequestId = new Map<string, StatusEntry>();
+  /** Serializes audit-log appends. A redacted terminal row can be
+   *  ~4 KiB — above Linux PIPE_BUF (4096), so concurrent appendFile
+   *  calls (e.g. a terminal write racing a parallel agent_logs
+   *  writeAudit) are no longer guaranteed atomic and could interleave
+   *  into a corrupt JSONL line. Chaining the writes keeps every row
+   *  whole; parseAuditLine still tolerates a torn line defensively. */
+  private auditAppendChain: Promise<void> = Promise.resolve();
   /** idempotency_key → request_id of the canonical (first) call. */
   private idempotencyKeys = new Map<string, { request_id: string; ts: number }>();
   /**
@@ -818,9 +826,15 @@ export class HostdServer {
         entry.error = (err as Error).message;
       })
       .finally(() => {
-        // Durable terminal row — fire-and-forget, must not throw into
-        // the finally. Written before the lock release so the audit
-        // record exists even if a racing mutation recreates state.
+        // Durable terminal row. Fire-and-forget: the append is async
+        // and NOT awaited here, so the lock releases before the row
+        // hits disk — acceptable because (a) the synchronous `started`
+        // row already records that the mutation was attempted, and
+        // (b) appendAuditRow is best-effort by contract. If hostd is
+        // SIGKILLed in the sub-millisecond window between this call
+        // and the write landing, we lose only the terminal row, not
+        // the fact-of-attempt. writeTerminalAudit never throws
+        // (appendAuditRow swallows), so it's safe un-awaited here.
         void this.writeTerminalAudit(entry);
         // Release the lock IF we're still the one holding it. A test
         // (or a future code path) that reset the daemon's state
@@ -898,13 +912,20 @@ export class HostdServer {
   }
 
   /** Append one JSONL row. Best-effort: a failed append logs to
-   *  stderr but never throws into the request path. */
-  private async appendAuditRow(row: Record<string, unknown>): Promise<void> {
+   *  stderr but never throws into the request path. Serialized via
+   *  `auditAppendChain` so large rows can't interleave. */
+  private appendAuditRow(row: Record<string, unknown>): Promise<void> {
     const path = this.auditLogPath();
-    await mkdir(dirname(path), { recursive: true }).catch(() => undefined);
-    await appendFile(path, JSON.stringify(row) + "\n").catch((err) => {
-      process.stderr.write(`hostd: audit append failed: ${(err as Error).message}\n`);
+    const line = JSON.stringify(row) + "\n";
+    this.auditAppendChain = this.auditAppendChain.then(async () => {
+      await mkdir(dirname(path), { recursive: true }).catch(() => undefined);
+      await appendFile(path, line).catch((err) => {
+        process.stderr.write(
+          `hostd: audit append failed: ${(err as Error).message}\n`,
+        );
+      });
     });
+    return this.auditAppendChain;
   }
 
   private async writeAudit(args: {
@@ -923,28 +944,44 @@ export class HostdServer {
       result: args.resp.result,
       exit_code: args.resp.exit_code,
       duration_ms: args.resp.duration_ms,
-      // Persist the output tails so a failed fleet-mutation can be
-      // diagnosed AFTER hostd is recreated. The in-memory status map
-      // dies on every container recreate (which `switchroom update`'s
-      // refresh-hostd step does on every run), so without this the
-      // stderr of a failed `update_apply` is unrecoverable — you'd
-      // have to reproduce the failure and race the next recreate.
-      // Only emitted when present so the common (started/ok) rows
-      // stay compact.
-      ...(args.resp.stdout_tail ? { stdout_tail: args.resp.stdout_tail } : {}),
-      ...(args.resp.stderr_tail ? { stderr_tail: args.resp.stderr_tail } : {}),
+      // NOTE: the generic request-path row deliberately does NOT
+      // persist stdout_tail/stderr_tail. `agent_exec` (allowlist
+      // includes `cat`) and `agent_logs` flow through here — an admin
+      // running `agent_exec cat .../credentials.json` would otherwise
+      // write a peer's OAuth token into a file admin agents can read
+      // :ro. The audit log is the *detection* surface, not the secret
+      // payload (PR #1215 reviewer invariant). Output-tail persistence
+      // is scoped to the fleet-mutation terminal path only — see
+      // writeTerminalAudit, where update_apply/apply are the only ops
+      // and the tails are redacted before they hit disk.
       error: args.resp.error,
     });
   }
 
   /** Durable terminal-outcome row for an async fleet mutation
-   *  (update_apply / apply). Written directly from the spawn
-   *  completion handler so the record does NOT depend on a
-   *  get_status poll happening to land after the subprocess exits
-   *  and before the next hostd recreate. `phase: "terminal"`
-   *  distinguishes it from the synchronous `started` row the
-   *  request path already wrote for the same request_id. */
+   *  (update_apply / apply ONLY — those are the sole ops that call
+   *  spawnFleetMutation). Written directly from the spawn completion
+   *  handler so the record does NOT depend on a get_status poll
+   *  happening to land after the subprocess exits and before the next
+   *  hostd recreate. `phase: "terminal"` distinguishes it from the
+   *  synchronous `started` row the request path already wrote for the
+   *  same request_id.
+   *
+   *  Secret posture: `switchroom update`/`apply` provision per-agent
+   *  `.env` / vault material, so a stack trace dumping a config object
+   *  could land secrets in the 4 KiB tail. We run stdout/stderr/error
+   *  through the vendored synchronous `redact()` (the same scrubber
+   *  the PreToolUse secret hook uses) BEFORE persisting. This is the
+   *  load-bearing mitigation — NOT file perms: the audit log is bind-
+   *  mounted :ro into admin agents (RFC C #1337) and MUST stay world-
+   *  readable for `/audit hostd` to work, exactly like vault-audit.log
+   *  (apply.ts pins it 0644 for the same reason). Tightening to 0600
+   *  would break the feature; redaction + the writeAudit scoping above
+   *  are what keep secrets out of the file. */
   private async writeTerminalAudit(entry: StatusEntry): Promise<void> {
+    const stdoutTail = entry.stdout_tail ? redact(entry.stdout_tail) : "";
+    const stderrTail = entry.stderr_tail ? redact(entry.stderr_tail) : "";
+    const errMsg = entry.error ? redact(entry.error) : "";
     await this.appendAuditRow({
       ts: new Date().toISOString(),
       op: entry.op,
@@ -957,9 +994,9 @@ export class HostdServer {
       result: entry.result,
       exit_code: entry.exit_code,
       duration_ms: (entry.finished_at ?? Date.now()) - entry.started_at,
-      ...(entry.stdout_tail ? { stdout_tail: entry.stdout_tail } : {}),
-      ...(entry.stderr_tail ? { stderr_tail: entry.stderr_tail } : {}),
-      ...(entry.error ? { error: entry.error } : {}),
+      ...(stdoutTail ? { stdout_tail: stdoutTail } : {}),
+      ...(stderrTail ? { stderr_tail: stderrTail } : {}),
+      ...(errMsg ? { error: errMsg } : {}),
     });
   }
 

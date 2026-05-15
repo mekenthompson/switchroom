@@ -610,11 +610,19 @@ describe("hostd server — Phase 2 fleet mutations + lock", () => {
     // (which `switchroom update`'s refresh-hostd step does on every
     // run). Before #22 the stderr lived only in the status map and
     // the audit log carried just result/exit_code.
+    // Token-shaped fixture built at runtime so the source file never
+    // contains a contiguous secret literal (repo push-protection).
+    const fakeToken =
+      "sk-ant-oat01-" + "A".repeat(40) + "-" + "B".repeat(40) + "-fakeAA";
     const failStub = join(tmp, "switchroom-fail-stub.sh");
     writeFileSync(
       failStub,
       `#!/bin/sh\necho "stdout breadcrumb"\n` +
+        // Simulate a stack trace that dumped a config object carrying
+        // a credential — the realistic secret-leak vector for
+        // switchroom apply/update.
         `echo "switchroom apply failed: EACCES /state/agent/start.sh" 1>&2\n` +
+        `echo "  ctx: { oauthToken: '${fakeToken}' }" 1>&2\n` +
         `exit 1\n`,
     );
     chmodSync(failStub, 0o755);
@@ -653,14 +661,82 @@ describe("hostd server — Phase 2 fleet mutations + lock", () => {
     expect(terminal).toBeDefined();
     expect(terminal!.result).toBe("error");
     expect(terminal!.exit_code).toBe(1);
+    // Non-secret diagnostic context survives.
     expect(String(terminal!.stderr_tail)).toContain("EACCES /state/agent/start.sh");
     expect(String(terminal!.stdout_tail)).toContain("stdout breadcrumb");
-    // The synchronous request-path row is still there too (started).
+    // SECURITY (PR #1351 review blocker): the token-shaped secret in
+    // the stub's stderr must be REDACTED before it hits the durable
+    // log — admin agents can read this file :ro via /audit hostd.
+    expect(String(terminal!.stderr_tail)).not.toContain(fakeToken);
+    expect(String(terminal!.stderr_tail)).toContain("[REDACTED");
+    // The synchronous request-path row is still there too (started)
+    // and — critically — carries NO output tails (generic writeAudit
+    // never persists them; only the fleet-mutation terminal path does).
     const startedRow = rows.find(
       (r) => r.request_id === "ua-term-1" && r.phase === undefined,
     );
     expect(startedRow).toBeDefined();
     expect(startedRow!.result).toBe("started");
+    expect(startedRow!.stdout_tail).toBeUndefined();
+    expect(startedRow!.stderr_tail).toBeUndefined();
+  });
+
+  it("generic writeAudit (agent_exec / agent_logs) never persists output tails — secrets stay out of the durable log (#1351)", async () => {
+    // Regression guard for the PR #1351 review blocker: an admin
+    // running `agent_exec cat .../credentials.json` must NOT get the
+    // token written to the audit file. agent_exec returns a
+    // stdout_tail on the response, but writeAudit deliberately drops
+    // it from the persisted row.
+    const dockerStub = join(tmp, "docker-secret-stub.sh");
+    const fakeCred =
+      "sk-ant-oat01-" + "C".repeat(40) + "-" + "D".repeat(40) + "-fakeBB";
+    writeFileSync(
+      dockerStub,
+      `#!/bin/sh\necho '{"claudeAiOauth":{"accessToken":"${fakeCred}"}}'\nexit 0\n`,
+    );
+    chmodSync(dockerStub, 0o755);
+    await server.stop();
+    server = new (await import("../../src/host-control/server.js")).HostdServer({
+      homeDir: tmp,
+      agentUids: { klanker: 10001, bob: 10002 },
+      config: { agents: { klanker: { admin: true }, bob: {} } },
+      switchroomBin: stubBin,
+      dockerBin: dockerStub,
+      auditLogPath: join(tmp, "audit.log"),
+      allowNonLinux: true,
+    });
+    await server.start();
+    const sock = server
+      .getBoundPaths()
+      .find((p) => p.endsWith("/klanker/sock"))!;
+
+    const resp = await hostdRequest(
+      { socketPath: sock },
+      {
+        v: 1,
+        op: "agent_exec",
+        request_id: "exec-secret-1",
+        args: { name: "klanker", argv: ["cat", "/state/agent/.claude/credentials.json"] },
+      },
+    );
+    // The caller's response frame may carry the tail (that's the
+    // existing, accepted trust boundary — admin === root proxy).
+    expect(resp.result).toBe("completed");
+    await new Promise((r) => setTimeout(r, 80));
+
+    const { readFileSync } = await import("node:fs");
+    const auditRaw = readFileSync(join(tmp, "audit.log"), "utf8");
+    // The durable log must NOT contain the credential, and the
+    // agent_exec row must carry no stdout_tail field at all.
+    expect(auditRaw).not.toContain(fakeCred);
+    const execRow = auditRaw
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .find((r) => r.request_id === "exec-secret-1");
+    expect(execRow).toBeDefined();
+    expect(execRow!.stdout_tail).toBeUndefined();
+    expect(execRow!.stderr_tail).toBeUndefined();
   });
 
   // ── Phase 3 admin observability — agent_logs / agent_exec ─────────────

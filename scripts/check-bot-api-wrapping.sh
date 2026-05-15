@@ -102,7 +102,9 @@ ALLOWLIST=(
   # (~32 lines added earlier in the file shift this band down).
   # Re-bumped 2026-05-15 for the auth-snapshot Format 2 PR
   # (insertions earlier in the file shifted the chunk-loop down).
-  "telegram-plugin/gateway/gateway.ts:3160-3420:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
+  # Re-bumped 2026-05-15 post-Path-A-Cut-2 (drive-write IPC handler
+  # added ~60 lines higher up; chunk-loop callsite shifted further to ~3451).
+  "telegram-plugin/gateway/gateway.ts:3160-3500:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
   # Range bumped 2026-05-13 for stuck-turn-recovery (#1136) v2 cleanup
@@ -118,7 +120,9 @@ ALLOWLIST=(
   # (~180 lines added across handleAuthDashboardCallback +
   # fireFleetAutoFallback re-entry guard shifted the vault wizard
   # callsites further down).
-  "telegram-plugin/gateway/gateway.ts:9340-10100:vault grant wizard ctx.api.editMessageText already has .catch swallow"
+  # Re-bumped 2026-05-15 post-Path-A-Cut-2 (drive-write IPC handler
+  # added ~60 lines).
+  "telegram-plugin/gateway/gateway.ts:9340-10200:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter
   # via DI. The gateway wires those adapters through robustApiCall (see

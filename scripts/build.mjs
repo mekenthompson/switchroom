@@ -113,6 +113,24 @@ if (cliEscape.changed) {
   console.log(`[build] ASCII-escaped ${cliEscape.nonAsciiCount} non-ASCII code units in dist/cli/switchroom.js`);
 }
 
+// Bundle the drive-write-pretool hook — RFC E §4.2 Cut 2. Same
+// pattern as autoaccept-poll below: standalone .mjs that the agent
+// container runs via node from a fixed path. The hook itself imports
+// from src/drive/*, src/auth/broker/* etc., none of which are
+// available inside the agent image — so we bundle to a single self-
+// contained file.
+console.log("[build] bundling src/cli/drive-write-pretool.ts -> dist/cli/drive-write-pretool.mjs");
+execSync(
+  `bun build ${JSON.stringify(resolve(root, "src/cli/drive-write-pretool.ts"))} --outfile ${JSON.stringify(resolve(outDir, "drive-write-pretool.mjs"))} --target node`,
+  { stdio: "inherit", cwd: root }
+);
+const hookOutFile = resolve(outDir, "drive-write-pretool.mjs");
+chmodSync(hookOutFile, 0o755);
+const hookEscape = escapeBundleNonAscii(hookOutFile);
+if (hookEscape.changed) {
+  console.log(`[build] ASCII-escaped ${hookEscape.nonAsciiCount} non-ASCII code units in dist/cli/drive-write-pretool.mjs`);
+}
+
 // Bundle the autoaccept-poll entrypoint. The agent unit's ExecStartPost
 // invokes this in the background to dispatch first-run TUI prompts via
 // `tmux capture-pane` + `tmux send-keys`. Must ship in dist/ because

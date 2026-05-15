@@ -47,6 +47,14 @@ RUN mkdir -p /tmp/tmux-shared
 COPY dist/cli/autoaccept-poll.js /opt/switchroom/autoaccept-poll.js
 RUN chmod 0755 /opt/switchroom/autoaccept-poll.js
 
+# Drive-write PreToolUse hook (RFC E §4.2 Cut 2). Bundled self-
+# contained .mjs that intercepts `mcp__google-workspace__*` write
+# tool calls and gates them behind a Telegram diff-preview approval
+# card. Bake under /opt/switchroom/hooks/ so the scaffold's hook
+# command path is stable across operator installs.
+COPY dist/cli/drive-write-pretool.mjs /opt/switchroom/hooks/drive-write-pretool.mjs
+RUN chmod 0755 /opt/switchroom/hooks/drive-write-pretool.mjs
+
 # switchroom CLI bundle: the in-container telegram-plugin gateway sidecar
 # shells out to `switchroom <verb>` for /auth, /vault, /agent, /topics
 # and friends (see telegram-plugin/gateway/gateway.ts:switchroomExec). On

@@ -156,6 +156,45 @@ describe("hindsight broker-fed mode (#1245)", () => {
   });
 });
 
+// Regression — `checkHindsightConsumer` in src/cli/doctor.ts probes the
+// host-side path of the named volume the broker chowns its consumer
+// socket into. It MUST use the unprefixed name (`auth-broker-hindsight-
+// sock`) because the compose generator overrides the project prefix on
+// per-consumer volumes (see compose-generator.test.ts "auth-broker
+// per-consumer volume naming"). Probing the prefixed path always
+// reports `socket not yet bound on disk` even on a healthy install.
+describe("checkHindsightConsumer — volume probe path (regression)", () => {
+  it("probes the unprefixed `auth-broker-hindsight-sock` host path, not the project-prefixed one", async () => {
+    const { checkHindsightConsumer } = await import("../../src/cli/doctor.js");
+    const probedPaths: string[] = [];
+    const result = checkHindsightConsumer(
+      {
+        auth: {
+          consumers: [{ name: "hindsight", account: "k@example.com", uid: 11000 }],
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+      {
+        socketProbe: (p: string) => {
+          probedPaths.push(p);
+          return false;
+        },
+      },
+    );
+    expect(probedPaths.length).toBeGreaterThan(0);
+    for (const p of probedPaths) {
+      // Must contain the unprefixed name…
+      expect(p).toContain("auth-broker-hindsight-sock");
+      // …and must NOT contain the docker-compose project prefix
+      // (otherwise the doctor false-warns on every healthy install
+      // post-bug-5-fix).
+      expect(p).not.toContain("switchroom_auth-broker-hindsight-sock");
+    }
+    // Probe missed → status warns; sanity check the result shape.
+    expect(result.status).toBe("warn");
+  });
+});
+
 // Regression — the compose snippet (used by operators who run hindsight
 // in its OWN compose project rather than via `docker run`) had the same
 // tmpfs ownership bug. Pin the tmpfs flag shape here so the two

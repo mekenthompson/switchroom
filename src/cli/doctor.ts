@@ -576,10 +576,18 @@ export function checkHindsightConsumer(
   // ~/.switchroom/state/auth-broker- side. We just check it's there
   // (volume mount may not be filesystem-visible without inspecting
   // the named volume; treat absence as warn, not fail).
+  //
+  // The volume name has NO `switchroom_` project prefix because the
+  // generator emits an explicit `name:` override on per-consumer
+  // volumes (see src/agents/compose.ts and the cross-project
+  // consumption story in src/setup/hindsight.ts). Without the
+  // override, the standalone hindsight container would mount a fresh
+  // empty volume; with the override, the real on-disk path matches
+  // the unprefixed name we look for here.
   const socketProbe = opts?.socketProbe ?? ((p: string) => existsSync(p));
   const home = process.env.HOME ?? "";
-  const dockerVolPath = `/var/lib/docker/volumes/switchroom_auth-broker-hindsight-sock/_data/sock`;
-  const altVolPath = join(home, ".local", "share", "docker", "volumes", "switchroom_auth-broker-hindsight-sock", "_data", "sock");
+  const dockerVolPath = `/var/lib/docker/volumes/auth-broker-hindsight-sock/_data/sock`;
+  const altVolPath = join(home, ".local", "share", "docker", "volumes", "auth-broker-hindsight-sock", "_data", "sock");
   const present = socketProbe(dockerVolPath) || socketProbe(altVolPath);
 
   if (!present) {

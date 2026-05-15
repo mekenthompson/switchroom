@@ -96,8 +96,8 @@ The wizard:
    (`google-oauth-client-id` / `google-oauth-client-secret`).
 3. Offers to write the `google_workspace:` block into your
    `switchroom.yaml` (atomic write, comment-preserving; it
-   re-validates the file before saving and never overwrites an
-   existing block).
+   re-validates the file afterward and never overwrites an existing
+   block).
 4. Points you at `switchroom auth google account add` to continue.
 
 ### The manual equivalent

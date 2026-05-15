@@ -1,0 +1,222 @@
+name: ci-evals
+
+# Skills evals — trigger routing + quality. Mirrors Buildkite
+# :compass: + :sparkles: + :bar_chart: steps.
+#
+# Auth precedence (same as BK pipeline.yml:483-489):
+#   1. ANTHROPIC_API_KEY (separate billing pool)
+#   2. CLAUDE_CODE_OAUTH_TOKEN (subscription, weekly cap)
+#   3. neither → step exits 0 (clean no-op)
+#
+# Quota protection: GHA concurrency group serialises eval runs across
+# parallel builds on the same workflow file. `cancel-in-progress: false`
+# is LOAD-BEARING — a fresh push must NOT kill an in-flight eval (it
+# already burned the quota; the result is what we want). Subsequent
+# pushes queue behind it. BK's `concurrency: 1` + `concurrency_group`
+# is the same idea.
+#
+# PR-from-fork: secrets are intentionally unavailable for fork PRs on
+# public repos (GitHub policy — no cross-repo token escape). The auth
+# block detects the empty-string case and exits 0 with a clear log line.
+# Maintainers running the workflow via push-to-branch or workflow_dispatch
+# get the full eval run.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      # Skill text changes can flip routing decisions
+      - "skills/**/SKILL.md"
+      # Eval framework + datasets
+      - "evals/run_trigger.py"
+      - "evals/run_quality.py"
+      - "evals/trigger_dataset.yaml"
+      - "evals/dataset.yaml"
+      # Profile CLAUDE.md influences how the model interprets queries
+      - "profiles/**/CLAUDE.md*"
+      - ".github/workflows/ci-evals.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialise eval runs across builds — share quota fairly with concurrent
+# pushes/PRs. NOT cancel-in-progress.
+concurrency:
+  group: ci-evals-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ─── Trigger routing eval ────────────────────────────────────────
+  evals-trigger:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up Node (for claude-code CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Auth gate
+        # Mirror BK behaviour: prefer API key over OAuth token; if neither
+        # is set, exit 0 cleanly so the build doesn't block on missing
+        # secrets (eg PR-from-fork on a public repo).
+        id: auth
+        run: |
+          if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+            echo "auth=api_key" >>"$GITHUB_OUTPUT"
+            # Don't pass both — explicit precedence.
+            echo "CLAUDE_CODE_OAUTH_TOKEN=" >>"$GITHUB_ENV"
+          elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+            echo "auth=oauth_token" >>"$GITHUB_OUTPUT"
+          else
+            echo "auth=none" >>"$GITHUB_OUTPUT"
+            echo "::notice::No Anthropic credential in env — skipping eval (this is expected for PRs from forks)"
+          fi
+
+      - name: Install claude-code CLI
+        if: steps.auth.outputs.auth != 'none'
+        # Skip the global re-install if `claude` is already on PATH from
+        # an earlier step or warm action cache.
+        run: |
+          if ! command -v claude >/dev/null 2>&1; then
+            npm i -g --prefer-offline --no-audit --no-fund @anthropic-ai/claude-code
+          fi
+          claude --version || true
+
+      - name: Install python deps
+        if: steps.auth.outputs.auth != 'none'
+        run: pip install -q pyyaml
+
+      - name: Run trigger-routing eval
+        if: steps.auth.outputs.auth != 'none'
+        continue-on-error: true
+        run: python3 evals/run_trigger.py --parallel 5
+
+      - name: Upload eval results
+        if: always() && steps.auth.outputs.auth != 'none'
+        uses: actions/upload-artifact@v4
+        with:
+          name: evals-trigger-results
+          path: evals/results/**/*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ─── Quality eval ────────────────────────────────────────────────
+  evals-quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Set up Node (for claude-code CLI)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Auth gate
+        id: auth
+        run: |
+          if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+            echo "auth=api_key" >>"$GITHUB_OUTPUT"
+            echo "CLAUDE_CODE_OAUTH_TOKEN=" >>"$GITHUB_ENV"
+          elif [[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
+            echo "auth=oauth_token" >>"$GITHUB_OUTPUT"
+          else
+            echo "auth=none" >>"$GITHUB_OUTPUT"
+            echo "::notice::No Anthropic credential in env — skipping eval (this is expected for PRs from forks)"
+          fi
+
+      - name: Install claude-code CLI
+        if: steps.auth.outputs.auth != 'none'
+        run: |
+          if ! command -v claude >/dev/null 2>&1; then
+            npm i -g --prefer-offline --no-audit --no-fund @anthropic-ai/claude-code
+          fi
+          claude --version || true
+
+      - name: Install python deps
+        if: steps.auth.outputs.auth != 'none'
+        run: pip install -q pyyaml
+
+      - name: Run quality eval
+        if: steps.auth.outputs.auth != 'none'
+        continue-on-error: true
+        run: python3 evals/run_quality.py --parallel 5
+
+      - name: Upload eval results
+        if: always() && steps.auth.outputs.auth != 'none'
+        uses: actions/upload-artifact@v4
+        with:
+          name: evals-quality-results
+          path: evals/results/**/*.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ─── Summary ─────────────────────────────────────────────────────
+  evals-summary:
+    runs-on: ubuntu-latest
+    needs: [evals-trigger, evals-quality]
+    if: always()
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download eval artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: evals/results
+          merge-multiple: true
+
+      - name: Annotate evals
+        # Best-effort — same posture as BK's annotate-evals.sh step.
+        # A failure here must NOT mask a passing eval run.
+        continue-on-error: true
+        run: |
+          if [ -f .buildkite/annotate-evals.sh ]; then
+            bash .buildkite/annotate-evals.sh || echo "annotate-evals.sh failed (continuing)"
+          else
+            echo "annotate-evals.sh not present — skipping"
+          fi
+
+      - name: Publish badges
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        continue-on-error: true
+        env:
+          GITHUB_GIST_TOKEN: ${{ secrets.GITHUB_GIST_TOKEN }}
+        run: |
+          if [ -f .buildkite/publish-badges.sh ] && [ -n "$GITHUB_GIST_TOKEN" ]; then
+            bash .buildkite/publish-badges.sh || echo "publish-badges.sh failed (continuing)"
+          else
+            echo "publish-badges.sh prerequisites missing — skipping"
+          fi

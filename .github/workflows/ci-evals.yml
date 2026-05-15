@@ -61,16 +61,28 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python
+        # No `cache: pip` — we install only `pyyaml`. The pip cache dir
+        # never materialises (no requirements.txt, single tiny package
+        # already wheel-cached on hosted images) and the post-job
+        # cleanup errors with "Cache folder path doesn't exist on disk".
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
 
       - name: Set up Node (for claude-code CLI)
+        # No `cache: npm` — we don't have a package-lock for the global
+        # install (`npm i -g @anthropic-ai/claude-code` is unconfigured
+        # by the repo lockfile). Cache the ~/.npm dir explicitly in the
+        # next step instead, matching BK's `v1-claude-code-global` key.
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
+
+      - name: Cache claude-code global install
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: v1-claude-code-global-${{ runner.os }}
 
       - name: Auth gate
         # Mirror BK behaviour: prefer API key over OAuth token; if neither
@@ -129,16 +141,28 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Python
+        # No `cache: pip` — we install only `pyyaml`. The pip cache dir
+        # never materialises (no requirements.txt, single tiny package
+        # already wheel-cached on hosted images) and the post-job
+        # cleanup errors with "Cache folder path doesn't exist on disk".
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
 
       - name: Set up Node (for claude-code CLI)
+        # No `cache: npm` — we don't have a package-lock for the global
+        # install (`npm i -g @anthropic-ai/claude-code` is unconfigured
+        # by the repo lockfile). Cache the ~/.npm dir explicitly in the
+        # next step instead, matching BK's `v1-claude-code-global` key.
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
+
+      - name: Cache claude-code global install
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: v1-claude-code-global-${{ runner.os }}
 
       - name: Auth gate
         id: auth

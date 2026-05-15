@@ -78,7 +78,11 @@ ALLOWLIST=(
   # `message_thread_id` (parse_mode + reply_markup only).
   # Range bumped 2026-05 for #1115 vault-approval-posture insertions
   # (~100 lines added to gateway).
-  "telegram-plugin/gateway/gateway.ts:2250-2310:operator-event broadcast; no thread_id in opts"
+  # Re-bumped 2026-05-15 for the auth-snapshot Format 2 PR's
+  # `wouldFireFleetAutoFallback` synchronous-check insertion (~10
+  # lines added between the modelUnavailable detection and the
+  # broadcast loop).
+  "telegram-plugin/gateway/gateway.ts:2250-2330:operator-event broadcast; no thread_id in opts"
 
   # permission-request keyboard send. opts only has reply_markup. No thread_id.
   # Range bumped 2026-05-13 for stuck-turn-recovery v2 cleanup expansion
@@ -96,7 +100,9 @@ ALLOWLIST=(
   # phantom second deletion.
   # Range bumped 2026-05-15 for #1292 tool-aware silence-poke fallback
   # (~32 lines added earlier in the file shift this band down).
-  "telegram-plugin/gateway/gateway.ts:3160-3400:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
+  # Re-bumped 2026-05-15 for the auth-snapshot Format 2 PR
+  # (insertions earlier in the file shifted the chunk-loop down).
+  "telegram-plugin/gateway/gateway.ts:3160-3420:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
   # Range bumped 2026-05-13 for stuck-turn-recovery (#1136) v2 cleanup

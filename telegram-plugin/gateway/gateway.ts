@@ -2255,13 +2255,21 @@ function emitGatewayOperatorEvent(event: OperatorEvent): void {
   let renderedText: string
   let renderedKeyboard: ReturnType<typeof renderOperatorEvent>['keyboard'] | undefined
   if (modelUnavailable) {
-    const willAutoFallback =
+    // Two questions, asked synchronously to avoid the "card promises
+    // an announcement that never arrives" trap:
+    //   1. Is this a kind that AUTO-fallback can address?
+    //   2. Will the dispatcher actually fire (vs. dedup-drop)?
+    // Card text branches on the AND. wouldFireFleetAutoFallback is a
+    // pure read of the dedup state; calling fireFleetAutoFallback only
+    // when both are true keeps the card honest.
+    const isAutoKind =
       modelUnavailable.kind === 'quota_exhausted' || modelUnavailable.kind === 'overload'
+    const willActuallyFire = isAutoKind && wouldFireFleetAutoFallback()
     process.stderr.write(
-      `telegram gateway: operator-event suppressing-raw-stderr-for-model-unavailable agent=${agent} kind=${kind} detected=${modelUnavailable.kind} autoFallback=${willAutoFallback}\n`,
+      `telegram gateway: operator-event suppressing-raw-stderr-for-model-unavailable agent=${agent} kind=${kind} detected=${modelUnavailable.kind} autoKind=${isAutoKind} willFire=${willActuallyFire}\n`,
     )
     renderedText = formatModelUnavailableCard(modelUnavailable, agent, {
-      autoFallbackInFlight: willAutoFallback,
+      autoFallbackInFlight: willActuallyFire,
     })
     renderedKeyboard = undefined
     // Trigger fleet-wide auto-fallback. Pre-fix this branch only
@@ -2271,7 +2279,7 @@ function emitGatewayOperatorEvent(event: OperatorEvent): void {
     // separately with the causal-shape headline ("5-hour limit on
     // ken" instead of generic "quota exhausted") — see
     // auth-snapshot-format.ts → renderFallbackAnnouncement.
-    if (willAutoFallback) {
+    if (willActuallyFire) {
       void fireFleetAutoFallback(agent)
     }
   } else {
@@ -8643,7 +8651,28 @@ type AutoFallbackCheckResult =
  */
 const FLEET_FALLBACK_DEDUP_MS = 30_000
 let fleetFallbackInFlight: Promise<void> | null = null
+/** Wall-clock ms of the last ACTUAL swap (kind: 'switched' from
+ *  runFleetAutoFallback). Skipped no-ops (no broker client, no
+ *  eligible target, idempotent skip) DO NOT update this — the user
+ *  hasn't seen a swap announcement, so suppressing future fires
+ *  off a non-event would create the "card lies" gap. */
 let fleetFallbackLastFiredAtMs = 0
+
+/**
+ * Pure read of the dedup state. Returns true when a fresh
+ * `fireFleetAutoFallback` call would actually invoke the dispatcher
+ * (vs. being short-circuited by the in-flight or post-fire window).
+ *
+ * Used by the model-unavailable card render path to decide whether to
+ * advertise "Auto-failover in progress" — calling
+ * `fireFleetAutoFallback` and blindly trusting the announcement to
+ * land would lie when the dispatcher dedup-drops.
+ */
+function wouldFireFleetAutoFallback(): boolean {
+  if (fleetFallbackInFlight) return false
+  const sinceLastMs = Date.now() - fleetFallbackLastFiredAtMs
+  return sinceLastMs >= FLEET_FALLBACK_DEDUP_MS
+}
 
 /**
  * Fleet-wide auto-fallback dispatcher (RFC H follow-up).
@@ -8685,21 +8714,32 @@ async function fireFleetAutoFallback(triggerAgent: string): Promise<void> {
     )
     return
   }
-  fleetFallbackInFlight = doFireFleetAutoFallback(triggerAgent).finally(() => {
-    fleetFallbackInFlight = null
-    fleetFallbackLastFiredAtMs = Date.now()
-  })
+  // Stamp `lastFiredAtMs` ONLY on actual swaps (kind: 'switched').
+  // No-ops (no broker, no eligible target, idempotent skip, error)
+  // do NOT arm the suppression window — otherwise a transient
+  // broker hiccup would block the next 30s of legitimate fires.
+  fleetFallbackInFlight = doFireFleetAutoFallback(triggerAgent)
+    .then((didSwap) => {
+      if (didSwap) fleetFallbackLastFiredAtMs = Date.now()
+    })
+    .finally(() => {
+      fleetFallbackInFlight = null
+    })
   return fleetFallbackInFlight
 }
 
-async function doFireFleetAutoFallback(triggerAgent: string): Promise<void> {
+/** Returns true iff the dispatcher actually performed a swap (and the
+ *  user-visible announcement was broadcast). False on no-op /
+ *  error / idempotent-skip — caller uses this to decide whether to
+ *  arm the post-fire suppression window. */
+async function doFireFleetAutoFallback(triggerAgent: string): Promise<boolean> {
   try {
     const client = await getAuthBrokerClient(triggerAgent)
     if (!client) {
       process.stderr.write(
         `telegram gateway: [fleet-fallback] skipped agent=${triggerAgent} reason=no-broker-client\n`,
       )
-      return
+      return false
     }
     const state = await client.listState()
     // Probe live quota for every account in parallel. force:true
@@ -8726,7 +8766,7 @@ async function doFireFleetAutoFallback(triggerAgent: string): Promise<void> {
     // (no message_thread_id) so THREAD_NOT_FOUND can't fire here;
     // wrap in swallowingApiCall anyway per the codebase rule.
     const access = loadAccess()
-    if (access.allowFrom.length === 0) return
+    if (access.allowFrom.length === 0) return outcome.kind === 'switched'
     const opts = { parse_mode: 'HTML' as const }
     for (const chat_id of access.allowFrom) {
       void swallowingApiCall(
@@ -8734,10 +8774,12 @@ async function doFireFleetAutoFallback(triggerAgent: string): Promise<void> {
         { chat_id, verb: 'fleet-fallback:notify' },
       )
     }
+    return outcome.kind === 'switched'
   } catch (err) {
     process.stderr.write(
       `telegram gateway: [fleet-fallback] error agent=${triggerAgent}: ${(err as Error)?.message ?? err}\n`,
     )
+    return false
   }
 }
 

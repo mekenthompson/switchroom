@@ -12,9 +12,13 @@
  * Phase 3a (this file) intentionally OMITS:
  *   - account add / remove (need OAuth flow refactor — Phase 3b)
  *   - share (one-shot enable + add) — Phase 3b
- *   - connect (wizard alias for first-run UX) — Phase 3b
  *   - drive connect/disconnect aliasing — Phase 3b
  *   - apply-time legacy-slot detector wiring — Phase 3b
+ *
+ * `connect` (the one-time install onboarding wizard — GCP client →
+ * vault → `google_workspace:` block) is implemented below in
+ * `registerConnect`; it is the native equivalent of the manual
+ * prerequisite documented in docs/google-workspace.md § Prerequisite.
  *
  * The reason for the split: the OAuth flow is currently inlined in
  * `src/cli/drive.ts:runConnect()` (lines 259–620, narrowly wired to the
@@ -50,6 +54,7 @@ export function registerAuthGoogleSubcommands(
       "Manage Google Workspace accounts shared across agents (RFC G — see docs/rfcs/google-workspace-generalization.md)",
     );
 
+  registerConnect(google, program);
   registerEnable(google, program);
   registerDisable(google, program);
   registerList(google, program);
@@ -63,6 +68,244 @@ export function registerAuthGoogleSubcommands(
   registerAccountAdd(account);
   registerAccountRemove(account);
   registerAccountList(account);
+}
+
+/**
+ * `switchroom auth google connect` — one-time-per-install onboarding
+ * wizard. The native equivalent of the manual prerequisite in
+ * docs/google-workspace.md § Prerequisite: walks the operator through
+ * the GCP Console, vaults the OAuth client id/secret, and writes the
+ * `google_workspace:` block into switchroom.yaml (comment-preserving
+ * via the shared yaml Document pattern; never clobbers an existing
+ * block).
+ *
+ * Conservative by construction:
+ *   - refuses on a non-TTY (a wizard in CI is meaningless),
+ *   - refuses if the block (or its legacy `drive:` alias) already
+ *     exists — prints the block for manual paste instead of touching
+ *     a configured file,
+ *   - re-validates switchroom.yaml after the write and surfaces a
+ *     clear error if (somehow) invalid.
+ */
+function registerConnect(googleParent: Command, program: Command): void {
+  googleParent
+    .command("connect")
+    .description(
+      "One-time install wizard: create + register your Google OAuth client (GCP Console → vault → google_workspace: block). Run once, then `auth google account add`.",
+    )
+    .action(
+      withConfigError(async () => {
+        if (!process.stdin.isTTY) {
+          throw new Error(
+            oauthClientSetupGuidance(
+              "`switchroom auth google connect` is an interactive wizard and needs a TTY.",
+            ),
+          );
+        }
+
+        const [
+          { loadConfig, resolvePath },
+          { setStringSecret },
+          { setGoogleWorkspaceBlock },
+          { atomicWriteFileSync },
+        ] = await Promise.all([
+          import("../config/loader.js"),
+          import("../vault/vault.js"),
+          import("./google-workspace-yaml.js"),
+          import("../util/atomic.js"),
+        ]);
+
+        const configPath = getConfigPath(program);
+        const config = loadConfig(configPath);
+        const gw = config.google_workspace;
+        if (gw?.google_client_id && gw?.google_client_secret) {
+          console.log();
+          console.log(
+            chalk.green(
+              "  ✓ A Google OAuth client is already configured in switchroom.yaml.",
+            ),
+          );
+          console.log();
+          console.log("  Nothing to do here. Next: connect a Google account:");
+          console.log(
+            chalk.cyan(
+              "    switchroom auth google account add <your-google-email>",
+            ),
+          );
+          console.log();
+          return;
+        }
+
+        console.log();
+        console.log(
+          chalk.bold("Google Workspace — one-time OAuth client setup"),
+        );
+        console.log(
+          chalk.gray(
+            "  Switchroom ships no shared client by design (per-install client\n" +
+              "  keeps the integration subscription-honest). This is one-time.\n",
+          ),
+        );
+        console.log("  In the Google Cloud Console (~5 min):");
+        console.log(
+          "    1. https://console.cloud.google.com — create a project.",
+        );
+        console.log(
+          "    2. APIs & Services → Library — enable the Drive, Docs,",
+        );
+        console.log("       Sheets, and Calendar APIs.");
+        console.log(
+          "    3. OAuth consent screen → External; add yourself as a Test user.",
+        );
+        console.log(
+          "    4. Credentials → Create credentials → OAuth client ID →",
+        );
+        console.log("       Application type: Desktop app.");
+        console.log(
+          chalk.gray(
+            "\n  NOT the examples/personal-google-workspace-mcp/ client — that's\n" +
+              "  a separate host-side surface; the fleet needs its own client.\n",
+          ),
+        );
+
+        const clientId = (
+          await readVisibleLine("  Paste the OAuth client ID: ")
+        ).trim();
+        const clientSecret = (
+          await readHiddenLine("  Paste the OAuth client secret: ")
+        ).trim();
+        if (!clientId || !clientSecret) {
+          throw new Error(
+            "Client id and secret are both required. Re-run `switchroom auth google connect` when you have them.",
+          );
+        }
+
+        const approversRaw = (
+          await readVisibleLine(
+            "  Telegram numeric user id(s) allowed to approve Drive onboarding\n" +
+              "  (comma-separated, ≥1): ",
+          )
+        ).trim();
+        const approvers = approversRaw
+          .split(/[,\s]+/)
+          .filter(Boolean)
+          .map((s) => {
+            if (!/^\d+$/.test(s)) {
+              throw new Error(
+                `"${s}" is not a numeric Telegram user id. Approvers must be numeric ids.`,
+              );
+            }
+            return Number(s);
+          });
+        if (approvers.length === 0) {
+          throw new Error(
+            "At least one approver Telegram user id is required.",
+          );
+        }
+
+        const tierRaw = (
+          await readVisibleLine(
+            "  Workspace tier [core] / extended / complete: ",
+          )
+        )
+          .trim()
+          .toLowerCase();
+        const tier =
+          tierRaw === "" ? "core" : (tierRaw as "core" | "extended" | "complete");
+        if (!["core", "extended", "complete"].includes(tier)) {
+          throw new Error(
+            `Unknown tier "${tierRaw}". Use core, extended, or complete.`,
+          );
+        }
+
+        const vaultPath = resolvePath(
+          config.vault?.path ?? "~/.switchroom/vault.enc",
+        );
+        const passphrase =
+          process.env.SWITCHROOM_VAULT_PASSPHRASE ??
+          (await readHiddenLine("  Vault passphrase: "));
+        setStringSecret(
+          passphrase,
+          vaultPath,
+          "google-oauth-client-id",
+          clientId,
+        );
+        setStringSecret(
+          passphrase,
+          vaultPath,
+          "google-oauth-client-secret",
+          clientSecret,
+        );
+        console.log(
+          chalk.green(
+            "\n  ✓ Stored client id + secret in the vault (google-oauth-client-id /\n" +
+              "    google-oauth-client-secret).",
+          ),
+        );
+
+        const blockYaml = [
+          "google_workspace:",
+          '  google_client_id: "vault:google-oauth-client-id"',
+          '  google_client_secret: "vault:google-oauth-client-secret"',
+          `  approvers: [${approvers.join(", ")}]`,
+          `  tier: ${tier}`,
+        ].join("\n");
+
+        const raw = readFileSync(configPath, "utf-8");
+        const patched = setGoogleWorkspaceBlock(raw, {
+          clientIdRef: "vault:google-oauth-client-id",
+          clientSecretRef: "vault:google-oauth-client-secret",
+          approvers,
+          tier,
+        });
+
+        if (patched === raw) {
+          console.log(
+            chalk.yellow(
+              "\n  switchroom.yaml already has a google_workspace:/drive: block —\n" +
+                "  leaving it untouched. Merge these values yourself if needed:\n",
+            ),
+          );
+          console.log(blockYaml.replace(/^/gm, "    "));
+          console.log();
+          return;
+        }
+
+        let mode = 0o644;
+        try {
+          const { statSync } = await import("node:fs");
+          mode = statSync(configPath).mode & 0o777;
+        } catch {
+          /* default 0644 */
+        }
+        atomicWriteFileSync(configPath, patched, mode);
+
+        try {
+          loadConfig(configPath);
+        } catch (err) {
+          throw new Error(
+            `Wrote google_workspace: to ${configPath} but it no longer validates: ` +
+              `${err instanceof Error ? err.message : String(err)}. ` +
+              `The OAuth client id/secret are safely in the vault — fix or remove ` +
+              `the block by hand (it is the last top-level key).`,
+          );
+        }
+
+        console.log(
+          chalk.green(
+            `\n  ✓ Wrote the google_workspace: block to ${configPath}.`,
+          ),
+        );
+        console.log();
+        console.log("  Next: connect a Google account:");
+        console.log(
+          chalk.cyan(
+            "    switchroom auth google account add <your-google-email>",
+          ),
+        );
+        console.log();
+      }),
+    );
 }
 
 function registerEnable(googleParent: Command, program: Command): void {
@@ -347,7 +590,9 @@ function registerAccountAdd(accountParent: Command): void {
         const gw = config.google_workspace;
         if (!gw) {
           throw new Error(
-            "switchroom.yaml is missing a `google_workspace:` block. Add `google_workspace: { google_client_id: ..., google_client_secret: ... }` (vault:<key> refs supported) before connecting accounts.",
+            oauthClientSetupGuidance(
+              "switchroom.yaml has no `google_workspace:` block, so there is no Google OAuth client to connect accounts against.",
+            ),
           );
         }
 
@@ -361,7 +606,9 @@ function registerAccountAdd(accountParent: Command): void {
           gw.google_client_secret;
         if (!clientIdRaw || !clientSecretRaw) {
           throw new Error(
-            "Missing Google OAuth client credentials. Set google_workspace.google_client_id + google_client_secret in switchroom.yaml, or env SWITCHROOM_GOOGLE_CLIENT_ID + SWITCHROOM_GOOGLE_CLIENT_SECRET.",
+            oauthClientSetupGuidance(
+              "The `google_workspace:` block is present but `google_client_id` and/or `google_client_secret` is empty.",
+            ),
           );
         }
 
@@ -469,6 +716,70 @@ function registerAccountAdd(accountParent: Command): void {
         console.log();
       }),
     );
+}
+
+/**
+ * Build the guided error shown when the Google OAuth client isn't
+ * configured. The CLI is the doc here (principles.md "docs test"): the
+ * operator should be able to recover from the error text alone without
+ * opening docs/. Leads with the native one-command fix, then the manual
+ * equivalent, then the doc pointer. `reason` is the specific thing that
+ * was missing so the two callsites stay distinguishable.
+ *
+ * Exported for the unit test that pins this contract.
+ */
+export function oauthClientSetupGuidance(reason: string): string {
+  return [
+    reason,
+    "",
+    "Switchroom ships no shared OAuth client by design (per-install",
+    "client keeps the integration subscription-honest). Set one up —",
+    "one-time per install:",
+    "",
+    "  Native (recommended): a wizard that walks the GCP Console, vaults",
+    "  the secrets, and writes the config block for you —",
+    "",
+    "    switchroom auth google connect",
+    "",
+    "  Manual: create a Desktop OAuth client at",
+    "  https://console.cloud.google.com (enable the Drive/Docs/Sheets/",
+    "  Calendar APIs, add yourself as a test user), then:",
+    "",
+    "    switchroom vault set google-oauth-client-id",
+    "    switchroom vault set google-oauth-client-secret",
+    "",
+    "  and add to ~/.switchroom/switchroom.yaml (top level):",
+    "",
+    "    google_workspace:",
+    '      google_client_id: "vault:google-oauth-client-id"',
+    '      google_client_secret: "vault:google-oauth-client-secret"',
+    "      approvers: [<your-telegram-user-id>]",
+    "      tier: core",
+    "",
+    "Env vars SWITCHROOM_GOOGLE_CLIENT_ID / _SECRET override the block",
+    "for one-off debugging. Full walkthrough: docs/google-workspace.md",
+    "§ Prerequisite.",
+  ].join("\n");
+}
+
+/**
+ * Read a single visible line (echoed) — for non-secret wizard prompts
+ * (client id, approver ids, tier). The client *secret* and vault
+ * passphrase use readHiddenLine instead.
+ */
+async function readVisibleLine(prompt: string): Promise<string> {
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  try {
+    return await new Promise<string>((resolve) => {
+      rl.question(prompt, (answer) => resolve(answer));
+    });
+  } finally {
+    rl.close();
+  }
 }
 
 /**
@@ -696,5 +1007,6 @@ export const _testing = {
   getEnabledAgentsBefore,
   expandAllAgents,
   buildGoogleCredentials,
+  oauthClientSetupGuidance,
 };
 

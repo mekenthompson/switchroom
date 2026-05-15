@@ -86,3 +86,38 @@ describe("buildGoogleCredentials", () => {
     ).toThrow(/refresh_token/);
   });
 });
+
+describe("oauthClientSetupGuidance", () => {
+  const { oauthClientSetupGuidance } = _testing;
+
+  it("leads with the caller-supplied reason", () => {
+    const msg = oauthClientSetupGuidance("SPECIFIC_REASON_X");
+    expect(msg.startsWith("SPECIFIC_REASON_X")).toBe(true);
+  });
+
+  it("surfaces the native one-command fix first, then the manual path", () => {
+    const msg = oauthClientSetupGuidance("r");
+    expect(msg).toContain("switchroom auth google connect");
+    expect(msg).toContain("switchroom vault set google-oauth-client-id");
+    expect(msg).toContain("switchroom vault set google-oauth-client-secret");
+    expect(msg).toContain("google_workspace:");
+    const nativeIdx = msg.indexOf("switchroom auth google connect");
+    const manualIdx = msg.indexOf("switchroom vault set");
+    expect(nativeIdx).toBeGreaterThan(-1);
+    expect(nativeIdx).toBeLessThan(manualIdx);
+  });
+
+  it("points at the canonical doc section", () => {
+    expect(oauthClientSetupGuidance("r")).toContain(
+      "docs/google-workspace.md",
+    );
+  });
+
+  it("distinguishes the two callsites by reason", () => {
+    const a = oauthClientSetupGuidance("no block");
+    const b = oauthClientSetupGuidance("empty id/secret");
+    expect(a).not.toBe(b);
+    expect(a).toContain("no block");
+    expect(b).toContain("empty id/secret");
+  });
+});

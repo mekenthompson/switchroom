@@ -14,17 +14,26 @@ Google account, not a service account. Nothing leaves your subscription.
 ## TL;DR
 
 ```bash
+# 0. One-time per install — create + register your Google OAuth client.
+#    The wizard walks you through the GCP Console, stores the client
+#    id/secret in the vault, and writes the google_workspace: config
+#    block for you. (Manual equivalent: see "Prerequisite" below.)
+switchroom auth google connect
+
 # 1. Connect a Google account to the auth-broker (one-time per account).
 switchroom auth google account add ken-personal
 
 # 2. Allow an agent to use that account.
 switchroom auth google enable ken-personal klanker
 
-# 3. (Optional) Configure which Workspace tier an agent gets.
-#    See docs/configuration.md for the cascade — defaults to "core".
+# 3. (Optional) Pick the Workspace tier — defaults to "core".
+#    See docs/configuration.md § google_workspace for the cascade.
 ```
 
-That's the operator surface. Everything else is one of:
+Step 0 is **required and one-time per switchroom install** — switchroom
+deliberately ships no OAuth client (see "Prerequisite" below for why).
+Steps 1–2 are the per-account / per-agent surface. Everything else is
+one of:
 - The agent already having access and doing the right thing.
 - Telegram approval cards the operator taps when the agent asks.
 
@@ -53,6 +62,77 @@ agent ──────▶ get_credentials(provider=google,   │
 can use it (controlled by the ACL). One agent → can have multiple
 accounts (the agent picks `account=<label>` per call). RFC G §4.4
 spells out why this shape is load-bearing.
+
+## Prerequisite — your OAuth client (one-time per install)
+
+Before any agent can touch Drive you need **one Google OAuth client,
+registered with switchroom**. Switchroom intentionally ships no shared
+client: per-user OAuth against *your* client is what keeps the
+integration subscription-honest (no service account, nothing routed
+through a switchroom-owned credential), and Google's terms expect one
+OAuth client per install. So this step is unavoidable by design — but
+it's one-time, and the wizard does the mechanical parts.
+
+> **This is not the host-side example.**
+> `examples/personal-google-workspace-mcp/` sets up a *different* OAuth
+> client for your own host Claude Code's pair-design loop. It is
+> deliberately separate and its client must **not** be reused for the
+> agent fleet — different trust posture (approval-kernel-mediated vs.
+> single-identity). If you followed that README, you still need this
+> step for agents.
+
+### The native way
+
+```bash
+switchroom auth google connect
+```
+
+The wizard:
+
+1. Walks you through the GCP Console screens (create project → enable
+   Drive/Docs/Sheets/Calendar APIs → OAuth consent screen, add yourself
+   as a test user → create a **Desktop** OAuth client).
+2. Prompts for the client id + secret and stores them in the vault
+   (`google-oauth-client-id` / `google-oauth-client-secret`).
+3. Offers to write the `google_workspace:` block into your
+   `switchroom.yaml` (atomic write, comment-preserving; it
+   re-validates the file afterward and never overwrites an existing
+   block).
+4. Points you at `switchroom auth google account add` to continue.
+
+### The manual equivalent
+
+If you'd rather do it by hand (the wizard automates exactly this):
+
+1. **GCP Console** (≈5 min) — at <https://console.cloud.google.com>:
+   create a project; under *APIs & Services → Library* enable the
+   **Google Drive, Docs, Sheets, and Calendar** APIs; under *OAuth
+   consent screen* pick **External**, add yourself as a **Test user**;
+   under *Credentials → Create credentials → OAuth client ID* choose
+   **Desktop app**. Copy the client id and secret.
+2. **Vault the secrets** so they never land in YAML:
+
+   ```bash
+   switchroom vault set google-oauth-client-id
+   switchroom vault set google-oauth-client-secret
+   ```
+
+3. **Add the block** to `~/.switchroom/switchroom.yaml` (top-level —
+   the client id/secret are install-wide, not per-agent):
+
+   ```yaml
+   google_workspace:
+     google_client_id: "vault:google-oauth-client-id"
+     google_client_secret: "vault:google-oauth-client-secret"
+     approvers: [123456789]   # your Telegram numeric user id
+     tier: core               # core | extended | complete (default: core)
+   ```
+
+   See `docs/configuration.md` § `google_workspace` for the cascade
+   and every field. `SWITCHROOM_GOOGLE_CLIENT_ID` /
+   `SWITCHROOM_GOOGLE_CLIENT_SECRET` env vars override the block for
+   one-off operator debugging, but the vault + YAML block is the
+   persistent baseline switchroom expects.
 
 ## Connecting an account
 

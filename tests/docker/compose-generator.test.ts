@@ -1981,3 +1981,75 @@ describe("Phase 4 cutover: agent-scheduler is default-on", () => {
     expect(out).not.toContain("switchroom-scheduler");
   });
 });
+
+// Regression — cross-project consumer volume naming. The auth-broker
+// binds a per-consumer UDS at /run/switchroom/auth-broker/<consumer>/sock
+// inside a named docker volume (`auth-broker-<consumer>-sock`). Per-agent
+// volumes use the same shape but live inside this same compose project,
+// so the docker-compose `<project>_` prefix is invisible to their
+// consumer (the agent service, in the same project).
+//
+// Per-CONSUMER volumes are different: the consumer container (e.g.
+// hindsight, started via `startHindsight()` / `docker run`) lives outside
+// the switchroom compose project. It references the volume by the name
+// declared in src/setup/hindsight.ts (`auth-broker-hindsight-sock`). If
+// docker-compose project-prefixes the volume to
+// `switchroom_auth-broker-hindsight-sock`, the consumer's `-v` mount
+// resolves to a NEW empty volume → the consumer's entrypoint times out
+// on the missing UDS and the container crash-loops.
+//
+// The generator must therefore declare per-consumer volumes with an
+// explicit `name:` override that suppresses the project prefix.
+describe("auth-broker per-consumer volume naming (cross-project)", () => {
+  function makeConfigWithConsumer(name: string) {
+    const cfg = makeConfig({ a: {} }) as unknown as Record<string, unknown>;
+    cfg.auth = {
+      active: "k@example.com",
+      consumers: [{ name, account: "k@example.com", uid: 11000 }],
+    };
+    return cfg as unknown as SwitchroomConfig;
+  }
+
+  it("declares the per-consumer volume with an unprefixed `name:` override", () => {
+    const out = generateCompose({ config: makeConfigWithConsumer("hindsight") });
+    // The volumes: block must contain the consumer volume AND a `name:`
+    // line right under it. The `name:` keeps docker-compose's project
+    // prefix off so the cross-project consumer can mount it by the
+    // documented name.
+    expect(out).toMatch(
+      /^ {2}auth-broker-hindsight-sock:\n {4}name: auth-broker-hindsight-sock$/m,
+    );
+  });
+
+  it("still binds the consumer's per-consumer dir inside the broker", () => {
+    const out = generateCompose({ config: makeConfigWithConsumer("hindsight") });
+    expect(out).toContain(
+      "- auth-broker-hindsight-sock:/run/switchroom/auth-broker/hindsight",
+    );
+  });
+
+  it("does NOT add a `name:` override on per-agent volumes (intra-project, prefix is fine)", () => {
+    const out = generateCompose({ config: makeConfig({ alice: {} }) });
+    // The per-agent volume declaration is a bare `  alice-...:` line —
+    // no `    name:` continuation line under it. (Per-consumer volumes
+    // get the override; per-agent volumes don't because they're
+    // consumed inside this same compose project.)
+    expect(out).not.toMatch(
+      /^ {2}auth-broker-alice-sock:\n {4}name:/m,
+    );
+  });
+
+  it("emits an override line for every consumer (not just hindsight)", () => {
+    const cfg = makeConfig({ a: {} }) as unknown as Record<string, unknown>;
+    cfg.auth = {
+      active: "k@example.com",
+      consumers: [
+        { name: "hindsight", account: "k@example.com", uid: 11000 },
+        { name: "indexer", account: "k@example.com", uid: 11001 },
+      ],
+    };
+    const out = generateCompose({ config: cfg as unknown as SwitchroomConfig });
+    expect(out).toMatch(/^ {2}auth-broker-hindsight-sock:\n {4}name: auth-broker-hindsight-sock$/m);
+    expect(out).toMatch(/^ {2}auth-broker-indexer-sock:\n {4}name: auth-broker-indexer-sock$/m);
+  });
+});

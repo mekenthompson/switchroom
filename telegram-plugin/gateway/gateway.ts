@@ -166,6 +166,11 @@ import {
   type AgentMetadata, type AuthSummary, type StatusProbeRow,
 } from '../welcome-text.js'
 import {
+  type BrokerStateView,
+  type ClaudeJsonView,
+  buildAuthSummaryFromBroker,
+} from './auth-status-adapter.js'
+import {
   isContextExhaustionText,
   shouldArmOrphanedReplyTimeout,
   ORPHANED_REPLY_TIMEOUT_MS,
@@ -7885,13 +7890,13 @@ function buildAgentAudit(agentName: string): AgentAudit | undefined {
 }
 
 // Build an AgentMetadata snapshot for the current agent by shelling out
-// to `switchroom agent list --json` and `switchroom auth status --json`.
-// TODO(rfc-h): the `auth status` verb was retired by RFC H. The shell
-// fails silently and `authSummary` lands as null — /status renders
-// without auth detail. Replace with an `auth show --json` adapter that
-// maps the new fleet-broker shape to the per-agent AuthSummary fields.
+// to `switchroom agent list --json` and `switchroom auth show --json`.
 // Best-effort — any missing piece renders as a placeholder in the text
-// templates rather than blocking the reply.
+// templates rather than blocking the reply. RFC H retired the per-agent
+// `auth status --json` shape; auth state is now derived from the
+// broker's fleet-wide `ListStateData` payload via
+// `buildAuthSummaryFromBroker`, with billingType pulled from the
+// agent's `.claude.json` (the broker doesn't track plan tier).
 async function buildAgentMetadata(agentName: string): Promise<AgentMetadata> {
   type AgentListResp = {
     agents: Array<{
@@ -7901,24 +7906,22 @@ async function buildAgentMetadata(agentName: string): Promise<AgentMetadata> {
       model?: string | null;
     }>
   }
-  type AuthStatusResp = {
-    agents: Array<{
-      name: string; authenticated: boolean; auth_source: string | null;
-      subscription_type: string | null; expires_in: string | null;
-    }>
-  }
   const list = switchroomExecJson<AgentListResp>(['agent', 'list'])
-  const auth = switchroomExecJson<AuthStatusResp>(['auth', 'status'])
+  const brokerState = switchroomExecJson<BrokerStateView>(['auth', 'show'])
   const a = list?.agents?.find(x => x.name === agentName) ?? null
-  const au = auth?.agents?.find(x => x.name === agentName) ?? null
-  const authSummary: AuthSummary | null = au
-    ? {
-        authenticated: au.authenticated,
-        subscription_type: au.subscription_type,
-        expires_in: au.expires_in,
-        auth_source: au.auth_source,
-      }
-    : null
+  let claudeJson: ClaudeJsonView | null = null
+  try {
+    const agentDir = resolveAgentDirFromEnv()
+    if (agentDir) {
+      const raw = readFileSync(join(agentDir, '.claude', '.claude.json'), 'utf8')
+      claudeJson = JSON.parse(raw) as ClaudeJsonView
+    }
+  } catch { /* leave null — billingType becomes null in the summary */ }
+  const authSummary: AuthSummary | null = buildAuthSummaryFromBroker(
+    brokerState,
+    agentName,
+    claudeJson,
+  )
   return {
     agentName,
     model: a?.model ?? null,

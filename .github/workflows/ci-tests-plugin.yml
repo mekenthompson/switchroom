@@ -1,7 +1,7 @@
 name: ci-tests-plugin
 
 # Bun test suite for telegram-plugin/ (bun-runtime-only tests that vitest
-# can't load). Mirrors Buildkite :telegram: Plugin tests (402).
+# can't load).
 #
 # Skip-as-pass pattern (#1320 followup): see ci-lint.yml header.
 #
@@ -9,8 +9,9 @@ name: ci-tests-plugin
 # telegram-plugin is a bun workspace of the root, and the root install via
 # the composite action already brings in its deps via the hoisted node_modules.
 # A per-package install creates a shadow `@mtcute/node` that breaks
-# vi.mock-based driver tests — see .buildkite/pipeline.yml:137-152 for the
-# full diagnosis. Tests run against the hoisted root install.
+# vi.mock-based driver tests — see the long comment block in
+# .github/actions/setup-switchroom/action.yml for the full diagnosis.
+# Tests run against the hoisted root install.
 
 on:
   pull_request:

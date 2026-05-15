@@ -58,9 +58,16 @@ const IPC_CONNECT_TIMEOUT_MS = 3000;
 const IPC_REPLY_TIMEOUT_MS = 10_000;
 const KERNEL_RPC_TIMEOUT_MS = 3000;
 
+// Gateway IPC socket. Compose / start.sh export TELEGRAM_STATE_DIR
+// into every agent-container child process; `gateway.sock` lives at
+// `<TELEGRAM_STATE_DIR>/gateway.sock` (see gateway.ts:362-363 for the
+// gateway side of this contract). The `SWITCHROOM_GATEWAY_SOCKET`
+// override lets tests / host invocations point elsewhere.
 const GATEWAY_SOCKET =
   process.env.SWITCHROOM_GATEWAY_SOCKET ??
-  join(homedir(), ".claude", "channels", "telegram", "gateway.sock");
+  (process.env.TELEGRAM_STATE_DIR !== undefined
+    ? join(process.env.TELEGRAM_STATE_DIR, "gateway.sock")
+    : join(homedir(), ".claude", "channels", "telegram", "gateway.sock"));
 
 // ─── Stdin parse ──────────────────────────────────────────────────────────
 
@@ -99,10 +106,15 @@ if (!agentName) {
 }
 
 // ─── Kernel client (NDJSON over UDS) ──────────────────────────────────────
+//
+// Canonical env name is `SWITCHROOM_KERNEL_SOCKET` (the docker compose
+// generator sets this, see `src/agents/compose.ts`); the canonical
+// in-container path is `/run/switchroom/kernel/sock` — there's no
+// per-agent subdirectory on the agent side, the kernel multiplexes by
+// peercred. Mirroring `src/vault/approvals/client.ts:resolveKernelSocketPath`.
 
 const KERNEL_SOCKET =
-  process.env.SWITCHROOM_APPROVAL_KERNEL_SOCK ??
-  join("/run/switchroom/kernel", agentName as string, "sock");
+  process.env.SWITCHROOM_KERNEL_SOCKET ?? "/run/switchroom/kernel/sock";
 
 interface KernelResponse {
   ok?: boolean;
@@ -178,18 +190,16 @@ async function approvalLookup(
 // ─── Operator allowFrom discovery ─────────────────────────────────────────
 
 function loadAllowFrom(): string[] {
-  // Mirrors the gateway's loadAccess() — reads from the standard state
-  // path. We need this to populate approval_lookup's `current_approver_set`.
-  const accessPath = join(
-    homedir(),
-    ".switchroom",
-    "agents",
-    agentName as string,
-    ".switchroom",
-    "state",
-    "telegram-plugin",
-    "access.json",
-  );
+  // Mirrors the gateway's loadAccess() (see gateway.ts:362-363).
+  // access.json lives at `<TELEGRAM_STATE_DIR>/access.json` inside
+  // the agent container; the host scaffold path
+  // `~/.switchroom/agents/<agent>/.switchroom/state/telegram-plugin/access.json`
+  // doesn't exist in the container. Fallback only kicks in for
+  // host-side invocations (tests, debug tools).
+  const stateDir =
+    process.env.TELEGRAM_STATE_DIR ??
+    join(homedir(), ".claude", "channels", "telegram");
+  const accessPath = join(stateDir, "access.json");
   try {
     const raw = readFileSync(accessPath, "utf8");
     const j = JSON.parse(raw) as { allowFrom?: unknown };
@@ -377,10 +387,9 @@ async function main(): Promise<void> {
     // this case. If we hit it, the upstream MCP added a new tool we
     // haven't taught the previewer about; better to let it through than
     // block silently.
-    if (previewResult.reason === "unrecognized_tool") {
-      allow();
-    }
-    block(`preview build failed: ${previewResult.detail}`);
+    if (previewResult.reason === "unrecognized_tool") allow();
+    else block(`preview build failed: ${previewResult.detail}`);
+    return;
   }
 
   // 6. IPC to gateway — register kernel request + post card.
@@ -394,10 +403,22 @@ async function main(): Promise<void> {
   }
   const expiresAtMs = ipcReply.expiresAtMs ?? Date.now() + HOOK_TIMEOUT_MS;
 
-  // 7. Poll kernel until verdict.
-  const deadline = Math.min(Date.now() + HOOK_TIMEOUT_MS, expiresAtMs);
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, KERNEL_POLL_INTERVAL_MS));
+  // 7. Poll kernel until verdict. The deadline is the kernel's own
+  // expires_at (gateway-computed) plus one poll interval of slack so
+  // a grant that lands in the last sub-poll window before kernel
+  // expiry is still observed.
+  const deadline = Math.min(
+    Date.now() + HOOK_TIMEOUT_MS,
+    expiresAtMs + KERNEL_POLL_INTERVAL_MS,
+  );
+  // Immediate first poll — the user could already have tapped the
+  // card by the time the IPC reply lands (gateway sends synchronously,
+  // the round-trip is ms). Polling after a 2s sleep on the first
+  // iteration would wait unnecessarily.
+  for (let first = true; Date.now() < deadline; first = false) {
+    if (!first) {
+      await new Promise((r) => setTimeout(r, KERNEL_POLL_INTERVAL_MS));
+    }
     const state = await approvalLookup(scope, allowFrom);
     if (state === "granted") {
       allow();

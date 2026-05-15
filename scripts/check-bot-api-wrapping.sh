@@ -83,6 +83,8 @@ ALLOWLIST=(
   # lines added between the modelUnavailable detection and the
   # broadcast loop).
   # Re-bumped 2026-05-15 for #1308 folder-picker handler (callsite now ~2331).
+  # Re-bumped 2026-05-15 post-#1328 (/audit hostd) + #1329 (auth-ux
+  # follow-ups) — broadcast loop now at ~2334 after combined drift.
   "telegram-plugin/gateway/gateway.ts:2250-2350:operator-event broadcast; no thread_id in opts"
 
   # permission-request keyboard send. opts only has reply_markup. No thread_id.
@@ -98,7 +100,9 @@ ALLOWLIST=(
   # deletion subtracted ~80 lines below — net shift varies between
   # local + CI grep (line counting drift); widened window to 2960.
   # Re-bumped 2026-05-15 for #1308 folder-picker handler integration.
-  "telegram-plugin/gateway/gateway.ts:2695-2960:permission-request keyboard; no thread_id"
+  # Re-bumped 2026-05-15 for RFC E §4.2 PR-2C drive PreToolUse hook
+  # (#1319) — added ~2 more lines above this block.
+  "telegram-plugin/gateway/gateway.ts:2695-3000:permission-request keyboard; no thread_id"
 
   # reply chunk-loop fallback after robustApiCall threw THREAD_NOT_FOUND.
   # The caller dropped the thread; this raw sendMessage retries on the

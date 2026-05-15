@@ -50,7 +50,7 @@ const {
   warnLegacySpawnIfHostdDisabled,
   _resetHostdEnabledCache,
   _resetDeprecationSeen,
-} = await import("../gateway/hostd-dispatch.js");
+} = await import("../../telegram-plugin/gateway/hostd-dispatch.js");
 
 beforeEach(() => {
   _resetHostdEnabledCache();

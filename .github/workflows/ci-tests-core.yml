@@ -1,0 +1,89 @@
+name: ci-tests-core
+
+# Vitest core suite. Mirrors Buildkite :vitest: Core tests, with 4-way
+# matrix sharding for parallelism. Single sequential BK step (~10 min)
+# becomes 4 parallel ~3 min shards on GHA.
+#
+# Sharding determinism: `vitest --shard X/Y` hashes test file paths so a
+# given file always lands in the same shard for a given Y. Adding a test
+# file may re-balance, but every file still gets run exactly once across
+# the matrix.
+#
+# Fork-pool tuning: vitest.config.ts honours VITEST_MAX_FORKS (default 4).
+# 4 shards × 4 forks on a 2-core GHA runner = 16 concurrent workers per
+# runner, OOM/thrash territory. Set VITEST_MAX_FORKS=2 in matrix env to
+# keep the box honest. 4×2 = 8 workers/runner, still oversubscribed but
+# manageable (each shard is also working on ~25% of the suite).
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "telegram-plugin/**/*.ts"
+      - "scripts/build.mjs"
+      - "vitest.config.ts"
+      - "tsconfig.json"
+      - "package.json"
+      - "bun.lock"
+      - "telegram-plugin/package.json"
+      - "telegram-plugin/bun.lock"
+      - ".github/actions/setup-switchroom/**"
+      - ".github/workflows/ci-tests-core.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-tests-core-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vitest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      # Stub bot token — same rationale as BK pipeline.yml:103. Tests
+      # never actually poll Telegram; this just lets import of server.ts
+      # via cross-package coverage avoid the "TELEGRAM_BOT_TOKEN required"
+      # exit path.
+      TELEGRAM_BOT_TOKEN: "123456:stub-for-tests"
+      # Cap fork concurrency — see header note. Honored by vitest.config.ts.
+      VITEST_MAX_FORKS: "2"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up workspace
+        # install-jq=true — tests/boot-self-test.test.ts shells boot-self-test.sh
+        # which jq-parses `switchroom auth heal --json`. Same fix as
+        # .buildkite/pipeline.yml:128-135.
+        uses: ./.github/actions/setup-switchroom
+        with:
+          install-jq: "true"
+
+      - name: Build dist/
+        # Several integration tests (cli.issues, run-hook, boot-self-test)
+        # shell out to dist/cli/switchroom.js. Build is ~1s — every shard
+        # rebuilds rather than caching the artifact (cache overhead would
+        # exceed the rebuild time).
+        run: bun scripts/build.mjs
+
+      - name: Vitest shard ${{ matrix.shard }}/4
+        run: bunx vitest run --shard ${{ matrix.shard }}/4
+
+      - name: Upload coverage (if produced)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-shard-${{ matrix.shard }}
+          path: coverage/
+          if-no-files-found: ignore
+          retention-days: 7

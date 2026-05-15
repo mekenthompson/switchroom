@@ -128,7 +128,6 @@ import {
   resolveModelUnavailableFromOperatorEvent,
 } from '../model-unavailable.js'
 import { runFleetAutoFallback } from '../auto-fallback-fleet.js'
-import { fetchAccountQuota } from '../quota-check.js'
 import { startRestartWatchdog } from './restart-watchdog.js'
 import { validateStringArray } from './access-validator.js'
 
@@ -8908,12 +8907,18 @@ async function doFireFleetAutoFallback(triggerAgent: string): Promise<boolean> {
       return false
     }
     const state = await client.listState()
-    // Probe live quota for every account in parallel. force:true
-    // bypasses the 5-min in-process cache — we want the freshest data
-    // for the swap decision, not a cached stale read.
-    const quotas = await Promise.all(
-      state.accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
-    )
+    // Probe live quota via the broker (#1336). Pre-fix this read
+    // credentials.json off the agent HOME, which is never populated
+    // post-RFC-H — every account looked "no credentials" and the
+    // fallback logic rolled blindly. Broker-routed probes use the
+    // canonical stored tokens.
+    const probeResp = state.accounts.length > 0
+      ? await client.probeQuota(state.accounts.map((a) => a.label)).catch(() => ({ results: [] }))
+      : { results: [] }
+    const quotas = state.accounts.map((a) => {
+      const hit = probeResp.results.find((r) => r.label === a.label)
+      return hit?.result ?? { ok: false as const, reason: 'broker returned no result for account' }
+    })
     const tz = process.env.SWITCHROOM_TIMEZONE ?? process.env.TZ ?? 'UTC'
     const outcome = await runFleetAutoFallback({
       state,
@@ -9098,17 +9103,31 @@ bot.command("auth", async ctx => {
     isAdmin,
     client,
     chatId,
-    // Format 2 enricher — probe live quota for every account in
-    // parallel so the snapshot reflects current Anthropic-side
-    // utilization, not the broker's potentially-days-stale
-    // disk-cached `quota.json`. force:true bypasses the 5-min
-    // in-process cache for this call. ~500-800ms per account
-    // serial; in parallel ~800ms total for typical 3-account
-    // fleets — acceptable for an interactive command.
-    liveQuotas: async (accounts) =>
-      Promise.all(
-        accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
-      ),
+    // Format 2 enricher — live quota probe via the broker (#1336).
+    // Pre-broker this read `~/.switchroom/accounts/<label>/credentials.json`
+    // off the agent's HOME, which post-RFC-H is never populated (broker
+    // writes only the per-agent .claude/.credentials.json mirror) — so
+    // every account showed "no credentials.json or accessToken" in
+    // /auth show. The broker is the source of truth for tokens and now
+    // does the Anthropic probe server-side via `probe-quota`. Tokens
+    // never leave the broker container.
+    liveQuotas: async (accounts) => {
+      try {
+        const { results } = await client.probeQuota(accounts.map((a) => a.label))
+        // Preserve input order (broker also preserves it, but be defensive).
+        return accounts.map((a) => {
+          const hit = results.find((r) => r.label === a.label)
+          if (!hit) return { ok: false as const, reason: "broker returned no result for account" }
+          return hit.result
+        })
+      } catch (err) {
+        // Surface a uniform per-account failure so the dashboard renders
+        // gracefully (label badge stays UNKNOWN) instead of falling back
+        // to the legacy table.
+        const reason = `broker probe-quota failed: ${(err as Error)?.message ?? String(err)}`
+        return accounts.map(() => ({ ok: false as const, reason }))
+      }
+    },
     tz: process.env.SWITCHROOM_TIMEZONE ?? process.env.TZ,
   })
   // Translate the handler's optional keyboard shape into grammy's
@@ -10855,9 +10874,14 @@ async function handleAuthDashboardCallback(ctx: Context): Promise<void> {
         return
       }
       const state = await client.listState()
-      const quotas = await Promise.all(
-        state.accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
-      )
+      // Broker-routed probe (#1336) — see gateway.ts:8910 for diagnosis.
+      const probeResp = state.accounts.length > 0
+        ? await client.probeQuota(state.accounts.map((a) => a.label)).catch(() => ({ results: [] }))
+        : { results: [] }
+      const quotas = state.accounts.map((a) => {
+        const hit = probeResp.results.find((r) => r.label === a.label)
+        return hit?.result ?? { ok: false as const, reason: 'broker returned no result for account' }
+      })
       const tz = process.env.SWITCHROOM_TIMEZONE ?? process.env.TZ ?? 'UTC'
       const { renderAuthSnapshotFormat2, buildSnapshotsFromState, buildSnapshotKeyboard } = await import(
         '../auth-snapshot-format.js'
@@ -11329,9 +11353,12 @@ bot.command('usage', async ctx => {
     if (client) {
       const state = await client.listState()
       if (state.accounts.length > 0) {
-        const quotas = await Promise.all(
-          state.accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
-        )
+        // Broker-routed probe (#1336) — see gateway.ts:8910 for diagnosis.
+        const probeResp = await client.probeQuota(state.accounts.map((a) => a.label)).catch(() => ({ results: [] }))
+        const quotas = state.accounts.map((a) => {
+          const hit = probeResp.results.find((r) => r.label === a.label)
+          return hit?.result ?? { ok: false as const, reason: 'broker returned no result for account' }
+        })
         const { renderAuthSnapshotFormat2, buildSnapshotsFromState } = await import(
           '../auth-snapshot-format.js'
         )

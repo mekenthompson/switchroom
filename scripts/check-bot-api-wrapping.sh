@@ -115,7 +115,10 @@ ALLOWLIST=(
   # Re-bumped 2026-05-15 post-Path-A-Cut-2 (drive-write IPC handler
   # added ~60 lines higher up; chunk-loop callsite shifted further to ~3451).
   # Re-bumped 2026-05-15 for #1308 folder-picker handler.
-  "telegram-plugin/gateway/gateway.ts:3160-3500:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
+  # Re-bumped 2026-05-15 for #1345 (quota align): +2 lines inserted above
+  # (quota-check import + a startBootCard wiring line) shifted the
+  # unchanged callsite 3499 -> 3501, just past the old 3500 bound.
+  "telegram-plugin/gateway/gateway.ts:3160-3505:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
 
   # credit-watch notification. No thread_id (DM).
   # Range bumped 2026-05-13 for stuck-turn-recovery (#1136) v2 cleanup

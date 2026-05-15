@@ -18,8 +18,8 @@
  *
  * What this module does:
  *
- *   1. Probe live quota for every account in parallel
- *      (`fetchAccountQuota({force: true})`) so we pick the best
+ *   1. Probe live quota for every account in parallel via the
+ *      broker (`client.probeQuota(...)`, #1336) so we pick the best
  *      target with current data, not stale broker disk-cache.
  *   2. Skip blocked accounts entirely; pick the lowest-utilization
  *      healthy candidate (or, if none, the lowest throttling one).
@@ -79,8 +79,8 @@ export interface FleetFallbackDeps {
    *  is testable without spinning up a UDS. */
   state: ListStateData;
   /** Parallel array of live quota probes, same order as `state.accounts`.
-   *  Use `Promise.all(state.accounts.map(a =>
-   *  fetchAccountQuota(a.label, {force: true})))`. */
+   *  Get via `client.probeQuota(state.accounts.map(a => a.label))`
+   *  and map the response back to per-account results (#1336). */
   quotas: QuotaResult[];
   /** Broker `setActive` invoker. Returns the result for logging. */
   setActive: (label: string) => Promise<{ active: string; fanned: string[] }>;

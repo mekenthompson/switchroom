@@ -220,6 +220,16 @@ export interface AuthBrokerClient {
     agent: string,
     account: string | null,
   ): Promise<{ agent: string; account: string | null }>
+  /**
+   * Live Anthropic quota probe via the broker (#1336). The broker
+   * uses its stored accessTokens to hit `/v1/messages` server-side
+   * and returns parsed rate-limit headers. Tokens never reach the
+   * caller. Per-label results are returned in input order.
+   */
+  probeQuota(
+    accounts: readonly string[],
+    timeoutMs?: number,
+  ): Promise<{ results: Array<{ label: string; result: import('../quota-check.js').QuotaResult }> }>
 }
 
 export interface AuthCommandContext {

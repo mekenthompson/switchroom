@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.11.1 — hostd default-on + CI infra-resilience follow-ups
+
+A small follow-up release: RFC C Phase 2 flips the host-control daemon on by default (so `/restart`, `/new`, `/reset`, `/update apply` work on docker-mode installs without per-install opt-in), `/audit hostd` gets its bind-mount, and the GHA queue-fail class (#1336) gets a manual recovery lever plus an alert backstop.
+
+### Changes
+
+#### Features
+
+- **feat(host-control):** RFC C Phase 2 default-flip — `host_control.enabled` defaults to `true` (#1338). An absent `host_control` block now resolves to enabled. Migration-safe: the `existsSync` guard on `~/.switchroom/hostd/<name>` means installs without hostd don't get a broken bind-mount and `compose up` doesn't hard-fail. Operators on legacy systemd-mode installs set `host_control: { enabled: false }` explicitly.
+- **feat(auth-broker):** probe-quota op — route `/auth show` quota probes through the broker (#1336).
+
+#### Fixes
+
+- **fix(audit-hostd):** Bind-mount `host-control-audit.log` :ro into admin agents so `/audit hostd` (#1328) can tail privileged-verb history from DM (#1337). Mirrors the vault-audit.log mount pattern; admin-gated; `existsSync`-guarded for fresh installs.
+
+#### CI infra-resilience
+
+- **ci(docker-images):** `workflow_dispatch` recovery trigger so `:latest` can be republished after a GHA queue-fail without another push to main (#1339), plus the same trigger added to the push-gated test workflows (#1340). The tag-computation steps treat a `workflow_dispatch` on `main` like a `push` (full multi-arch, `:latest` + `:sha-<short>`).
+- **ci:** `ci-infra-watchdog` — alert-only backstop that distinguishes a GHA queue force-fail (workflow concluded `failure`, zero jobs with `conclusion==failure`) from a genuine regression and opens/de-dupes a `ci-infra-failure` issue so main-red-on-infra is visible in minutes, not hours (#1341).
+
+### Upgrade notes
+
+- `switchroom update` handles the rollout. The #1338 default-flip means admin agents pick up the hostd UDS bind-mount on the next `apply` **if hostd is installed** (`~/.switchroom/hostd/<name>` exists); installs without hostd are unaffected. No image changes beyond the v0.11.0 set.
+
 ## v0.11.0 — Drive write-preview lands + hindsight production-hardening + GHA primary CI
 
 The RFC E (Google Drive) write-preview path goes end-to-end: a PreToolUse hook intercepts Drive writes, posts a diff-preview card to Telegram, and waits for approval before letting the model proceed. Hindsight ships its first real-deploy survival kit after a single install loop surfaced five separate latent bugs. CI flips to GitHub Actions as primary (Buildkite stays as a backup) and picks up shared-dist + cache speedups.

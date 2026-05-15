@@ -992,6 +992,65 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
     }
   });
 
+  it("admin agents get a read-only host-control-audit.log mount when the host log exists (#1328 follow-up)", async () => {
+    // fails when: the hostd-audit-log mount is dropped from admin
+    // agent compose. /audit hostd in DM (#1328) shells out to
+    // `switchroom hostd audit` inside the agent container, which
+    // reads `${HOME}/.switchroom/host-control-audit.log` via
+    // defaultAuditLogPath(). Without the mount the lookup resolves
+    // to a path that doesn't exist inside the container and the
+    // command returns "log not found" regardless of real log state.
+    const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "compose-hostd-audit-mount-"));
+    try {
+      mkdirSync(join(tmp, ".switchroom"), { recursive: true });
+      writeFileSync(join(tmp, ".switchroom", "host-control-audit.log"), "");
+      const out = generateCompose({
+        config: makeConfig({
+          alice: { admin: true },
+          bob: {},
+        }),
+        homeDir: tmp,
+      });
+      expect(out).toMatch(
+        /agent-alice:[\s\S]*?\.switchroom\/host-control-audit\.log:\/state\/agent\/home\/\.switchroom\/host-control-audit\.log:ro/,
+      );
+      // Non-admin: no audit-log mount. Operator state never reaches
+      // an ordinary agent's container.
+      expect(out).not.toMatch(
+        /agent-bob:[\s\S]*?host-control-audit\.log/,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the hostd-audit-log mount on fresh installs where the host log doesn't exist yet (no docker compose hard-fail)", async () => {
+    // fails when: the existsSync guard on the host-control-audit.log
+    // mount is dropped. Hostd creates the log lazily on the first
+    // privileged-verb request, so a brand-new install may not have it
+    // yet — without the guard, docker compose `up` would hard-fail
+    // on a missing :ro source. Same pattern as the vault-audit.log
+    // guard above.
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const tmp = mkdtempSync(join(tmpdir(), "compose-hostd-audit-fresh-"));
+    try {
+      const out = generateCompose({
+        config: makeConfig({ alice: { admin: true } }),
+        homeDir: tmp,
+      });
+      expect(out).not.toMatch(
+        /agent-alice:[\s\S]*?host-control-audit\.log/,
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("admin agents get NO operator-socket mount or routing env (#1021 Design B handles grant-mgmt server-side)", () => {
     // fails when: a refactor re-introduces the pre-#1021 attempt of
     // mounting the operator socket directly into admin agents. That

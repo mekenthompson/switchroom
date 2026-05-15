@@ -115,6 +115,22 @@ describe("hindsight broker-fed mode (#1245)", () => {
     expect(envPairs).toContain("HINDSIGHT_API_LLM_MODEL=claude-sonnet-4-6");
   });
 
+  it("enables stateless MCP (HINDSIGHT_API_MCP_STATELESS=true) so a hindsight bounce doesn't strand agent-side MCP sessions", () => {
+    // Stateful MCP makes the server assign an Mcp-Session-Id on
+    // initialize that the client must echo on every subsequent call.
+    // When hindsight restarts, its in-memory session table is wiped
+    // but every agent's claude MCP client keeps caching the now-stale
+    // id — retain fails with "Session not found" until each agent is
+    // also restarted. Stateless mode makes every request self-contained.
+    startHindsight({ apiPort: 8888, uiPort: 9999 });
+    const args = findRunArgs();
+    const envPairs: string[] = [];
+    for (let i = 0; i < args.length - 1; i++) {
+      if (args[i] === "-e") envPairs.push(args[i + 1] as string);
+    }
+    expect(envPairs).toContain("HINDSIGHT_API_MCP_STATELESS=true");
+  });
+
   it("uses the switchroom-hindsight image, not upstream", () => {
     startHindsight({ apiPort: 8888, uiPort: 9999 });
     const args = findRunArgs();

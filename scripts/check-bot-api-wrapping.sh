@@ -83,6 +83,8 @@ ALLOWLIST=(
   # lines added between the modelUnavailable detection and the
   # broadcast loop).
   # Re-bumped 2026-05-15 for #1308 folder-picker handler (callsite now ~2331).
+  # Re-bumped 2026-05-15 post-#1328 (/audit hostd) + #1329 (auth-ux
+  # follow-ups) — broadcast loop now at ~2334 after combined drift.
   "telegram-plugin/gateway/gateway.ts:2250-2350:operator-event broadcast; no thread_id in opts"
 
   # permission-request keyboard send. opts only has reply_markup. No thread_id.

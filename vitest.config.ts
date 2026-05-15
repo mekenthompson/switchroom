@@ -134,6 +134,8 @@ export default defineConfig({
       "**/telegram-plugin/tests/history-reaper.test.ts",
       // sandbox-hint-posttool.test.ts uses bun:test — run via test:bun.
       "**/telegram-plugin/tests/sandbox-hint-posttool.test.ts",
+      // fleet-fallback-gate.test.ts uses bun:test — run via test:bun.
+      "**/telegram-plugin/tests/fleet-fallback-gate.test.ts",
       "**/telegram-plugin/tests/ipc-server-client.test.ts",
       "**/telegram-plugin/tests/ipc-server-race.test.ts",
       "**/telegram-plugin/tests/gateway-bridge.test.ts",

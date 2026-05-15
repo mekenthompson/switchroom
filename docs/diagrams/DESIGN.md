@@ -48,3 +48,47 @@ All three explanatory diagrams (`progress-card-anatomy`, `approval-grant-flow`,
 `--ink-300 #8A8F98`, `--ink-200 #B8BCC3`,
 `--brass #E8B657`, `--brass-deep #B8873A`,
 `--cord #C8302C`, `--teal #4A9B8E`. No gradients. No invented hues.
+
+## Source-of-truth & regeneration model
+
+A flattened `.jpg` is **not** a source. It can't be diffed in review and
+can't be regenerated without re-illustrating from scratch. Every diagram
+therefore has up to three artifacts, with strict precedence:
+
+1. **`<name>.spec.md`** — the regeneration contract (authoritative).
+   Headline/footer copy, node list, edge list, callout table, and a
+   **"Source of truth in code"** block citing `file:line` so the diagram
+   can be rebuilt and re-verified against the implementation, not against
+   prose docs (RFC drafts and the CLAUDE.md ASCII drift; code does not).
+2. **`<name>.svg`** — the authored artifact. MUST conform to the v3
+   recipe above (canvas, cards, callouts, palette). Text → diffable,
+   renders inline on GitHub. This is what a regeneration produces.
+3. **`<name>.jpg`** — optional raster export for docs/social embeds.
+   Always derived from the SVG. Never hand-edited, never the source.
+
+**Correctness rule:** a diagram is correct iff its `.spec.md` matches the
+cited code *and* its `.svg` matches the spec. Review checks the spec
+against `file:line`, not the picture by eye. When code moves, update the
+spec first; the SVG/JPG are regenerated to follow it.
+
+**Spec skeleton** (every `<name>.spec.md` follows this):
+
+```
+# <name> — diagram spec
+Status: current | needs-revision | new
+Source of truth in code: <file:line>, <file:line> …
+Headline: "<top copy>"
+Footer:   "<bottom copy>"
+
+## Nodes
+- id · label · sub-label · role-color (brass|teal|cord|dark|plain)
+
+## Edges
+- from → to · label · kind (primary-flow | leader)
+
+## Callouts        (anatomy diagrams only)
+- n · target · text
+
+## Style notes
+Inherits the v3 recipe above. Note any sanctioned deviation here.
+```

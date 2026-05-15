@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" font-family="'Inter', system-ui, -apple-system, sans-serif">
+  <defs>
+    <filter id="cardShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="6" stdDeviation="10" flood-color="#14171C" flood-opacity="0.18"/>
+    </filter>
+    <marker id="arrowCord" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C8302C"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="800" fill="#FAF7EF"/>
+
+  <g>
+    <circle cx="80" cy="80" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="1120" cy="80" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="80" cy="720" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="1120" cy="720" r="4" fill="#E8B657" opacity="0.55"/>
+    <circle cx="140" cy="140" r="3" fill="#C8302C" opacity="0.5"/>
+    <circle cx="1060" cy="660" r="3" fill="#C8302C" opacity="0.5"/>
+  </g>
+
+  <text x="600" y="64" text-anchor="middle" font-size="18" font-weight="700" fill="#23282F">Editing a Google Doc is a gated tool call too.</text>
+  <text x="600" y="748" text-anchor="middle" font-size="11" font-weight="500" font-style="italic" fill="#5A6069">Same kernel, same TTL, same audit — a diff you approve before it lands in Drive.</text>
+
+  <!-- 1 agent · Drive write intent (dark) -->
+  <g transform="rotate(-1.2 220 360)">
+    <rect x="90" y="250" width="260" height="220" rx="14" fill="#14171C" stroke="#23282F" stroke-width="1.5" filter="url(#cardShadow)"/>
+    <text x="110" y="284" font-size="15" font-weight="700" fill="#FAF7EF">agent</text>
+    <text x="110" y="308" font-size="11.5" font-weight="500" fill="#8A8F98">Drive write intent (MCP tool)</text>
+    <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="12" fill="#B8BCC3">
+      <text x="110" y="344">gdrive.write(</text>
+      <text x="126" y="364">fileId, edits…)</text>
+      <text x="110" y="396" fill="#E8B657">Paused — awaiting</text>
+      <text x="110" y="414" fill="#E8B657">approval</text>
+    </g>
+  </g>
+
+  <!-- 2 approval kernel (identical treatment to approval-grant-flow) -->
+  <g transform="rotate(-1.2 600 360)">
+    <rect x="470" y="250" width="260" height="220" rx="14" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="1.5" filter="url(#cardShadow)"/>
+    <text x="492" y="284" font-size="16" font-weight="700" fill="#23282F">approval kernel</text>
+    <text x="492" y="306" font-size="11" font-weight="500" fill="#5A6069">same singleton as the</text>
+    <text x="492" y="322" font-size="11" font-weight="500" fill="#5A6069">tool-approval rail</text>
+    <line x1="492" y1="338" x2="708" y2="338" stroke="#EDE7D7" stroke-width="1"/>
+    <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="11.5" fill="#23282F">
+      <text x="492" y="364">one request:</text>
+      <text x="492" y="386" fill="#5A6069">doc:gdrive:write:&lt;fileId&gt;</text>
+      <text x="492" y="412">→ request_id + expires_at</text>
+    </g>
+    <text x="492" y="446" font-size="10.5" font-weight="500" font-style="italic" fill="#5A6069">TTL'd · audited · apv:&lt;id&gt;:once</text>
+  </g>
+
+  <!-- 3 phone: diff-preview card -->
+  <g transform="rotate(0.8 950 380)">
+    <rect x="850" y="160" width="220" height="450" rx="26" fill="#FFFFFF" stroke="#EDE7D7" stroke-width="2" filter="url(#cardShadow)"/>
+    <rect x="930" y="174" width="60" height="8" rx="4" fill="#EDE7D7"/>
+    <rect x="868" y="202" width="184" height="386" rx="10" fill="#14171C"/>
+    <text x="884" y="232" font-size="12.5" font-weight="700" fill="#FAF7EF">@worker → Google Doc</text>
+    <text x="884" y="250" font-size="10" font-weight="500" fill="#8A8F98" font-family="'JetBrains Mono', ui-monospace, monospace">Q3-planning.gdoc</text>
+    <rect x="884" y="262" width="152" height="86" rx="6" fill="#23282F"/>
+    <g font-family="'JetBrains Mono', ui-monospace, monospace" font-size="10" fill="#B8BCC3">
+      <text x="894" y="282" fill="#C8302C">- target: Q2</text>
+      <text x="894" y="300" fill="#4A9B8E">+ target: Q3</text>
+      <text x="894" y="318" fill="#4A9B8E">+ owner: @worker</text>
+      <text x="894" y="336" fill="#5A6069">buildDiffPreview()</text>
+    </g>
+    <!-- shipped: single approve button (suggest slot) -->
+    <rect x="884" y="362" width="152" height="34" rx="8" fill="#4A9B8E"/>
+    <text x="960" y="384" text-anchor="middle" font-size="12" font-weight="700" fill="#FAF7EF">Approve edit</text>
+    <!-- renderer-capable, not wired: dashed ghost -->
+    <rect x="884" y="404" width="152" height="30" rx="8" fill="none" stroke="#8A8F98" stroke-width="1.4" stroke-dasharray="4 4"/>
+    <text x="960" y="424" text-anchor="middle" font-size="10.5" font-weight="500" fill="#8A8F98">⚠ Apply directly</text>
+    <text x="884" y="452" font-size="8.5" font-weight="500" font-style="italic" fill="#5A6069">^ renderer-capable, not wired</text>
+    <!-- post-grant: Open in Drive -->
+    <rect x="884" y="466" width="152" height="30" rx="8" fill="#23282F" stroke="#E8B657" stroke-width="1.2"/>
+    <text x="960" y="486" text-anchor="middle" font-size="10.5" font-weight="700" fill="#E8B657">Open in Drive</text>
+    <text x="884" y="520" font-size="8.5" font-weight="500" font-style="italic" fill="#8A8F98">(appears after grant)</text>
+  </g>
+
+  <!-- 4 Google Drive (teal) -->
+  <g transform="rotate(0.8 220 620)">
+    <rect x="120" y="580" width="200" height="80" rx="14" fill="#FFFFFF" stroke="#4A9B8E" stroke-width="2" filter="url(#cardShadow)"/>
+    <rect x="120" y="580" width="6" height="80" rx="3" fill="#4A9B8E"/>
+    <text x="142" y="610" font-size="14" font-weight="700" fill="#23282F">Google Drive</text>
+    <text x="142" y="634" font-size="11" font-weight="500" fill="#5A6069">the write lands</text>
+  </g>
+
+  <!-- Steps (same color scheme as approval-grant-flow) -->
+  <path d="M350,340 C376,340 396,340 468,340" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <circle cx="410" cy="312" r="16" fill="#E8B657"/><text x="410" y="317" text-anchor="middle" font-size="13" font-weight="700" fill="#FAF7EF">1</text>
+  <text x="356" y="296" font-size="10" font-weight="500" fill="#5A6069">register one kernel request</text>
+
+  <path d="M730,318 C780,300 808,290 848,288" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <circle cx="792" cy="276" r="16" fill="#C8302C"/><text x="792" y="281" text-anchor="middle" font-size="13" font-weight="700" fill="#FAF7EF">2</text>
+  <text x="744" y="258" font-size="10" font-weight="500" fill="#5A6069">post diff-preview card</text>
+
+  <path d="M848,452 C808,470 780,478 732,452" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <circle cx="792" cy="492" r="16" fill="#C8302C"/><text x="792" y="497" text-anchor="middle" font-size="13" font-weight="700" fill="#FAF7EF">3</text>
+  <text x="744" y="522" font-size="10" font-weight="500" fill="#5A6069">user taps approve</text>
+
+  <path d="M468,400 C440,420 416,428 352,406" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <circle cx="410" cy="446" r="16" fill="#4A9B8E"/><text x="410" y="451" text-anchor="middle" font-size="13" font-weight="700" fill="#FAF7EF">4</text>
+  <text x="346" y="476" font-size="10" font-weight="500" fill="#5A6069">hook polls → resumes</text>
+
+  <path d="M210,470 C210,520 215,545 218,576" fill="none" stroke="#C8302C" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowCord)"/>
+  <circle cx="250" cy="528" r="16" fill="#4A9B8E"/><text x="250" y="533" text-anchor="middle" font-size="13" font-weight="700" fill="#FAF7EF">5</text>
+  <text x="268" y="533" font-size="10" font-weight="500" fill="#5A6069">write applied</text>
+
+  <!-- leader: Open in Drive post-grant -->
+  <line x1="884" y1="481" x2="330" y2="600" stroke="#8A8F98" stroke-width="1.4" stroke-dasharray="2 4"/>
+  <text x="430" y="560" font-size="10" font-weight="500" font-style="italic" fill="#8A8F98">"Open in Drive" — post-grant button, not part of the flow</text>
+</svg>

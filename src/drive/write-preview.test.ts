@@ -550,6 +550,118 @@ describe("buildWritePreview — attestation invariant", () => {
     expect(r.reason).toBe("off_body_target");
   });
 
+  // ─── Re-review fixes (round 2): more tools take off-body args + more enum-only fields ─
+
+  it("B3-followup: find_and_replace_doc refuses tab_id (would mis-attest body-scope replace)", () => {
+    const r = callWith("mcp__google-workspace__find_and_replace_doc", {
+      document_id: "DOC1",
+      tab_id: "TAB1",
+      find_text: "TBD",
+      replace_text: "Done",
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("off_body_target");
+    expect(r.detail).toContain("tab_id");
+  });
+
+  it("B2-followup: update_doc_headers_footers section_type is enum-pinned", () => {
+    // Plain-English deception attempt:
+    const r1 = callWith("mcp__google-workspace__update_doc_headers_footers", {
+      document_id: "DOC1",
+      section_type: "footer onto Approved heading -- lies",
+      content: "x",
+    });
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    expect(r1.preview.resolvedAnchor.displayName).toBe("update section");
+    expect(r1.preview.resolvedAnchor.displayName).not.toContain("Approved");
+
+    // Legitimate values pass through:
+    for (const t of ["header", "footer"]) {
+      const r = callWith("mcp__google-workspace__update_doc_headers_footers", {
+        document_id: "DOC1",
+        section_type: t,
+        content: "x",
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      expect(r.preview.resolvedAnchor.displayName).toBe(`update ${t}`);
+    }
+  });
+
+  it("B2-followup: manage_doc_tab action is enum-pinned", () => {
+    const r1 = callWith("mcp__google-workspace__manage_doc_tab", {
+      document_id: "DOC1",
+      action: "create' inside section 'Approved",
+      title: "x",
+    });
+    expect(r1.ok).toBe(true);
+    if (!r1.ok) return;
+    expect(r1.preview.resolvedAnchor.displayName).toBe("? tab 'x'");
+    expect(r1.preview.resolvedAnchor.displayName).not.toContain("Approved");
+
+    // Legitimate values pass through:
+    for (const a of ["create", "rename", "delete", "populate_from_markdown"]) {
+      const r = callWith("mcp__google-workspace__manage_doc_tab", {
+        document_id: "DOC1",
+        action: a,
+        title: "X",
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      expect(r.preview.resolvedAnchor.displayName).toBe(`${a} tab 'X'`);
+    }
+  });
+
+  it("B3-followup: detectOffBodyTargeting catches non-string truthy values", () => {
+    // Reviewer attack: pass tab_id as a number / array / object. Older
+    // truthiness gate required `typeof === "string" && length > 0`,
+    // missing these. Upstream might coerce to a valid id; we MUST
+    // refuse rather than render a body-scope card.
+    for (const tabId of [1, [1, 2], { id: "x" }, true]) {
+      const r = callWith("mcp__google-workspace__modify_doc_text", {
+        document_id: "DOC1",
+        tab_id: tabId,
+        start_index: 50,
+        text: "x",
+      });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.reason).toBe("off_body_target");
+    }
+  });
+
+  it("B3-followup: end_of_segment truthy non-true values still trip the refusal", () => {
+    for (const eos of [1, "true", { x: 1 }, [true]]) {
+      const r = callWith("mcp__google-workspace__modify_doc_text", {
+        document_id: "DOC1",
+        end_of_segment: eos,
+        text: "x",
+      });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.reason).toBe("off_body_target");
+    }
+  });
+
+  it("B3-followup: '0' / null / false / empty-string / undefined are correctly treated as 'not set'", () => {
+    // The defensive cases — these are upstream's "not set" signals,
+    // the hook MUST NOT trip the refusal on them.
+    for (const eos of [false, 0, null, undefined]) {
+      for (const tab of ["", null, undefined]) {
+        const r = callWith("mcp__google-workspace__modify_doc_text", {
+          document_id: "DOC1",
+          end_of_segment: eos,
+          tab_id: tab,
+          start_index: 50,
+          text: "x",
+        });
+        expect(r.ok).toBe(true);
+      }
+    }
+  });
+
   it("batch_update_doc op count reflects real entries, not array length (sparse-array defence)", () => {
     const r = callWith("mcp__google-workspace__batch_update_doc", {
       document_id: "DOC1",

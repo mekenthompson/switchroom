@@ -210,22 +210,49 @@ function modifyDocText(
  *     segment (header/footer/tab end), NOT at end of body
  */
 function detectOffBodyTargeting(input: Record<string, unknown>): string | null {
-  if (typeof input.tab_id === "string" && input.tab_id.length > 0) {
-    return "tab_id";
-  }
-  if (typeof input.segment_id === "string" && input.segment_id.length > 0) {
-    return "segment_id";
-  }
-  if (input.end_of_segment === true) {
+  // Truthiness gate is broad — non-string truthy values
+  // (`tab_id: 1`, `tab_id: {}`, `end_of_segment: 1`) MUST still
+  // trip the off-body refusal because upstream's argument coercion
+  // could turn them into a valid tab/segment id. The only inputs
+  // that mean "not set" are: undefined, null, empty string, false,
+  // 0. Anything else gets treated as "operator-controlled
+  // off-body targeting" and we refuse rather than render a
+  // body-stream location string.
+  if (isTruthyNonEmpty(input.tab_id)) return "tab_id";
+  if (isTruthyNonEmpty(input.segment_id)) return "segment_id";
+  if (input.end_of_segment !== undefined && input.end_of_segment !== false && input.end_of_segment !== 0 && input.end_of_segment !== null) {
     return "end_of_segment";
   }
   return null;
+}
+
+function isTruthyNonEmpty(v: unknown): boolean {
+  if (v === undefined || v === null) return false;
+  if (typeof v === "string") return v.length > 0;
+  if (typeof v === "boolean") return v;
+  if (typeof v === "number") return v !== 0 && Number.isFinite(v);
+  // Objects, arrays, anything else — treat as set. The card MUST
+  // refuse rather than guess about coercion behaviour.
+  return true;
 }
 
 function findAndReplace(
   args: BuildWritePreviewArgs,
   input: Record<string, unknown>,
 ): BuildWritePreviewResult {
+  // RFC §4.2 attestation: upstream's find_and_replace_doc accepts
+  // a `tab_id` to scope the replacement to a single tab. The card
+  // would otherwise render "every match of '<find>'" with no tab
+  // qualifier, falsely implying body-scope. Refuse rather than
+  // mis-attest.
+  const offBody = detectOffBodyTargeting(input);
+  if (offBody !== null) {
+    return {
+      ok: false,
+      reason: "off_body_target",
+      detail: `find_and_replace_doc uses ${offBody}; refusing to attest a body-scope replace for an off-body call`,
+    };
+  }
   const findText = stringOr(input.find_text, "");
   const replaceText = stringOr(input.replace_text, "");
   // find_and_replace doesn't take offsets — wrap the location as
@@ -409,15 +436,23 @@ function createTable(
   return ok(args, resolved, rowCount, 0);
 }
 
+// Upstream `update_doc_headers_footers.section_type` is enum-bound
+// to `header | footer`. Enum-pin so an agent can't smuggle
+// arbitrary plain-English deception via this field.
+const HEADER_FOOTER_SECTION_TYPES = new Set<string>(["header", "footer"]);
+
 function updateHeadersFooters(
   args: BuildWritePreviewArgs,
   input: Record<string, unknown>,
 ): BuildWritePreviewResult {
-  const sectionType = stringOr(input.section_type, "header");
+  const rawSection = stringOr(input.section_type, "");
+  const sectionType = HEADER_FOOTER_SECTION_TYPES.has(rawSection)
+    ? rawSection
+    : "section";
   const content = stringOr(input.content, "");
   const resolved: ResolvedAnchor = {
     op: { kind: "replace_paragraph", paragraphIndex: -1 },
-    displayName: `update ${truncateLine(sectionType)}`,
+    displayName: `update ${sectionType}`,
   };
   return ok(args, resolved, countLines(content), 0);
 }
@@ -443,15 +478,26 @@ function updateParagraphStyle(
   return ok(args, resolved, 0, 0);
 }
 
+// Upstream `manage_doc_tab.action` is enum-bound. Enum-pin so the
+// agent can't smuggle plain-English deception in the
+// `<action> tab '<title>'` displayName.
+const MANAGE_DOC_TAB_ACTIONS = new Set<string>([
+  "create",
+  "rename",
+  "delete",
+  "populate_from_markdown",
+]);
+
 function manageDocTab(
   args: BuildWritePreviewArgs,
   input: Record<string, unknown>,
 ): BuildWritePreviewResult {
-  const action = stringOr(input.action, "?");
+  const rawAction = stringOr(input.action, "");
+  const action = MANAGE_DOC_TAB_ACTIONS.has(rawAction) ? rawAction : "?";
   const title = stringOr(input.title, "");
   const resolved: ResolvedAnchor = {
     op: { kind: "insert_after", paragraphIndex: -1 },
-    displayName: `${truncateLine(action)} tab${title ? ` '${truncateLine(title)}'` : ""}`,
+    displayName: `${action} tab${title ? ` '${truncateLine(title)}'` : ""}`,
   };
   // markdown_text drives the line count when populating; otherwise 0
   const md = stringOr(input.markdown_text, "");

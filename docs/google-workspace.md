@@ -93,7 +93,11 @@ The wizard:
    Drive/Docs/Sheets/Calendar APIs → OAuth consent screen, add yourself
    as a test user → create a **Desktop** OAuth client).
 2. Prompts for the client id + secret and stores them in the vault
-   (`google-oauth-client-id` / `google-oauth-client-secret`).
+   **via the vault-broker** (`google-oauth-client-id` /
+   `google-oauth-client-secret`) — the broker owns `vault.enc`, so the
+   write works regardless of file ownership. The vault passphrase you
+   enter is forwarded to the broker as operator attestation; it must
+   match the passphrase the broker is unlocked with.
 3. Offers to write the `google_workspace:` block into your
    `switchroom.yaml` (atomic write, comment-preserving; it
    re-validates the file afterward and never overwrites an existing

@@ -292,6 +292,59 @@ describe('probeQuota — #1163: /v1/messages headers path', () => {
     expect(result.detail).toContain('18% / 7d')
   })
 
+  it('prefers the broker probe and does NOT do a direct fetch when it succeeds (Option A / #1336)', async () => {
+    const directFetch: typeof fetch = async () => {
+      throw new Error('direct fetch must not run when the broker probe returns a result')
+    }
+    const brokerProbe = async () => ({
+      ok: true as const,
+      data: {
+        fiveHourUtilizationPct: 30,
+        sevenDayUtilizationPct: 12,
+        fiveHourResetAt: null,
+        sevenDayResetAt: null,
+        representativeClaim: null,
+        overageStatus: null,
+        overageDisabledReason: null,
+      },
+    })
+    const result = await probeQuota(claudeDir, agentDir, directFetch, { brokerProbe })
+    expect(result.status).toBe('ok')
+    expect(result.detail).toContain('30% / 5h')
+    expect(result.detail).toContain('12% / 7d')
+  })
+
+  it('falls back to a direct probe when the broker probe returns null (broker unreachable)', async () => {
+    const headers = new Headers({
+      'anthropic-ratelimit-unified-5h-utilization': '0.55',
+      'anthropic-ratelimit-unified-7d-utilization': '0.22',
+    })
+    const directFetch: typeof fetch = async () =>
+      new Response('{}', { status: 200, headers }) as Response
+    const brokerProbe = async () => null
+
+    const result = await probeQuota(claudeDir, agentDir, directFetch, { brokerProbe })
+    expect(result.status).toBe('ok')
+    expect(result.detail).toContain('55% / 5h')
+    expect(result.detail).toContain('22% / 7d')
+  })
+
+  it('falls back to a direct probe when the broker probe throws', async () => {
+    const headers = new Headers({
+      'anthropic-ratelimit-unified-5h-utilization': '0.10',
+      'anthropic-ratelimit-unified-7d-utilization': '0.05',
+    })
+    const directFetch: typeof fetch = async () =>
+      new Response('{}', { status: 200, headers }) as Response
+    const brokerProbe = async () => {
+      throw new Error('broker UDS connect failed')
+    }
+
+    const result = await probeQuota(claudeDir, agentDir, directFetch, { brokerProbe })
+    expect(result.status).toBe('ok')
+    expect(result.detail).toContain('10% / 5h')
+  })
+
   it('surfaces auth rejection with the RFC-H replace-account hint on 403', async () => {
     const fakeFetch: typeof fetch = async () =>
       new Response(null, { status: 403 }) as Response

@@ -179,4 +179,127 @@ describe("formatForCli", () => {
     // exit_code: null → '  -' padded
     expect(line).toMatch(/\s-\s/);
   });
+
+  it("marks terminal-phase rows with a ✓ suffix on the op", () => {
+    const terminal = parseAuditLine(
+      JSON.stringify({
+        ts: "2026-05-15T08:00:40.000Z",
+        op: "update_apply",
+        phase: "terminal",
+        caller: { kind: "agent", name: "klanker" },
+        request_id: "gw-update-1",
+        result: "error",
+        exit_code: 1,
+        duration_ms: 11876,
+        stderr_tail: "switchroom apply failed: EACCES /state/...\nstack frame",
+      }),
+    )!;
+    const line = formatForCli([terminal])[0]!;
+    expect(line).toContain("update_apply✓");
+  });
+
+  it("verbose mode appends an indented stderr block under failed rows", () => {
+    const terminal = parseAuditLine(
+      JSON.stringify({
+        ts: "2026-05-15T08:00:40.000Z",
+        op: "update_apply",
+        phase: "terminal",
+        caller: { kind: "agent", name: "klanker" },
+        request_id: "gw-update-1",
+        result: "error",
+        exit_code: 1,
+        duration_ms: 11876,
+        stderr_tail: "line one\nline two",
+      }),
+    )!;
+    const out = formatForCli([terminal], { verbose: true });
+    expect(out[0]).toContain("update_apply");
+    expect(out.some((l) => l.includes("stderr:"))).toBe(true);
+    expect(out.some((l) => l.includes("│ line one"))).toBe(true);
+    expect(out.some((l) => l.includes("│ line two"))).toBe(true);
+  });
+
+  it("verbose mode falls back to the error message when no stderr_tail", () => {
+    const e = parseAuditLine(
+      JSON.stringify({
+        ts: "2026-05-15T08:00:40.000Z",
+        op: "update_apply",
+        phase: "terminal",
+        caller: { kind: "agent", name: "klanker" },
+        request_id: "gw-update-2",
+        result: "error",
+        exit_code: null,
+        duration_ms: 200,
+        error: "spawn ENOENT",
+      }),
+    )!;
+    const out = formatForCli([e], { verbose: true });
+    expect(out.some((l) => l.includes("error:"))).toBe(true);
+    expect(out.some((l) => l.includes("│ spawn ENOENT"))).toBe(true);
+  });
+
+  it("verbose mode is silent for clean (no stderr / no error) rows", () => {
+    const ok = parseAuditLine(
+      JSON.stringify({
+        ts: "2026-05-15T08:00:40.000Z",
+        op: "agent_restart",
+        caller: { kind: "agent", name: "klanker" },
+        request_id: "r1",
+        result: "completed",
+        exit_code: 0,
+        duration_ms: 500,
+      }),
+    )!;
+    expect(formatForCli([ok], { verbose: true })).toHaveLength(1);
+  });
+
+  it("clips a pathologically long stderr tail in verbose mode", () => {
+    const huge = "x".repeat(5000);
+    const e = parseAuditLine(
+      JSON.stringify({
+        ts: "2026-05-15T08:00:40.000Z",
+        op: "update_apply",
+        phase: "terminal",
+        caller: { kind: "agent", name: "klanker" },
+        request_id: "r2",
+        result: "error",
+        exit_code: 1,
+        duration_ms: 100,
+        stderr_tail: huge,
+      }),
+    )!;
+    const out = formatForCli([e], { verbose: true }).join("\n");
+    expect(out).toContain("(truncated)");
+    expect(out.length).toBeLessThan(huge.length);
+  });
+});
+
+describe("parseAuditLine — persisted tails (#22)", () => {
+  it("captures phase, stdout_tail, stderr_tail when present", () => {
+    const e = parseAuditLine(
+      JSON.stringify({
+        ts: "2026-05-15T08:00:40.000Z",
+        op: "update_apply",
+        phase: "terminal",
+        caller: { kind: "operator" },
+        request_id: "r3",
+        result: "completed",
+        exit_code: 0,
+        duration_ms: 1234,
+        stdout_tail: "ok",
+        stderr_tail: "warn: foo",
+      }),
+    );
+    expect(e).not.toBeNull();
+    expect(e!.phase).toBe("terminal");
+    expect(e!.stdout_tail).toBe("ok");
+    expect(e!.stderr_tail).toBe("warn: foo");
+  });
+
+  it("tolerates the legacy row shape (no phase / tails)", () => {
+    const e = parseAuditLine(SAMPLE_AGENT_LINE);
+    expect(e).not.toBeNull();
+    expect(e!.phase).toBeUndefined();
+    expect(e!.stderr_tail).toBeUndefined();
+  });
 });

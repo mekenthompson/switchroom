@@ -128,7 +128,6 @@ import {
   resolveModelUnavailableFromOperatorEvent,
 } from '../model-unavailable.js'
 import { runFleetAutoFallback } from '../auto-fallback-fleet.js'
-import { fetchAccountQuota } from '../quota-check.js'
 import { startRestartWatchdog } from './restart-watchdog.js'
 import { validateStringArray } from './access-validator.js'
 
@@ -8908,12 +8907,18 @@ async function doFireFleetAutoFallback(triggerAgent: string): Promise<boolean> {
       return false
     }
     const state = await client.listState()
-    // Probe live quota for every account in parallel. force:true
-    // bypasses the 5-min in-process cache — we want the freshest data
-    // for the swap decision, not a cached stale read.
-    const quotas = await Promise.all(
-      state.accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
-    )
+    // Probe live quota via the broker (#1336). Pre-fix this read
+    // credentials.json off the agent HOME, which is never populated
+    // post-RFC-H — every account looked "no credentials" and the
+    // fallback logic rolled blindly. Broker-routed probes use the
+    // canonical stored tokens.
+    const probeResp = state.accounts.length > 0
+      ? await client.probeQuota(state.accounts.map((a) => a.label)).catch(() => ({ results: [] }))
+      : { results: [] }
+    const quotas = state.accounts.map((a) => {
+      const hit = probeResp.results.find((r) => r.label === a.label)
+      return hit?.result ?? { ok: false as const, reason: 'broker returned no result for account' }
+    })
     const tz = process.env.SWITCHROOM_TIMEZONE ?? process.env.TZ ?? 'UTC'
     const outcome = await runFleetAutoFallback({
       state,
@@ -10869,9 +10874,14 @@ async function handleAuthDashboardCallback(ctx: Context): Promise<void> {
         return
       }
       const state = await client.listState()
-      const quotas = await Promise.all(
-        state.accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
-      )
+      // Broker-routed probe (#1336) — see gateway.ts:8910 for diagnosis.
+      const probeResp = state.accounts.length > 0
+        ? await client.probeQuota(state.accounts.map((a) => a.label)).catch(() => ({ results: [] }))
+        : { results: [] }
+      const quotas = state.accounts.map((a) => {
+        const hit = probeResp.results.find((r) => r.label === a.label)
+        return hit?.result ?? { ok: false as const, reason: 'broker returned no result for account' }
+      })
       const tz = process.env.SWITCHROOM_TIMEZONE ?? process.env.TZ ?? 'UTC'
       const { renderAuthSnapshotFormat2, buildSnapshotsFromState, buildSnapshotKeyboard } = await import(
         '../auth-snapshot-format.js'
@@ -11343,9 +11353,12 @@ bot.command('usage', async ctx => {
     if (client) {
       const state = await client.listState()
       if (state.accounts.length > 0) {
-        const quotas = await Promise.all(
-          state.accounts.map((a) => fetchAccountQuota(a.label, { force: true })),
-        )
+        // Broker-routed probe (#1336) — see gateway.ts:8910 for diagnosis.
+        const probeResp = await client.probeQuota(state.accounts.map((a) => a.label)).catch(() => ({ results: [] }))
+        const quotas = state.accounts.map((a) => {
+          const hit = probeResp.results.find((r) => r.label === a.label)
+          return hit?.result ?? { ok: false as const, reason: 'broker returned no result for account' }
+        })
         const { renderAuthSnapshotFormat2, buildSnapshotsFromState } = await import(
           '../auth-snapshot-format.js'
         )

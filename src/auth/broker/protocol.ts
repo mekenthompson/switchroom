@@ -260,10 +260,11 @@ export const ListGoogleAccountsRequestSchema = z.object({
  * (which DOES have the file) without exposing the accessToken to
  * the gateway.
  *
- * ACL: agent + operator identities accepted (consumer identities
- * don't render dashboards). No per-account ACL — `accounts` must
- * be a subset of `listAccounts()`; unknown labels return a failure
- * result for that label, never a hard error.
+ * ACL: same posture as `list-state` — no identity restriction.
+ * Every peer that reaches the broker can call this op (matches the
+ * existing fleet-snapshot precedent). No per-account ACL either;
+ * unknown labels return a failure result for that label, never a
+ * hard error.
  */
 export const ProbeQuotaRequestSchema = z.object({
   v: z.literal(PROTOCOL_VERSION),

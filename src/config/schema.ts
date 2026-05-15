@@ -1727,9 +1727,13 @@ export const QuotaConfigSchema = z.object({
 export const HostControlConfigSchema = z.object({
   enabled: z
     .boolean()
-    .optional()
+    .default(true)
     .describe(
-      "Opt-in to the host-control daemon. Default: false. " +
+      "Whether the host-control daemon is in use. Default: true (since " +
+      "RFC C Phase 2 default-flip — the gateway's /restart, /new, /reset, " +
+      "and /update apply slash-commands all dispatch through hostd, and " +
+      "without it those verbs fail on docker-mode installs because the " +
+      "agent container has no docker binary/socket). " +
       "When true, the compose generator emits per-agent bind mounts " +
       "at `~/.switchroom/hostd/<name>/sock` for every admin-flagged " +
       "agent. Install the daemon with `switchroom hostd install` — " +
@@ -1737,13 +1741,9 @@ export const HostControlConfigSchema = z.object({
       "(`switchroom-hostd`), separate from the agent fleet's compose " +
       "project so `up -d --remove-orphans` cycles of the fleet " +
       "can't recreate the daemon mid-RPC. See RFC C §5.1. " +
-      "Since Phase 2 (#1175 PR γ) the gateway's /restart, /new, /reset, " +
-      "and /update apply slash-commands automatically dispatch through " +
-      "hostd when enabled — replacing the in-container " +
-      "`spawnSwitchroomDetached` shellout that requires docker access. " +
-      "Set enabled: true on docker-mode installs to make those verbs work " +
-      "(they otherwise fail because the agent container has no docker " +
-      "binary/socket).",
+      "Set enabled: false only on legacy systemd-mode installs that " +
+      "still rely on the in-container `spawnSwitchroomDetached` " +
+      "shellout (removal is tracked as RFC C Phase 3).",
     ),
 });
 
@@ -1869,10 +1869,11 @@ export const SwitchroomConfigSchema = z.object({
     "Optional weekly/monthly USD spend budgets rendered in the session " +
     "greeting. Usage is read from ccusage at runtime; no network calls.",
   ),
-  host_control: HostControlConfigSchema.optional().describe(
-    "Optional host-control daemon configuration. See RFC C " +
-    "(docs/rfcs/host-control-daemon.md) and the field-level help on " +
-    "`enabled` for the Phase 1 scope.",
+  host_control: HostControlConfigSchema.default({}).describe(
+    "Host-control daemon configuration. Defaults to enabled=true since " +
+    "RFC C Phase 2 (docs/rfcs/host-control-daemon.md). Omit the block " +
+    "to accept defaults; set `enabled: false` only on legacy systemd-" +
+    "mode installs (removal tracked as RFC C Phase 3).",
   ),
   google_accounts: z
     .record(

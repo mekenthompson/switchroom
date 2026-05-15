@@ -68,17 +68,22 @@ afterEach(() => {
 });
 
 describe("isHostdEnabled() — config gate", () => {
-  it("returns false when host_control absent", () => {
+  it("returns true when host_control is absent (default-on since RFC C Phase 2)", () => {
+    // Mock returns a partial config without host_control — simulates an
+    // older config object or a path that bypassed Zod. The helper now
+    // uses `!== false` semantics, matching the schema's `.default(true)`
+    // so default-on stays default-on across both parsed and unparsed
+    // config paths.
     loadConfigMock.mockReturnValue({});
-    expect(isHostdEnabled()).toBe(false);
+    expect(isHostdEnabled()).toBe(true);
   });
 
-  it("returns false when host_control.enabled is false", () => {
+  it("returns false when host_control.enabled is explicitly false", () => {
     loadConfigMock.mockReturnValue({ host_control: { enabled: false } });
     expect(isHostdEnabled()).toBe(false);
   });
 
-  it("returns true when host_control.enabled is true", () => {
+  it("returns true when host_control.enabled is explicitly true", () => {
     loadConfigMock.mockReturnValue({ host_control: { enabled: true } });
     expect(isHostdEnabled()).toBe(true);
   });
@@ -104,7 +109,7 @@ describe("isHostdEnabled() — config gate", () => {
 
 describe("hostdWillBeUsed() — config + socket existence", () => {
   it("false when hostd disabled even if socket would be present", () => {
-    loadConfigMock.mockReturnValue({});
+    loadConfigMock.mockReturnValue({ host_control: { enabled: false } });
     expect(hostdWillBeUsed("klanker")).toBe(false);
   });
 
@@ -117,7 +122,7 @@ describe("hostdWillBeUsed() — config + socket existence", () => {
 
 describe("tryHostdDispatch()", () => {
   it("returns 'not-configured' when hostd disabled", async () => {
-    loadConfigMock.mockReturnValue({});
+    loadConfigMock.mockReturnValue({ host_control: { enabled: false } });
     const result = await tryHostdDispatch("klanker", {
       v: 1,
       op: "agent_restart",
@@ -304,7 +309,7 @@ describe("pollHostdStatus() — long-running verb completion polling", () => {
   });
 
   it("returns 'not-configured' when hostd is disabled", async () => {
-    loadConfigMock.mockReturnValue({});
+    loadConfigMock.mockReturnValue({ host_control: { enabled: false } });
     const resp = await pollHostdStatus("klanker", "gw-x", {
       timeoutMs: 1000,
       intervalMs: 50,
@@ -368,7 +373,7 @@ describe("warnLegacySpawnIfHostdDisabled() — deprecation noise", () => {
   });
 
   it("emits exactly one warning per verb per process", () => {
-    loadConfigMock.mockReturnValue({});
+    loadConfigMock.mockReturnValue({ host_control: { enabled: false } });
     warnLegacySpawnIfHostdDisabled("agent_restart");
     warnLegacySpawnIfHostdDisabled("agent_restart");
     warnLegacySpawnIfHostdDisabled("agent_restart");
@@ -379,7 +384,7 @@ describe("warnLegacySpawnIfHostdDisabled() — deprecation noise", () => {
   });
 
   it("emits per distinct verb", () => {
-    loadConfigMock.mockReturnValue({});
+    loadConfigMock.mockReturnValue({ host_control: { enabled: false } });
     warnLegacySpawnIfHostdDisabled("agent_restart");
     warnLegacySpawnIfHostdDisabled("update_apply");
     warnLegacySpawnIfHostdDisabled("agent_start");

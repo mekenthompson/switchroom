@@ -185,8 +185,9 @@ export async function requestDeviceCode(
     //   - 401 invalid_client ("Invalid client type."): the OAuth client
     //     is a Desktop/Web type, not "TVs and Limited Input devices".
     //     Common operator mistake (setup docs historically said
-    //     "Desktop app"); the desktop_loopback tier handles those
-    //     clients, so fall through instead of dumping a raw stack.
+    //     "Desktop app"). Falling through reaches oob_paste, which
+    //     works with any client type — so degrade gracefully instead
+    //     of dumping a raw stack.
     if (
       res.status === 400 ||
       res.status === 403 ||

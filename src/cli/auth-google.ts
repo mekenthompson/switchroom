@@ -41,6 +41,7 @@ import {
   getEnabledAgentsForGoogleAccount,
   listGoogleAccounts,
 } from "./google-accounts-yaml.js";
+import type { PutResult } from "../vault/broker/client.js";
 import { withConfigError, getConfig, getConfigPath } from "./helpers.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 
@@ -105,12 +106,12 @@ function registerConnect(googleParent: Command, program: Command): void {
 
         const [
           { loadConfig, resolvePath },
-          { setStringSecret },
+          { putViaBroker, resolveBrokerSocketPath },
           { setGoogleWorkspaceBlock },
           { atomicWriteFileSync },
         ] = await Promise.all([
           import("../config/loader.js"),
-          import("../vault/vault.js"),
+          import("../vault/broker/client.js"),
           import("./google-workspace-yaml.js"),
           import("../util/atomic.js"),
         ]);
@@ -218,28 +219,49 @@ function registerConnect(googleParent: Command, program: Command): void {
           );
         }
 
-        const vaultPath = resolvePath(
-          config.vault?.path ?? "~/.switchroom/vault.enc",
-        );
+        // Write the secrets through the vault-broker, not the vault file
+        // directly. The broker is the single owner/writer of vault.enc
+        // (it runs as root and rewrites the file on its own schedule);
+        // a host-side direct write races it and breaks the moment the
+        // broker has re-owned the file (the classic root:root EACCES).
+        // `switchroom vault set` is broker-routed for the same reason —
+        // `--no-broker` direct-file is the legacy escape hatch, not the
+        // default. We forward the operator passphrase as attestation
+        // (#969 P1a): when it matches the broker's unlocked passphrase
+        // the broker treats the call as operator-issued and bypasses
+        // the unknown-key gate, so it can create these brand-new keys —
+        // the same path the Telegram one-tap save uses.
+        let brokerSocket: string | undefined;
+        try {
+          brokerSocket = resolveBrokerSocketPath({
+            vaultBrokerSocket: config.vault?.broker?.socket
+              ? resolvePath(config.vault.broker.socket)
+              : undefined,
+          });
+        } catch {
+          brokerSocket = resolveBrokerSocketPath();
+        }
         const passphrase =
           process.env.SWITCHROOM_VAULT_PASSPHRASE ??
           (await readHiddenLine("  Vault passphrase: "));
-        setStringSecret(
-          passphrase,
-          vaultPath,
-          "google-oauth-client-id",
-          clientId,
-        );
-        setStringSecret(
-          passphrase,
-          vaultPath,
-          "google-oauth-client-secret",
-          clientSecret,
-        );
+        for (const [key, value] of [
+          ["google-oauth-client-id", clientId],
+          ["google-oauth-client-secret", clientSecret],
+        ] as const) {
+          const result = await putViaBroker(
+            key,
+            { kind: "string", value },
+            { socket: brokerSocket, passphrase },
+          );
+          const verdict = interpretConnectPutResult(key, result);
+          if (!verdict.ok) {
+            throw new Error(verdict.message);
+          }
+        }
         console.log(
           chalk.green(
-            "\n  ✓ Stored client id + secret in the vault (google-oauth-client-id /\n" +
-              "    google-oauth-client-secret).",
+            "\n  ✓ Stored client id + secret in the vault via the broker\n" +
+              "    (google-oauth-client-id / google-oauth-client-secret).",
           ),
         );
 
@@ -763,6 +785,60 @@ export function oauthClientSetupGuidance(reason: string): string {
 }
 
 /**
+ * Decide whether a broker `put` during `connect` succeeded, and if not,
+ * produce the operator-facing recovery message. Pure + exported so the
+ * broker-failure contract is unit-tested without driving the
+ * interactive wizard (the wizard action itself is smoke-tested per the
+ * file header).
+ *
+ * Deliberately does NOT fall back to a direct vault.enc write on
+ * failure: the broker owns the file, so a host-side direct write is the
+ * exact thing that breaks under a broker-owned (root:root) vault.
+ * Stopping with an actionable message beats silently regressing to the
+ * path this change exists to remove.
+ */
+export function interpretConnectPutResult(
+  key: string,
+  result: PutResult,
+): { ok: true } | { ok: false; message: string } {
+  switch (result.kind) {
+    case "ok":
+      return { ok: true };
+    case "unreachable":
+      return {
+        ok: false,
+        message:
+          `Vault broker is unreachable (${result.msg}); '${key}' was not ` +
+          `stored. connect writes secrets through the broker, not the ` +
+          `vault file. Check it on the host — 'switchroom vault broker ` +
+          `status'; if wedged, 'docker compose -p switchroom restart ` +
+          `vault-broker' — then re-run 'switchroom auth google connect' ` +
+          `(the write is idempotent).`,
+      };
+    case "denied":
+      return {
+        ok: false,
+        message:
+          `Vault broker refused to store '${key}' [${result.code}]: ` +
+          `${result.msg}. Most common cause: the passphrase does not ` +
+          `match the broker's unlocked passphrase. Re-run 'switchroom ` +
+          `auth google connect' with the vault passphrase the broker is ` +
+          `unlocked with.`,
+      };
+    case "not_found":
+      return {
+        ok: false,
+        message:
+          `Vault broker reached but rejected creating '${key}' ` +
+          `[${result.code}]: ${result.msg}. Creating a new key needs ` +
+          `operator-passphrase attestation and the supplied passphrase ` +
+          `did not attest. Re-run with the real vault passphrase (the ` +
+          `one the broker is unlocked with).`,
+      };
+  }
+}
+
+/**
  * Read a single visible line (echoed) — for non-secret wizard prompts
  * (client id, approver ids, tier). The client *secret* and vault
  * passphrase use readHiddenLine instead.
@@ -1008,5 +1084,6 @@ export const _testing = {
   expandAllAgents,
   buildGoogleCredentials,
   oauthClientSetupGuidance,
+  interpretConnectPutResult,
 };
 

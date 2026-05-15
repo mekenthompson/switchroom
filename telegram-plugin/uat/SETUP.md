@@ -297,18 +297,22 @@ as a long-lived secret.
 When all three are checked, the env block above + `bun run test:uat`
 is safe to run.
 
-## 8. CI gate — `:robot: UAT fuzz` Buildkite step
+## 8. CI gate — `ci-uat` GitHub Actions workflow
 
-Since the buildkite gate landed, the fuzz subset of scenarios
-(`fuzz-random-prompts-dm.test.ts`, `fuzz-extended-dm.test.ts`,
-`fuzz-human-style-dm.test.ts`) runs automatically on every PR that
-touches `telegram-plugin/`, `src/agents/`, or `telegram-plugin/uat/`.
+Since the GHA gate landed (replacing the original Buildkite gate),
+the fuzz subset of scenarios (`fuzz-random-prompts-dm.test.ts`,
+`fuzz-extended-dm.test.ts`, `fuzz-human-style-dm.test.ts`) runs
+automatically on every PR that touches `telegram-plugin/`,
+`src/agents/`, or `telegram-plugin/uat/`.
 
-The step runs on a self-hosted Buildkite agent tagged
-`queue=uat-host` that lives on the same box as the `test-harness`
-agent. Secrets come from the Buildkite cluster secret store, not
-from local vault. See `.buildkite/README.md` § "UAT fuzz step" for
-agent setup + secret rotation.
+The workflow (`.github/workflows/ci-uat.yml`) runs on a self-hosted
+GHA runner labelled `[self-hosted, uat-host]` that lives on the
+same box as the `test-harness` agent. Gating: the `UAT_GATE_ENABLED`
+repository variable must be `true` AND the four Telegram secrets
+(`TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_UAT_DRIVER_SESSION`,
+`TELEGRAM_TEST_BOT_USERNAME`) must be present as GitHub Actions
+secrets. The workflow's header docstring covers agent setup + secret
+rotation.
 
 **Scope (CI):**
 

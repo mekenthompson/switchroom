@@ -227,8 +227,8 @@ jobs:
         # A failure here must NOT mask a passing eval run.
         continue-on-error: true
         run: |
-          if [ -f .buildkite/annotate-evals.sh ]; then
-            bash .buildkite/annotate-evals.sh || echo "annotate-evals.sh failed (continuing)"
+          if [ -f scripts/ci/annotate-evals.sh ]; then
+            bash scripts/ci/annotate-evals.sh || echo "annotate-evals.sh failed (continuing)"
           else
             echo "annotate-evals.sh not present — skipping"
           fi
@@ -239,8 +239,8 @@ jobs:
         env:
           GITHUB_GIST_TOKEN: ${{ secrets.GITHUB_GIST_TOKEN }}
         run: |
-          if [ -f .buildkite/publish-badges.sh ] && [ -n "$GITHUB_GIST_TOKEN" ]; then
-            bash .buildkite/publish-badges.sh || echo "publish-badges.sh failed (continuing)"
+          if [ -f scripts/ci/publish-badges.sh ] && [ -n "$GITHUB_GIST_TOKEN" ]; then
+            bash scripts/ci/publish-badges.sh || echo "publish-badges.sh failed (continuing)"
           else
             echo "publish-badges.sh prerequisites missing — skipping"
           fi

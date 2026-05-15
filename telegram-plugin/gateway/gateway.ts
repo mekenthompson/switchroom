@@ -2255,10 +2255,14 @@ function emitGatewayOperatorEvent(event: OperatorEvent): void {
   let renderedText: string
   let renderedKeyboard: ReturnType<typeof renderOperatorEvent>['keyboard'] | undefined
   if (modelUnavailable) {
+    const willAutoFallback =
+      modelUnavailable.kind === 'quota_exhausted' || modelUnavailable.kind === 'overload'
     process.stderr.write(
-      `telegram gateway: operator-event suppressing-raw-stderr-for-model-unavailable agent=${agent} kind=${kind} detected=${modelUnavailable.kind}\n`,
+      `telegram gateway: operator-event suppressing-raw-stderr-for-model-unavailable agent=${agent} kind=${kind} detected=${modelUnavailable.kind} autoFallback=${willAutoFallback}\n`,
     )
-    renderedText = formatModelUnavailableCard(modelUnavailable, agent)
+    renderedText = formatModelUnavailableCard(modelUnavailable, agent, {
+      autoFallbackInFlight: willAutoFallback,
+    })
     renderedKeyboard = undefined
     // Trigger fleet-wide auto-fallback. Pre-fix this branch only
     // rendered the card; the fallback machinery was unreachable from
@@ -2267,7 +2271,7 @@ function emitGatewayOperatorEvent(event: OperatorEvent): void {
     // separately with the causal-shape headline ("5-hour limit on
     // ken" instead of generic "quota exhausted") — see
     // auth-snapshot-format.ts → renderFallbackAnnouncement.
-    if (modelUnavailable.kind === 'quota_exhausted' || modelUnavailable.kind === 'overload') {
+    if (willAutoFallback) {
       void fireFleetAutoFallback(agent)
     }
   } else {
@@ -8627,6 +8631,21 @@ type AutoFallbackCheckResult =
   | { kind: 'error'; message: string }
 
 /**
+ * Re-entry guard for `fireFleetAutoFallback`. Without this, N
+ * concurrent agent turns hitting 429 within ~1s each fire a separate
+ * fleet swap — N broadcasts, N broker writes, N quota probes per
+ * account, possibly oscillating swap targets. The guard collapses
+ * concurrent triggers from the same agent into one in-flight
+ * promise, and suppresses re-fires for `FLEET_FALLBACK_DEDUP_MS`
+ * after the most recent successful trigger (the suppression survives
+ * the announcement → user-side observed swap; if quota is still bad
+ * the next event will fire after the window closes).
+ */
+const FLEET_FALLBACK_DEDUP_MS = 30_000
+let fleetFallbackInFlight: Promise<void> | null = null
+let fleetFallbackLastFiredAtMs = 0
+
+/**
  * Fleet-wide auto-fallback dispatcher (RFC H follow-up).
  *
  * Wired from the model-unavailable card render path so a quota-out
@@ -8637,12 +8656,43 @@ type AutoFallbackCheckResult =
  * fires on utilization headers) was the only trigger and missed
  * hard-rejection events.
  *
+ * Concurrency: collapses concurrent triggers via the in-flight
+ * promise above. Subsequent calls within `FLEET_FALLBACK_DEDUP_MS` of
+ * a recent fire are dropped silently — the broadcast announcement is
+ * the user-visible signal that the swap happened, no need to repeat.
+ *
  * Fire-and-forget: never throws into the caller's flow. Posts the
  * causal-shape announcement to every chat in `loadAccess().allowFrom`
  * so the user sees the outcome inline with the original "Model
  * unavailable" card.
  */
 async function fireFleetAutoFallback(triggerAgent: string): Promise<void> {
+  // Dedup: collapse concurrent fires into the in-flight promise.
+  if (fleetFallbackInFlight) {
+    process.stderr.write(
+      `telegram gateway: [fleet-fallback] dropped (in-flight) agent=${triggerAgent}\n`,
+    )
+    return fleetFallbackInFlight
+  }
+  // Dedup: suppress re-fires within the post-trigger window. The
+  // broker write + announcement broadcast already informed every
+  // user surface of the swap — a second swap N seconds later
+  // would oscillate targets and spam.
+  const sinceLastMs = Date.now() - fleetFallbackLastFiredAtMs
+  if (sinceLastMs < FLEET_FALLBACK_DEDUP_MS) {
+    process.stderr.write(
+      `telegram gateway: [fleet-fallback] dropped (dedup ${sinceLastMs}ms < ${FLEET_FALLBACK_DEDUP_MS}ms) agent=${triggerAgent}\n`,
+    )
+    return
+  }
+  fleetFallbackInFlight = doFireFleetAutoFallback(triggerAgent).finally(() => {
+    fleetFallbackInFlight = null
+    fleetFallbackLastFiredAtMs = Date.now()
+  })
+  return fleetFallbackInFlight
+}
+
+async function doFireFleetAutoFallback(triggerAgent: string): Promise<void> {
   try {
     const client = await getAuthBrokerClient(triggerAgent)
     if (!client) {
@@ -8950,17 +9000,24 @@ bot.command("auth", async ctx => {
   // (taps paste the slash-command into the user's input). Keep a
   // safe default for buttons missing both (shouldn't happen).
   if (reply.keyboard && reply.keyboard.length > 0) {
-    const inline_keyboard = reply.keyboard.map((row) =>
-      row.map((b) => {
-        if (b.callbackData) return { text: b.text, callback_data: b.callbackData }
-        if (b.insertText) return { text: b.text, switch_inline_query_current_chat: b.insertText }
-        return { text: b.text, callback_data: 'auth:noop' }
-      }),
-    )
+    // Build via grammy's InlineKeyboard so the type is correct
+    // for switchroomReply's reply_markup field — no `as never`
+    // cast needed.
+    const kb = new InlineKeyboard()
+    for (let i = 0; i < reply.keyboard.length; i++) {
+      const row = reply.keyboard[i]!
+      for (const b of row) {
+        if (b.callbackData) kb.text(b.text, b.callbackData)
+        else if (b.insertText) kb.switchInlineCurrent(b.text, b.insertText)
+        else kb.text(b.text, 'auth:noop')
+      }
+      // grammy's row terminator — except after the last row.
+      if (i < reply.keyboard.length - 1) kb.row()
+    }
     await switchroomReply(ctx, reply.text, {
       html: reply.html,
-      reply_markup: { inline_keyboard },
-    } as never)
+      reply_markup: kb,
+    })
   } else {
     await switchroomReply(ctx, reply.text, { html: reply.html })
   }

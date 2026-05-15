@@ -85,7 +85,10 @@ ALLOWLIST=(
   # (~100 lines total added around line 2510).
   # Range bumped 2026-05-15 for #1292 tool-aware silence-poke fallback
   # (~32 lines added in onSessionEvent + ctx threading).
-  "telegram-plugin/gateway/gateway.ts:2695-2920:permission-request keyboard; no thread_id"
+  # Re-bumped 2026-05-15 for the auth-snapshot Format 2 PR: card-path
+  # `willAutoFallback` branching added a few lines just above this
+  # block, shifting the permission send down ~5 lines.
+  "telegram-plugin/gateway/gateway.ts:2695-2940:permission-request keyboard; no thread_id"
 
   # reply chunk-loop fallback after robustApiCall threw THREAD_NOT_FOUND.
   # The caller dropped the thread; this raw sendMessage retries on the
@@ -106,9 +109,10 @@ ALLOWLIST=(
   # are tap-driven UI and a missed edit just leaves the previous state
   # visible (the user can re-tap).
   # Range bumped 2026-05-15 for the auth-snapshot Format 2 PR
-  # (~120 lines added to handleAuthDashboardCallback shifted the
-  # vault wizard callsites further down).
-  "telegram-plugin/gateway/gateway.ts:9340-10000:vault grant wizard ctx.api.editMessageText already has .catch swallow"
+  # (~180 lines added across handleAuthDashboardCallback +
+  # fireFleetAutoFallback re-entry guard shifted the vault wizard
+  # callsites further down).
+  "telegram-plugin/gateway/gateway.ts:9340-10100:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter
   # via DI. The gateway wires those adapters through robustApiCall (see

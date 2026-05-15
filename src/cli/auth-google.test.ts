@@ -121,3 +121,54 @@ describe("oauthClientSetupGuidance", () => {
     expect(b).toContain("empty id/secret");
   });
 });
+
+describe("interpretConnectPutResult", () => {
+  const { interpretConnectPutResult } = _testing;
+
+  it("passes a successful put through", () => {
+    expect(interpretConnectPutResult("k", { kind: "ok" })).toEqual({
+      ok: true,
+    });
+  });
+
+  it("unreachable → not stored + points at broker recovery, no direct-file fallback", () => {
+    const v = interpretConnectPutResult("google-oauth-client-id", {
+      kind: "unreachable",
+      msg: "ENOENT socket",
+    });
+    expect(v.ok).toBe(false);
+    if (v.ok) throw new Error("unreachable");
+    expect(v.message).toContain("google-oauth-client-id");
+    expect(v.message).toContain("was not");
+    expect(v.message).toContain("switchroom vault broker status");
+    expect(v.message).toContain("ENOENT socket");
+    // Must NOT suggest bypassing the broker — that's the bug we removed.
+    expect(v.message.toLowerCase()).not.toContain("--no-broker");
+    expect(v.message.toLowerCase()).not.toContain("vault.enc");
+  });
+
+  it("denied → surfaces code/msg and the passphrase-mismatch hint", () => {
+    const v = interpretConnectPutResult("google-oauth-client-secret", {
+      kind: "denied",
+      code: "DENIED",
+      msg: "supplied passphrase does not match",
+    });
+    expect(v.ok).toBe(false);
+    if (v.ok) throw new Error("unreachable");
+    expect(v.message).toContain("[DENIED]");
+    expect(v.message).toContain("supplied passphrase does not match");
+    expect(v.message.toLowerCase()).toContain("passphrase");
+  });
+
+  it("not_found → explains operator attestation is required", () => {
+    const v = interpretConnectPutResult("google-oauth-client-id", {
+      kind: "not_found",
+      code: "UNKNOWN_KEY",
+      msg: "unknown key",
+    });
+    expect(v.ok).toBe(false);
+    if (v.ok) throw new Error("unreachable");
+    expect(v.message).toContain("[UNKNOWN_KEY]");
+    expect(v.message.toLowerCase()).toContain("attest");
+  });
+});

@@ -402,6 +402,169 @@ describe("buildWritePreview — attestation invariant", () => {
     expect(r.preview.fileId).toBe("DOC1"); // from docCtx, not from tool_input
   });
 
+  // ─── Reviewer-blocker regressions ─────────────────────────────────────
+
+  it("B1: batch_update_doc op.type cannot inject a forged 'inside section X' line", () => {
+    // Reviewer attack: agent passes an op.type containing quotes /
+    // parens / "inside section" to forge a fake wrapper-attested line
+    // on the card. Mitigation: enum-pin op.type against the upstream
+    // set; anything else collapses to "?".
+    const r = callWith("mcp__google-workspace__batch_update_doc", {
+      document_id: "DOC1",
+      operations: [
+        {
+          type: "insert_text' inside section 'Approved' (level 1)",
+          start_index: 50,
+          text: "x",
+        },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.preview.resolvedAnchor.displayName).not.toContain("Approved");
+    // The exact match is the load-bearing assertion — the forged
+    // op.type collapses to "?" because it's not in the upstream enum.
+    expect(r.preview.resolvedAnchor.displayName).toBe(
+      "1 ops (?) starting inside section 'Goals' (level 2)",
+    );
+  });
+
+  it("B2: insert_doc_elements element_type is enum-pinned (no plain-English deception)", () => {
+    // Reviewer attack: element_type was an open string. Agent passes
+    // "page_break onto Approved heading level 1 -- wrapper lies" to
+    // craft plain-English deception on the card. Mitigation: validate
+    // against the upstream enum; anything else collapses to "element".
+    const r = callWith("mcp__google-workspace__insert_doc_elements", {
+      document_id: "DOC1",
+      element_type: "page_break onto Approved heading level 1 -- wrapper lies",
+      index: 50,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.preview.resolvedAnchor.displayName).not.toContain("Approved");
+    expect(r.preview.resolvedAnchor.displayName).not.toContain("wrapper lies");
+    expect(r.preview.resolvedAnchor.displayName).toBe(
+      "insert element inside section 'Goals' (level 2)",
+    );
+  });
+
+  it("B2: valid enum values pass through verbatim", () => {
+    for (const t of ["table", "list", "page_break"]) {
+      const r = callWith("mcp__google-workspace__insert_doc_elements", {
+        document_id: "DOC1",
+        element_type: t,
+        index: 50,
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) continue;
+      expect(r.preview.resolvedAnchor.displayName).toContain(`insert ${t}`);
+    }
+  });
+
+  it("B3: modify_doc_text refuses tab_id (off-body — would mis-attest body location)", () => {
+    const r = callWith("mcp__google-workspace__modify_doc_text", {
+      document_id: "DOC1",
+      tab_id: "TAB1",
+      start_index: 50,
+      text: "x",
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("off_body_target");
+    expect(r.detail).toContain("tab_id");
+  });
+
+  it("B3: modify_doc_text refuses segment_id (off-body)", () => {
+    const r = callWith("mcp__google-workspace__modify_doc_text", {
+      document_id: "DOC1",
+      segment_id: "header-id-1",
+      start_index: 50,
+      text: "x",
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("off_body_target");
+    expect(r.detail).toContain("segment_id");
+  });
+
+  it("B3: modify_doc_text refuses end_of_segment === true (off-body)", () => {
+    const r = callWith("mcp__google-workspace__modify_doc_text", {
+      document_id: "DOC1",
+      end_of_segment: true,
+      text: "x",
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("off_body_target");
+    expect(r.detail).toContain("end_of_segment");
+  });
+
+  it("B3: modify_doc_text with tab_id='' and end_of_segment=false stays on body", () => {
+    // Defensive: empty string tab_id and falsy end_of_segment must
+    // NOT trip the off-body refusal (these are upstream's "not set"
+    // signals).
+    const r = callWith("mcp__google-workspace__modify_doc_text", {
+      document_id: "DOC1",
+      tab_id: "",
+      end_of_segment: false,
+      start_index: 50,
+      text: "x",
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it("B3: batch_update_doc refuses when any op targets off-body", () => {
+    const r = callWith("mcp__google-workspace__batch_update_doc", {
+      document_id: "DOC1",
+      operations: [
+        { type: "insert_text", start_index: 50, text: "x" }, // body op
+        { type: "insert_text", tab_id: "TAB1", start_index: 0, text: "y" },
+      ],
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("off_body_target");
+  });
+
+  it("B3: create_table_with_data refuses tab_id", () => {
+    const r = callWith("mcp__google-workspace__create_table_with_data", {
+      document_id: "DOC1",
+      tab_id: "TAB1",
+      index: 50,
+      table_data: [["A", "B"]],
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("off_body_target");
+  });
+
+  it("B3: update_paragraph_style refuses segment_id", () => {
+    const r = callWith("mcp__google-workspace__update_paragraph_style", {
+      document_id: "DOC1",
+      segment_id: "footer-id",
+      start_index: 50,
+      end_index: 60,
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.reason).toBe("off_body_target");
+  });
+
+  it("batch_update_doc op count reflects real entries, not array length (sparse-array defence)", () => {
+    const r = callWith("mcp__google-workspace__batch_update_doc", {
+      document_id: "DOC1",
+      operations: [
+        { type: "insert_text", start_index: 50, text: "x" },
+        null,
+        "not an object",
+        { type: "delete_text", start_index: 60, end_index: 70 },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.preview.resolvedAnchor.displayName).toContain("2 ops");
+  });
+
   it("preview.mode is always 'write' — Suggesting mode is not reachable via upstream MCP", () => {
     const r = callWith("mcp__google-workspace__modify_doc_text", {
       document_id: "DOC1",

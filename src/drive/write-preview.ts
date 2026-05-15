@@ -70,7 +70,11 @@ export interface BuildWritePreviewArgs {
 
 export type BuildWritePreviewResult =
   | { ok: true; preview: DiffPreviewInput }
-  | { ok: false; reason: "unrecognized_tool" | "missing_required_arg"; detail: string };
+  | {
+      ok: false;
+      reason: "unrecognized_tool" | "missing_required_arg" | "off_body_target";
+      detail: string;
+    };
 
 export function buildWritePreview(
   args: BuildWritePreviewArgs,
@@ -154,6 +158,24 @@ function modifyDocText(
   args: BuildWritePreviewArgs,
   input: Record<string, unknown>,
 ): BuildWritePreviewResult {
+  // RFC §4.2 attestation blocker: `tab_id`, `segment_id`, and
+  // `end_of_segment` all redirect the write off the main body —
+  // into a tab / header / footer / footnote / end-of-segment that
+  // `documents.get`'s body-only paragraph stream cannot describe.
+  // Refusing here is the safer call than rendering a body-stream
+  // location string that doesn't match where the bytes will land.
+  // The hook surfaces the refusal as a block-decision to the
+  // operator, who can then choose to grant access via a different
+  // path or deny the write.
+  const offBody = detectOffBodyTargeting(input);
+  if (offBody !== null) {
+    return {
+      ok: false,
+      reason: "off_body_target",
+      detail: `modify_doc_text uses ${offBody} which redirects the write off the main body — refusing to attest a body-stream location for an off-body edit`,
+    };
+  }
+
   const startIndex = numberOr(input.start_index, NaN);
   const endIndex = numberOr(input.end_index, NaN);
   const text = stringOr(input.text, "");
@@ -173,6 +195,31 @@ function modifyDocText(
   const linesRemoved = isReplace ? estimateRemovedLines(args.doc.snapshot, startIndex, endIndex) : 0;
 
   return ok(args, resolved, linesAdded, linesRemoved);
+}
+
+/**
+ * Detect off-body targeting that would make the wrapper-attested
+ * body-stream location wrong. Returns a short human-readable name
+ * for the field that triggered the detection, or null when the
+ * input targets the main body.
+ *
+ * Upstream surface (from taylorwilsdon/google_workspace_mcp):
+ *   - `tab_id`: edit lands in the named tab, not the main body
+ *   - `segment_id`: edit lands in a footnote/header/footer segment
+ *   - `end_of_segment === true`: edit lands at end of the current
+ *     segment (header/footer/tab end), NOT at end of body
+ */
+function detectOffBodyTargeting(input: Record<string, unknown>): string | null {
+  if (typeof input.tab_id === "string" && input.tab_id.length > 0) {
+    return "tab_id";
+  }
+  if (typeof input.segment_id === "string" && input.segment_id.length > 0) {
+    return "segment_id";
+  }
+  if (input.end_of_segment === true) {
+    return "end_of_segment";
+  }
+  return null;
 }
 
 function findAndReplace(
@@ -204,16 +251,26 @@ function findAndReplace(
   );
 }
 
+// Upstream `insert_doc_elements.element_type` is enum-bound — see
+// `taylorwilsdon/google_workspace_mcp` `gdocs/docs_tools.py`. We
+// pin against the known set so an attacker can't smuggle plain-
+// English deception (e.g. `"page_break onto Approved heading level
+// 1"`) into the displayName.
+const INSERT_DOC_ELEMENT_TYPES = new Set<string>(["table", "list", "page_break"]);
+
 function insertDocElements(
   args: BuildWritePreviewArgs,
   input: Record<string, unknown>,
 ): BuildWritePreviewResult {
   const index = numberOr(input.index, NaN);
-  const elementType = stringOr(input.element_type, "element");
+  const rawElementType = stringOr(input.element_type, "");
+  const elementType = INSERT_DOC_ELEMENT_TYPES.has(rawElementType)
+    ? rawElementType
+    : "element";
   const description = describeOffset(args.doc.snapshot, index);
   const resolved: ResolvedAnchor = {
     op: { kind: "insert_after", paragraphIndex: -1 },
-    displayName: `insert ${truncateLine(elementType)} ${description.displayName}`,
+    displayName: `insert ${elementType} ${description.displayName}`,
   };
   return ok(args, resolved, 1, 0);
 }
@@ -231,6 +288,39 @@ function insertDocImage(
   return ok(args, resolved, 1, 0);
 }
 
+// Upstream `batch_update_doc.operations[].type` is enum-bound to
+// the set of mutation kinds the upstream MCP supports. We pin
+// against the known set so an attacker can't smuggle quote /
+// parenthesis attestation forgeries via the displayName-embedded
+// type label. Full set from `taylorwilsdon/google_workspace_mcp`
+// `gdocs/docs_tools.py:1139-1240`.
+const BATCH_UPDATE_OP_TYPES = new Set<string>([
+  "insert_text",
+  "delete_text",
+  "replace_text",
+  "format_text",
+  "update_paragraph_style",
+  "update_table_cell_style",
+  "insert_table",
+  "insert_table_row",
+  "delete_table_row",
+  "insert_table_column",
+  "delete_table_column",
+  "merge_table_cells",
+  "unmerge_table_cells",
+  "update_table_column_properties",
+  "insert_page_break",
+  "insert_section_break",
+  "find_replace",
+  "create_bullet_list",
+  "create_named_range",
+  "replace_named_range_content",
+  "delete_named_range",
+  "update_document_style",
+  "update_section_style",
+  "create_header_footer",
+]);
+
 function batchUpdateDoc(
   args: BuildWritePreviewArgs,
   input: Record<string, unknown>,
@@ -243,14 +333,37 @@ function batchUpdateDoc(
       detail: "batch_update_doc requires operations: array",
     };
   }
-  // Aggregate: count distinct mutation ops, find the lowest start
-  // offset for the location surface.
-  let minOffset = Number.POSITIVE_INFINITY;
-  let opTypes: string[] = [];
-  let totalAdded = 0;
+  // RFC §4.2 attestation: if ANY op targets off-body (tab_id /
+  // segment_id / end_of_segment), refuse the whole batch. We
+  // can't faithfully attest a body-stream location for a batch
+  // that mixes body + off-body ops, and partial attestation would
+  // be worse than refusal.
   for (const op of ops as Array<Record<string, unknown>>) {
     if (typeof op !== "object" || op === null) continue;
-    const type = stringOr(op.type, "?");
+    const offBody = detectOffBodyTargeting(op);
+    if (offBody !== null) {
+      return {
+        ok: false,
+        reason: "off_body_target",
+        detail: `batch_update_doc op uses ${offBody} which redirects off the main body — refusing to attest a body-stream location for an off-body batch`,
+      };
+    }
+  }
+  // Aggregate: count distinct mutation ops, find the lowest start
+  // offset for the location surface. Only count real-object entries
+  // toward the displayed op-count so a sparse array with garbage
+  // entries doesn't inflate the user-visible total.
+  let minOffset = Number.POSITIVE_INFINITY;
+  const opTypes: string[] = [];
+  let totalAdded = 0;
+  let realOpCount = 0;
+  for (const op of ops as Array<Record<string, unknown>>) {
+    if (typeof op !== "object" || op === null) continue;
+    realOpCount += 1;
+    // Pin against the upstream enum — anything else collapses to
+    // "?" so the displayName remains structurally clean.
+    const rawType = stringOr(op.type, "");
+    const type = BATCH_UPDATE_OP_TYPES.has(rawType) ? rawType : "?";
     opTypes.push(type);
     const start = numberOr(op.start_index ?? op.index, NaN);
     if (Number.isFinite(start) && start < minOffset) {
@@ -268,7 +381,7 @@ function batchUpdateDoc(
       : `${opTypes.slice(0, 3).join(", ")} +${opTypes.length - 3} more`;
   const resolved: ResolvedAnchor = {
     op: { kind: "insert_after", paragraphIndex: -1 },
-    displayName: `${ops.length} ops (${typesLabel}) starting ${description}`,
+    displayName: `${realOpCount} ops (${typesLabel}) starting ${description}`,
   };
   return ok(args, resolved, totalAdded, 0);
 }
@@ -277,6 +390,14 @@ function createTable(
   args: BuildWritePreviewArgs,
   input: Record<string, unknown>,
 ): BuildWritePreviewResult {
+  const offBody = detectOffBodyTargeting(input);
+  if (offBody !== null) {
+    return {
+      ok: false,
+      reason: "off_body_target",
+      detail: `create_table_with_data uses ${offBody}; refusing to attest a body-stream location`,
+    };
+  }
   const index = numberOr(input.index, NaN);
   const data = input.table_data;
   const rowCount = Array.isArray(data) ? data.length : 0;
@@ -305,6 +426,14 @@ function updateParagraphStyle(
   args: BuildWritePreviewArgs,
   input: Record<string, unknown>,
 ): BuildWritePreviewResult {
+  const offBody = detectOffBodyTargeting(input);
+  if (offBody !== null) {
+    return {
+      ok: false,
+      reason: "off_body_target",
+      detail: `update_paragraph_style uses ${offBody}; refusing to attest a body-stream location`,
+    };
+  }
   const startIndex = numberOr(input.start_index, NaN);
   const description = describeOffset(args.doc.snapshot, startIndex);
   const resolved: ResolvedAnchor = {

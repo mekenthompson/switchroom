@@ -156,6 +156,35 @@ export interface SetActiveData {
   fanned: string[];
 }
 
+/**
+ * Per-account probe result returned by `probe-quota`. The broker
+ * runs each probe server-side and returns the parsed
+ * rate-limit-utilization headers. `result` is the same shape the
+ * pre-#1336 `fetchAccountQuota` returned, so callers can swap the
+ * source without changing the format layer.
+ */
+export interface ProbeQuotaEntry {
+  label: string;
+  result:
+    | {
+        ok: true;
+        data: {
+          fiveHourUtilizationPct: number;
+          sevenDayUtilizationPct: number;
+          fiveHourResetAt: Date | null;
+          sevenDayResetAt: Date | null;
+          representativeClaim: string | null;
+          overageStatus: string | null;
+          overageDisabledReason: string | null;
+        };
+      }
+    | { ok: false; reason: string };
+}
+
+export interface ProbeQuotaData {
+  results: ProbeQuotaEntry[];
+}
+
 export interface MarkExhaustedData {
   account: string;
   rolled: string[];
@@ -303,6 +332,26 @@ export class AuthBrokerClient {
       op: "list-google-accounts",
     });
     return data as ListGoogleAccountsData;
+  }
+
+  /**
+   * Probe live Anthropic quota for a set of accounts. The broker
+   * does the network call server-side using its stored credentials,
+   * so accessTokens never reach the caller. Returns one result per
+   * input label (order preserved).
+   */
+  async probeQuota(
+    accounts: readonly string[],
+    timeoutMs?: number,
+  ): Promise<ProbeQuotaData> {
+    const data = await this.send({
+      v: PROTOCOL_VERSION,
+      id: randomUUID(),
+      op: "probe-quota",
+      accounts: [...accounts],
+      ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    });
+    return data as ProbeQuotaData;
   }
 
   async setActive(account: string): Promise<SetActiveData> {

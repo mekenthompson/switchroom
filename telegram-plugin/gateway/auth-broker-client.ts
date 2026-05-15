@@ -30,6 +30,8 @@ export function createAuthBrokerClient(): {
     refreshAccount: (label: string) => broker.refreshAccount(label),
     setOverride: (agent: string, account: string | null) =>
       broker.setOverride(agent, account),
+    probeQuota: (accounts: readonly string[], timeoutMs?: number) =>
+      broker.probeQuota(accounts, timeoutMs),
   }
   return { client, close: () => broker.close() }
 }

@@ -23,11 +23,16 @@
 
 import type { Command } from "commander";
 import chalk from "chalk";
-import { existsSync, mkdirSync, readdirSync, writeFileSync, statSync, copyFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, statSync, copyFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { getConfig, withConfigError } from "./helpers.js";
+import {
+  defaultAuditLogPath,
+  formatForCli,
+  readAndFilter,
+} from "../host-control/audit-reader.js";
 
 /**
  * Image tag the install verb pins. Defaults to `:latest`. Override
@@ -363,4 +368,82 @@ export function registerHostdCommand(program: Command): void {
     .command("uninstall")
     .description("Stop the hostd container. Leaves the compose file in place for re-install.")
     .action(() => doUninstall());
+
+  // `switchroom hostd audit` — tail/filter the audit log of privileged-
+  // verb calls. Read-only (does not call hostd itself); the audit log is
+  // append-only JSONL at ~/.switchroom/host-control-audit.log.
+  hostd
+    .command("audit")
+    .description("Tail and filter the hostd audit log (privileged-verb call history)")
+    .option("--tail <n>", "Number of matching entries to show (default: 50)", "50")
+    .option("--agent <name>", "Filter to a specific caller agent")
+    .option("--op <verb>", "Filter to a specific hostd verb (e.g. update_apply, agent_restart)")
+    .option("--error", "Show only failed (error/denied) entries")
+    .option("--path <file>", "Override audit log path (for debugging)")
+    .action((opts: {
+      tail?: string;
+      agent?: string;
+      op?: string;
+      error?: boolean;
+      path?: string;
+    }) => {
+      const logPath = opts.path ?? defaultAuditLogPath();
+      if (!existsSync(logPath)) {
+        console.error(
+          chalk.yellow(`Audit log not found at ${logPath}.`) +
+            chalk.gray(
+              "\nThe log is created when hostd handles its first privileged-verb request.",
+            ),
+        );
+        return;
+      }
+      const raw = readFileSync(logPath, "utf-8");
+      const limit = Math.max(1, parseInt(opts.tail ?? "50", 10) || 50);
+      const filters = {
+        agent: opts.agent,
+        op: opts.op,
+        errorOnly: !!opts.error,
+      };
+      const entries = readAndFilter(raw, filters, limit);
+      if (entries.length === 0) {
+        const parts: string[] = [];
+        if (opts.agent) parts.push(`agent=${opts.agent}`);
+        if (opts.op) parts.push(`op=${opts.op}`);
+        if (opts.error) parts.push("errors-only");
+        const desc = parts.length > 0 ? ` matching ${parts.join(", ")}` : "";
+        console.log(chalk.dim(`No hostd audit entries${desc}.`));
+        return;
+      }
+      const header =
+        "ts".padEnd(20) +
+        " " +
+        "caller".padEnd(15) +
+        " " +
+        "op".padEnd(16) +
+        " " +
+        "result".padEnd(10) +
+        " " +
+        "exit".padStart(3) +
+        " " +
+        "dur".padStart(8);
+      console.log(chalk.dim(header));
+      console.log(chalk.dim("─".repeat(header.length)));
+      for (const line of formatForCli(entries)) {
+        if (line.includes(" error ") || line.includes(" denied ")) {
+          console.log(chalk.red(line));
+        } else if (line.includes(" started ")) {
+          console.log(chalk.yellow(line));
+        } else {
+          console.log(line);
+        }
+      }
+      console.log();
+      console.log(
+        chalk.dim(
+          `${entries.length} entr${entries.length === 1 ? "y" : "ies"} shown` +
+            (entries.length === limit ? ` (--tail ${limit})` : "") +
+            `  ·  log: ${logPath}`,
+        ),
+      );
+    });
 }

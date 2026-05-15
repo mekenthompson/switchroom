@@ -122,7 +122,10 @@ ALLOWLIST=(
   # callsites further down).
   # Re-bumped 2026-05-15 post-Path-A-Cut-2 (drive-write IPC handler
   # added ~60 lines).
-  "telegram-plugin/gateway/gateway.ts:9340-10200:vault grant wizard ctx.api.editMessageText already has .catch swallow"
+  # Re-bumped 2026-05-15 for the /audit hostd command insertion
+  # (~85 lines added near line 8475 shifted the vault wizard callsites
+  # further down past the prior 10100 ceiling).
+  "telegram-plugin/gateway/gateway.ts:9340-10300:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter
   # via DI. The gateway wires those adapters through robustApiCall (see

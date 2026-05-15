@@ -3,11 +3,17 @@ name: docker-images
 # Multi-arch build + push for switchroom's container images.
 #
 # Triggers:
-#   - push to main: build all 5 images for linux/amd64 + linux/arm64,
+#   - push to main: build all images for linux/amd64 + linux/arm64,
 #     push as `:latest` and `:sha-<short>` to
 #     ghcr.io/<owner>/switchroom-<image>.
 #   - tag push v*: same matrix, push as `:<tag>` and `:latest`.
 #   - pull_request: build only (no push) to validate Dockerfile changes.
+#
+# Two parallel pipelines:
+#   - build-base + build-dependents: switchroom-{base,agent,broker,kernel,
+#     hostd,auth-broker}. Dependents extend base, so base builds first.
+#   - build-hindsight: extends upstream `vectorize-io/hindsight:latest`,
+#     no switchroom-base dependency. Runs in parallel with build-base.
 #
 # This workflow is staged at docs/proposed/docker-images.yml because the
 # OAuth token used to land code changes here lacks the `workflow` scope
@@ -189,3 +195,53 @@ jobs:
             BASE_IMAGE=${{ steps.tags.outputs.base }}
           cache-from: type=gha,scope=${{ matrix.image.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
+
+  build-hindsight:
+    # Hindsight extends upstream `ghcr.io/vectorize-io/hindsight:latest`
+    # rather than `switchroom-base`, so it has no dependency on the
+    # base job and runs in parallel. See docker/Dockerfile.hindsight
+    # for why we extend instead of running upstream as-is (claude-code
+    # provider + claude-agent-sdk + UID pin).
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU (for arm64 cross-build)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR (push only on main / tags)
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          IMAGE="${REGISTRY}/${IMAGE_NAMESPACE}/switchroom-hindsight"
+          SHA_SHORT=$(echo "${{ github.sha }}" | cut -c1-7)
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG_VERSION="${GITHUB_REF#refs/tags/}"
+            echo "tags=${IMAGE}:${TAG_VERSION},${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "tags=${IMAGE}:latest,${IMAGE}:sha-${SHA_SHORT}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tags=${IMAGE}:pr-${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build (and push on main/tag) hindsight
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile.hindsight
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.tags.outputs.tags }}
+          push: ${{ github.event_name != 'pull_request' }}
+          cache-from: type=gha,scope=hindsight
+          cache-to: type=gha,mode=max,scope=hindsight

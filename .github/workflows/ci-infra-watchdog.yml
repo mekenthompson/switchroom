@@ -68,8 +68,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          jobs_json="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100")"
-          failed_jobs="$(echo "$jobs_json" | jq '[.jobs[] | select(.conclusion=="failure")] | length')"
+          # --paginate --slurp walks every page and wraps them as
+          # [{page1},{page2},...]; flatten .[].jobs[] so a run with
+          # >100 jobs whose failures land on page 2+ is still counted.
+          # Without this a large matrix could undercount failures to 0
+          # and mis-classify a genuine red as an infra force-fail —
+          # the exact false-positive that defeats this watchdog.
+          jobs_json="$(gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" --paginate --slurp)"
+          failed_jobs="$(echo "$jobs_json" | jq '[.[].jobs[] | select(.conclusion=="failure")] | length')"
 
           if [ "${failed_jobs:-0}" -ne 0 ]; then
             echo "Run $RUN_ID ($WF_NAME): $failed_jobs job(s) reported failure — genuine red, not an infra force-fail. No alert."

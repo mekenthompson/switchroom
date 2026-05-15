@@ -1,0 +1,99 @@
+name: ci-uat
+
+# UAT fuzz — drives a real mtcute MTProto user session against the
+# live test-harness bot in a real supergroup. Mirrors Buildkite
+# pipeline.uat.yml.
+#
+# Why a self-hosted runner?
+#   The harness needs surfaces that DON'T exist on hosted runners:
+#   the test-harness container, the vault, the broker, and a real
+#   mtcute driver session string that must never land on shared
+#   ephemeral infrastructure. The `uat-host` self-hosted runner is
+#   tagged on the box that already runs test-harness + the broker.
+#
+# OPERATOR FAILURE MODE — "queued forever":
+#   If no self-hosted runner is registered with the `uat-host` label,
+#   this job sits queued indefinitely until the workflow's timeout
+#   fires (see timeout-minutes below). GHA shows "Waiting for a
+#   runner to pick up this job" — there is no built-in "queue empty"
+#   signal that auto-fails. Mitigations:
+#     - timeout-minutes bounds the wait (35 min, same as BK soft cap).
+#     - This workflow is gated on a repo variable `UAT_GATE_ENABLED`
+#       (mirrors BK's SWITCHROOM_UAT_GATE_ENABLED). When the operator
+#       hasn't yet provisioned the self-hosted runner, leave the var
+#       unset and the workflow no-ops.
+#     - The self-skip block at the top of the job exits 0 if any of
+#       the 4 Telegram secrets are missing, so an env reset that
+#       rotates secrets out without replacement won't wedge the queue.
+#   Long-term, monitor runner registration via repo Settings →
+#   Actions → Runners; a missing `uat-host` runner is the canonical
+#   "queued forever" cause.
+#
+# PR-from-fork: secrets unavailable, same fallback as ci-evals — the
+# job exits 0 cleanly with a notice.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "telegram-plugin/**"
+      - "src/agents/**"
+      - "telegram-plugin/uat/**"
+      - "vitest.uat.config.ts"
+      - ".github/workflows/ci-uat.yml"
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Sequential — Telegram's per-bot rate limits are global; two parallel
+# UAT runs interleave inbounds on the same chat. NOT cancel-in-progress
+# (a fresh push must let the running job complete to release the
+# test-harness singleton cleanly).
+concurrency:
+  group: ci-uat-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  uat-fuzz:
+    # Gate on a repo variable so the workflow is invisible on hosts
+    # without a self-hosted runner registered — keeps PRs green until
+    # the operator opts in.
+    if: vars.UAT_GATE_ENABLED == 'true'
+    runs-on: [self-hosted, uat-host]
+    timeout-minutes: 35
+    env:
+      TELEGRAM_API_ID: ${{ secrets.TELEGRAM_API_ID }}
+      TELEGRAM_API_HASH: ${{ secrets.TELEGRAM_API_HASH }}
+      TELEGRAM_UAT_DRIVER_SESSION: ${{ secrets.TELEGRAM_UAT_DRIVER_SESSION }}
+      TELEGRAM_TEST_BOT_USERNAME: ${{ secrets.TELEGRAM_TEST_BOT_USERNAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Secrets gate
+        # If any of the 4 UAT secrets are missing (rotation gap, fork
+        # PR, etc), skip cleanly with a clear log line. Mirrors BK
+        # pipeline.uat.yml:62-67.
+        id: secrets
+        run: |
+          if [[ -z "${TELEGRAM_API_ID:-}" || -z "${TELEGRAM_API_HASH:-}" || -z "${TELEGRAM_UAT_DRIVER_SESSION:-}" || -z "${TELEGRAM_TEST_BOT_USERNAME:-}" ]]; then
+            echo "ok=false" >>"$GITHUB_OUTPUT"
+            echo "::warning::UAT fuzz skipped: one or more secrets missing (TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_UAT_DRIVER_SESSION / TELEGRAM_TEST_BOT_USERNAME). Expected for PRs from forks."
+          else
+            echo "ok=true" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up workspace
+        if: steps.secrets.outputs.ok == 'true'
+        uses: ./.github/actions/setup-switchroom
+
+      - name: UAT fuzz (scoped to fuzz-*.test.ts)
+        if: steps.secrets.outputs.ok == 'true'
+        # Positional filter narrows vitest collection to fuzz-*.test.ts
+        # only — the vitest.uat.config.ts include glob picks up every
+        # scenario file, but only fuzz scenarios are PR-gate-stable.
+        working-directory: telegram-plugin
+        run: bun run test:uat fuzz-

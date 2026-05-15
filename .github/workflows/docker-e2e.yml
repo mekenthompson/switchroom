@@ -50,20 +50,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
+      - name: Set up workspace
+        # Use the shared composite — same cache key as every other
+        # workflow, same install discipline. Drops the uncached
+        # `bun install` + non-deterministic `bun-version: latest` that
+        # used to live here.
+        uses: ./.github/actions/setup-switchroom
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-
-      - name: Install deps + build dist/
-        run: |
-          bun install
-          npm run build
+      - name: Build dist/
+        run: bun scripts/build.mjs
 
       - name: Set up Docker Buildx (docker driver — writes to local daemon)
         # Important: must use the `docker` driver, NOT the default

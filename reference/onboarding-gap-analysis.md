@@ -1,5 +1,17 @@
 # Switchroom Onboarding — Gap Analysis & Phased Fix Plan
 
+## Status — historical (last updated 2026-04-25); no longer tracks closure
+
+This document is a **point-in-time analysis**, not a live tracker.
+Despite being indexed as "tracks gaps as they close," it does **not**
+track closure and is stale. Several of the gaps below have since
+shipped fixes. It is deliberately **not** re-adjudicated gap-by-gap
+here (per-gap status would itself go stale and risks introducing
+errors). Read it as a snapshot of the onboarding pain that motivated a
+batch of fixes — not as the current state of any individual gap. For
+present-day onboarding behaviour, follow the docs and the CLI, not
+this list.
+
 ## Problem
 
 Bringing up a new switchroom agent with a real corpus is still a babysitting

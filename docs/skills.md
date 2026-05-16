@@ -8,8 +8,8 @@ Switchroom distinguishes four populations, each living in a different place and 
 
 | Population | Where they live | When they get installed | Audience |
 |---|---|---|---|
-| **Bundled-default skills** | `<repo>/skills/` — vendored Anthropic skills (skill-creator, mcp-builder, webapp-testing, pdf, docx, xlsx, pptx) + slim switchroom-core (switchroom-cli, switchroom-status, switchroom-health) | Auto-symlinked into every agent's `.claude/skills/` on scaffold and on `switchroom apply`, regardless of role. Per-key opt-out via `defaults.bundled_skills`. See `reconcileAgentDefaultSkills` in `src/agents/reconcile-default-skills.ts` | **Every agent** |
-| **Switchroom foreman-only skills** | `<repo>/skills/` (`switchroom-install`, `switchroom-manage`, `switchroom-architecture`) | Auto-symlinked only when the agent has `role: foreman`. See `installSwitchroomSkills` in `src/agents/scaffold.ts` | Foreman agents (operator) |
+| **Bundled-default skills** | `<repo>/skills/` — vendored Anthropic skills (skill-creator, mcp-builder, webapp-testing, pdf, docx, xlsx, pptx) + the slim universal switchroom trio (switchroom-cli, switchroom-status, switchroom-health) | Auto-symlinked into every agent's `.claude/skills/` on scaffold and on `switchroom apply`, regardless of role. Per-key opt-out via `defaults.bundled_skills`. See `reconcileAgentDefaultSkills` in `src/agents/reconcile-default-skills.ts` | **Every agent** |
+| **Switchroom foreman-only skills** | `<repo>/skills/` — every `switchroom-*` skill *except* the universal trio (`switchroom-install`, `switchroom-manage`, `switchroom-architecture`, `switchroom-runtime`) | Auto-symlinked only when the agent has `role: foreman`. See `installSwitchroomSkills` in `src/agents/scaffold.ts` | Foreman agents (operator) |
 | **Switchroom-bundled developer skills** | `<repo>/skills/` (without `switchroom-` prefix — e.g. `buildkite-*`, `file-bug`, `telegram-test-harness`, `humanizer*`, `token-helpers`) | NOT auto-installed; a developer agent opts in via `defaults.skills:` or per-agent `skills:` in switchroom.yaml | Switchroom developers + power-user operators |
 | **User-managed personal skills** | `~/.switchroom/skills/` (or wherever `switchroom.skills_dir` points) | Symlinked into agents that name them in `defaults.skills` or `agents.<name>.skills`. See `syncGlobalSkills` in `src/agents/scaffold.ts` | Fleet agents — calendar, garmin, doctor-appointments, etc. — anything personal to the operator |
 
@@ -57,7 +57,7 @@ Per-agent values override `defaults.bundled_skills` (so an agent can re-enable a
 
 Different populations answer different questions:
 
-- "What does *every* agent need?" → bundled-default skills (anthropic-vendored + switchroom-core, see section above)
+- "What does *every* agent need?" → bundled-default skills (anthropic-vendored + the universal `switchroom-cli`/`status`/`health` trio, see section above)
 - "What does an operator running the *whole fleet* need?" → switchroom foreman-only skills (`role: foreman` auto-installs them)
 - "What does a *developer* working on switchroom need?" → bundled developer skills (opt in via `defaults.skills`, not auto-injected)
 - "What does *this user's* fleet need beyond the defaults?" → user-managed personal skills
@@ -78,11 +78,18 @@ agents:
 
 Reconcile honors role flips both ways: `assistant → foreman` installs the symlinks, `foreman → assistant` retracts them (only switchroom-installed symlinks; never real dirs the operator placed manually).
 
-The 3 foreman-only skills:
+The foreman-only skills (the gate auto-installs every `switchroom-*`
+skill **except** the universal `cli`/`status`/`health` trio — see
+`universalDefaultSkills` in `src/agents/scaffold.ts`):
 
 - `switchroom-install` — bootstrap switchroom on a fresh machine
-- `switchroom-manage` — add/remove agents and edit fleet config
+- `switchroom-manage` — add/remove/reinstall/list agents (fleet-level)
 - `switchroom-architecture` — internal design context for fleet-management decisions
+- `switchroom-runtime` — conditional runtime protocols: the agent
+  answering for *itself* about a crash, restart, hand-off resume, or
+  mid-turn interrupt ("why did you restart?", "did you crash?", "still
+  there after the restart?"). Three of its gates are side-channel
+  signals (env var / sentinel file), not natural-language triggers.
 
 A fleet agent like `clerk` doing user-facing tasks never needs to call `switchroom-install` or `switchroom-manage`, so the assistant default keeps their tool list focused. The slim `switchroom-cli` / `switchroom-status` / `switchroom-health` trio every agent benefits from is bundled-default (see the section above).
 
@@ -102,15 +109,34 @@ Current `<repo>/skills/` inventory:
 | `switchroom-cli` | bundled-default (every agent) | Logs / restart / version / config / schedule |
 | `switchroom-status` | bundled-default (every agent) | Show running agents + fleet health |
 | `switchroom-health` | bundled-default (every agent) | "Something is broken" diagnostics |
-| `switchroom-install` | foreman-only (auto when `role: foreman`) | Operator skill |
-| `switchroom-manage` | foreman-only (auto when `role: foreman`) | Operator skill |
-| `switchroom-architecture` | foreman-only (auto when `role: foreman`) | Operator skill |
+| `switchroom-install` | foreman-only (auto when `role: foreman`) | First-time bootstrap on a fresh machine |
+| `switchroom-manage` | foreman-only (auto when `role: foreman`) | Add/remove/reinstall/list agents (fleet-level) |
+| `switchroom-architecture` | foreman-only (auto when `role: foreman`) | Internal design context for fleet-mgmt decisions |
+| `switchroom-runtime` | foreman-only (auto when `role: foreman`) | Agent answering for itself about crash/restart/interrupt/hand-off |
 | `humanizer` | developer (opt-in) | Strips AI-writing patterns from replies; opt in via `defaults.skills` |
 | `humanizer-calibrate` | developer (opt-in) | Builds a personal voice template; companion to `humanizer` |
-| `buildkite-*` (8 skills) | developer (opt-in) | Switchroom CI work; not for fleet agents |
-| `file-bug` | developer (opt-in) | Files structured bug reports; switchroom dev workflow |
+| `buildkite-agent-infrastructure` | developer (opt-in) | Buildkite CI — cluster/queue/agent provisioning |
+| `buildkite-agent-runtime` | developer (opt-in) | Buildkite CI — `buildkite-agent` in-step subcommands |
+| `buildkite-api` | developer (opt-in) | Buildkite CI — REST/GraphQL/webhooks automation |
+| `buildkite-cli` | developer (opt-in) | Buildkite CI — terminal `bk` CLI |
+| `buildkite-migration` | developer (opt-in) | Buildkite CI — convert pipelines from other CI systems |
+| `buildkite-pipelines` | developer (opt-in) | Buildkite CI — author `.buildkite/pipeline.yml` |
+| `buildkite-secure-delivery` | developer (opt-in) | Buildkite CI — OIDC / SLSA / signing |
+| `buildkite-test-engine` | developer (opt-in) | Buildkite CI — `bktec` test splitting / flaky detection |
+| `file-bug` | developer (opt-in) | Files structured bug reports via `gh issue create` |
 | `telegram-test-harness` | developer (opt-in) | Guidance for writing Telegram tests against the harness |
-| `token-helpers` | developer (opt-in) | OAuth token refresh for Google Calendar / MS Graph |
+| `token-helpers` | developer (opt-in) | Library skill — OAuth token refresh for Google Calendar / MS Graph |
+
+> The eight `buildkite-*` skills are still vendored in `skills/` for
+> switchroom's own (now-retired) Buildkite CI work. Whether to keep or
+> remove them from the bundle is an unresolved maintainer decision —
+> tracked in **[#1384](https://github.com/switchroom/switchroom/issues/1384)**.
+> They are opt-in only; fleet agents never get them auto-installed.
+
+That's the full `skills/` tree as of the audit (27 directories: 7
+vendored Anthropic + 7 `switchroom-*` + 8 `buildkite-*` +
+`humanizer`/`humanizer-calibrate` + `file-bug` + `telegram-test-harness`
++ `token-helpers`). Verify with `ls skills/`.
 
 Real fleet agents (clerk, klanker, etc.) load their personal skills from `~/.switchroom/skills/` — that directory holds calendar, compass, coolify, doctor-appointments, fully-kiosk, garmin, and similar. **The repo doesn't track those** — they're operator-managed.
 

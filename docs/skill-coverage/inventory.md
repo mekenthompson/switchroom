@@ -1,8 +1,15 @@
 # Switchroom skill bundle inventory
 
-Source: `/home/kenthompson/code/switchroom-skill-coverage/skills/*/SKILL.md` at the worktree HEAD. Read-only inventory feeding the probabilistic skill-coverage harness.
+Source: the repo's `skills/*/SKILL.md` tree at HEAD. Read-only inventory feeding the probabilistic skill-coverage harness.
 
-Skill count: **27**. Profile-overlay count: **7** (3 `_shared` fragments + 4 profile `CLAUDE.md.hbs`).
+Skill count: **27** (matches `ls skills/`). Profile-overlay count: **7** (3 `_shared` fragments + 4 profile `CLAUDE.md.hbs`).
+
+> **`buildkite-*` retention:** the eight `buildkite-*` skills below are
+> inventoried as-shipped. Whether they stay in the bundle or get
+> removed (switchroom's own Buildkite CI is retired) is an unresolved
+> maintainer decision tracked in
+> [#1384](https://github.com/switchroom/switchroom/issues/1384) — this
+> inventory neither prescribes nor pre-empts that call.
 
 ## Summary table
 

@@ -3494,7 +3494,16 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
       const sendChunkPlainText = async (opts: Record<string, unknown>): Promise<void> => {
         const plainOpts = { ...opts }
         delete (plainOpts as { parse_mode?: unknown }).parse_mode
-        const plain = telegramHtmlToPlainText(chunks[i])
+        // A chunk that was pure markup (no text content) strips to ''.
+        // Sending '' is a Telegram 400 "message text is empty" — i.e.
+        // the answer would still vanish, in the exact path that exists
+        // to prevent that. Substitute an honest placeholder so the
+        // user at least sees that a fragment was unrenderable.
+        const stripped = telegramHtmlToPlainText(chunks[i])
+        const plain =
+          stripped.length > 0
+            ? stripped
+            : '⚠️ (a formatted fragment could not be rendered for Telegram)'
         const sent = await lockedBot.api.sendMessage(chat_id, plain, plainOpts as never)
         sentIds.push(sent.message_id)
         logOutbound('reply', chat_id, sent.message_id, plain.length, `chunk=${i + 1}/${chunks.length} plaintext-fallback`)

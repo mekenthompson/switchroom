@@ -1165,4 +1165,12 @@ describe('telegramHtmlToPlainText (HTML parse-reject fallback)', () => {
     expect(telegramHtmlToPlainText('')).toBe('')
     expect(telegramHtmlToPlainText('   \n  ')).toBe('')
   })
+
+  test('pure-markup chunk collapses to empty (gateway substitutes a placeholder)', () => {
+    // Documents the trigger for the empty-string guard in
+    // gateway.ts:sendChunkPlainText — a chunk with no text content
+    // strips to '', so the send path must substitute rather than
+    // post an empty message (Telegram 400 "message text is empty").
+    expect(telegramHtmlToPlainText('<b></b><i></i><br><span></span>')).toBe('')
+  })
 })

@@ -270,7 +270,7 @@ export function isHtmlParseRejectError(err: unknown): boolean {
     d.includes('unsupported start tag') ||
     d.includes('unclosed start tag') ||
     d.includes("can't find end of the entity") ||
-    d.includes('unexpected end tag') ||
+    // covers both "expected end tag" and "unexpected end tag"
     d.includes('expected end tag')
   )
 }

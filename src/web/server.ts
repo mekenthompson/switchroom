@@ -24,6 +24,7 @@ import {
   handleGetTurns,
   handleGetSubagents,
   handleGetAccounts,
+  handleRefreshAccountsQuota,
   handleGetAgentAccounts,
   handleGetAgentConfig,
   handleUseAccount,
@@ -388,6 +389,13 @@ function parseRoute(
     return { handler: "useAccount", params: {} };
   }
 
+  // POST /api/accounts/quota/refresh  body: { labels?: string[], force?: bool }
+  // Explicit, cost-bearing: probe-quota is a live billed Anthropic call
+  // per account. TTL-cached server-side; force=true bypasses the TTL.
+  if (method === "POST" && pathname === "/api/accounts/quota/refresh") {
+    return { handler: "refreshQuota", params: {} };
+  }
+
   // GET /api/agents/:name/accounts
   const agentAccountsMatch = pathname.match(/^\/api\/agents\/([^/]+)\/accounts$/);
   if (method === "GET" && agentAccountsMatch) {
@@ -588,6 +596,24 @@ export function startWebServer(
                 return jsonResponse(result, 400);
               }
               return jsonResponse(result);
+            })();
+          }
+
+          case "refreshQuota": {
+            return (async () => {
+              let body: { labels?: unknown; force?: unknown } = {};
+              try {
+                const raw = await req.text();
+                body = raw ? JSON.parse(raw) : {};
+              } catch {
+                return jsonResponse({ ok: false, error: "Invalid JSON body" }, 400);
+              }
+              const labels = Array.isArray(body.labels)
+                ? body.labels.filter((l): l is string => typeof l === "string")
+                : undefined;
+              const force = body.force === true;
+              const result = await handleRefreshAccountsQuota(labels, force);
+              return jsonResponse(result, result.ok ? 200 : 502);
             })();
           }
 

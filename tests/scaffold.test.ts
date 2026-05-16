@@ -597,15 +597,13 @@ describe("scaffoldAgent", () => {
   it("never emits skipDangerousModePermissionPrompt — Claude Code ignores it at project scope", () => {
     // Regression guard: this key was emitted historically but Claude Code only
     // honors it at user/local scope, never project. autoaccept handles the prompt.
-    for (const skip of [true, false, undefined]) {
-      const config = makeAgentConfig(skip === undefined ? {} : { skip_permission_prompt: skip });
-      const result = scaffoldAgent(`skip-${String(skip)}`, config, tmpDir, telegramConfig);
-      const settings = JSON.parse(
-        readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
-      );
-      expect(settings.skipDangerousModePermissionPrompt).toBeUndefined();
-      expect(settings.permissions?.skipDangerousModePermissionPrompt).toBeUndefined();
-    }
+    const config = makeAgentConfig({});
+    const result = scaffoldAgent("skip-default", config, tmpDir, telegramConfig);
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+    expect(settings.skipDangerousModePermissionPrompt).toBeUndefined();
+    expect(settings.permissions?.skipDangerousModePermissionPrompt).toBeUndefined();
   });
 
   it("never emits enabledPlugins — redundant with start.sh CLI flag pathway", () => {

@@ -349,8 +349,13 @@ export function renderBootCard(opts: RenderBootCardOpts): string {
       : ''
     degradedRows.push(`⚠️ <b>Restart</b>  ${escapeHtml(REASON_LABEL.crash)}${ageStr}`)
     // Principle 1: every failure carries its next step. The crash row
-    // tells the user how to inspect why.
-    degradedRows.push(`    ↳ Tail logs: <code>journalctl --user -u switchroom-${escapeHtml(agentSlug)} -n 100</code>`)
+    // tells the user how to inspect why. Runtime-aware: v0.7+ agents run
+    // in Docker (no systemd/journalctl in-container) — the canonical
+    // detection is SWITCHROOM_RUNTIME (see doctor-docker.ts).
+    const tailCmd = process.env.SWITCHROOM_RUNTIME === 'docker'
+      ? `docker logs --tail 100 switchroom-${escapeHtml(agentSlug)}`
+      : `journalctl --user -u switchroom-${escapeHtml(agentSlug)} -n 100`
+    degradedRows.push(`    ↳ Tail logs: <code>${tailCmd}</code>`)
   }
 
   // Probe rows — only those that surfaced as degraded/fail. Healthy

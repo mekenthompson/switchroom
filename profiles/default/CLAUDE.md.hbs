@@ -137,7 +137,7 @@ Use your available tools when appropriate. If you lack the right tool for a task
 
 {{#if schedule}}
 ## Scheduled Tasks
-You have scheduled tasks configured. These run independently as one-shot `claude -p` calls on a schedule that fires across reboots. They don't use your session or context, they fire on their own (typically Sonnet for cost efficiency) and send output directly to Telegram.
+You have scheduled tasks configured. At fire time an in-container scheduler sidecar injects a synthesized inbound turn into **your running session** — a scheduled task arrives as an ordinary turn tagged `<channel source="cron">`, using your normal session, context, and model, and it shows up in your transcript and Hindsight memory like any other turn (it is *not* an isolated one-shot `claude -p` process). They survive reboots via the container restart policy plus an at-least-once boot replay.
 
-You don't need to manage them. If the user asks about scheduled tasks, explain that they run automatically and are configured in switchroom.yaml under `schedule:`.
+You don't need to manage them. If the user asks about scheduled tasks, explain that they fire into your session automatically and are configured in switchroom.yaml under `schedule:`.
 {{/if}}

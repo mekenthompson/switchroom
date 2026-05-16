@@ -277,6 +277,164 @@ export function buildChildEnv(
   return env;
 }
 
+// ─── tools/list input_schema sanitiser ────────────────────────────────────
+
+/**
+ * Anthropic's tool-schema validator rejects tools whose `input_schema`
+ * has `anyOf` / `oneOf` / `allOf` at the ROOT (top-level must be
+ * `{"type": "object", ...}`). Upstream `google_workspace_mcp` is built
+ * on Pydantic v2, which serialises `Optional[X]` / `Union[A, B]` root
+ * parameters as a root-level `anyOf`. The result: agents with the
+ * gdrive MCP enabled started 400-ing on every turn
+ * (`tools.<N>.custom.input_schema: input_schema does not support oneOf,
+ * allOf, or anyOf at the top level`) once Anthropic tightened
+ * validation in mid-May 2026.
+ *
+ * Classification — the schema is either "ok" (root `type:"object"` —
+ * forward untouched) or "drop" (anything else, including root
+ * anyOf/oneOf/allOf). We DO NOT attempt to rewrap into a
+ * `{type:"object", properties:{input:<orig>}}` envelope: that fixes
+ * `tools/list` but silently breaks `tools/call` because upstream's
+ * Pydantic handler expects FLAT kwargs (`{real_kwargs}`), while a
+ * wrapped tool causes Claude to call with `{input: {real_kwargs}}`. A
+ * safe wrap would need bidirectional `tools/call` arg-unwrapping in
+ * the parent→child direction, which is non-trivial; empirically the
+ * upstream pinned SHA has ZERO tools with bad-root schemas at either
+ * `--tool-tier extended` (89 tools) or `--tool-tier complete` (119
+ * tools), so wrap is dead code in practice. Dropping is safe, loud
+ * (the dropped tool is logged to stderr), and won't half-work the way
+ * wrap would.
+ *
+ * Returns `"ok"` if the schema can be forwarded untouched, `"drop"`
+ * otherwise. Exported for unit tests; called from the stdio proxy
+ * below.
+ */
+export function classifyRootSchema(schema: unknown): "ok" | "drop" {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
+    return "drop";
+  }
+  const s = schema as Record<string, unknown>;
+  if (s.type === "object") return "ok";
+  return "drop";
+}
+
+/**
+ * Walk a parsed JSON-RPC message and, if it's a `tools/list` response,
+ * classify every tool's `inputSchema` (MCP wire field) via
+ * {@link classifyRootSchema}. Tools whose root schema isn't
+ * `{"type": "object", ...}` are DROPPED from the response (and the
+ * drop is logged to stderr) — see classifyRootSchema for why we drop
+ * rather than wrap. Boot must continue regardless.
+ *
+ * Returns the (possibly mutated) message. Non-`tools/list` messages
+ * pass through untouched.
+ */
+export function sanitizeToolsListMessage(
+  msg: unknown,
+  logDrop: (toolName: string, reason: string) => void,
+): unknown {
+  if (msg === null || typeof msg !== "object" || Array.isArray(msg)) return msg;
+  const m = msg as Record<string, unknown>;
+  const result = m.result;
+  if (!result || typeof result !== "object") return msg;
+  const r = result as Record<string, unknown>;
+  const tools = r.tools;
+  if (!Array.isArray(tools)) return msg;
+  const kept: unknown[] = [];
+  for (const tool of tools) {
+    if (!tool || typeof tool !== "object") {
+      kept.push(tool);
+      continue;
+    }
+    const t = tool as Record<string, unknown>;
+    const name = typeof t.name === "string" ? t.name : "<unnamed>";
+    const schema = t.inputSchema;
+    if (classifyRootSchema(schema) === "ok") {
+      kept.push(t);
+      continue;
+    }
+    const why =
+      schema === null || schema === undefined
+        ? "missing"
+        : typeof schema !== "object" || Array.isArray(schema)
+          ? `not a JSON object (got ${schema === null ? "null" : typeof schema})`
+          : "root is not {type:\"object\",...} (likely root-level anyOf/oneOf/allOf — " +
+            "Anthropic's validator rejects this and we no longer rewrap; see " +
+            "classifyRootSchema docstring)";
+    logDrop(name, why);
+  }
+  r.tools = kept;
+  return msg;
+}
+
+/**
+ * Wire a line-delimited JSON-RPC sanitiser between upstream's stdout
+ * and Claude Code's stdin (our process.stdout). MCP stdio framing is
+ * newline-delimited JSON; we accumulate bytes, split on `\n`, parse
+ * each line, sanitise tools/list responses via
+ * {@link sanitizeToolsListMessage}, and re-serialise.
+ *
+ * Non-JSON lines (or parse failures) are forwarded verbatim — the
+ * sanitiser must be transparent on anything it doesn't recognise so a
+ * future upstream framing change can't bring the agent down.
+ */
+export function installToolsListSanitiserProxy(
+  upstream: NodeJS.ReadableStream,
+  downstream: NodeJS.WritableStream,
+): void {
+  let buf = "";
+  upstream.setEncoding?.("utf8");
+  // Pause upstream on `write()===false` and resume on `drain` so a
+  // slow downstream consumer (Claude Code's stdio reader paused mid-
+  // turn) can't grow this Node process's buffer without bound. The
+  // 'drain' listener is one-shot per pause cycle; re-installed when
+  // we pause again. `pause`/`resume` on a piped stream is a no-op
+  // for the pipe (we don't pipe — we consume via 'data'), so this
+  // governs the flow correctly.
+  const writeWithBackpressure = (s: string) => {
+    const ok = downstream.write(s);
+    if (!ok && typeof (upstream as { pause?: () => void }).pause === "function") {
+      (upstream as NodeJS.ReadableStream).pause();
+      downstream.once("drain", () => {
+        if (typeof (upstream as { resume?: () => void }).resume === "function") {
+          (upstream as NodeJS.ReadableStream).resume();
+        }
+      });
+    }
+  };
+  upstream.on("data", (chunk: string | Buffer) => {
+    buf += typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    let idx: number;
+    while ((idx = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, idx);
+      buf = buf.slice(idx + 1);
+      writeWithBackpressure(processJsonRpcLine(line) + "\n");
+    }
+  });
+  upstream.on("end", () => {
+    if (buf.length > 0) {
+      writeWithBackpressure(processJsonRpcLine(buf));
+      buf = "";
+    }
+  });
+}
+
+function processJsonRpcLine(line: string): string {
+  if (line.length === 0) return line;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return line; // not JSON; pass through
+  }
+  const sanitised = sanitizeToolsListMessage(parsed, (name, reason) => {
+    process.stderr.write(
+      `drive-mcp-launcher: dropping tool '${name}' from tools/list — ${reason}\n`,
+    );
+  });
+  return JSON.stringify(sanitised);
+}
+
 // ─── I/O helpers (thin) ───────────────────────────────────────────────────
 
 /**
@@ -546,13 +704,25 @@ export async function runDriveMcpLauncher(opts: {
     brokerCreds.accountEmail,
   );
 
-  // Replace this process with upstream so Claude Code's MCP stdio
-  // transport talks directly to it and signals/exit propagate. Node has
-  // no execvp; spawn with stdio:inherit + mirror the child's exit is the
-  // idiomatic equivalent for a stdio MCP server.
+  // Pipe stdio (NOT inherit) so we can interpose a JSON-RPC sanitiser
+  // on the upstream→Claude direction. Upstream `google_workspace_mcp`
+  // is built on Pydantic v2, which serialises `Optional[X]` /
+  // `Union[A, B]` root parameters as a root-level `anyOf` —
+  // Anthropic's tool-schema validator rejects that shape with HTTP
+  // 400. We intercept `tools/list` responses and rewrap any offending
+  // `inputSchema` (see {@link classifyRootSchema}). All other traffic
+  // is forwarded byte-perfect.
   const { spawn } = await import("node:child_process");
   const os = await import("node:os");
-  const child = spawn("uvx", args, { stdio: "inherit", env });
+  const child = spawn("uvx", args, {
+    stdio: ["pipe", "pipe", "inherit"],
+    env,
+  });
+  // stdin: forward parent → child verbatim (no parsing needed; the
+  // sanitiser only touches RESPONSES from upstream).
+  process.stdin.pipe(child.stdin!);
+  // stdout: parse line-delimited JSON-RPC, sanitise tools/list, forward.
+  installToolsListSanitiserProxy(child.stdout!, process.stdout);
   child.on("error", (err) => {
     process.stderr.write(
       `drive-mcp-launcher: failed to exec uvx: ${err.message}. Is \`uv\` ` +

@@ -15,10 +15,14 @@
  *     but this helper is fail-closed for tests / future callers that pass
  *     an empty string.)
  *
- *   - Does the wire-claimed `agent_unit` match the listener's agent? When
- *     they disagree the request is DENIED — the wire claim has no power,
- *     and we surface the mismatch in the audit row so a forensic reviewer
- *     can spot misconfigured agent-side code.
+ *   - Does the candidate `agent_unit` match the listener's agent? When
+ *     they disagree the request is DENIED. The candidate is the
+ *     wire-claimed `agent_unit` for `approval_request`/`approval_lookup`,
+ *     and the *resolved DB row's* `agent_unit` for the mutating ops
+ *     (`approval_consume`/`approval_revoke`/`approval_record`, #1399) —
+ *     either way the listener's bind-time identity is the only authority;
+ *     the caller-supplied id selects the row but cannot grant cross-agent
+ *     reach. Mismatches surface in the audit row for forensics.
  *
  * The kernel does NOT carry a per-key allowlist analogous to the broker's
  * `schedule[i].secrets`. Per-agent isolation IS the security model: every

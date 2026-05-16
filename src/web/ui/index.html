@@ -405,7 +405,8 @@
     <div class="refresh-info">Refreshes every 10s</div>
   </header>
   <nav class="tabs">
-    <button id="tab-agents" class="active" onclick="switchTab('agents')">Agents</button>
+    <button id="tab-summary" class="active" onclick="switchTab('summary')">Summary</button>
+    <button id="tab-agents" onclick="switchTab('agents')">Agents</button>
     <button id="tab-accounts" onclick="switchTab('accounts')">Accounts</button>
     <button id="tab-system" onclick="switchTab('system')">System</button>
     <button id="tab-google" onclick="switchTab('google')">Google</button>
@@ -414,7 +415,8 @@
   </nav>
   <main>
     <div id="error"></div>
-    <div id="agents" class="loading">Loading agents...</div>
+    <div id="summary" class="loading">Loading summary…</div>
+    <div id="agents" style="display:none" class="loading">Loading agents...</div>
     <div id="accounts" style="display:none"></div>
     <div id="system" style="display:none"></div>
     <div id="google" style="display:none"></div>
@@ -525,16 +527,111 @@
     }
 
     function switchTab(tab) {
-      const tabs = ['agents', 'accounts', 'system', 'google', 'schedule', 'approvals'];
+      const tabs = ['summary', 'agents', 'accounts', 'system', 'google', 'schedule', 'approvals'];
       for (const t of tabs) {
         document.getElementById(`tab-${t}`).classList.toggle('active', tab === t);
         document.getElementById(t).style.display = tab === t ? '' : 'none';
       }
+      if (tab === 'summary') fetchSummary();
       if (tab === 'accounts') fetchAccounts();
       if (tab === 'system') fetchSystemHealth();
       if (tab === 'google') fetchGoogleAccounts();
       if (tab === 'schedule') fetchSchedule();
       if (tab === 'approvals') fetchApprovals();
+    }
+
+    // Fleet overview — aggregates the cheap endpoints client-side
+    // (one parallel fan-out; no new server work, no extra docker/probe
+    // cost beyond what those tabs already do). Each tile degrades
+    // independently if its source errors.
+    async function fetchSummary() {
+      const el = document.getElementById('summary');
+      const get = async (p) => {
+        try {
+          const r = await fetch(`${API}${p}`, { headers: authHeaders() });
+          return r.ok ? await r.json() : null;
+        } catch { return null; }
+      };
+      const [ag, sys, appr, sched, accts] = await Promise.all([
+        get('/api/agents'), get('/api/system-health'),
+        get('/api/approvals'), get('/api/schedule'), get('/api/accounts'),
+      ]);
+      clearError();
+      const tile = (title, body, ok) => `
+        <div class="agent-card" style="min-width:220px">
+          <div class="card-header" style="cursor:default">
+            <span class="status-dot ${ok === null ? '' : ok ? 'active' : 'inactive'}" style="display:inline-block;vertical-align:middle"></span>
+            <span class="agent-name">${escapeHtml(title)}</span>
+          </div>
+          <div style="padding:0 1.25rem 1rem;font-size:0.9rem">${body}</div>
+        </div>`;
+      const dim = (s) => `<span style="color:var(--text-dim)">${escapeHtml(s)}</span>`;
+
+      // Agents up/total
+      let agentsTile;
+      if (Array.isArray(ag)) {
+        const up = ag.filter(x => x.active === 'active').length;
+        agentsTile = tile('Agents', `<strong>${up}/${ag.length}</strong> active`, up === ag.length);
+      } else agentsTile = tile('Agents', dim('unavailable'), null);
+
+      // Broker / hindsight / hostd from system-health
+      let brokerTile, hsTile, hostdTile;
+      if (sys && sys.broker) {
+        brokerTile = tile('Auth-broker',
+          sys.broker.reachable
+            ? `reachable · active <strong>${escapeHtml(sys.broker.active || '—')}</strong><br>${sys.broker.accounts ?? '?'} accts · ${sys.broker.agents ?? '?'} agents`
+            : `<span style="color:var(--red)">unreachable</span>`,
+          !!sys.broker.reachable);
+      } else brokerTile = tile('Auth-broker', dim('unavailable'), null);
+      if (sys && sys.hindsight) {
+        hsTile = tile('Hindsight',
+          sys.hindsight.running
+            ? `running<br>${escapeHtml(sys.hindsight.model || '?')} · ${sys.hindsight.mcpStateless == null ? '?' : sys.hindsight.mcpStateless ? 'stateless' : 'stateful'}`
+            : `<span style="color:var(--red)">not running</span>`,
+          !!sys.hindsight.running);
+      } else hsTile = tile('Hindsight', dim('unavailable'), null);
+      if (sys && sys.hostd) {
+        hostdTile = tile('Hostd',
+          sys.hostd.auditLogPresent
+            ? `audit present · ${(sys.hostd.recent || []).length} recent`
+            : dim('no audit log yet'),
+          sys.hostd.auditLogPresent ? true : null);
+      } else hostdTile = tile('Hostd', dim('unavailable'), null);
+
+      // Approvals
+      let apprTile;
+      if (appr && appr.reachable !== false) {
+        const d = appr.decisions || [];
+        const active = d.filter(x => !x.revoked_at && !(x.ttl_expires_at && x.ttl_expires_at < Date.now())).length;
+        apprTile = tile('Approvals', `<strong>${active}</strong> active · ${d.length} total`, true);
+      } else apprTile = tile('Approvals', dim((appr && appr.error) ? 'kernel unreachable' : 'unavailable'), null);
+
+      // Schedule
+      let schedTile;
+      if (sched && Array.isArray(sched.entries)) {
+        const agents = new Set(sched.entries.map(e => e.agent));
+        schedTile = tile('Schedule', `<strong>${sched.entries.length}</strong> cron entr${sched.entries.length === 1 ? 'y' : 'ies'} · ${agents.size} agent(s)`, true);
+      } else schedTile = tile('Schedule', dim('unavailable'), null);
+
+      // Quota headroom — worst cached 5h/7d across accounts (no probe;
+      // shows "—" until someone refreshes on the Accounts tab).
+      let quotaTile;
+      if (Array.isArray(accts) && accts.length) {
+        const used = accts.filter(a => a.quotaUsage);
+        if (used.length === 0) {
+          quotaTile = tile('Quota', dim('not probed yet — see Accounts tab'), null);
+        } else {
+          const worst5 = Math.max(...used.map(a => a.quotaUsage.fiveHourPct));
+          const worst7 = Math.max(...used.map(a => a.quotaUsage.sevenDayPct));
+          const anyStale = accts.some(a => a.quotaStale);
+          quotaTile = tile('Quota (worst acct)',
+            `5h <strong>${Math.round(worst5)}%</strong> · 7d <strong>${Math.round(worst7)}%</strong>${anyStale ? '<br>' + dim('some stale') : ''}`,
+            worst5 < 90 && worst7 < 90);
+        }
+      } else quotaTile = tile('Quota', dim('unavailable'), null);
+
+      el.classList.remove('loading');
+      el.innerHTML = `<div class="agents-grid">${agentsTile}${brokerTile}${hsTile}${hostdTile}${apprTile}${schedTile}${quotaTile}</div>`;
     }
 
     function showError(msg) {
@@ -674,13 +771,33 @@
       // threshold_violations, last_refreshed_at}). The pre-RFC-H
       // primaryFor/fallbackFor lists and quota.fiveHourPct utilization
       // fields no longer exist on the wire.
+      // usage % cell: live 5h/7d utilization from the last cached
+      // probe (cost-gated — see refreshQuota). null → "—" + a per-
+      // account ↻ that force-probes. quotaStale → value shown muted
+      // with ↻ to refresh.
+      const pctCell = (pct, label, stale) => {
+        if (pct == null) return '<span style="color:var(--text-dim)">—</span>';
+        let cls = 'quota-pct';
+        if (pct >= 90) cls += ' high';
+        else if (pct >= 70) cls += ' mid';
+        const v = `${Math.round(pct)}%`;
+        return stale
+          ? `<span class="${cls}" title="stale — click ↻" style="opacity:.55">${v}</span>`
+          : `<span class="${cls}">${v}</span>`;
+      };
       const enriched = accounts.map(a => {
         const q = a.quota || null;
+        const u = a.quotaUsage || null;
         const exhausted = q ? !!q.exhausted : null;
         return {
           a,
           usedBy: a.usedBy || [],
-          exhausted,
+          fiveH: pctCell(u ? u.fiveHourPct : null, '5h', a.quotaStale),
+          sevenD: pctCell(u ? u.sevenDayPct : null, '7d', a.quotaStale),
+          fiveReset: u && u.fiveHourResetAt ? formatTimestamp(u.fiveHourResetAt) : '<span style="color:var(--text-dim)">—</span>',
+          captured: u && u.capturedAt
+            ? formatTimestamp(u.capturedAt)
+            : '<span style="color:var(--text-dim)">never</span>',
           exhaustedCell: q == null
             ? '<span style="color:var(--text-dim)">broker offline</span>'
             : exhausted
@@ -689,29 +806,30 @@
           violations: q && q.threshold_violations
             ? `<span class="quota-pct mid">${q.threshold_violations}</span>`
             : '<span style="color:var(--text-dim)">0</span>',
-          refreshed: q && q.last_refreshed_at
-            ? formatTimestamp(q.last_refreshed_at)
-            : '<span style="color:var(--text-dim)">—</span>',
           expires: formatTimestamp(a.expiresAt),
         };
       });
+      const refreshBtn = (label) =>
+        `<button class="btn" title="Probe live quota now (billed Anthropic call)" onclick="refreshQuota('${escapeHtml(label)}', true)">↻</button>`;
       const rows = enriched.map(e => {
-        const { a, usedBy, exhaustedCell, violations, refreshed, expires } = e;
+        const { a, usedBy, fiveH, sevenD, captured, exhaustedCell, violations, expires } = e;
         return `
         <tr>
           <td>${escapeHtml(a.label)}</td>
           <td><span class="health-badge ${escapeHtml(a.health)}">${escapeHtml(a.health)}</span></td>
           <td>${renderUsedByCell(usedBy)}</td>
+          <td>${fiveH}</td>
+          <td>${sevenD}</td>
+          <td title="quota probed at">${captured}</td>
           <td>${exhaustedCell}</td>
           <td>${violations}</td>
-          <td>${refreshed}</td>
           <td>${expires}</td>
-          <td><button class="btn" onclick="openPromoteModal('${escapeHtml(a.label)}')">Make fleet-active…</button></td>
+          <td>${refreshBtn(a.label)} <button class="btn" onclick="openPromoteModal('${escapeHtml(a.label)}')">Make fleet-active…</button></td>
         </tr>
       `;
       }).join('');
       const cards = enriched.map(e => {
-        const { a, usedBy, exhaustedCell, violations, refreshed, expires } = e;
+        const { a, usedBy, fiveH, sevenD, captured, exhaustedCell, violations, expires } = e;
         return `
         <div class="account-card">
           <div class="account-card-header">
@@ -720,30 +838,61 @@
           </div>
           <div class="account-usage">${renderUsedByCell(usedBy)}</div>
           <div class="card-meta" style="padding:0">
+            <div class="meta-item"><label>5h usage </label><span>${fiveH}</span></div>
+            <div class="meta-item"><label>7d usage </label><span>${sevenD}</span></div>
+            <div class="meta-item"><label>Probed </label><span>${captured}</span></div>
             <div class="meta-item"><label>Quota </label><span>${exhaustedCell}</span></div>
             <div class="meta-item"><label>Threshold viols </label><span>${violations}</span></div>
-            <div class="meta-item"><label>Last refresh </label><span>${refreshed}</span></div>
             <div class="meta-item"><label>Expires </label><span>${expires}</span></div>
           </div>
           <div style="margin-top:0.75rem">
+            ${refreshBtn(a.label)}
             <button class="btn" onclick="openPromoteModal('${escapeHtml(a.label)}')">Make fleet-active…</button>
           </div>
         </div>
       `;
       }).join('');
       container.innerHTML = `
+        <div style="margin-bottom:0.6rem;display:flex;align-items:center;gap:0.75rem">
+          <button class="btn" onclick="refreshQuota(null, true)">↻ Refresh all quota</button>
+          <span style="font-size:0.78rem;color:var(--text-dim)">
+            5h/7d usage is cached (≤10 min); ↻ forces a live probe (one billed Anthropic call per account).
+          </span>
+        </div>
         <div class="accounts-table-wrap">
           <table class="accounts-table">
             <thead><tr>
               <th>Label</th><th>Health</th><th>Used by</th>
-              <th>Quota</th><th>Threshold viols</th>
-              <th>Last refresh</th><th>Expires</th><th></th>
+              <th>5h&nbsp;%</th><th>7d&nbsp;%</th><th>Probed</th>
+              <th>Quota</th><th>Threshold viols</th><th>Expires</th><th></th>
             </tr></thead>
             <tbody>${rows}</tbody>
           </table>
         </div>
         <div class="accounts-grid">${cards}</div>
       `;
+    }
+
+    // Refresh cached quota. label=null → all accounts. force=true →
+    // bypass the server's 10-min TTL (the per-account / "all" buttons).
+    async function refreshQuota(label, force) {
+      try {
+        showToast(label ? `Probing ${label}…` : 'Probing all accounts…', true);
+        const res = await fetch(`${API}/api/accounts/quota/refresh`, {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify(label ? { labels: [label], force: !!force } : { force: !!force }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.ok) {
+          showToast(`Quota probe failed: ${data.error || `HTTP ${res.status}`}`, false);
+        } else {
+          showToast('Quota updated', true);
+        }
+        fetchAccounts(); // re-pull; handleGetAccounts now serves the fresh cache
+      } catch (err) {
+        showToast(`Quota probe failed: ${err.message}`, false);
+      }
     }
 
     function renderUsedByCell(usedBy) {
@@ -1118,7 +1267,12 @@
       };
     }
 
-    // Init
+    // Init. Summary is the default visible tab; fetchAgents still runs
+    // (populates the agents tab + keeps the 10s fleet poll warm + the
+    // log WS depends on it). Summary is fetched on init + on tab-switch
+    // only — deliberately NOT on the 10s interval (it fans out to
+    // system-health etc.; on-demand refresh is enough).
+    fetchSummary();
     fetchAgents();
     connectWebSocket();
     setInterval(fetchAgents, 10000);

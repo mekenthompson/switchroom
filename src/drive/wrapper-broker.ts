@@ -33,6 +33,29 @@
  * `BrokerCredentialsExpired` when that happens — operators must
  * re-run `auth google account add` to get fresh tokens until the
  * tick lands.
+ *
+ * ── DEPRECATED for the MCP-spawn path ──────────────────────────────
+ *
+ * The "Phase 3b.4c: wire `loadFromAuthBroker` into the agent's
+ * MCP-spawn args" plan referenced above is **superseded** and will
+ * NOT be implemented. `loadFromAuthBroker` returns a ~1-hour Google
+ * *access token*; an MCP server is long-lived and must self-refresh,
+ * so handing it a 1h access token at spawn time means it dies an
+ * hour later with no recovery. The chosen mechanism is instead the
+ * **refresh-token seed launcher**: `src/cli/drive-mcp-launcher.ts`
+ * pulls the *refresh token* from the broker, seeds upstream's
+ * credentials file (`token:null, refresh_token, …, expiry:null`),
+ * and execs `google-workspace-mcp --single-user` so upstream owns
+ * the refresh loop itself. The `gdrive` MCP scaffold entry points at
+ * that launcher (see `getGdriveMcpSettingsEntry`).
+ *
+ * This module is NOT dead — `loadFromAuthBroker` is still the right
+ * tool for short-lived, single-request callers that need a bearer
+ * token *now* and don't outlive it. Its only current caller is the
+ * Drive-write pre-tool hook (`src/cli/drive-write-pretool.ts`), which
+ * makes one Drive API call per invocation and exits — exactly the
+ * access-token use case. Do NOT extend this for the MCP path; use
+ * the launcher.
  */
 
 import { withAuthBrokerClient } from "../auth/broker/client.js";

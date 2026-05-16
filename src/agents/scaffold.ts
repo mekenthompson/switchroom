@@ -106,7 +106,12 @@ import {
   renderVaultProtocolFragment,
   renderAgentSelfServiceFragment,
 } from "./profiles.js";
-import { getHindsightSettingsEntry, getBuiltinDefaultMcpEntries } from "../memory/scaffold-integration.js";
+import {
+  getHindsightSettingsEntry,
+  getBuiltinDefaultMcpEntries,
+  getGdriveMcpSettingsEntry,
+  shouldEmitGdriveMcp,
+} from "../memory/scaffold-integration.js";
 import { reconcileAgentDefaultSkills } from "./reconcile-default-skills.js";
 import { applyTelegramProgressGuidance, applyCronTelegramGuidance } from "./sub-agent-telegram-prompt.js";
 import type { McpServerConfig } from "../memory/hindsight.js";
@@ -1749,6 +1754,57 @@ export const DOCKER_BIN_PATH = "/opt/switchroom/bin";
  */
 export const DOCKER_CONFIG_PATH = "/state/config/switchroom.yaml";
 
+/**
+ * In-container path to the switchroom CLI. `Dockerfile.agent` symlinks
+ * `dist/cli/switchroom.js` onto PATH here. Used for MCP entries whose
+ * `command` is a switchroom-internal verb (agent-config, hostd, and the
+ * gdrive `drive-mcp-launcher`) — the host's repo/npm-global path is
+ * irrelevant inside the container.
+ */
+export const DOCKER_SWITCHROOM_CLI_PATH = "/usr/local/bin/switchroom";
+
+/**
+ * Decide whether the per-agent `gdrive` MCP entry should be written into
+ * `mcpServers`, and if so produce it.
+ *
+ * Net-new conditional logic (unlike `getBuiltinDefaultMcpEntries()`,
+ * which is unconditional). Shared by BOTH the `scaffoldAgent` and
+ * `reconcileAgent` mcpServers-assembly paths so an agent can never get a
+ * `gdrive` entry it can't satisfy at the broker.
+ *
+ * Gate (all must hold):
+ *   1. NOT a hard opt-out — `mcp_servers: { gdrive: false }`.
+ *   2. `shouldEmitGdriveMcp(name, account, google_accounts)` — i.e. the
+ *      agent has `google_workspace.account` set AND that account lists
+ *      this agent in its `google_accounts.<account>.enabled_for[]`. This
+ *      is the SAME predicate the auth-broker uses to select+authorize a
+ *      Google account, so scaffold and broker can never disagree.
+ *
+ * The `--tier` passed to the launcher is per-agent override → top-level
+ * default (mirrors approvers/tier override semantics elsewhere). The
+ * launcher re-reads tier from config and is authoritative; threading it
+ * here just makes the resolved choice visible in settings.json.
+ *
+ * Returns `null` when the entry must not be emitted.
+ */
+export function resolveGdriveMcpEntry(
+  agentName: string,
+  agentConfig: AgentConfig,
+  switchroomConfig: SwitchroomConfig | undefined,
+): { key: string; value: McpServerConfig } | null {
+  if ((agentConfig.mcp_servers ?? {})["gdrive"] === false) return null;
+  const account = agentConfig.google_workspace?.account;
+  const googleAccounts = switchroomConfig?.google_accounts;
+  if (!shouldEmitGdriveMcp(agentName, account, googleAccounts)) return null;
+  const tier =
+    agentConfig.google_workspace?.tier ??
+    switchroomConfig?.google_workspace?.tier;
+  return getGdriveMcpSettingsEntry(
+    DOCKER_SWITCHROOM_CLI_PATH,
+    tier ? { tier } : {},
+  );
+}
+
 export function scaffoldAgent(
   name: string,
   agentConfigRaw: AgentConfig,
@@ -1980,6 +2036,21 @@ export function scaffoldAgent(
         const agentOptOut = (agentConfig.mcp_servers ?? {})[entry.optOutKey] === false;
         if (!agentOptOut && !settings.mcpServers[entry.key]) {
           settings.mcpServers[entry.key] = entry.value;
+        }
+      }
+
+      // Per-agent conditional `gdrive` MCP. Net-new gated logic (the
+      // built-in defaults above are unconditional). Emitted ONLY when the
+      // agent is broker-authorized for a Google account — the gate
+      // mirrors the auth-broker's account selection + ACL exactly so the
+      // launcher never spawns an MCP the broker would refuse. Honours the
+      // `mcp_servers: { gdrive: false }` hard opt-out. A user-declared
+      // `gdrive` entry (already in settings.mcpServers) wins, same as the
+      // built-in defaults above.
+      {
+        const gdrive = resolveGdriveMcpEntry(name, agentConfig, switchroomConfig);
+        if (gdrive && !settings.mcpServers[gdrive.key]) {
+          settings.mcpServers[gdrive.key] = gdrive.value;
         }
       }
 
@@ -3549,6 +3620,27 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
       const optOut = (agentConfig.mcp_servers ?? {})[entry.optOutKey] === false;
       if (!optOut) {
         mcpServers[entry.key] = entry.value;
+      }
+    }
+
+    // Per-agent conditional `gdrive` MCP — same shared gate as the
+    // scaffoldAgent path (resolveGdriveMcpEntry honours the
+    // `mcp_servers: { gdrive: false }` opt-out and the broker-ACL
+    // predicate). Placed before the user-defined extras below so an
+    // explicit user `gdrive` entry still overrides. `switchroom update`
+    // → reconcile re-evaluates this every run, so toggling
+    // google_workspace.account / google_accounts.enabled_for[] in
+    // switchroom.yaml adds or retracts the entry on the next reconcile.
+    {
+      const gdrive = resolveGdriveMcpEntry(name, agentConfig, switchroomConfig);
+      if (gdrive) {
+        mcpServers[gdrive.key] = gdrive.value;
+      } else {
+        // Retraction: if the agent lost authorization (account removed
+        // from enabled_for[], or opt-out flipped), drop any stale entry
+        // so reconcile is the source of truth — mirrors how the #235
+        // switchroom-mcp retraction works.
+        delete mcpServers["gdrive"];
       }
     }
 

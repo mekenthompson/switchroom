@@ -51,29 +51,29 @@ export function getPlaywrightMcpSettingsEntry(): { key: string; value: McpServer
 }
 
 /**
- * Return the MCP server entry for the Google Workspace MCP (Drive + Docs +
- * Sheets + Calendar + Gmail) per RFC C §2.
- *
- * Pinned to a specific upstream commit SHA — RFC C requires this rather
- * than a floating tag so upgrades are explicit. The chosen SHA corresponds
- * to taylorwilsdon/google_workspace_mcp v0.5.x as of 2026-05.
- *
- * The server is launched via `uvx --from git+https://...@<sha>` so no
- * system-wide install is required and the version is reproducible.
- *
- * Default OFF — the server only does anything useful after the operator
- * has run `switchroom drive connect <agent>` and consented through the
- * onboarding card. Agents that need it opt-in via
- * `mcp_servers: { gdrive: true }`; opt-out (the usual default-MCP shape)
- * is `mcp_servers: { gdrive: false }`. The reconciler honours either.
- */
-/**
  * Allowed `tier` values per RFC G §4.2 — kept here as a string-literal
  * union (rather than importing from src/config/schema) to avoid a memory
  * → config import dependency. The schema and this set must agree; the
  * unit test in scaffold-integration.test.ts pins the alignment.
  */
 export type GdriveMcpTier = "core" | "extended" | "complete";
+
+/**
+ * Pinned upstream commit SHA for `taylorwilsdon/google_workspace_mcp`.
+ *
+ * Specific commit SHA — bump deliberately. Pinning to a 40-char commit
+ * SHA (not a tag) means upstream history rewrites can't change what we
+ * run. google_workspace_mcp v1.20.3 = this SHA; verified MIT-licensed
+ * at this SHA on 2026-05-06. (Note: RFC C originally referenced v0.5.0;
+ * that tag does not exist on upstream — v1.20.3 is the latest stable as
+ * of this pin.)
+ *
+ * Exported as the single source of truth: the scaffold MCP entry and
+ * the in-container `drive-mcp-launcher` both reference this constant so
+ * the spawned upstream revision is identical on both code paths.
+ */
+export const GOOGLE_WORKSPACE_MCP_PINNED_SHA =
+  "f3c7dc5df2641c8545abc9e8f402d794f2853745";
 
 export interface GdriveMcpEntryOptions {
   /**
@@ -93,35 +93,100 @@ export interface GdriveMcpEntryOptions {
   tier?: GdriveMcpTier;
 }
 
+/**
+ * Return the MCP server entry for the Google Workspace MCP (Drive + Docs +
+ * Sheets + Calendar + optionally Gmail) per RFC C §2 / RFC G.
+ *
+ * The entry's `command` is the switchroom CLI's hidden
+ * `drive-mcp-launcher` verb, NOT a bare `uvx`. The launcher (see
+ * `src/cli/drive-mcp-launcher.ts`) runs INSIDE the agent container as the
+ * agent UID and, at spawn time:
+ *
+ *   1. pulls a Google refresh token from the auth-broker (path-as-identity
+ *      per-agent socket; broker enforces `google_accounts.<acct>.enabled_for`),
+ *   2. resolves the OAuth client_secret from config / vault-broker,
+ *   3. pre-seeds a credentials file (`{token:null, refresh_token, ...,
+ *      expiry:null}`) into a per-agent `WORKSPACE_MCP_CREDENTIALS_DIR`,
+ *   4. `exec`s `uvx --from git+...@<pinned-sha> google-workspace-mcp
+ *      --single-user [--tool-tier <tier>]`.
+ *
+ * The `--single-user` + pre-seeded-file shape is what makes upstream run
+ * browserless: token/expiry null forces the refresh branch, no OAuth
+ * device flow. The launcher pins the upstream revision to
+ * `GOOGLE_WORKSPACE_MCP_PINNED_SHA` (same constant referenced here so the
+ * two paths can never drift).
+ *
+ * No `env` block: the old `GOOGLE_OAUTH_TOKEN_FROM_VAULT` /
+ * `GOOGLE_OAUTH_REFRESH_TOKEN` injection idea is dead — credentials are
+ * delivered via the seeded file the launcher writes, never via env.
+ *
+ * Default OFF for an agent — the scaffold only emits this entry when the
+ * agent has `google_workspace.account` set AND that account lists the
+ * agent in `google_accounts.<account>.enabled_for[]` (see
+ * `shouldEmitGdriveMcp`). Agents can still hard opt-out with
+ * `mcp_servers: { gdrive: false }`.
+ *
+ * @param switchroomCliPath  Absolute path to the in-container switchroom
+ *                           CLI (`/usr/local/bin/switchroom`), matching
+ *                           how the other switchroom-internal MCP entries
+ *                           (agent-config, hostd) are spawned.
+ */
 export function getGdriveMcpSettingsEntry(
+  switchroomCliPath: string,
   options: GdriveMcpEntryOptions = {},
 ): { key: string; value: McpServerConfig } {
-  // Specific commit SHA — bump deliberately. Pinning to a 40-char commit
-  // SHA (not a tag) means upstream history rewrites can't change what we
-  // run. google_workspace_mcp v1.20.3 = f3c7dc5df2641c8545abc9e8f402d794f2853745;
-  // verified MIT-licensed at this SHA on 2026-05-06.
-  // (Note: RFC C originally referenced v0.5.0; that tag does not exist on
-  // upstream — v1.20.3 is the latest stable as of this pin.)
-  const PINNED_SHA = "f3c7dc5df2641c8545abc9e8f402d794f2853745";
-  const baseArgs = [
-    "--from",
-    `git+https://github.com/taylorwilsdon/google_workspace_mcp.git@${PINNED_SHA}`,
-    "google-workspace-mcp",
-  ];
-  const tierArgs = options.tier ? ["--tool-tier", options.tier] : [];
+  // The launcher reads the tier itself from config; we still thread it
+  // through here so the resolved choice is visible in settings.json
+  // (doctor/debug surfaces) and so a future caller without config in
+  // scope can pin it explicitly.
+  const tierArgs = options.tier ? ["--tier", options.tier] : [];
   return {
     key: "gdrive",
     value: {
-      command: "uvx",
-      args: [...baseArgs, ...tierArgs],
-      env: {
-        // The MCP wrapper reads the refresh token from the broker on
-        // startup; the bridging script (drive-mcp-launcher.ts, future
-        // work) injects GOOGLE_OAUTH_REFRESH_TOKEN at spawn time.
-        GOOGLE_OAUTH_TOKEN_FROM_VAULT: "1",
-      },
+      command: switchroomCliPath,
+      args: ["drive-mcp-launcher", ...tierArgs],
     },
   };
+}
+
+/**
+ * The shared gate predicate: should agent `<agentName>` receive the
+ * `gdrive` MCP entry?
+ *
+ * This MUST agree with the auth-broker's account-selection + ACL logic
+ * (`src/auth/broker/server.ts` opGoogleGetCredentials): the broker
+ * returns a Google account iff `agents.<name>.google_workspace.account`
+ * is set AND that account is a key in top-level `google_accounts` with
+ * `<name>` in its `enabled_for[]`. If the scaffold emitted the entry
+ * under looser conditions, the agent would get a `gdrive` MCP whose
+ * launcher fails at spawn (broker returns FORBIDDEN/ACCOUNT_NOT_FOUND) —
+ * a broken tool surface. So both sides call this one predicate.
+ *
+ * Hard opt-out (`mcp_servers: { gdrive: false }`) is handled by the
+ * caller (same shape as every other built-in default), NOT here — this
+ * predicate answers only "is this agent broker-authorized for Google".
+ *
+ * Account-name comparison is case-insensitive + trimmed because the
+ * config schema normalizes both the per-agent `google_workspace.account`
+ * and the `google_accounts` keys to lowercase; the broker compares the
+ * post-normalization strings. We re-normalize here defensively so a
+ * test or caller that hand-builds an un-normalized config still gets
+ * the same answer the broker would.
+ */
+export function shouldEmitGdriveMcp(
+  agentName: string,
+  agentGoogleAccount: string | undefined,
+  googleAccounts:
+    | Record<string, { enabled_for?: string[] } | undefined>
+    | undefined,
+): boolean {
+  if (!agentGoogleAccount) return false;
+  const account = agentGoogleAccount.trim().toLowerCase();
+  if (account.length === 0) return false;
+  const acctEntry = googleAccounts?.[account];
+  if (!acctEntry) return false;
+  const enabledFor = acctEntry.enabled_for ?? [];
+  return enabledFor.includes(agentName);
 }
 
 /**

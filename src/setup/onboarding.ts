@@ -274,6 +274,66 @@ export function preTrustWorkspace(agentDir: string): void {
 }
 
 /**
+ * Ensure every scaffolded `.mcp.json` server is on Claude Code's
+ * per-project trust allowlist.
+ *
+ * Claude Code only loads project `.mcp.json` servers that are listed in
+ * `.claude.json` `projects[<absDir>].enabledMcpjsonServers`. `preTrustWorkspace`
+ * sets `hasTrustDialogAccepted` but never touches that array, so any
+ * server scaffolded AFTER original onboarding (gdrive, plus agent-config
+ * / hostd for non-original agents) is silently ignored — it never spawns
+ * as a Claude Code child. This unions `serverKeys` into that allowlist
+ * (idempotent), creating the project entry/array if missing and keeping
+ * `hasTrustDialogAccepted: true`.
+ *
+ * Same `.claude.json` path + project key (`resolve(agentDir)`) +
+ * skip-silently-if-absent contract as `preTrustWorkspace`. Call it from
+ * every `.mcp.json` write site with the keys of the object just written.
+ */
+export function ensureMcpServersTrusted(
+  agentDir: string,
+  serverKeys: string[],
+): void {
+  const configPath = join(agentDir, ".claude", ".claude.json");
+
+  if (!existsSync(configPath)) {
+    return;
+  }
+
+  try {
+    const raw = readFileSync(configPath, "utf-8");
+    const config = JSON.parse(raw);
+
+    if (!config.projects) {
+      config.projects = {};
+    }
+
+    const absDir = resolve(agentDir);
+    const project = config.projects[absDir] ?? {};
+    project.hasTrustDialogAccepted = true;
+    if (!Array.isArray(project.allowedTools)) {
+      project.allowedTools = [];
+    }
+
+    const existing = Array.isArray(project.enabledMcpjsonServers)
+      ? project.enabledMcpjsonServers
+      : [];
+    project.enabledMcpjsonServers = Array.from(
+      new Set([...existing, ...serverKeys]),
+    );
+    config.projects[absDir] = project;
+
+    writeFileSync(configPath, JSON.stringify(config, null, 2) + "\n", {
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+  } catch {
+    // If we can't read/parse the config, skip silently (mirrors
+    // preTrustWorkspace).
+  }
+}
+
+/**
  * Create a minimal .claude config.json when no existing Claude installation
  * is available. The agent will need to complete onboarding via `switchroom agent attach`.
  */

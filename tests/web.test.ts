@@ -95,6 +95,8 @@ import {
   handleGetAccounts,
   handleUseAccount,
   handleGetApprovals,
+  handleRefreshAccountsQuota,
+  __resetQuotaCacheForTests,
   type AgentInfo,
 } from "../src/web/api.js";
 import { resolveAgentsDir } from "../src/config/loader.js";
@@ -837,5 +839,124 @@ describe("handleGetApprovals", () => {
     expect(approvalList).toHaveBeenCalledWith(undefined, {
       socket: "/run/op/sock",
     });
+  });
+});
+
+describe("handleRefreshAccountsQuota (cached + manual refresh)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    brokerImpl.run = null;
+    __resetQuotaCacheForTests();
+    asMock(getAccountInfos).mockReturnValue([
+      { label: "a@x.com", health: "healthy" },
+      { label: "b@x.com", health: "healthy" },
+    ] as never);
+  });
+
+  // The mock client must answer BOTH ops: handleRefreshAccountsQuota
+  // calls probeQuota; a subsequent handleGetAccounts calls listState.
+  const withProbe = (impl: (labels: string[]) => unknown) => {
+    brokerImpl.run = async (fn) =>
+      (fn as (c: unknown) => Promise<unknown>)({
+        probeQuota: async (labels: string[]) => impl(labels),
+        listState: async () => ({
+          active: "a@x.com",
+          fallback_order: [],
+          accounts: [],
+          agents: [],
+          consumers: [],
+        }),
+      });
+  };
+
+  it("force-probes and caches usage; then default load serves it (no re-probe)", async () => {
+    let probeCalls = 0;
+    withProbe((labels) => {
+      probeCalls++;
+      return {
+        results: labels.map((label) => ({
+          label,
+          result: {
+            ok: true,
+            data: {
+              fiveHourUtilizationPct: 42,
+              sevenDayUtilizationPct: 7,
+              fiveHourResetAt: new Date(1810000000000),
+              sevenDayResetAt: null,
+            },
+          },
+        })),
+      };
+    });
+    const r = await handleRefreshAccountsQuota(["a@x.com"], true);
+    expect(r.ok).toBe(true);
+    expect(r.usage["a@x.com"].usage?.fiveHourPct).toBe(42);
+    expect(r.usage["a@x.com"].usage?.fiveHourResetAt).toBe(1810000000000);
+    expect(r.usage["a@x.com"].usage?.sevenDayResetAt).toBeNull();
+    expect(r.usage["a@x.com"].stale).toBe(false);
+    expect(probeCalls).toBe(1);
+
+    // Default accounts load now serves the cached probe — no new probe.
+    const accts = await handleGetAccounts(undefined);
+    const a = accts.find((x) => x.label === "a@x.com")!;
+    expect(a.quotaUsage?.fiveHourPct).toBe(42);
+    expect(a.quotaStale).toBe(false);
+    expect(probeCalls).toBe(1); // unchanged — getAccounts never probes
+  });
+
+  it("TTL-respecting: a non-forced refresh skips an account whose cache is fresh", async () => {
+    let probeCalls = 0;
+    withProbe((labels) => {
+      probeCalls++;
+      return {
+        results: labels.map((label) => ({
+          label,
+          result: { ok: true, data: { fiveHourUtilizationPct: 1, sevenDayUtilizationPct: 1, fiveHourResetAt: null, sevenDayResetAt: null } },
+        })),
+      };
+    });
+    await handleRefreshAccountsQuota(["a@x.com"], true); // primes cache
+    expect(probeCalls).toBe(1);
+    // Non-forced, cache fresh → must NOT probe again (anti-storm).
+    const r = await handleRefreshAccountsQuota(["a@x.com"], false);
+    expect(probeCalls).toBe(1);
+    expect(r.ok).toBe(true);
+    expect(r.usage["a@x.com"].stale).toBe(false);
+  });
+
+  it("degrades (ok:false) but still returns cached values when the broker is unreachable", async () => {
+    brokerImpl.run = null; // withAuthBrokerClient throws FakeUnreachable
+    const r = await handleRefreshAccountsQuota(["a@x.com"], true);
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("broker down");
+    expect(r.usage["a@x.com"].usage).toBeNull();
+    expect(r.usage["a@x.com"].stale).toBe(true);
+  });
+
+  it("records a per-account probe failure as null usage with the reason", async () => {
+    withProbe((labels) => ({
+      results: labels.map((label) => ({
+        label,
+        result: { ok: false, reason: "rate-limited probe" },
+      })),
+    }));
+    const r = await handleRefreshAccountsQuota(["a@x.com"], true);
+    expect(r.ok).toBe(true);
+    expect(r.usage["a@x.com"].usage).toBeNull();
+    expect(r.usage["a@x.com"].error).toBe("rate-limited probe");
+  });
+
+  it("default handleGetAccounts reports quotaStale:true and never probes when cache is empty", async () => {
+    let probeCalls = 0;
+    withProbe(() => {
+      probeCalls++;
+      return { results: [] };
+    });
+    const accts = await handleGetAccounts(undefined);
+    for (const a of accts) {
+      expect(a.quotaUsage).toBeNull();
+      expect(a.quotaStale).toBe(true);
+    }
+    expect(probeCalls).toBe(0); // the cost guarantee
   });
 });

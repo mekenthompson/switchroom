@@ -214,9 +214,55 @@ export function handleGetSubagents(
  * is unreachable the quota field is `null` and callers fall back to the
  * cached view (Decision 9: degraded, not catastrophic).
  */
+/**
+ * Live rate-limit utilization for an account, from the broker's
+ * `probe-quota` op. Distinct from `quota: AccountState` (exhaustion
+ * flags from list-state) — this is the actual 5h/7d %.
+ *
+ * COST: each probe is a live billed `POST api.anthropic.com/v1/messages`
+ * per account (the broker sends "hi" to read the rate-limit headers).
+ * So it is NEVER called on the default accounts load — only from the
+ * explicit refresh endpoint, and cached with a TTL so neither the 10s
+ * fleet poll nor a tab re-open can cause a probe storm.
+ */
+export interface AccountQuotaUsage {
+  fiveHourPct: number;
+  sevenDayPct: number;
+  /** ms epoch (Date serialised) or null when the broker didn't report one. */
+  fiveHourResetAt: number | null;
+  sevenDayResetAt: number | null;
+  /** ms epoch when this probe was taken. */
+  capturedAt: number;
+}
+
+/** Probe results cached at most this long before a refresh re-probes. */
+export const QUOTA_CACHE_TTL_MS = 10 * 60 * 1000;
+
+interface QuotaCacheEntry {
+  usage: AccountQuotaUsage | null;
+  fetchedAt: number;
+  error?: string;
+}
+
+// Module-level: the dashboard server is a single long-lived process,
+// so a plain Map is the cache. Bounded by account count.
+const quotaCache = new Map<string, QuotaCacheEntry>();
+
+function quotaEntryFresh(e: QuotaCacheEntry | undefined, now: number): boolean {
+  return !!e && now - e.fetchedAt < QUOTA_CACHE_TTL_MS;
+}
+
 export interface AccountDashboardInfo extends AccountInfo {
   /** Broker-derived quota / exhaustion state. `null` when broker unreachable. */
   quota: AccountState | null;
+  /**
+   * Live 5h/7d utilization from the last cached probe, or null if never
+   * probed / probe failed. Populated by the refresh endpoint, never by
+   * this default load (cost — see AccountQuotaUsage).
+   */
+  quotaUsage: AccountQuotaUsage | null;
+  /** true when there's no fresh cached probe (UI shows a refresh prompt). */
+  quotaStale: boolean;
   /** Agents currently bound to this account (fleet active or per-agent override). */
   usedBy: string[];
 }
@@ -251,12 +297,127 @@ export async function handleGetAccounts(
       }
       usedBy.sort();
     }
+    const now = Date.now();
+    const ce = quotaCache.get(info.label);
     return {
       ...info,
       quota: brokerAccounts.get(info.label) ?? null,
+      // Cache read only — NEVER probe here (cost). Stale/missing → null
+      // + quotaStale:true so the UI can prompt a refresh.
+      quotaUsage: quotaEntryFresh(ce, now) ? (ce!.usage ?? null) : null,
+      quotaStale: !quotaEntryFresh(ce, now),
       usedBy,
     };
   });
+}
+
+export interface RefreshQuotaResult {
+  ok: boolean;
+  error?: string;
+  /** Per-label outcome after the (possibly cache-skipped) refresh. */
+  usage: Record<
+    string,
+    { usage: AccountQuotaUsage | null; stale: boolean; error?: string }
+  >;
+}
+
+/**
+ * Explicitly refresh cached quota usage via the broker's `probe-quota`
+ * (live billed Anthropic call per account). TTL-respecting: an account
+ * whose cache is still fresh is skipped UNLESS `force` is set (the
+ * manual per-account / "refresh all" button passes force=true; the
+ * accounts-tab auto-trigger does NOT, so it no-ops when fresh and can
+ * never storm).
+ *
+ * @param labels  accounts to (maybe) probe; omitted ⇒ all known accounts
+ * @param force   bypass the TTL and re-probe now
+ */
+export async function handleRefreshAccountsQuota(
+  labels?: string[],
+  force = false,
+  home?: string,
+): Promise<RefreshQuotaResult> {
+  const now = Date.now();
+  const all = getAccountInfos(now, home).map((i) => i.label);
+  const targets = (labels && labels.length > 0 ? labels : all).filter((l) =>
+    all.includes(l),
+  );
+  // Only probe accounts that are forced or stale; serve cache otherwise.
+  const toProbe = targets.filter(
+    (l) => force || !quotaEntryFresh(quotaCache.get(l), now),
+  );
+
+  if (toProbe.length > 0) {
+    try {
+      await withAuthBrokerClient(async (client) => {
+        const data = await client.probeQuota(toProbe);
+        const probedAt = Date.now();
+        for (const entry of data.results) {
+          if (entry.result.ok) {
+            const d = entry.result.data;
+            quotaCache.set(entry.label, {
+              fetchedAt: probedAt,
+              usage: {
+                fiveHourPct: d.fiveHourUtilizationPct,
+                sevenDayPct: d.sevenDayUtilizationPct,
+                fiveHourResetAt: d.fiveHourResetAt
+                  ? d.fiveHourResetAt.getTime()
+                  : null,
+                sevenDayResetAt: d.sevenDayResetAt
+                  ? d.sevenDayResetAt.getTime()
+                  : null,
+                capturedAt: probedAt,
+              },
+            });
+          } else {
+            quotaCache.set(entry.label, {
+              fetchedAt: probedAt,
+              usage: null,
+              error: entry.result.reason,
+            });
+          }
+        }
+      });
+    } catch (err) {
+      const msg =
+        err instanceof AuthBrokerUnreachableError
+          ? err.message
+          : err instanceof AuthBrokerError
+            ? `${err.code}: ${err.message}`
+            : err instanceof Error
+              ? err.message
+              : String(err);
+      // Degraded: report the error but still return whatever's cached.
+      const out: RefreshQuotaResult = { ok: false, error: msg, usage: {} };
+      const t = Date.now();
+      for (const l of targets) {
+        const e = quotaCache.get(l);
+        out.usage[l] = {
+          usage: quotaEntryFresh(e, t) ? (e!.usage ?? null) : null,
+          stale: !quotaEntryFresh(e, t),
+          error: e?.error,
+        };
+      }
+      return out;
+    }
+  }
+
+  const t = Date.now();
+  const usage: RefreshQuotaResult["usage"] = {};
+  for (const l of targets) {
+    const e = quotaCache.get(l);
+    usage[l] = {
+      usage: quotaEntryFresh(e, t) ? (e!.usage ?? null) : null,
+      stale: !quotaEntryFresh(e, t),
+      error: e?.error,
+    };
+  }
+  return { ok: true, usage };
+}
+
+/** Test-only: reset the module quota cache between cases. */
+export function __resetQuotaCacheForTests(): void {
+  quotaCache.clear();
 }
 
 export interface UseAccountResult {

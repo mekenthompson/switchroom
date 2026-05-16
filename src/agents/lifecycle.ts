@@ -595,13 +595,102 @@ export function getAgentStatus(name: string): AgentStatus {
   return { active, uptime, memory, pid };
 }
 
+/**
+ * Batched fleet status — two `docker` calls total, not 2×N.
+ *
+ * The previous implementation called `getAgentStatus` per agent: one
+ * `docker inspect` + one `docker stats --no-stream` each, all
+ * synchronous and serial. On a 9-agent host that's ~18 blocking shell-
+ * outs (`docker stats --no-stream` alone is ~1-2s each) — ~17s wall
+ * time that froze the single-threaded event loop, so the web
+ * dashboard's concurrent broker/system calls timed out and the proxy
+ * 502'd before the response landed.
+ *
+ * This does ONE `docker inspect <all containers>` and ONE
+ * `docker stats --no-stream` (all running containers), then maps
+ * results back by name. spawnSync (not execFileSync) so a missing
+ * container — non-zero exit — still yields the stdout for the ones
+ * that do exist. Same sync signature + return shape; every caller
+ * (web/api, cli/version, cli/agent, cli/doctor) benefits unchanged.
+ */
 export function getAllAgentStatuses(
   config: SwitchroomConfig
 ): Record<string, AgentStatus> {
+  const agentNames = Object.keys(config.agents);
   const statuses: Record<string, AgentStatus> = {};
-  for (const agentName of Object.keys(config.agents)) {
-    statuses[agentName] = getAgentStatus(agentName);
+  if (agentNames.length === 0) return statuses;
+
+  // name → container, and reverse for mapping docker output back.
+  const cnByAgent = new Map<string, string>();
+  const agentByCn = new Map<string, string>();
+  for (const a of agentNames) {
+    const cn = containerName(a);
+    cnByAgent.set(a, cn);
+    agentByCn.set(cn, a);
+    // Default: inactive shell. Overwritten below if the container exists.
+    statuses[a] = { active: "inactive", uptime: null, memory: null, pid: null };
   }
+
+  // ── 1 call: inspect every container at once ──────────────────────
+  const insp = spawnSync(
+    "docker",
+    [
+      "inspect",
+      "--format",
+      "{{.Name}}|{{.State.Status}}|{{.State.StartedAt}}|{{.State.Pid}}",
+      ...cnByAgent.values(),
+    ],
+    { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 15000 },
+  );
+  for (const line of (insp.stdout ?? "").split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    const [rawName, status, startedAt, pidStr] = t.split("|");
+    // docker prints {{.Name}} with a leading slash: "/switchroom-clerk".
+    const cn = (rawName ?? "").replace(/^\//, "");
+    const agent = agentByCn.get(cn);
+    if (!agent) continue;
+    const pidNum = parseInt(pidStr ?? "", 10);
+    statuses[agent] = {
+      active: status === "running" ? "active" : (status || "inactive"),
+      uptime:
+        startedAt && startedAt !== "0001-01-01T00:00:00Z" ? startedAt : null,
+      memory: null,
+      pid: Number.isFinite(pidNum) && pidNum > 0 ? pidNum : null,
+    };
+  }
+
+  // ── 1 call: memory for all running containers ────────────────────
+  // No container args → all running containers; we filter to ours.
+  // Tolerant: if `docker stats` fails entirely, memory just stays null.
+  const stats = spawnSync(
+    "docker",
+    ["stats", "--no-stream", "--format", "{{.Name}}|{{.MemUsage}}"],
+    { encoding: "utf-8", stdio: ["ignore", "pipe", "pipe"], timeout: 15000 },
+  );
+  if (stats.status === 0) {
+    for (const line of (stats.stdout ?? "").split("\n")) {
+      const t = line.trim();
+      if (!t) continue;
+      const [cn, memUsage] = t.split("|");
+      const agent = cn ? agentByCn.get(cn) : undefined;
+      if (!agent || statuses[agent].active !== "active") continue;
+      const first = (memUsage ?? "").split("/")[0]?.trim();
+      if (!first) continue;
+      const m = first.match(/([\d.]+)\s*([KMG]i?B)/i);
+      if (m) {
+        const val = parseFloat(m[1]);
+        const unit = m[2].toUpperCase();
+        let mb = val;
+        if (unit.startsWith("K")) mb = val / 1024;
+        else if (unit.startsWith("G")) mb = val * 1024;
+        statuses[agent].memory = `${Math.round(mb)}MB`;
+      } else {
+        statuses[agent].memory = first;
+      }
+    }
+  }
+
   return statuses;
 }
 

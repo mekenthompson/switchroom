@@ -1484,9 +1484,9 @@ The full set of fixes since v0.7.0:
   systemd keep running while operators migrate piecemeal. Compose
   still walks the full fleet so per-agent socket volumes for
   not-yet-cutover agents stay correct in YAML.
-- `docs/operators/migration-v0.7.md` rewritten from the field:
-  auto-unlock as a hard precondition, all-at-once vs one-at-a-time
-  guidance, image-source clarification (`pull` vs `--build-local`),
+- `docs/operators/migration-v0.7.md` (doc since removed) rewritten
+  from the field: auto-unlock as a hard precondition, all-at-once vs
+  one-at-a-time guidance, image-source clarification (`pull` vs `--build-local`),
   expanded snapshot step including systemd unit files.
 
 **Also in this release window:**
@@ -1742,7 +1742,7 @@ and the boot watchdog still assume systemd in places):
 - `src/agents/systemd.ts` and the entire systemd unit-template + reconcile machinery.
 - 5 unit-targeted test files; 4 watchdog integration tests.
 
-**Migration:** see [`docs/operators/migration-v0.7.md`](docs/operators/migration-v0.7.md).
+**Migration:** see `docs/operators/migration-v0.7.md` (doc since removed).
 
 **Scope:** Linux only. Mac (Docker Desktop) validation tracked as Phase 3.5.
 

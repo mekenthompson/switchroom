@@ -1,7 +1,12 @@
 # Switchroom Diagrams — Unified Design System (v3)
 
-All three explanatory diagrams (`progress-card-anatomy`, `approval-grant-flow`,
-`wake-audit-lifecycle`) MUST share these recipes so they read as a set.
+All six explanatory diagrams — `progress-card-anatomy`,
+`approval-grant-flow`, `wake-audit-lifecycle`,
+`auth-broker-credential-plane`, `drive-write-approval`, and
+`runtime-topology` — MUST share these recipes so they read as a set.
+Each has a `<name>.spec.md` (authoritative) and a `<name>.svg`
+(authored artifact); only the original three also have an optional
+`<name>.jpg` raster export.
 
 ## Canvas
 - viewBox: `0 0 1200 800`

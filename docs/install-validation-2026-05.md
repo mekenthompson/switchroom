@@ -1,3 +1,5 @@
+> **Archived — point-in-time snapshot (2026-05-14). Not current guidance.**
+
 # Install-validation loop — 2026-05-14
 
 End-to-end install validation on a fresh Ubuntu 26.04 VM. The goal was

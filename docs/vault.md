@@ -6,6 +6,8 @@ agents and scheduled tasks.  This guide covers the architecture, how to
 declare and scope secrets, Telegram commands for runtime management, the
 audit log, and the threat model.
 
+**Scope / see also:** this is the **operator guide** (declare secrets, Telegram commands, audit log, day-to-day use). For the security/threat model and which auth path to use when, see [vault-security.md](vault-security.md); for broker ACL internals and the path-as-identity contract, see [vault-broker.md](vault-broker.md); for boot-time auto-unlock setup and recovery, see [auto-unlock.md](auto-unlock.md).
+
 > ## v0.7.12 layout change
 >
 > As of **v0.7.12**, the canonical vault path is
@@ -200,9 +202,23 @@ The file is mode `0600` (user-only).  Each line is a JSON object:
   "caller": "switchroom-my-agent-cron-0.service",
   "pid": 12345,
   "cgroup": "switchroom-my-agent-cron-0.service",
+  "agent_name": "my-agent",
   "result": "allowed"
 }
 ```
+
+**Identity model vs. the `caller` string.** The ACL decision is *not*
+made from `caller`/`cgroup`.  As described in [Architecture](#architecture)
+above, the broker derives the calling agent's identity from the
+per-agent bind socket path via `socketPathToAgent` — path-as-identity,
+never cgroup membership.  The trusted, ACL-relevant identity in the
+record is `agent_name` (derived from that bind path).  The `caller` and
+`cgroup` fields are **informational forensic context only**.  Note that
+the broker still writes these two fields in a legacy
+`switchroom-<agent>-cron-N.service`-shaped format for back-compat with
+older audit tooling (tracked separately as #1383); the `.service`
+suffix is a label, not an indication that any systemd unit exists —
+cron runs in-process inside the agent's `agent-scheduler` sidecar.
 
 Fields:
 
@@ -211,9 +227,10 @@ Fields:
 | `ts` | ISO-8601 | Timestamp of the request |
 | `op` | string | Operation: `get`, `set`, `delete`, `list`, `unlock`, `lock` |
 | `key` | string? | Vault key name — **never the secret value** |
-| `caller` | string | Cgroup unit name, or `pid:<n>` if unavailable |
+| `caller` | string | Informational forensic label (legacy `.service`-shaped string for back-compat, or `pid:<n>`). **Not** used for ACL — see note above (#1383) |
 | `pid` | number | PID of the calling process |
-| `cgroup` | string? | Raw cgroup unit name if resolved |
+| `cgroup` | string? | Informational legacy label; mirrors `caller` when present. Not an ACL input |
+| `agent_name` | string? | Agent slug derived from the bind socket path — the trusted identity used for the ACL decision (path-as-identity) |
 | `result` | string | `"allowed"`, `"denied:<reason>"`, or `"error:<detail>"` |
 
 ### Grep examples
@@ -225,8 +242,8 @@ grep '"result":"denied' ~/.switchroom/vault-audit.log
 # All requests for a specific key
 grep '"key":"stripe/live-key"' ~/.switchroom/vault-audit.log
 
-# Requests from a specific cron unit
-grep '"caller":"switchroom-my-agent-cron-0.service"' ~/.switchroom/vault-audit.log
+# Requests from a specific agent (trusted, path-derived identity)
+grep '"agent_name":"my-agent"' ~/.switchroom/vault-audit.log
 
 # Use switchroom vault audit for formatted output
 switchroom vault audit --denied

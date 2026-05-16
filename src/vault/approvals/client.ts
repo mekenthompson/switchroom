@@ -11,6 +11,9 @@
  * helpers below normalize that field name out for callers.
  */
 
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { rpcRaw, type BrokerClientOpts } from "../broker/client.js";
 import type {
   ApprovalDecisionMeta,
@@ -51,6 +54,37 @@ export interface ApprovalKernelClientOpts extends BrokerClientOpts {
    * rather than via the environment.
    */
   kernelSocket?: string;
+}
+
+/**
+ * Host-side operator socket path — the host end of the compose bind
+ * `~/.switchroom/state/kernel-operator → /run/switchroom/kernel/operator`.
+ * The kernel restricts this socket to the read-only `approval_list`
+ * op, so it is safe for host observers (the web dashboard) but cannot
+ * be used for grant/consume/revoke.
+ *
+ * Deliberately NOT folded into `resolveKernelSocketPath` (which stays a
+ * pure env/opts function): host-fs probing inside the shared resolver
+ * would make every caller's behaviour depend on whether the operator
+ * socket happens to exist on the box. Instead the one host caller (the
+ * dashboard's approvals view) probes this explicitly and passes it as
+ * `opts.kernelSocket` when present.
+ */
+export function kernelOperatorSocketPath(home: string = homedir()): string {
+  return join(home, ".switchroom", "state", "kernel-operator", "sock");
+}
+
+/**
+ * Resolve the host operator socket iff it exists, else null. The
+ * read-only host caller uses this to decide whether to pass
+ * `opts.kernelSocket`; absent ⇒ caller degrades (kernel unreachable
+ * from host) rather than silently changing the resolver contract.
+ */
+export function resolveKernelOperatorSocket(
+  home: string = homedir(),
+): string | null {
+  const p = kernelOperatorSocketPath(home);
+  return existsSync(p) ? p : null;
 }
 
 export function resolveKernelSocketPath(

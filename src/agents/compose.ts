@@ -947,9 +947,17 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   lines.push(`      - "FOWNER"`);
   lines.push(`      - "DAC_READ_SEARCH"`);
   lines.push(`      - "DAC_OVERRIDE"`);
-  if (switchroomConfigPath) {
+  if (switchroomConfigPath || opts.operatorUid !== undefined) {
     lines.push(`    environment:`);
-    lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);
+    if (switchroomConfigPath) {
+      lines.push(`      SWITCHROOM_CONFIG: /state/config/switchroom.yaml`);
+    }
+    // Enables the read-only host operator listener. Gated on the same
+    // operatorUid the auth-broker uses; absent ⇒ no operator socket,
+    // kernel behaviour unchanged.
+    if (opts.operatorUid !== undefined) {
+      lines.push(`      SWITCHROOM_KERNEL_OPERATOR_UID: "${opts.operatorUid}"`);
+    }
   }
   lines.push(`    volumes:`);
   for (const a of describeAgents(config)) {
@@ -957,6 +965,16 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   }
   if (switchroomConfigPath) {
     lines.push(`      - ${switchroomConfigPath}:/state/config/switchroom.yaml:ro`);
+  }
+  // Operator socket — host-mounted bind so host-side `approvalList`
+  // (e.g. the web dashboard) can read decision metadata. Mirrors the
+  // auth-broker operator bind; only emitted when operatorUid is set so
+  // a legacy install doesn't get a confusingly-empty dir. The kernel
+  // restricts this socket to the read-only approval_list op.
+  if (opts.operatorUid !== undefined) {
+    lines.push(
+      `      - ${homePrefix}/.switchroom/state/kernel-operator:/run/switchroom/kernel/operator`,
+    );
   }
   lines.push(`      - ${homePrefix}/.switchroom/approvals:/state/approvals`);
   lines.push(``);

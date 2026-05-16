@@ -6,6 +6,7 @@ vi.mock("../src/agents/lifecycle.js", () => ({
   startAgent: vi.fn(),
   stopAgent: vi.fn(),
   restartAgent: vi.fn(),
+  containerName: (name: string) => `switchroom-${name}`,
 }));
 
 // Mock auth module
@@ -22,6 +23,7 @@ vi.mock("../src/config/loader.js", () => ({
 vi.mock("node:child_process", () => ({
   execSync: vi.fn(),
   execFileSync: vi.fn(),
+  spawnSync: vi.fn(),
   spawn: vi.fn(),
 }));
 
@@ -36,7 +38,7 @@ import {
 import { isOriginAllowed, isTailscaleIdentified } from "../src/web/server.js";
 import { getAllAgentStatuses, startAgent, stopAgent, restartAgent } from "../src/agents/lifecycle.js";
 import { getAllAuthStatuses } from "../src/auth/manager.js";
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import type { SwitchroomConfig } from "../src/config/schema.js";
 
 // Bun's vitest compat layer doesn't implement vi.mocked(). Use a
@@ -204,38 +206,56 @@ describe("handleGetLogs", () => {
     vi.clearAllMocks();
   });
 
-  it("returns logs from journalctl", () => {
-    asMock(execFileSync).mockReturnValue("line 1\nline 2\nline 3\n" as any);
+  it("returns merged container stdout+stderr from docker logs", () => {
+    asMock(spawnSync).mockReturnValue({
+      status: 0,
+      stdout: "line 1\nline 2\n",
+      stderr: "boot warn\n",
+    } as any);
 
     const result = handleGetLogs("coach", 50);
     expect(result.ok).toBe(true);
     expect(result.logs).toContain("line 1");
-    expect(execFileSync).toHaveBeenCalledWith(
-      "journalctl",
-      ["--user", "-u", "switchroom-coach", "--no-pager", "-n", "50"],
+    // docker logs splits container stdout/stderr; both are surfaced.
+    expect(result.logs).toContain("boot warn");
+    expect(spawnSync).toHaveBeenCalledWith(
+      "docker",
+      ["logs", "--tail", "50", "switchroom-coach"],
       expect.objectContaining({ encoding: "utf-8" })
     );
   });
 
   it("uses default of 50 lines", () => {
-    asMock(execFileSync).mockReturnValue("output" as any);
+    asMock(spawnSync).mockReturnValue({ status: 0, stdout: "output", stderr: "" } as any);
 
     handleGetLogs("sage");
-    expect(execFileSync).toHaveBeenCalledWith(
-      "journalctl",
-      ["--user", "-u", "switchroom-sage", "--no-pager", "-n", "50"],
+    expect(spawnSync).toHaveBeenCalledWith(
+      "docker",
+      ["logs", "--tail", "50", "switchroom-sage"],
       expect.any(Object)
     );
   });
 
-  it("returns error when journalctl fails", () => {
-    asMock(execFileSync).mockImplementation(() => {
-      throw new Error("no journal data");
-    });
+  it("returns error when docker logs exits non-zero (no such container)", () => {
+    asMock(spawnSync).mockReturnValue({
+      status: 1,
+      stdout: "",
+      stderr: "Error: No such container: switchroom-missing\n",
+    } as any);
 
     const result = handleGetLogs("missing", 10);
     expect(result.ok).toBe(false);
-    expect(result.error).toContain("no journal data");
+    expect(result.error).toContain("No such container");
+  });
+
+  it("returns error when docker binary is unavailable", () => {
+    asMock(spawnSync).mockReturnValue({
+      error: new Error("spawn docker ENOENT"),
+    } as any);
+
+    const result = handleGetLogs("coach", 10);
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("ENOENT");
   });
 });
 

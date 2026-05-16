@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# Read the most recent trigger + quality eval result JSONs and post a
-# Buildkite annotation summarizing pass/fail counts. Falls back to a warning
-# annotation if no result files are present (eval steps were skipped).
+# Read the most recent trigger + quality eval result JSONs and append a
+# pass/fail summary to the GitHub Actions step summary. No-ops cleanly if
+# no result files are present (eval steps skipped / fork PR). Buildkite is
+# retired; pre-#1372 this piped to an absent `buildkite-agent` on GHA so
+# the computed table was silently discarded — the summary never reached
+# the run.
 
 set -uo pipefail
 
@@ -50,8 +53,8 @@ fi
   [[ -n "${trigger_file:-}" ]] && summarize "$trigger_file" "Trigger routing"
   [[ -n "${quality_file:-}" ]] && summarize "$quality_file" "Quality"
   echo
-  echo "Build SHA: \`${BUILDKITE_COMMIT:-unknown}\`"
+  echo "Build SHA: \`${GITHUB_SHA:-unknown}\`"
   echo
   [[ -n "${trigger_file:-}" ]] && echo "- Trigger results: \`$(basename "$trigger_file")\`"
   [[ -n "${quality_file:-}" ]] && echo "- Quality results: \`$(basename "$quality_file")\`"
-} | buildkite-agent annotate --style "info" --context "evals-summary"
+} >> "${GITHUB_STEP_SUMMARY:-/dev/stdout}"

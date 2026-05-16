@@ -313,12 +313,6 @@ export function mergeAgentConfig(
   if (defaults.dangerous_mode !== undefined && merged.dangerous_mode === undefined) {
     merged.dangerous_mode = defaults.dangerous_mode;
   }
-  if (
-    defaults.skip_permission_prompt !== undefined
-    && merged.skip_permission_prompt === undefined
-  ) {
-    merged.skip_permission_prompt = defaults.skip_permission_prompt;
-  }
   if (defaults.thinking_effort !== undefined && merged.thinking_effort === undefined) {
     merged.thinking_effort = defaults.thinking_effort;
   }

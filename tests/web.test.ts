@@ -31,6 +31,14 @@ vi.mock("../src/analytics/posthog.js", () => ({
   captureException: vi.fn(),
 }));
 
+// Approval-kernel client — handleGetApprovals reads the kernel's
+// read-only operator socket. Stub the resolver + list call so the
+// unit test never opens a real UDS.
+vi.mock("../src/vault/approvals/client.js", () => ({
+  resolveKernelOperatorSocket: vi.fn(() => null),
+  approvalList: vi.fn(async () => null),
+}));
+
 // Mock child_process
 vi.mock("node:child_process", () => ({
   execSync: vi.fn(),
@@ -86,10 +94,15 @@ import {
   handleGetSchedule,
   handleGetAccounts,
   handleUseAccount,
+  handleGetApprovals,
   type AgentInfo,
 } from "../src/web/api.js";
 import { resolveAgentsDir } from "../src/config/loader.js";
 import { getAccountInfos } from "../src/auth/account-store.js";
+import {
+  resolveKernelOperatorSocket,
+  approvalList,
+} from "../src/vault/approvals/client.js";
 import { isOriginAllowed, isTailscaleIdentified } from "../src/web/server.js";
 import { getAllAgentStatuses, startAgent, stopAgent, restartAgent } from "../src/agents/lifecycle.js";
 import { getAllAuthStatuses } from "../src/auth/manager.js";
@@ -760,5 +773,45 @@ describe("handleGetAccounts / handleUseAccount shape (RFC-H)", () => {
     const r = await handleUseAccount("ken@x.com");
     expect(r.ok).toBe(false);
     expect(r.error).toContain("broker down");
+  });
+});
+
+describe("handleGetApprovals", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("reports unreachable when the operator socket is absent", async () => {
+    asMock(resolveKernelOperatorSocket).mockReturnValue(null);
+    const r = await handleGetApprovals();
+    expect(r.reachable).toBe(false);
+    expect(r.decisions).toEqual([]);
+    expect(r.error).toMatch(/operator socket not present/i);
+    // Must not even attempt the RPC when there's no socket.
+    expect(approvalList).not.toHaveBeenCalled();
+  });
+
+  it("reports unreachable when approvalList returns null (kernel down)", async () => {
+    asMock(resolveKernelOperatorSocket).mockReturnValue("/run/op/sock");
+    asMock(approvalList).mockResolvedValue(null);
+    const r = await handleGetApprovals();
+    expect(r.reachable).toBe(false);
+    expect(r.error).toMatch(/unreachable or returned an error/i);
+  });
+
+  it("returns decisions newest-first and pins the socket opt", async () => {
+    asMock(resolveKernelOperatorSocket).mockReturnValue("/run/op/sock");
+    asMock(approvalList).mockResolvedValue([
+      { id: "old", agent_unit: "carrie", scope: "doc:gdrive:write", action: "docs:edit", decision: "allow_ttl", granted_at: 100, granted_by_user_id: 1, ttl_expires_at: null, last_used_at: null, revoked_at: null, revoke_reason: null },
+      { id: "new", agent_unit: "clerk", scope: "vault:read", action: "get", decision: "allow_always", granted_at: 999, granted_by_user_id: 1, ttl_expires_at: null, last_used_at: null, revoked_at: null, revoke_reason: null },
+    ] as never);
+    const r = await handleGetApprovals();
+    expect(r.reachable).toBe(true);
+    expect(r.decisions.map((d) => d.id)).toEqual(["new", "old"]);
+    // No agent filter (fleet-wide) + socket pinned so the resolver
+    // can't fall through to the broker.
+    expect(approvalList).toHaveBeenCalledWith(undefined, {
+      socket: "/run/op/sock",
+    });
   });
 });

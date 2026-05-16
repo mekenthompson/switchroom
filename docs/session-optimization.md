@@ -21,7 +21,7 @@ Switchroom agents have three mechanisms that survive restarts and compaction:
    To opt into transcript-replay continuity instead, set `session_continuity.resume_mode` per agent in switchroom.yaml:
 
    - `handoff` — default. Fresh session every restart, briefing injected.
-   - `auto` — pass `--continue` only when the JSONL transcript exists, is under the size cap (`session_continuity.resume_max_bytes`, default 2 MB), and is fresher than `session.max_idle` (default 7 days).
+   - `auto` — pass `--continue` only when the JSONL transcript exists, is under the size cap (`session_continuity.resume_max_bytes`, default 2 MB), and is fresher than `session.max_idle` if set, else a hardcoded 7-day fallback (the schema gives `session.max_idle` no default; the 7-day floor lives in `start.sh` as `${SWITCHROOM_SESSION_MAX_IDLE_SECS:-604800}`).
    - `continue` — always pass `--continue`. Flaky on large transcripts; only use if you know your sessions stay small.
    - `none` — fresh every time, no briefing.
 

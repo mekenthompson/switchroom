@@ -14,6 +14,8 @@ broker. Done — every subsequent boot, the broker reads the file, decrypts,
 unlocks the vault, and your fleet comes back working without you typing
 anything.
 
+**Scope / see also:** this is the **auto-unlock** doc (boot-time machine-bound unlock, setup, and recovery). For day-to-day operator use, see [vault.md](vault.md); for the security/threat model, see [vault-security.md](vault-security.md); for broker ACL internals, see [vault-broker.md](vault-broker.md).
+
 To turn it off:
 
 ```
@@ -138,7 +140,7 @@ is documented in [vault-broker.md](vault-broker.md) and tracked in
 
 ## Recovering from a broken auto-unlock
 
-If the blob fails to decrypt at boot (broker journal shows
+If the blob fails to decrypt at boot (broker logs show
 `auto-unlock decrypt failed`), the broker stays running but locked.
 Three ways to recover:
 

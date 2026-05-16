@@ -12,6 +12,8 @@ per-agent socket), not by parsing systemd cgroups. Cron is the in-agent
 the per-agent `secrets:` allowlist drive what each scheduled task can
 read.
 
+**Scope / see also:** this is the **broker internals** doc (ACL model, path-as-identity contract, socket layout). For day-to-day operator use, see [vault.md](vault.md); for the security/threat model and auth-path selection, see [vault-security.md](vault-security.md); for boot-time auto-unlock setup and recovery, see [auto-unlock.md](auto-unlock.md).
+
 ## What is the vault broker?
 
 The vault broker is a long-running container that holds the decrypted

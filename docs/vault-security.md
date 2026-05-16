@@ -6,6 +6,8 @@ This document is the canonical reference. Skill authors and operators reading
 this should leave with a clear answer for "I'm in situation X — which auth path
 do I use, and what do I have to set up?"
 
+**Scope / see also:** this is the **security model** (auth paths, threat model, what the ACL does and doesn't protect). For day-to-day operator use (declaring secrets, Telegram commands, audit log), see [vault.md](vault.md); for broker ACL internals and the path-as-identity contract, see [vault-broker.md](vault-broker.md); for boot-time auto-unlock, see [auto-unlock.md](auto-unlock.md).
+
 ## Three auth paths
 
 The vault broker accepts three distinct authorization paths for read (`get` /

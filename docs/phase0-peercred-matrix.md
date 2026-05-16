@@ -1,3 +1,5 @@
+> **Archived — point-in-time snapshot (Phase 0 run, 2026-05-08). Not current guidance.**
+
 # Phase 0 — container identity matrix
 
 Run: `2026-05-08T00:59:27Z` (rootful + rootless full matrix incl. same-UID-twin assumption row; supersedes 2026-05-08T00:47:20Z run)

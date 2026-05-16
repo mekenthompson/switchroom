@@ -17,7 +17,9 @@ import {
   buildSeedCredentials,
   buildUvxArgs,
   encodeCredentialsFilename,
+  classifyRootSchema,
   resolveCredentialsDir,
+  sanitizeToolsListMessage,
 } from "./drive-mcp-launcher.js";
 import { GOOGLE_WORKSPACE_MCP_PINNED_SHA } from "../memory/scaffold-integration.js";
 
@@ -242,6 +244,102 @@ describe("buildChildEnv — strips --single-user-incompatible knobs", () => {
     const base = { MCP_ENABLE_OAUTH21: "1" };
     buildChildEnv(base, "/tmp/c", "pixsoul@gmail.com");
     expect(base.MCP_ENABLE_OAUTH21).toBe("1");
+  });
+});
+
+describe("classifyRootSchema — drop unless root is {type:\"object\",...}", () => {
+  it("returns ok for a well-formed {type:object, properties:...} schema", () => {
+    expect(
+      classifyRootSchema({ type: "object", properties: { foo: { type: "string" } } }),
+    ).toBe("ok");
+  });
+
+  it("returns drop for a root anyOf schema (no wrap — see docstring)", () => {
+    expect(
+      classifyRootSchema({ anyOf: [{ type: "string" }, { type: "null" }] }),
+    ).toBe("drop");
+  });
+
+  it("returns drop for a root oneOf schema", () => {
+    expect(
+      classifyRootSchema({ oneOf: [{ type: "string" }, { type: "integer" }] }),
+    ).toBe("drop");
+  });
+
+  it("returns drop for a root allOf schema", () => {
+    expect(
+      classifyRootSchema({ allOf: [{ type: "object" }, { properties: {} }] }),
+    ).toBe("drop");
+  });
+
+  it("returns drop for null / undefined / non-object schemas", () => {
+    expect(classifyRootSchema(null)).toBe("drop");
+    expect(classifyRootSchema(undefined)).toBe("drop");
+    expect(classifyRootSchema("string")).toBe("drop");
+    expect(classifyRootSchema(42)).toBe("drop");
+    expect(classifyRootSchema([])).toBe("drop");
+  });
+
+  it("does NOT recurse — a top-level object with nested anyOf is ok", () => {
+    // Nested anyOf inside properties.<x> is fine — Anthropic's
+    // validator only rejects ROOT-level anyOf/oneOf/allOf.
+    expect(
+      classifyRootSchema({
+        type: "object",
+        properties: { foo: { anyOf: [{ type: "string" }, { type: "null" }] } },
+      }),
+    ).toBe("ok");
+  });
+});
+
+describe("sanitizeToolsListMessage — drops tools with bad root schemas", () => {
+  it("keeps good tools untouched and drops tools with root anyOf", () => {
+    const msg = {
+      jsonrpc: "2.0",
+      id: 1,
+      result: {
+        tools: [
+          {
+            name: "good_tool",
+            inputSchema: { type: "object", properties: { x: { type: "string" } } },
+          },
+          {
+            name: "bad_tool",
+            inputSchema: { anyOf: [{ type: "string" }, { type: "null" }] },
+          },
+        ],
+      },
+    };
+    const drops: { name: string; reason: string }[] = [];
+    const out = sanitizeToolsListMessage(msg, (name, reason) =>
+      drops.push({ name, reason }),
+    ) as typeof msg;
+    expect(out.result.tools.length).toBe(1);
+    expect(out.result.tools[0].name).toBe("good_tool");
+    expect(out.result.tools[0].inputSchema).toEqual({
+      type: "object",
+      properties: { x: { type: "string" } },
+    });
+    expect(drops.length).toBe(1);
+    expect(drops[0].name).toBe("bad_tool");
+    expect(drops[0].reason).toMatch(/anyOf\/oneOf\/allOf/);
+  });
+
+  it("drops a tool with missing inputSchema (logged accordingly)", () => {
+    const msg = {
+      jsonrpc: "2.0",
+      id: 1,
+      result: { tools: [{ name: "no_schema" }] },
+    };
+    const drops: string[] = [];
+    const out = sanitizeToolsListMessage(msg, (n) => drops.push(n)) as typeof msg;
+    expect(out.result.tools).toEqual([]);
+    expect(drops).toEqual(["no_schema"]);
+  });
+
+  it("passes through messages that are not tools/list responses", () => {
+    const msg = { jsonrpc: "2.0", id: 1, method: "ping", params: {} };
+    expect(sanitizeToolsListMessage(msg, () => {})).toEqual(msg);
   });
 });
 

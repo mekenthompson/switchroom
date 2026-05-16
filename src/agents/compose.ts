@@ -1525,20 +1525,36 @@ function emitAgentService(
   lines.push(`      - ${homePrefix}/.switchroom/logs/${a.name}:/var/log/switchroom`);
   lines.push(`      - ${homePrefix}/.switchroom/agents/${a.name}:${homePrefix}/.switchroom/agents/${a.name}`);
   lines.push(`      - ${homePrefix}/.claude/projects/${a.name}:${homePrefix}/.claude/projects/${a.name}`);
-  // Shared read-only bind mounts for skills + credentials (#907). Cron
-  // yaml prompts widely reference `~/.switchroom/skills/...` (calendar,
-  // mail, garmin, home-assistant) and `~/.switchroom/credentials/...`.
-  // Mounted at the operator's host path so absolute paths in scaffolded
-  // start.sh and yaml prompts Just Work; tilde resolution is fixed by
-  // start.sh.hbs's $HOME/.switchroom symlink (see #910). Conditional on
-  // existsSync because docker compose `up` hard-fails when a `:ro`
-  // source is missing — many operators keep all secrets in vault and
-  // never create a `credentials/` dir at all.
+  // Shared read-only `skills/` bind mount (#907). Cron yaml prompts
+  // reference `~/.switchroom/skills/...` (calendar, mail, garmin,
+  // home-assistant). Mounted at the operator's host path so absolute
+  // paths in scaffolded start.sh and yaml prompts Just Work; tilde
+  // resolution is fixed by start.sh.hbs's $HOME/.switchroom symlink
+  // (#910). existsSync-guarded: docker compose `up` hard-fails on a
+  // missing `:ro` source. skills/ is operator-authored, non-secret
+  // content (WS6 audit: LOW info-disclosure only) so it stays
+  // fleet-wide.
   if (existsSync(`${hostHomeForChecks}/.switchroom/skills`)) {
     lines.push(`      - ${homePrefix}/.switchroom/skills:${homePrefix}/.switchroom/skills:ro`);
   }
-  if (existsSync(`${hostHomeForChecks}/.switchroom/credentials`)) {
-    lines.push(`      - ${homePrefix}/.switchroom/credentials:${homePrefix}/.switchroom/credentials:ro`);
+  // PER-AGENT credentials mount (sec WS6-F2, #1390). Previously the
+  // ENTIRE `~/.switchroom/credentials/` dir was bind-mounted `:ro`
+  // into EVERY agent — so a prompt-injected agent could read every
+  // credential the operator placed there for any agent/purpose
+  // (cross-agent credential exfil reachable from untrusted input).
+  // Now scoped to `~/.switchroom/credentials/<name>/`, mirroring the
+  // per-agent `audit/<name>` pattern below (and its "never mount the
+  // parent" rule). Mounted at BOTH the canonical flat in-container
+  // path AND the host-absolute path so existing yaml prompts that
+  // reference `~/.switchroom/credentials/<file>` keep resolving — the
+  // agent now sees only ITS OWN credentials there. Migration of any
+  // pre-existing flat `~/.switchroom/credentials/*` files into per-
+  // agent subdirs is surfaced as a loud `doctor` warning (see
+  // checkFlatCredentialsMigration) — never a silent break.
+  if (existsSync(`${hostHomeForChecks}/.switchroom/credentials/${a.name}`)) {
+    lines.push(
+      `      - ${homePrefix}/.switchroom/credentials/${a.name}:${homePrefix}/.switchroom/credentials:ro`,
+    );
   }
   // Ensure the host-side per-agent audit dir exists before docker
   // compose tries to bind-mount it (docker auto-creates as root, which

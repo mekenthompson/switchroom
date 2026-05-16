@@ -27,6 +27,7 @@ import { probeHindsight } from "../memory/hindsight.js";
 import { isDockerMode, runDockerChecks } from "./doctor-docker.js";
 import { runAuthBrokerChecks } from "./doctor-auth-broker.js";
 import { runDriveChecks } from "./doctor-drive.js";
+import { runCredentialsMigrationChecks } from "./doctor-credentials-migration.js";
 
 /**
  * Result of a single doctor check.
@@ -2225,6 +2226,7 @@ export function registerDoctorCommand(program: Command): void {
           { title: "Memory (Hindsight)", results: await checkHindsight(config) },
           { title: "Telegram", results: await checkTelegram(config) },
           { title: "Agents", results: checkAgents(config, configPath) },
+          { title: "Credentials", results: runCredentialsMigrationChecks(config) },
           { title: "Docker (Phase 1a)", results: runDockerSection(config) },
           { title: "Auth Broker", results: runAuthBrokerChecks(config) },
           { title: "Google Drive", results: runDriveChecks(config) },

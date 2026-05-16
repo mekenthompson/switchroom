@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 // Mock lifecycle module
 vi.mock("../src/agents/lifecycle.js", () => ({
@@ -27,18 +27,59 @@ vi.mock("node:child_process", () => ({
   spawn: vi.fn(),
 }));
 
+// Auth-broker client — used by the accounts handlers and the new
+// system-health handler. vi.mock is hoisted above all top-level decls,
+// so the shared state + error classes must live inside vi.hoisted().
+const brokerHoist = vi.hoisted(() => {
+  class FakeUnreachable extends Error {}
+  class FakeBrokerError extends Error {
+    code: string;
+    constructor(code: string, msg: string) {
+      super(msg);
+      this.code = code;
+    }
+  }
+  return {
+    FakeUnreachable,
+    FakeBrokerError,
+    impl: { run: null as null | ((client: unknown) => Promise<unknown>) },
+  };
+});
+const brokerImpl = brokerHoist.impl;
+vi.mock("../src/auth/broker/client.js", () => ({
+  AuthBrokerUnreachableError: brokerHoist.FakeUnreachable,
+  AuthBrokerError: brokerHoist.FakeBrokerError,
+  withAuthBrokerClient: vi.fn(async (fn: (c: unknown) => Promise<unknown>) => {
+    if (!brokerHoist.impl.run) {
+      throw new brokerHoist.FakeUnreachable("broker down");
+    }
+    return brokerHoist.impl.run(fn);
+  }),
+}));
+
+// Hindsight container probes.
+vi.mock("../src/setup/hindsight.js", () => ({
+  getHindsightStatus: vi.fn(() => null),
+  isHindsightRunning: vi.fn(() => false),
+}));
+
 import {
   handleGetAgents,
   handleStartAgent,
   handleStopAgent,
   handleRestartAgent,
   handleGetLogs,
+  handleGetSystemHealth,
   type AgentInfo,
 } from "../src/web/api.js";
 import { isOriginAllowed, isTailscaleIdentified } from "../src/web/server.js";
 import { getAllAgentStatuses, startAgent, stopAgent, restartAgent } from "../src/agents/lifecycle.js";
 import { getAllAuthStatuses } from "../src/auth/manager.js";
+import { getHindsightStatus, isHindsightRunning } from "../src/setup/hindsight.js";
 import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { SwitchroomConfig } from "../src/config/schema.js";
 
 // Bun's vitest compat layer doesn't implement vi.mocked(). Use a
@@ -383,5 +424,122 @@ describe("isTailscaleIdentified", () => {
     const req = makeTsRequest();
     const server = makeServerStub(null);
     expect(isTailscaleIdentified(req, server)).toBe(false);
+  });
+});
+
+describe("handleGetSystemHealth", () => {
+  let home: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    brokerImpl.run = null;
+    asMock(getHindsightStatus).mockReturnValue(null);
+    asMock(isHindsightRunning).mockReturnValue(false);
+    home = mkdtempSync(join(tmpdir(), "syshealth-"));
+  });
+
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("reports broker reachable with fleet snapshot", async () => {
+    brokerImpl.run = async (fn) =>
+      (fn as (c: unknown) => Promise<unknown>)({
+        listState: async () => ({
+          active: "ken@example.com",
+          fallback_order: [],
+          accounts: [{ label: "a" }, { label: "b" }],
+          agents: [{ name: "x" }],
+          consumers: [{ name: "hindsight" }],
+        }),
+      });
+
+    const h = await handleGetSystemHealth(home);
+    expect(h.broker.reachable).toBe(true);
+    expect(h.broker.active).toBe("ken@example.com");
+    expect(h.broker.accounts).toBe(2);
+    expect(h.broker.agents).toBe(1);
+    expect(h.broker.consumers).toBe(1);
+  });
+
+  it("reports broker unreachable without throwing", async () => {
+    brokerImpl.run = null; // withAuthBrokerClient throws FakeUnreachable
+    const h = await handleGetSystemHealth(home);
+    expect(h.broker.reachable).toBe(false);
+    expect(h.broker.error).toContain("broker down");
+  });
+
+  it("formats an AuthBrokerError as `code: message` (reachable but protocol error)", async () => {
+    brokerImpl.run = async () => {
+      throw new brokerHoist.FakeBrokerError("EPROTO", "bad frame");
+    };
+    const h = await handleGetSystemHealth(home);
+    expect(h.broker.reachable).toBe(false);
+    expect(h.broker.error).toBe("EPROTO: bad frame");
+  });
+
+  it("reads live hindsight env from docker inspect when running", async () => {
+    asMock(getHindsightStatus).mockReturnValue("Up 3 hours");
+    asMock(isHindsightRunning).mockReturnValue(true);
+    asMock(spawnSync).mockReturnValue({
+      status: 0,
+      stdout: JSON.stringify([
+        "PATH=/usr/bin",
+        "HINDSIGHT_API_LLM_MODEL=claude-sonnet-4-6",
+        "HINDSIGHT_API_LLM_PROVIDER=claude-code",
+        "HINDSIGHT_API_MCP_STATELESS=true",
+      ]),
+      stderr: "",
+    } as never);
+
+    const h = await handleGetSystemHealth(home);
+    expect(h.hindsight.running).toBe(true);
+    expect(h.hindsight.containerStatus).toBe("Up 3 hours");
+    expect(h.hindsight.model).toBe("claude-sonnet-4-6");
+    expect(h.hindsight.provider).toBe("claude-code");
+    expect(h.hindsight.mcpStateless).toBe(true);
+  });
+
+  it("leaves hindsight env null when the container is absent", async () => {
+    asMock(getHindsightStatus).mockReturnValue(null);
+    asMock(isHindsightRunning).mockReturnValue(false);
+    const h = await handleGetSystemHealth(home);
+    expect(h.hindsight.running).toBe(false);
+    expect(h.hindsight.model).toBeNull();
+    expect(h.hindsight.mcpStateless).toBeNull();
+    // docker inspect must NOT be probed when the container isn't running.
+    expect(spawnSync).not.toHaveBeenCalled();
+  });
+
+  it("parses the hostd audit log when present (newest entries, capped)", async () => {
+    mkdirSync(join(home, ".switchroom"), { recursive: true });
+    const line = (op: string, code: number) =>
+      JSON.stringify({
+        ts: "2026-05-16T10:00:00.000Z",
+        op,
+        caller: { kind: "agent", name: "carrie" },
+        request_id: "r",
+        result: code === 0 ? "ok" : "error",
+        exit_code: code,
+        duration_ms: 12,
+      });
+    writeFileSync(
+      join(home, ".switchroom", "host-control-audit.log"),
+      [line("restart", 0), line("update-apply", 1)].join("\n") + "\n",
+    );
+
+    const h = await handleGetSystemHealth(home);
+    expect(h.hostd.auditLogPresent).toBe(true);
+    expect(h.hostd.recent).toHaveLength(2);
+    expect(h.hostd.recent.map((e) => e.op)).toEqual([
+      "restart",
+      "update-apply",
+    ]);
+  });
+
+  it("reports hostd audit absent on a fresh install (no crash)", async () => {
+    const h = await handleGetSystemHealth(home);
+    expect(h.hostd.auditLogPresent).toBe(false);
+    expect(h.hostd.recent).toEqual([]);
   });
 });

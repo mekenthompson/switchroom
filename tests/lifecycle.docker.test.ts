@@ -15,7 +15,7 @@ vi.mock("../src/agents/tmux.js", () => ({
   captureAgentPane: vi.fn(),
 }));
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   startAgent,
   stopAgent,
@@ -29,6 +29,7 @@ import {
 import type { SwitchroomConfig } from "../src/config/schema.js";
 
 const mockedExec = execFileSync as unknown as ReturnType<typeof vi.fn>;
+const mockedSpawnSync = spawnSync as unknown as ReturnType<typeof vi.fn>;
 
 interface DockerCall {
   args: string[];
@@ -355,19 +356,28 @@ describe("lifecycle (docker mode): getAgentStatus + getAllAgentStatuses", () => 
     expect(s).toEqual({ active: "inactive", uptime: null, memory: null, pid: null });
   });
 
-  it("getAllAgentStatuses iterates every configured agent", () => {
-    mockedExec.mockImplementation((_bin: string, args: string[]) => {
-      if (
-        args[0] === "inspect" &&
-        args.includes("{{.State.Status}}|{{.State.StartedAt}}|{{.State.Pid}}")
-      ) {
-        // pull the container name (last arg) to differentiate
-        const cn = args[args.length - 1];
-        if (cn === "switchroom-a") return "running|2026-05-09T12:00:00Z|111";
-        if (cn === "switchroom-b") return "exited|2026-05-09T11:00:00Z|0";
+  it("getAllAgentStatuses batches into ONE inspect + ONE stats call", () => {
+    // New contract (perf fix): two `docker` calls total via spawnSync,
+    // not 2×N execFileSync. inspect returns one line per container with
+    // a leading-slash {{.Name}}; stats lists all running containers.
+    const calls: string[][] = [];
+    mockedSpawnSync.mockImplementation((_bin: string, args: string[]) => {
+      calls.push(args);
+      if (args[0] === "inspect") {
+        // Both container names in a SINGLE call; missing ones simply
+        // don't appear in stdout.
+        return {
+          status: 0,
+          stdout:
+            "/switchroom-a|running|2026-05-09T12:00:00Z|111\n" +
+            "/switchroom-b|exited|2026-05-09T11:00:00Z|0\n",
+          stderr: "",
+        };
       }
-      if (args[0] === "stats") return "8MiB / 4GiB";
-      return "";
+      if (args[0] === "stats") {
+        return { status: 0, stdout: "switchroom-a|8MiB / 4GiB\n", stderr: "" };
+      }
+      return { status: 1, stdout: "", stderr: "" };
     });
     const config: SwitchroomConfig = {
       switchroom: { version: 1, agents_dir: "/tmp/agents", skills_dir: "/tmp/skills" },
@@ -380,9 +390,71 @@ describe("lifecycle (docker mode): getAgentStatus + getAllAgentStatuses", () => 
       },
     } as unknown as SwitchroomConfig;
     const all = getAllAgentStatuses(config);
+
     expect(all.a.active).toBe("active");
     expect(all.a.pid).toBe(111);
+    expect(all.a.memory).toBe("8MB");
     expect(all.b.active).toBe("exited");
     expect(all.b.pid).toBeNull();
+    expect(all.b.memory).toBeNull(); // not running → no stats line
+
+    // The whole point of the fix: exactly 2 docker invocations
+    // regardless of agent count, and the inspect call carries BOTH
+    // container names (batched, not per-agent).
+    const inspectCalls = calls.filter((a) => a[0] === "inspect");
+    const statsCalls = calls.filter((a) => a[0] === "stats");
+    expect(inspectCalls).toHaveLength(1);
+    expect(statsCalls).toHaveLength(1);
+    expect(inspectCalls[0]).toContain("switchroom-a");
+    expect(inspectCalls[0]).toContain("switchroom-b");
+  });
+
+  it("getAllAgentStatuses tolerates a total stats failure (memory stays null)", () => {
+    mockedSpawnSync.mockImplementation((_bin: string, args: string[]) => {
+      if (args[0] === "inspect") {
+        return {
+          status: 0,
+          stdout: "/switchroom-a|running|2026-05-09T12:00:00Z|111\n",
+          stderr: "",
+        };
+      }
+      // stats blows up entirely.
+      return { status: 1, stdout: "", stderr: "docker stats failed" };
+    });
+    const config = {
+      switchroom: { version: 1, agents_dir: "/tmp/a", skills_dir: "/tmp/s" },
+      telegram: { bot_token: "123:abc" },
+      defaults: {},
+      profiles: {},
+      agents: { a: { profile: "default" } },
+    } as unknown as SwitchroomConfig;
+    const all = getAllAgentStatuses(config);
+    expect(all.a.active).toBe("active");
+    expect(all.a.pid).toBe(111);
+    expect(all.a.memory).toBeNull();
+  });
+
+  it("getAllAgentStatuses returns inactive shells for containers absent from inspect output", () => {
+    mockedSpawnSync.mockImplementation((_bin: string, args: string[]) => {
+      if (args[0] === "inspect") {
+        // Only 'a' exists; 'b' missing → omitted from stdout, non-zero exit.
+        return {
+          status: 1,
+          stdout: "/switchroom-a|running|2026-05-09T12:00:00Z|111\n",
+          stderr: "Error: No such object: switchroom-b",
+        };
+      }
+      return { status: 0, stdout: "", stderr: "" };
+    });
+    const config = {
+      switchroom: { version: 1, agents_dir: "/tmp/a", skills_dir: "/tmp/s" },
+      telegram: { bot_token: "123:abc" },
+      defaults: {},
+      profiles: {},
+      agents: { a: { profile: "default" }, b: { profile: "default" } },
+    } as unknown as SwitchroomConfig;
+    const all = getAllAgentStatuses(config);
+    expect(all.a.active).toBe("active");
+    expect(all.b).toEqual({ active: "inactive", uptime: null, memory: null, pid: null });
   });
 });

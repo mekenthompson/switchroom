@@ -4,17 +4,33 @@ Switchroom runs its agent fleet as Docker containers brought up by a
 generated `docker-compose.yml`. This is the only supported production
 runtime.
 
-Three commands cover the full lifecycle:
+The canonical lifecycle command is **`switchroom update`** — it pulls
+images, runs `apply`, recreates changed containers, and runs a focused
+`doctor` sweep, in one operator step:
+
+```sh
+switchroom update              # pull + apply + recreate + doctor
+switchroom update --check      # dry-run: print the plan, exit 0
+```
+
+`switchroom apply` (scaffold every agent + write the compose file from
+`switchroom.yaml`) is also available standalone for a scaffold-only
+change.
+
+Raw `docker compose` is a **debugging fallback only**:
 
 ```sh
 switchroom apply
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml pull
-docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d --remove-orphans
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 ```
 
-`switchroom apply` scaffolds every agent and writes the compose file
-derived from your `switchroom.yaml`. The CLI deliberately does not call
-`docker` for you — operators control the bring-up.
+> ⚠️ Do **not** routinely use raw `docker compose up -d
+> --remove-orphans` for fleet bring-up. It bypasses the operator
+> restart-marker, so the agents' boot cards render as a *crash* (and
+> notify the fleet) instead of a clean restart. Use `switchroom
+> update` (or `switchroom agent restart`) for normal operation; reach
+> for raw compose only when diagnosing the compose layer itself.
 
 See [`install.md`](./install.md) for the full operator install flow
 (curl one-liner, prerequisites, GHCR auth, dev-time `--build-local`

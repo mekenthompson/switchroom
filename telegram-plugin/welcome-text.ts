@@ -253,14 +253,7 @@ export const switchroomHelpCommandNames = [
   "new", "reset", "approve", "deny", "pending", "interrupt",
   // Agents
   "agents", "agentstart", "stop", "restart", "logs", "memory",
-  // Auth & config. The auth surface consolidated onto the `/auth`
-  // dashboard:
-  //   - /authfallback removed in v0.6.12 (Switch primary picker
-  //     handles the operator case; auto-fallback poller handles the
-  //     transparent on-quota-wall case)
-  //   - /reauth removed in v0.6.13 (dashboard's `🔄 Reauth` button
-  //     fires the same flow; paste-back of the OAuth code is caught
-  //     by the generic message intercept on `pendingReauthFlows`)
+  // Auth & config — consolidated onto the `/auth` dashboard.
   "auth",
   "topics", "update", "version",
   "permissions", "grant", "dangerous", "vault", "doctor",

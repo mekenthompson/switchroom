@@ -1010,7 +1010,6 @@ const profileFields = {
   session_continuity: SessionContinuitySchema,
   channels: ChannelsSchema,
   dangerous_mode: z.boolean().optional(),
-  skip_permission_prompt: z.boolean().optional(),
   settings_raw: z.record(z.string(), z.unknown()).optional(),
   claude_md_raw: z.string().optional(),
   cli_args: z.array(z.string()).optional(),
@@ -1384,15 +1383,6 @@ export const AgentSchema = z.object({
     .boolean()
     .optional()
     .describe("If true, include --dangerously-skip-permissions in start.sh"),
-  skip_permission_prompt: z
-    .boolean()
-    .optional()
-    .describe(
-      "DEPRECATED no-op (accepted for backwards compatibility). Claude Code " +
-      "ignores skipDangerousModePermissionPrompt at project scope; autoaccept " +
-      "(src/agents/autoaccept.ts) handles the bypass-mode prompt instead. " +
-      "Safe to remove from switchroom.yaml.",
-    ),
   admin: z
     .boolean()
     .optional()

@@ -635,7 +635,7 @@ export function registerVaultCommand(program: Command): void {
   vault
     .command("get <key>")
     .description("Get a secret from the vault (tries broker first)")
-    .option("--no-broker", "Bypass the broker and read directly from the vault file. Required for interactive (non-cron) access — the broker only serves switchroom cron units.")
+    .option("--no-broker", "Bypass the broker and read directly from the vault store. Required for interactive (non-scheduled) access — the broker only serves an agent's scheduled runs (the in-agent agent-scheduler sidecar) over that agent's per-agent socket.")
     .option(
       "--expect <format>",
       `Warn if the stored format hint does not match. Allowed values: ${VAULT_FORMAT_HINTS.join(", ")}. Exits with code 4 on mismatch (warn-and-proceed is the default; use --strict-format to fail-closed).`

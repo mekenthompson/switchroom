@@ -10,8 +10,9 @@ fleet up via `docker compose`. No `docker build` on the operator's host.
 - Linux (Ubuntu 24.04 LTS canonical; other distros work).
 - Docker Engine 24+ with the compose v2 plugin (`docker compose ...`).
 - The `claude` CLI on the host (`npm i -g @anthropic-ai/claude-code`,
-  Node 20.11+) for OAuth login. The agent runtime itself ships in
-  containers — the host only needs `claude` for `switchroom auth login`.
+  Node 20.11+) for OAuth. The agent runtime itself ships in
+  containers — the host only needs `claude` for the
+  `switchroom auth add --via-claude` flow.
 
 ## Install — one-liner (recommended)
 
@@ -30,10 +31,16 @@ Then bring up your fleet:
 # 1. Interactive first-time wiring (Telegram bot token, vault, first agent).
 switchroom setup
 
-# 2. Scaffold agents + write ~/.switchroom/compose/docker-compose.yml.
+# 2. Authenticate with your Claude subscription (one OAuth flow,
+#    fleet-wide). The auth-broker becomes the sole writer of every
+#    agent's credentials.
+switchroom auth add me --from-oauth
+switchroom auth use me
+
+# 3. Scaffold agents + write ~/.switchroom/compose/docker-compose.yml.
 switchroom apply
 
-# 3. Bring the fleet up.
+# 4. Bring the fleet up.
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml pull
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 ```

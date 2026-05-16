@@ -1725,11 +1725,13 @@ export const QuotaConfigSchema = z.object({
 });
 
 /**
- * Host-control daemon (`switchroom-hostd`) — opt-in Phase 1 surface
- * defined in `docs/rfcs/host-control-daemon.md`. When enabled, the
- * compose generator emits per-agent UDS bind mounts for admin agents
- * so the daemon (a systemd user unit on the host) can dispatch a
- * closed set of operator verbs reached from inside the containers.
+ * Host-control daemon (`switchroom-hostd`) — default-on since RFC C
+ * Phase 2 (#1338); see `docs/rfcs/host-control-daemon.md`. The daemon
+ * is the `switchroom-hostd` Docker container, running in its own
+ * compose project (separate from the agent fleet's project). When
+ * enabled (the default), the compose generator emits per-agent UDS
+ * bind mounts for admin agents so the daemon can dispatch a closed
+ * set of operator verbs reached from inside the containers.
  */
 export const HostControlConfigSchema = z.object({
   enabled: z

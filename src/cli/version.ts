@@ -121,9 +121,12 @@ export function printHealthSummary(config: ReturnType<typeof getConfig>): void {
       const isUp = s.active === "active" || s.active === "running";
       const uptime = formatUptime(s.uptime);
       if (isUp) {
-        // Read the SHA the agent was started under from its systemd unit's
-        // Environment= block (baked in at install time via SWITCHROOM_AGENT_START_SHA).
-        // Falls back to "?" if the unit pre-dates #66 or systemctl is unavailable.
+        // Read the SHA the agent was started under via `docker inspect`
+        // (SWITCHROOM_AGENT_START_SHA container env, then the
+        // `switchroom.commit` container label, then the
+        // `org.opencontainers.image.revision` image label — see
+        // getAgentStartSha in agents/lifecycle.ts). Falls back to "?"
+        // if none are present or the container isn't running.
         const agentSha = getAgentStartSha(name) ?? "?";
         lines.push(chalk.green(`✓ ${name} → up ${uptime}, on ${agentSha}`));
       } else {

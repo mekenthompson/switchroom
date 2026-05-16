@@ -15,7 +15,9 @@ Switchroom is a multi-agent orchestration tool for Claude Code. This document pr
 Switchroom is scaffolding and lifecycle management for multiple Claude Code sessions. It:
 
 1. Creates directory structures and configuration files for each agent
-2. Generates systemd units to keep agents running
+2. Generates a Docker Compose project to keep agents running (one
+   container per agent, plus shared singleton containers; the container
+   restart policy keeps sessions alive — no systemd units are generated)
 3. Assigns one Telegram bot per agent, each using the official Telegram plugin
 4. Provides a CLI for managing agent lifecycle (start, stop, restart, logs)
 5. Manages an encrypted vault for secrets
@@ -43,7 +45,7 @@ Switchroom does **not**:
 
 **Source:** [Legal and compliance - Claude Code Docs](https://code.claude.com/docs/en/legal-and-compliance) (OAuth prohibition); [Anthropic clarifies ban on third-party tool access to Claude — The Register, 2026-02-20](https://www.theregister.com/2026/02/20/anthropic_clarifies_ban_third_party_claude_access/) (Agent SDK and third-party tools clarification); [Anthropic tests removing Claude Code from Pro — The Register, 2026-04-22](https://www.theregister.com/2026/04/22/anthropic_removes_claude_code_pro/) (pricing-page packaging change)
 
-**Switchroom's compliance:** Switchroom leverages Claude Code natively — no Agent SDK, no direct API usage, no custom runtime. Each agent is an unmodified `claude` CLI process started the same way a user would start one, authenticated via Claude Code's own OAuth flow completed in the terminal. Switchroom reads the OAuth token from the agent's local `.credentials.json` solely to manage multi-account slot rotation on the same machine (writing a companion slot file, `accounts/<slot>/.oauth-token`). The token is never transmitted off-device, never forwarded to a third party, and never used by switchroom to make inference calls on the user's behalf. All inference happens between the user's Claude Code session and Anthropic's servers directly, via Claude Code's built-in client.
+**Switchroom's compliance:** Switchroom leverages Claude Code natively — no Agent SDK, no direct API usage, no custom runtime. Each agent is an unmodified `claude` CLI process started the same way a user would start one, authenticated via Claude Code's own OAuth flow completed in the terminal. A local `switchroom-auth-broker` container holds the per-account OAuth credentials on the same machine and writes a per-agent `.credentials.json` mirror into each agent's host-mounted Claude config directory — the same on-disk file Claude Code reads natively — solely to manage multi-account use and refresh locally. The token is never transmitted off-device, never forwarded to a third party, and never used by switchroom to make inference calls on the user's behalf. All inference happens between the user's Claude Code session and Anthropic's servers directly, via Claude Code's built-in client.
 
 Switchroom's auth flow Phase 1 (`src/auth/pane-ready-probe.ts`) automates only keystroke entry into the terminal during the OAuth flow. The authentication relationship is directly between the user's Claude Code session and Anthropic.
 
@@ -76,13 +78,13 @@ Operators who require strict use of Anthropic-published code paths should set `c
 
 **Switchroom's compliance:** The switchroom-telegram plugin is a standard MCP server using the official `@modelcontextprotocol/sdk` package (confirmed in `telegram-plugin/package.json` v1.0.0) and follows the documented MCP protocol. (The legacy `switchroom-mcp/` management server was removed under #235; its 4 tools were dormant and the functionality is now covered natively by Hindsight's MCP and Claude Code's built-in `Read`/`Grep`.)
 
-### 4. systemd/tmux Process Management Is Standard Operations
+### 4. Docker/tmux Process Management Is Standard Operations
 
 **Anthropic's documentation:** "For an always-on setup you run Claude in a background process or persistent terminal." The Telegram channel documentation specifically notes using persistent terminals.
 
 **Source:** [Channels - Claude Code Docs](https://code.claude.com/docs/en/channels)
 
-**Switchroom's compliance:** Switchroom generates systemd user units that keep Claude Code sessions running. This is standard Linux process management — the same as running Claude Code in tmux, screen, or any other process supervisor. Anthropic explicitly acknowledges this use case in their channels documentation.
+**Switchroom's compliance:** Switchroom runs each agent as a Docker container whose restart policy keeps the Claude Code session running, with `claude` itself executing inside a persistent `tmux` session in that container. This is standard process management — the same as running Claude Code under tmux, screen, or any other process supervisor. Anthropic explicitly acknowledges this use case in their channels documentation.
 
 ### 5. No Modification of Claude Code
 
@@ -123,7 +125,7 @@ Users must explicitly grant access via sender allowlists in `access.json` and th
 4. It routes outbound Claude Code responses back through Telegram
 5. It never handles, stores, or forwards OAuth tokens or subscription credentials
 
-The gateway stays alive across Claude Code session restarts (via systemd), allowing persistent Telegram connectivity without restarting the OAuth flow. This is explicitly permissible per Anthropic's documentation on persistent terminals.
+The gateway stays alive across Claude Code session restarts (it runs as a supervised sidecar in the agent's container, alongside the tmux-hosted `claude` session), allowing persistent Telegram connectivity without restarting the OAuth flow. This is explicitly permissible per Anthropic's documentation on persistent terminals.
 
 ### Auth Flow Phase 1 (OAuth Keystroke Automation)
 
@@ -131,8 +133,8 @@ The gateway stays alive across Claude Code session restarts (via systemd), allow
 
 **Compliance take:** This is **compliant** because:
 1. It only automates manual keystroke entry (pasting the code shown in the browser)
-2. The token is written directly by `claude setup-token` into `.credentials.json` in the agent's local Claude directory
-3. Switchroom reads the token locally from `.credentials.json` solely to write the companion slot file (`accounts/<slot>/.oauth-token`) for multi-account rotation — it does not route the token through any external infrastructure
+2. The token is written directly by the native Claude Code OAuth flow into `.credentials.json` in the agent's local Claude directory
+3. The local `switchroom-auth-broker` container holds the per-account OAuth credentials and writes a per-agent `.credentials.json` mirror into the agent's host-mounted Claude config directory for multi-account use — it does not route the token through any external infrastructure
 4. The token never leaves the machine
 
 ---
@@ -140,8 +142,13 @@ The gateway stays alive across Claude Code session restarts (via systemd), allow
 ## Architecture Evidence
 
 ### Each agent is a real Claude Code session:
+
+Each agent is one Docker container whose `CMD` runs `{agentDir}/start.sh`
+under `tini`; `start.sh` enters a persistent `tmux` session and `exec`s
+the unmodified `claude` CLI. Container stdout/stderr is captured by the
+Docker logging driver (`docker logs`):
 ```
-ExecStart=/usr/bin/script -qfc "/bin/bash -l {agentDir}/start.sh" {logFile}
+CMD ["/state/agent/start.sh"]   # under tini (PID 1); start.sh → tmux → bash → claude
 ```
 
 ### start.sh runs the unmodified claude CLI with one of the two channel modes:

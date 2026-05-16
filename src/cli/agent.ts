@@ -1624,7 +1624,7 @@ export function registerAgentCommand(program: Command): void {
                 const restartRequired = [...semantics.restartRequired, ...unitChanges];
 
                 if (restartRequired.length > 0) {
-                  console.log(chalk.yellow("\n  Changed (restart required — soul/MCP/settings/launch/systemd):"));
+                  console.log(chalk.yellow("\n  Changed (restart required — soul/MCP/settings/start.sh):"));
                   for (const f of restartRequired) {
                     console.log(chalk.yellow(`    - ${f}`));
                   }

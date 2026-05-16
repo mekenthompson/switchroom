@@ -1,9 +1,10 @@
 # Vault — Operator Guide
 
-Switchroom's vault is an AES-256-GCM encrypted file (`vault.enc`) that stores
-secrets used by agents and scheduled cron tasks.  This guide covers the
-architecture, how to declare and scope secrets, Telegram commands for runtime
-management, the audit log, and the threat model.
+Switchroom's vault is a directory (`~/.switchroom/vault/`) holding an
+AES-256-GCM encrypted store (`vault.enc`) that keeps secrets used by
+agents and scheduled tasks.  This guide covers the architecture, how to
+declare and scope secrets, Telegram commands for runtime management, the
+audit log, and the threat model.
 
 > ## v0.7.12 layout change
 >
@@ -35,39 +36,49 @@ management, the audit log, and the threat model.
 ## Architecture
 
 ```
-vault.enc (AES-256-GCM, passphrase-derived)
+~/.switchroom/vault/vault.enc (AES-256-GCM, passphrase-derived)
     │
-    └── vault broker daemon  (Unix socket: ~/.switchroom/vault-broker.sock)
-            │  mode 0600 — only the owner UID may connect
-            │  identity via peercred + cgroup — not spoofable from userspace
+    └── switchroom-vault-broker  (Docker compose singleton)
+            │  per-agent Unix socket: /run/switchroom/broker/<agent>/sock
+            │  mode 0600, chowned to the agent UID at bind time
+            │  identity = the bind path (path-as-identity), not a wire payload
             │
-            ├── switchroom-<agent>-cron-0.service   (allowed, if key in secrets[])
-            ├── switchroom-<agent>-cron-1.service   (allowed, if key in secrets[])
-            └── (all other callers)                 → DENIED
+            ├── agent-<name>  (scheduled run)  (allowed, if key in secrets[])
+            └── (all other callers)            → DENIED
 ```
 
-The broker is a long-running user-level systemd unit
-(`~/.config/systemd/user/switchroom-vault-broker.service`).  It holds the
-decrypted vault in memory after a one-time passphrase unlock.  When a cron
-unit makes a `get` request the broker:
+The broker is a long-running Docker container — a `docker compose`
+singleton in the `switchroom` project, not a systemd user unit.  It
+holds the decrypted vault in memory after a one-time passphrase unlock
+(or machine-bound auto-unlock).  Compose binds one socket per agent at
+`/run/switchroom/broker/<agent>/sock`; the broker derives the calling
+agent's identity from that **bind path** via `socketPathToAgent`
+(`src/vault/broker/peercred.ts`) — never from systemd cgroups, and
+never from anything the caller sends on the wire.  When a scheduled
+run makes a `get` request the broker:
 
-1. Identifies the caller via Linux cgroup membership (cgroups are written by
-   systemd as root — processes cannot move themselves between cgroups).
+1. Parses the agent name from the socket the connection arrived on
+   (path-as-identity; the path is broker-controlled at bind time).
 2. Checks the per-schedule `secrets[]` allowlist.
 3. Checks the per-key scope ACL (if set via `--allow` / `--deny`).
 4. Returns the value or denies with a logged reason.
 
-Interactive calls (`switchroom vault get`) go directly to the vault file with
-the user's passphrase — the broker is for cron-only access.
+Cron is the in-agent `agent-scheduler` sidecar (since Phase 4 — see
+[scheduling.md](scheduling.md)); there are no
+`switchroom-<agent>-cron-N.service` systemd units.  Interactive calls
+(`switchroom vault get`) go directly to the vault store with the user's
+passphrase — the broker is for scheduled (non-interactive) access.
 
 ---
 
 ## Commands
 
-### Initialise and populate the vault
+### Populate the vault
+
+The vault store is created on first `set` (it prompts for a passphrase
+when no store exists yet — there is no separate `vault init` verb).
 
 ```sh
-switchroom vault init                          # create vault.enc (prompts for passphrase)
 switchroom vault set <key>                     # set a secret interactively
 switchroom vault set <key> --file /path/to     # read value from file (PEM, JSON, etc.)
 switchroom vault get <key>                     # decrypt and print (direct, not via broker)
@@ -230,9 +241,11 @@ switchroom vault audit --who my-agent-cron-0
   access to another cron's keys.  Each cron task only sees keys explicitly
   listed for it.
 - **Hijacked agent on this UID**: a compromised agent Claude session cannot
-  read vault keys via the broker — the broker only serves systemd cron units,
-  not interactive Claude processes.  The cgroup identity is set by systemd as
-  root and cannot be spoofed from userspace.
+  read vault keys via the broker — the broker only answers a scheduled run's
+  `secrets[]`-listed keys, not arbitrary interactive Claude requests.  The
+  caller's agent identity is the bind path of the per-agent socket, which
+  the broker controls at bind time (chowned to the agent UID, mode 0600) —
+  it cannot be forged by a wire payload.
 - **Per-key scoping**: `--allow` / `--deny` narrows access further, so even a
   legitimate cron unit cannot read keys it is not explicitly permitted to read.
 

@@ -123,7 +123,8 @@ it during `switchroom setup` for the `allowFrom` ACL.
 For each bot, open it in Telegram (search by username, or use the
 direct link BotFather sent: `t.me/<bot_username>`) and tap **Start**.
 
-The agent bot won't reply until setup, `switchroom auth login`, and
+The agent bot won't reply until setup, authentication
+(`switchroom auth add me --from-oauth && switchroom auth use me`), and
 `docker compose ... up -d` are done.
 
 ## Optional: profile picture + description

@@ -47,7 +47,7 @@ Key flags:
 Environment variables set before exec:
 
 - `CLAUDE_CONFIG_DIR` — pinned to `/agent/.claude/` (the agent's per-container config dir, host-mounted from `~/.switchroom/agents/<agent>/.claude/`). Fully isolates each agent's auth, settings, transcripts, and MCP config from every other agent and from the user's personal Claude setup.
-- `CLAUDE_CODE_OAUTH_TOKEN` — populated from the active slot or shared Anthropic account.
+- `CLAUDE_CODE_OAUTH_TOKEN` — **defensively unset** by `start.sh`. Switchroom does not inject an OAuth token via env; `claude` reads `<CLAUDE_CONFIG_DIR>/.credentials.json`, which the `switchroom-auth-broker` container is the sole writer of.
 
 This is an **interactive REPL**, not `claude -p`. The session is persistent and long-lived; continuity across container restarts is provided by the switchroom layer (handoff briefing + Hindsight recall + Telegram history buffer), not by `--continue` (which is off by default).
 

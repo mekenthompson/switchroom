@@ -1,46 +1,58 @@
 # Vault Broker — ACL model and access guide
 
-> **v0.7 note.** Under v0.7+ the broker runs as the `switchroom-broker`
-> container and authenticates connecting clients by the socket path the
-> connection arrived on (`/run/switchroom/broker/<agent>/sock`,
-> broker-controlled per-agent socket), not by parsing systemd cgroups.
-> The terms "cron unit" / "systemd unit" / cgroup parsing below describe
-> the v0.6 host-native broker; the ACL contract — "only declared cron
-> secrets, only the cron caller for that agent" — is identical, and the
-> per-agent `secrets:` allowlist still drives what each cron can read.
+The vault broker runs as the `switchroom-vault-broker` container (a
+`docker compose` singleton in the `switchroom` project) and
+authenticates connecting clients by the socket path the connection
+arrived on (`/run/switchroom/broker/<agent>/sock`, a broker-controlled
+per-agent socket), not by parsing systemd cgroups. Cron is the in-agent
+`agent-scheduler` sidecar (since Phase 4 — see
+[scheduling.md](scheduling.md)); there are no
+`switchroom-<agent>-cron-N.service` systemd units. The ACL contract —
+"only declared `secrets:`, only the scheduled run for that agent" — and
+the per-agent `secrets:` allowlist drive what each scheduled task can
+read.
 
 ## What is the vault broker?
 
-The vault broker is a per-host daemon that holds the decrypted vault in
-memory and serves secrets to authorised **switchroom scheduler containers**
-over a Unix socket. It avoids re-prompting for the vault passphrase on
-every scheduled run.
+The vault broker is a long-running container that holds the decrypted
+vault in memory and serves secrets to authorised **switchroom agents'
+scheduled runs** over a per-agent Unix socket. It avoids re-prompting
+for the vault passphrase on every scheduled run.
 
-The broker is **not** a general-purpose secret server.  It only serves callers
-it can positively identify as a switchroom cron unit — it does not serve
-interactive shells, Claude Code sessions, or arbitrary scripts.
+The broker is **not** a general-purpose secret server.  It only serves a
+scheduled run's declared `secrets[]` keys for the agent that owns the
+socket — it does not serve interactive shells, Claude Code sessions, or
+arbitrary scripts.
 
 ## Who can read from the broker?
 
 | Caller context | Broker access |
 |---|---|
-| systemd unit `switchroom-<agent>-cron-<N>.service` | Allowed if the requested key is in `schedule[N].secrets` |
+| Scheduled run for `agent-<name>` (via that agent's bound socket) | Allowed if the requested key is in `schedule[N].secrets` |
 | Interactive shell (`switchroom vault get`) | **Denied** — use `--no-broker` |
 | Claude Code / agent session | **Denied** — use `--no-broker` |
 | Any other caller | **Denied** |
 
-Identity is established via Linux cgroup membership (peercred + `/proc`).
-When systemd starts a cron unit it places the process in a dedicated cgroup
-that it writes as root — processes cannot move themselves between cgroups, so
-the unit name is unspoofable.
+Identity is **path-as-identity**: compose binds one socket per agent at
+`/run/switchroom/broker/<agent>/sock`, chowned to that agent's UID at
+mode 0600 at bind time. The broker derives the calling agent's name from
+that bind path via `socketPathToAgent` (`src/vault/broker/peercred.ts`).
+Because the path is broker-controlled — never sent by the caller — it
+cannot be forged from userspace.
 
 ## Why are agents denied?
 
 The broker's ACL is misconfiguration protection, not a security boundary
 (see `docs/architecture.md`).  Allowing arbitrary agent sessions to read the
-vault would mean any skill or sub-agent could exfiltrate any secret.  Cron
-units receive only the keys explicitly listed in their `schedule[N].secrets`
-allowlist.
+vault would mean any skill or sub-agent could exfiltrate any secret.  A
+scheduled run receives only the keys explicitly listed in its
+`schedule[N].secrets` allowlist.
+
+> The CLI's denial string and some legacy ACL internals still say
+> "switchroom cron unit" — that vocabulary predates the Phase 4
+> cron-fold-in. It now means "a scheduled run dispatched by the
+> in-agent `agent-scheduler` sidecar", identified by the per-agent
+> socket bind path.
 
 Agent sessions are expected to receive secrets as environment variables
 injected by the cron job itself, not by querying the broker at runtime.

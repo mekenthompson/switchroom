@@ -1,7 +1,21 @@
 /**
  * Multi-account Claude OAuth slot management.
  *
- * Storage layout (per agent):
+ * ┌─ LEGACY (post-RFC-H) ───────────────────────────────────────────────┐
+ * │ This module is legacy per-agent slot scaffolding. Since the          │
+ * │ auth-broker migration (RFC H), the `switchroom-auth-broker`          │
+ * │ container is the SOLE writer of every agent's                        │
+ * │ <agentDir>/.claude/.credentials.json, and `claude` reads that        │
+ * │ dotfile directly. There is no per-agent OAuth slot tree in the       │
+ * │ current runtime, no `CLAUDE_CODE_OAUTH_TOKEN` injection (start.sh    │
+ * │ defensively unsets it), and the legacy `.oauth-token` mirror is no   │
+ * │ longer load-bearing for booting an agent. The slot/active/mirror     │
+ * │ machinery below is retained for back-compat and migration paths      │
+ * │ only — see docs/auth.md for the authoritative current model. Do not  │
+ * │ build new behavior on this layout.                                   │
+ * └─────────────────────────────────────────────────────────────────────┘
+ *
+ * Historical storage layout (per agent), as described by this module:
  *   <agentDir>/.claude/
  *     accounts/
  *       <slot>/
@@ -12,8 +26,10 @@
  *     .oauth-token              — LEGACY path, kept in sync with the active slot
  *     .oauth-token.meta.json    — LEGACY path, kept in sync with the active slot
  *
- * The legacy `.oauth-token` / meta files are always mirrored from the active
- * slot so that start.sh.hbs and Claude Code itself see no layout change.
+ * The legacy `.oauth-token` / meta files were historically mirrored from
+ * the active slot so that start.sh.hbs and Claude Code saw no layout
+ * change; under the broker model this mirror is no longer the path
+ * Claude Code reads.
  *
  * Slot names are validated: [A-Za-z0-9._-]+, max 64 chars, no `..`, no `/`.
  */
@@ -257,11 +273,17 @@ export function setSlotLabel(
   writeSlotMeta(agentDir, slot, meta);
 }
 
-/* ── Legacy mirror ───────────────────────────────────────────────────── */
+/* ── Legacy mirror (post-RFC-H: no longer load-bearing) ──────────────── */
 
 /**
- * Sync the legacy top-level .oauth-token (+ meta) path from the active slot
- * so that start.sh / Claude Code see no layout change.
+ * Sync the legacy top-level .oauth-token (+ meta) path from the active slot.
+ *
+ * LEGACY: this mirror was load-bearing pre-RFC-H, when start.sh / Claude
+ * Code read the top-level `.oauth-token`. Under the auth-broker model the
+ * broker owns `.credentials.json` (which is what `claude` reads) and
+ * start.sh defensively unsets `CLAUDE_CODE_OAUTH_TOKEN`, so this mirror
+ * no longer gates an agent's authentication. Retained for back-compat /
+ * migration only.
  *
  * Atomic write: read source → write to a sibling tempfile in the same
  * directory → renameSync onto the destination. Pre-fix this used

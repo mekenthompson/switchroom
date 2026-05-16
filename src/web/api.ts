@@ -20,6 +20,11 @@ import {
   readAndFilter,
   type AuditEntry,
 } from "../host-control/audit-reader.js";
+import {
+  collectScheduleEntries,
+  type SchedulerEntry,
+  type DispatchResult,
+} from "../scheduler/dispatch.js";
 import { captureEvent, captureException } from "../analytics/posthog.js";
 import { resolveAgentsDir } from "../config/loader.js";
 import { resolveAgentConfig } from "../config/merge.js";
@@ -447,4 +452,109 @@ export async function handleGetSystemHealth(
   }
 
   return { broker, hindsight, hostd };
+}
+
+/**
+ * Google Workspace (RFC G) accounts. Live inventory (expiry / scope /
+ * clientId) comes from the broker; the per-agent ACL is config-side
+ * (`google_accounts[email].enabled_for`). Broker-unreachable degrades
+ * to "config only" — the ACL still renders, live fields are null.
+ */
+export interface GoogleAccountDashboardInfo {
+  account: string;
+  expiresAt: number | null;
+  scope: string | null;
+  clientId: string | null;
+  /** Agents allowed to use this account (config ACL). */
+  enabledFor: string[];
+  /** false when the broker couldn't confirm the slot exists. */
+  brokerKnown: boolean;
+}
+
+export async function handleGetGoogleAccounts(
+  config: SwitchroomConfig,
+): Promise<GoogleAccountDashboardInfo[]> {
+  const live = new Map<
+    string,
+    { expiresAt: number; scope: string; clientId: string }
+  >();
+  try {
+    await withAuthBrokerClient(async (client) => {
+      const data = await client.listGoogleAccounts();
+      for (const a of data.accounts) {
+        live.set(a.account.toLowerCase(), {
+          expiresAt: a.expiresAt,
+          scope: a.scope,
+          clientId: a.clientId,
+        });
+      }
+    });
+  } catch (err) {
+    if (!(err instanceof AuthBrokerUnreachableError)) throw err;
+    // Degraded: ACL still renders from config; live fields stay null.
+  }
+  // Union of config-declared accounts and broker-known slots so an
+  // account present in only one source is still visible.
+  const cfgAccounts = config.google_accounts ?? {};
+  const keys = new Set<string>([
+    ...Object.keys(cfgAccounts).map((k) => k.toLowerCase()),
+    ...live.keys(),
+  ]);
+  const out: GoogleAccountDashboardInfo[] = [];
+  for (const key of [...keys].sort()) {
+    const cfg = cfgAccounts[key];
+    const l = live.get(key);
+    out.push({
+      account: key,
+      expiresAt: l?.expiresAt ?? null,
+      scope: l?.scope ?? null,
+      clientId: l?.clientId ?? null,
+      enabledFor: cfg?.enabled_for ? [...cfg.enabled_for].sort() : [],
+      brokerKnown: l != null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Cron schedule view: every cascade-resolved schedule entry plus the
+ * most-recent fire rows from each agent's host-side `scheduler.jsonl`
+ * (the bind source for the in-container `/state/agent/scheduler.jsonl`
+ * ledger). No next-fire calculation — that needs a cron parser we
+ * deliberately don't depend on; the cron expression + recent-fire
+ * history is the high-signal data without the dep.
+ */
+export interface ScheduleDashboard {
+  entries: SchedulerEntry[];
+  /** agent → most-recent DispatchResult rows (newest last), capped. */
+  recentByAgent: Record<string, DispatchResult[]>;
+}
+
+export function handleGetSchedule(
+  config: SwitchroomConfig,
+): ScheduleDashboard {
+  const entries = collectScheduleEntries(config);
+  const agentsDir = resolveAgentsDir(config);
+  const recentByAgent: Record<string, DispatchResult[]> = {};
+  const agents = new Set(entries.map((e) => e.agent));
+  for (const agent of agents) {
+    const path = resolve(agentsDir, agent, "scheduler.jsonl");
+    if (!existsSync(path)) continue;
+    try {
+      const rows: DispatchResult[] = [];
+      for (const line of readFileSync(path, "utf-8").split("\n")) {
+        const t = line.trim();
+        if (!t) continue;
+        try {
+          rows.push(JSON.parse(t) as DispatchResult);
+        } catch {
+          /* skip a torn/partial JSONL line */
+        }
+      }
+      recentByAgent[agent] = rows.slice(-10);
+    } catch {
+      /* unreadable ledger — omit this agent, don't fail the view */
+    }
+  }
+  return { entries, recentByAgent };
 }

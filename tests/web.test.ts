@@ -19,6 +19,18 @@ vi.mock("../src/config/loader.js", () => ({
   resolveAgentsDir: vi.fn(() => "/home/test/.switchroom/agents"),
 }));
 
+// Account store — handleGetAccounts reads the on-disk inventory.
+vi.mock("../src/auth/account-store.js", () => ({
+  getAccountInfos: vi.fn(() => []),
+}));
+
+// Analytics is fire-and-forget; stub so handleUseAccount doesn't
+// reach PostHog during the unit test.
+vi.mock("../src/analytics/posthog.js", () => ({
+  captureEvent: vi.fn(),
+  captureException: vi.fn(),
+}));
+
 // Mock child_process
 vi.mock("node:child_process", () => ({
   execSync: vi.fn(),
@@ -70,8 +82,14 @@ import {
   handleRestartAgent,
   handleGetLogs,
   handleGetSystemHealth,
+  handleGetGoogleAccounts,
+  handleGetSchedule,
+  handleGetAccounts,
+  handleUseAccount,
   type AgentInfo,
 } from "../src/web/api.js";
+import { resolveAgentsDir } from "../src/config/loader.js";
+import { getAccountInfos } from "../src/auth/account-store.js";
 import { isOriginAllowed, isTailscaleIdentified } from "../src/web/server.js";
 import { getAllAgentStatuses, startAgent, stopAgent, restartAgent } from "../src/agents/lifecycle.js";
 import { getAllAuthStatuses } from "../src/auth/manager.js";
@@ -541,5 +559,206 @@ describe("handleGetSystemHealth", () => {
     const h = await handleGetSystemHealth(home);
     expect(h.hostd.auditLogPresent).toBe(false);
     expect(h.hostd.recent).toEqual([]);
+  });
+});
+
+describe("handleGetGoogleAccounts", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    brokerImpl.run = null;
+  });
+
+  const cfgWith = (ga: Record<string, { enabled_for: string[] }>) =>
+    ({ ...mockConfig, google_accounts: ga }) as unknown as SwitchroomConfig;
+
+  it("merges broker live data with the config ACL", async () => {
+    brokerImpl.run = async (fn) =>
+      (fn as (c: unknown) => Promise<unknown>)({
+        listGoogleAccounts: async () => ({
+          accounts: [
+            { account: "alice@example.com", expiresAt: 123, scope: "drive gmail", clientId: "cid-abc" },
+          ],
+        }),
+      });
+    const out = await handleGetGoogleAccounts(
+      cfgWith({ "alice@example.com": { enabled_for: ["coach", "sage"] } }),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      account: "alice@example.com",
+      expiresAt: 123,
+      scope: "drive gmail",
+      clientId: "cid-abc",
+      enabledFor: ["coach", "sage"],
+      brokerKnown: true,
+    });
+  });
+
+  it("degrades to config-only when the broker is unreachable", async () => {
+    brokerImpl.run = null; // throws FakeUnreachable
+    const out = await handleGetGoogleAccounts(
+      cfgWith({ "bob@example.com": { enabled_for: ["coach"] } }),
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]).toMatchObject({
+      account: "bob@example.com",
+      expiresAt: null,
+      scope: null,
+      clientId: null,
+      enabledFor: ["coach"],
+      brokerKnown: false,
+    });
+  });
+
+  it("unions config-declared and broker-only accounts", async () => {
+    brokerImpl.run = async (fn) =>
+      (fn as (c: unknown) => Promise<unknown>)({
+        listGoogleAccounts: async () => ({
+          accounts: [
+            { account: "ghost@example.com", expiresAt: 9, scope: "s", clientId: "c" },
+          ],
+        }),
+      });
+    const out = await handleGetGoogleAccounts(
+      cfgWith({ "declared@example.com": { enabled_for: [] } }),
+    );
+    expect(out.map((a) => a.account).sort()).toEqual([
+      "declared@example.com",
+      "ghost@example.com",
+    ]);
+    expect(out.find((a) => a.account === "ghost@example.com")!.brokerKnown).toBe(true);
+    expect(out.find((a) => a.account === "declared@example.com")!.brokerKnown).toBe(false);
+  });
+});
+
+describe("handleGetSchedule", () => {
+  let tmp: string;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    tmp = mkdtempSync(join(tmpdir(), "sched-"));
+    asMock(resolveAgentsDir).mockReturnValue(tmp);
+  });
+
+  afterEach(() => {
+    rmSync(tmp, { recursive: true, force: true });
+  });
+
+  const cfgWithSchedule = () =>
+    ({
+      ...mockConfig,
+      agents: {
+        ...mockConfig.agents,
+        coach: {
+          ...mockConfig.agents.coach,
+          schedule: [
+            { cron: "0 9 * * *", prompt: "morning standup" },
+            { cron: "0 17 * * *", prompt: "evening recap" },
+          ],
+        },
+      },
+    }) as unknown as SwitchroomConfig;
+
+  it("returns cascade-resolved entries with recent fires from scheduler.jsonl", () => {
+    mkdirSync(join(tmp, "coach"), { recursive: true });
+    const row = (idx: number, code: number) =>
+      JSON.stringify({
+        agent: "coach",
+        scheduleIndex: idx,
+        promptKey: "k",
+        exitCode: code,
+        outputSummary: code === 0 ? "delivered to bridge via gateway" : "no agent client connected",
+        startedAt: 1747300000000 + idx,
+        finishedAt: 1747300000500 + idx,
+      });
+    writeFileSync(
+      join(tmp, "coach", "scheduler.jsonl"),
+      [row(0, 0), row(1, -1)].join("\n") + "\n",
+    );
+
+    const d = handleGetSchedule(cfgWithSchedule());
+    expect(d.entries.filter((e) => e.agent === "coach")).toHaveLength(2);
+    expect(d.entries[0].cron).toBe("0 9 * * *");
+    expect(d.recentByAgent.coach).toHaveLength(2);
+    expect(d.recentByAgent.coach[1].exitCode).toBe(-1);
+  });
+
+  it("skips agents with no scheduler.jsonl without failing", () => {
+    const d = handleGetSchedule(cfgWithSchedule());
+    expect(d.entries.length).toBeGreaterThan(0);
+    expect(d.recentByAgent.coach).toBeUndefined();
+  });
+
+  it("tolerates a torn JSONL line", () => {
+    mkdirSync(join(tmp, "coach"), { recursive: true });
+    writeFileSync(
+      join(tmp, "coach", "scheduler.jsonl"),
+      '{"agent":"coach","exitCode":0,"outputSummary":"ok","startedAt":1,"finishedAt":2,"scheduleIndex":0,"promptKey":"k"}\n{ broken json\n',
+    );
+    const d = handleGetSchedule(cfgWithSchedule());
+    expect(d.recentByAgent.coach).toHaveLength(1);
+  });
+});
+
+// Deferred P0-review nit: pin the RFC-H accounts/use wire shapes.
+describe("handleGetAccounts / handleUseAccount shape (RFC-H)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    brokerImpl.run = null;
+    asMock(getAccountInfos).mockReturnValue([
+      { label: "ken@x.com", health: "ok", expiresAt: 111 },
+    ] as never);
+  });
+
+  // usedBy is derived from the fleet-active binding, so the config
+  // must declare auth.active for coach+sage to resolve to this label.
+  const cfgActive = () =>
+    ({ ...mockConfig, auth: { active: "ken@x.com" } }) as unknown as SwitchroomConfig;
+
+  it("handleGetAccounts attaches broker quota + usedBy to each account", async () => {
+    brokerImpl.run = async (fn) =>
+      (fn as (c: unknown) => Promise<unknown>)({
+        listState: async () => ({
+          active: "ken@x.com",
+          fallback_order: [],
+          accounts: [
+            { label: "ken@x.com", exhausted: false, threshold_violations: 2 },
+          ],
+          agents: [],
+          consumers: [],
+        }),
+      });
+    const out = await handleGetAccounts(cfgActive());
+    expect(out).toHaveLength(1);
+    expect(out[0].label).toBe("ken@x.com");
+    expect(out[0].quota).toMatchObject({ exhausted: false, threshold_violations: 2 });
+    // coach + sage both bind the fleet-active account (no overrides).
+    expect(out[0].usedBy.sort()).toEqual(["coach", "sage"]);
+  });
+
+  it("handleGetAccounts degrades quota to null when broker unreachable", async () => {
+    brokerImpl.run = null;
+    const out = await handleGetAccounts(cfgActive());
+    expect(out[0].quota).toBeNull();
+    expect(out[0].usedBy.sort()).toEqual(["coach", "sage"]);
+  });
+
+  it("handleUseAccount returns {ok, active, fanned} on success", async () => {
+    brokerImpl.run = async (fn) =>
+      (fn as (c: unknown) => Promise<unknown>)({
+        setActive: async (label: string) => ({
+          active: label,
+          fanned: ["coach", "sage"],
+        }),
+      });
+    const r = await handleUseAccount("ken@x.com");
+    expect(r).toEqual({ ok: true, active: "ken@x.com", fanned: ["coach", "sage"] });
+  });
+
+  it("handleUseAccount maps broker-unreachable to a clean error", async () => {
+    brokerImpl.run = null;
+    const r = await handleUseAccount("ken@x.com");
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("broker down");
   });
 });

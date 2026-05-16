@@ -408,12 +408,16 @@
     <button id="tab-agents" class="active" onclick="switchTab('agents')">Agents</button>
     <button id="tab-accounts" onclick="switchTab('accounts')">Accounts</button>
     <button id="tab-system" onclick="switchTab('system')">System</button>
+    <button id="tab-google" onclick="switchTab('google')">Google</button>
+    <button id="tab-schedule" onclick="switchTab('schedule')">Schedule</button>
   </nav>
   <main>
     <div id="error"></div>
     <div id="agents" class="loading">Loading agents...</div>
     <div id="accounts" style="display:none"></div>
     <div id="system" style="display:none"></div>
+    <div id="google" style="display:none"></div>
+    <div id="schedule" style="display:none"></div>
   </main>
 
   <script>
@@ -485,14 +489,38 @@
       }
     }
 
+    async function fetchGoogleAccounts() {
+      try {
+        const res = await fetch(`${API}/api/google-accounts`, { headers: authHeaders() });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        renderGoogleAccounts(await res.json());
+        clearError();
+      } catch (err) {
+        showError(`Failed to fetch Google accounts: ${err.message}`);
+      }
+    }
+
+    async function fetchSchedule() {
+      try {
+        const res = await fetch(`${API}/api/schedule`, { headers: authHeaders() });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        renderSchedule(await res.json());
+        clearError();
+      } catch (err) {
+        showError(`Failed to fetch schedule: ${err.message}`);
+      }
+    }
+
     function switchTab(tab) {
-      const tabs = ['agents', 'accounts', 'system'];
+      const tabs = ['agents', 'accounts', 'system', 'google', 'schedule'];
       for (const t of tabs) {
         document.getElementById(`tab-${t}`).classList.toggle('active', tab === t);
         document.getElementById(t).style.display = tab === t ? '' : 'none';
       }
       if (tab === 'accounts') fetchAccounts();
       if (tab === 'system') fetchSystemHealth();
+      if (tab === 'google') fetchGoogleAccounts();
+      if (tab === 'schedule') fetchSchedule();
     }
 
     function showError(msg) {
@@ -783,6 +811,84 @@
       if (!ts) return '—';
       // 2026-05-15T04:15:13.465Z → 2026-05-15 04:15:13
       return String(ts).replace('T', ' ').replace(/\.\d+Z?$/, '').replace(/Z$/, '');
+    }
+
+    function renderGoogleAccounts(rows) {
+      const container = document.getElementById('google');
+      if (!rows || rows.length === 0) {
+        container.innerHTML = '<div class="loading">No Google accounts. Add one under <code>google_accounts:</code> in switchroom.yaml and run <code>switchroom auth google account add</code>.</div>';
+        return;
+      }
+      const dim = (s) => `<span style="color:var(--text-dim)">${escapeHtml(s)}</span>`;
+      const cards = rows.map(a => {
+        const expires = a.expiresAt ? formatTimestamp(a.expiresAt) : dim('—');
+        const scope = a.scope ? escapeHtml(a.scope) : dim('broker offline');
+        const known = a.brokerKnown
+          ? '<span class="usage-pill primary">slot present</span>'
+          : '<span style="color:var(--yellow)">config-only (no broker slot)</span>';
+        const acl = (a.enabledFor && a.enabledFor.length)
+          ? a.enabledFor.map(escapeHtml).join(', ')
+          : dim('no agents enabled');
+        return `
+        <div class="account-card">
+          <div class="account-card-header">
+            <div class="account-label">${escapeHtml(a.account)}</div>
+            <span style="margin-left:auto">${known}</span>
+          </div>
+          <div class="account-usage"><label style="color:var(--text-dim);opacity:.7">Enabled for: </label>${acl}</div>
+          <div class="card-meta" style="padding:0">
+            <div class="meta-item"><label>Expires </label><span>${expires}</span></div>
+            <div class="meta-item" title="${a.scope ? escapeHtml(a.scope) : ''}"><label>Scope </label><span>${a.scope ? escapeHtml(a.scope.split(' ').length + ' scope(s)') : dim('—')}</span></div>
+            <div class="meta-item"><label>Client </label><span>${a.clientId ? escapeHtml(a.clientId.slice(0, 16) + '…') : dim('—')}</span></div>
+          </div>
+        </div>`;
+      }).join('');
+      container.innerHTML = `<div class="accounts-grid">${cards}</div>`;
+    }
+
+    function renderSchedule(data) {
+      const container = document.getElementById('schedule');
+      const entries = (data && data.entries) || [];
+      const recent = (data && data.recentByAgent) || {};
+      if (entries.length === 0) {
+        container.innerHTML = '<div class="loading">No <code>schedule:</code> entries in any agent\'s cascade-resolved config.</div>';
+        return;
+      }
+      const dim = (s) => `<span style="color:var(--text-dim)">${escapeHtml(s)}</span>`;
+      // Group entries by agent.
+      const byAgent = {};
+      for (const e of entries) (byAgent[e.agent] ||= []).push(e);
+      const cards = Object.keys(byAgent).sort().map(agent => {
+        const rows = byAgent[agent].map(e => `
+          <tr>
+            <td><code>${escapeHtml(e.cron)}</code></td>
+            <td title="${escapeHtml(e.prompt)}">${escapeHtml(e.prompt.length > 70 ? e.prompt.slice(0, 70) + '…' : e.prompt)}</td>
+          </tr>`).join('');
+        const fires = (recent[agent] || []).slice().reverse();
+        const fireRows = fires.length === 0
+          ? `<tr><td colspan="3">${dim('no recorded fires yet')}</td></tr>`
+          : fires.map(f => {
+              const ok = f.exitCode === 0;
+              return `<tr>
+                <td><span class="status-dot ${ok ? 'active' : 'inactive'}" style="display:inline-block;vertical-align:middle"></span> ${escapeHtml(shortTs(new Date(f.startedAt).toISOString()))}</td>
+                <td>${escapeHtml(String(f.outputSummary || '').slice(0, 80))}</td>
+                <td>${ok ? 'ok' : 'exit ' + escapeHtml(String(f.exitCode))}</td>
+              </tr>`;
+            }).join('');
+        return `
+        <div class="agent-card" style="margin-bottom:1rem">
+          <div class="card-header" style="cursor:default">
+            <span class="agent-name">${escapeHtml(agent)}</span>
+            <span class="agent-topic">${byAgent[agent].length} schedule entr${byAgent[agent].length === 1 ? 'y' : 'ies'}</span>
+          </div>
+          <div style="padding:0 1.25rem 1rem">
+            <table class="accounts-table"><thead><tr><th>Cron</th><th>Prompt</th></tr></thead><tbody>${rows}</tbody></table>
+            <div style="margin-top:0.6rem;font-size:0.8rem;color:var(--text-dim)">Recent fires (from scheduler.jsonl)</div>
+            <table class="accounts-table"><thead><tr><th>When</th><th>Result</th><th>Exit</th></tr></thead><tbody>${fireRows}</tbody></table>
+          </div>
+        </div>`;
+      }).join('');
+      container.innerHTML = cards;
     }
 
     function openPromoteModal(label) {

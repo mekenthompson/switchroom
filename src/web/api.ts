@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentConfig, SwitchroomConfig } from "../config/schema.js";
 import {
@@ -10,6 +11,15 @@ import {
 } from "../agents/lifecycle.js";
 import { getAllAuthStatuses } from "../auth/manager.js";
 import { getCollectionForAgent } from "../memory/hindsight.js";
+import {
+  getHindsightStatus,
+  isHindsightRunning,
+} from "../setup/hindsight.js";
+import {
+  defaultAuditLogPath,
+  readAndFilter,
+  type AuditEntry,
+} from "../host-control/audit-reader.js";
 import { captureEvent, captureException } from "../analytics/posthog.js";
 import { resolveAgentsDir } from "../config/loader.js";
 import { resolveAgentConfig } from "../config/merge.js";
@@ -303,4 +313,138 @@ export function handleGetAgentConfig(
 ): AgentConfig {
   const agent = config.agents[agentName];
   return resolveAgentConfig(config.defaults, config.profiles, agent);
+}
+
+/**
+ * Fleet infrastructure health — the three singletons the dashboard
+ * never surfaced (auth-broker, hindsight, hostd). All reads are
+ * best-effort and degrade independently: a broker timeout doesn't
+ * blank the hindsight panel and vice versa. This is observability,
+ * not control — no mutating ops live here.
+ */
+export interface SystemHealth {
+  broker: {
+    reachable: boolean;
+    active?: string;
+    accounts?: number;
+    agents?: number;
+    consumers?: number;
+    error?: string;
+  };
+  hindsight: {
+    /** Raw `docker ps` Status string, or null when the container is absent. */
+    containerStatus: string | null;
+    running: boolean;
+    /** Live values read from the running container's env (truth, not the
+     *  compile-time default) — null when the container isn't inspectable. */
+    model: string | null;
+    provider: string | null;
+    mcpStateless: boolean | null;
+  };
+  hostd: {
+    auditLogPresent: boolean;
+    /** Most-recent privileged-verb audit rows (newest last), capped. */
+    recent: AuditEntry[];
+    error?: string;
+  };
+}
+
+/**
+ * Pull a single env var out of `docker inspect`'s Config.Env array for
+ * a container. Returns null when the container is absent or the var
+ * isn't set — the caller renders that as "unknown" rather than guessing
+ * from the compile-time default (the running container is the truth).
+ */
+function inspectEnv(
+  container: string,
+  keys: readonly string[],
+): Record<string, string | null> {
+  const out: Record<string, string | null> = {};
+  for (const k of keys) out[k] = null;
+  const res = spawnSync(
+    "docker",
+    ["inspect", "--format", "{{json .Config.Env}}", container],
+    { encoding: "utf-8", timeout: 4000 },
+  );
+  if (res.error || res.status !== 0 || !res.stdout) return out;
+  try {
+    const env = JSON.parse(res.stdout.trim()) as string[];
+    for (const pair of env) {
+      const eq = pair.indexOf("=");
+      if (eq < 0) continue;
+      const name = pair.slice(0, eq);
+      if (name in out) out[name] = pair.slice(eq + 1);
+    }
+  } catch {
+    /* malformed inspect output — leave nulls */
+  }
+  return out;
+}
+
+export async function handleGetSystemHealth(
+  home?: string,
+): Promise<SystemHealth> {
+  // ── auth-broker ──────────────────────────────────────────────────
+  const broker: SystemHealth["broker"] = { reachable: false };
+  try {
+    await withAuthBrokerClient(async (client) => {
+      const state = await client.listState();
+      broker.reachable = true;
+      broker.active = state.active;
+      broker.accounts = state.accounts.length;
+      broker.agents = state.agents.length;
+      broker.consumers = state.consumers.length;
+    });
+  } catch (err) {
+    broker.reachable = false;
+    if (err instanceof AuthBrokerUnreachableError) {
+      broker.error = err.message;
+    } else if (err instanceof AuthBrokerError) {
+      broker.error = `${err.code}: ${err.message}`;
+    } else {
+      broker.error = err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  // ── hindsight ────────────────────────────────────────────────────
+  const containerStatus = getHindsightStatus();
+  const running = isHindsightRunning();
+  const env = running
+    ? inspectEnv("switchroom-hindsight", [
+        "HINDSIGHT_API_LLM_MODEL",
+        "HINDSIGHT_API_LLM_PROVIDER",
+        "HINDSIGHT_API_MCP_STATELESS",
+      ])
+    : {
+        HINDSIGHT_API_LLM_MODEL: null,
+        HINDSIGHT_API_LLM_PROVIDER: null,
+        HINDSIGHT_API_MCP_STATELESS: null,
+      };
+  const statelessRaw = env.HINDSIGHT_API_MCP_STATELESS;
+  const hindsight: SystemHealth["hindsight"] = {
+    containerStatus,
+    running,
+    model: env.HINDSIGHT_API_LLM_MODEL,
+    provider: env.HINDSIGHT_API_LLM_PROVIDER,
+    mcpStateless:
+      statelessRaw == null ? null : statelessRaw.toLowerCase() === "true",
+  };
+
+  // ── hostd ────────────────────────────────────────────────────────
+  const hostd: SystemHealth["hostd"] = {
+    auditLogPresent: false,
+    recent: [],
+  };
+  try {
+    const logPath = defaultAuditLogPath(home);
+    if (existsSync(logPath)) {
+      hostd.auditLogPresent = true;
+      const raw = readFileSync(logPath, "utf-8");
+      hostd.recent = readAndFilter(raw, {}, 10);
+    }
+  } catch (err) {
+    hostd.error = err instanceof Error ? err.message : String(err);
+  }
+
+  return { broker, hindsight, hostd };
 }

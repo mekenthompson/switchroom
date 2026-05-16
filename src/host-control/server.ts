@@ -25,7 +25,7 @@
 import { createServer, type Server, type Socket } from "node:net";
 import { spawn } from "node:child_process";
 import { mkdir, chmod, chown, unlink, appendFile } from "node:fs/promises";
-import { readdirSync, existsSync, statSync } from "node:fs";
+import { readdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 import {

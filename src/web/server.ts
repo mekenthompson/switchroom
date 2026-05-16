@@ -14,6 +14,7 @@ import { spawn } from "node:child_process";
 import { timingSafeEqual, randomBytes } from "node:crypto";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { resolveAgentConfig } from "../config/merge.js";
+import { containerName } from "../agents/lifecycle.js";
 import {
   handleGetAgents,
   handleStartAgent,
@@ -613,9 +614,13 @@ export function startWebServer(
               (ws as any)._logProcess = null;
             }
 
+            // Agents are Docker containers since v0.7 — stream the
+            // container log, not a (nonexistent) systemd user unit.
+            // docker logs splits container stdout/stderr across the
+            // two fds; both are forwarded to the client below.
             const child = spawn(
-              "journalctl",
-              ["--user", "-u", `switchroom-${agentName}`, "-f", "--no-pager", "-n", "20"],
+              "docker",
+              ["logs", "-f", "--tail", "20", containerName(agentName)],
               { stdio: ["ignore", "pipe", "pipe"] }
             );
 

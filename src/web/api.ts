@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { resolve } from "node:path";
 import type { AgentConfig, SwitchroomConfig } from "../config/schema.js";
 import {
@@ -6,6 +6,7 @@ import {
   startAgent,
   stopAgent,
   restartAgent,
+  containerName,
 } from "../agents/lifecycle.js";
 import { getAllAuthStatuses } from "../auth/manager.js";
 import { getCollectionForAgent } from "../memory/hindsight.js";
@@ -113,19 +114,27 @@ export function handleGetLogs(
   name: string,
   lines: number = 50
 ): { ok: boolean; logs?: string; error?: string } {
-  try {
-    const output = execFileSync(
-      "journalctl",
-      ["--user", "-u", `switchroom-${name}`, "--no-pager", "-n", String(lines)],
-      { encoding: "utf-8", timeout: 5000 }
-    );
-    return { ok: true, logs: output };
-  } catch (err) {
+  // Agents are Docker containers since v0.7 — there is no
+  // `switchroom-<name>` systemd user unit to journalctl against.
+  // `docker logs` splits the container's stdout/stderr across the two
+  // fds; a container can log to either, so merge both for a complete
+  // view. spawnSync hands back both streams regardless of exit code.
+  const res = spawnSync(
+    "docker",
+    ["logs", "--tail", String(lines), containerName(name)],
+    { encoding: "utf-8", timeout: 5000 },
+  );
+  if (res.error) {
+    return { ok: false, error: res.error.message };
+  }
+  if (res.status !== 0) {
+    const stderr = (res.stderr ?? "").trim();
     return {
       ok: false,
-      error: err instanceof Error ? err.message : String(err),
+      error: stderr || `docker logs exited ${res.status ?? "non-zero"}`,
     };
   }
+  return { ok: true, logs: `${res.stdout ?? ""}${res.stderr ?? ""}` };
 }
 
 export function handleGetTurns(

@@ -118,7 +118,7 @@ export interface AgentStatus {
 const COMPOSE_PROJECT = "switchroom";
 
 /** Container name for an agent (set via `container_name:` in compose.ts). */
-function containerName(name: string): string {
+export function containerName(name: string): string {
   return `switchroom-${name}`;
 }
 

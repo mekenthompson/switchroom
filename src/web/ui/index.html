@@ -606,61 +606,65 @@
         container.innerHTML = '<div class="loading">No accounts. Run <code>switchroom auth account add &lt;label&gt;</code>.</div>';
         return;
       }
+      // RFC-H shape: the API returns `usedBy` (agents bound via the
+      // fleet-active account or a per-agent override) and a broker
+      // `quota` AccountState ({exhausted, exhausted_until,
+      // threshold_violations, last_refreshed_at}). The pre-RFC-H
+      // primaryFor/fallbackFor lists and quota.fiveHourPct utilization
+      // fields no longer exist on the wire.
       const enriched = accounts.map(a => {
-        const capturedMs = a.quota && a.quota.capturedAt ? new Date(a.quota.capturedAt).getTime() : null;
-        const captured = a.quota && a.quota.capturedAt ? new Date(a.quota.capturedAt).toLocaleString() : 'never';
+        const q = a.quota || null;
+        const exhausted = q ? !!q.exhausted : null;
         return {
           a,
-          capturedMs,
-          fiveH: renderQuotaPct(a.quota && a.quota.fiveHourPct, capturedMs),
-          sevenD: renderQuotaPct(a.quota && a.quota.sevenDayPct, capturedMs),
-          usageTitle: `Quota captured: ${captured}`,
-          primaryFor: a.primaryFor || [],
-          fallbackFor: a.fallbackFor || [],
-          refreshed: capturedMs ? formatTimestamp(capturedMs) : '<span style="color:var(--text-dim)">—</span>',
-          fiveReset: a.quota && a.quota.fiveHourResetAt ? formatTimestamp(a.quota.fiveHourResetAt) : '<span style="color:var(--text-dim)">—</span>',
-          sevenReset: a.quota && a.quota.sevenDayResetAt ? formatTimestamp(a.quota.sevenDayResetAt) : '<span style="color:var(--text-dim)">—</span>',
+          usedBy: a.usedBy || [],
+          exhausted,
+          exhaustedCell: q == null
+            ? '<span style="color:var(--text-dim)">broker offline</span>'
+            : exhausted
+              ? `<span class="quota-pct high">exhausted${q.exhausted_until ? ' → ' + formatTimestamp(q.exhausted_until) : ''}</span>`
+              : '<span class="quota-pct">ok</span>',
+          violations: q && q.threshold_violations
+            ? `<span class="quota-pct mid">${q.threshold_violations}</span>`
+            : '<span style="color:var(--text-dim)">0</span>',
+          refreshed: q && q.last_refreshed_at
+            ? formatTimestamp(q.last_refreshed_at)
+            : '<span style="color:var(--text-dim)">—</span>',
           expires: formatTimestamp(a.expiresAt),
         };
       });
       const rows = enriched.map(e => {
-        const { a, fiveH, sevenD, usageTitle, primaryFor, fallbackFor, refreshed, fiveReset, sevenReset, expires } = e;
-        const usageCell = renderUsageCell(primaryFor, fallbackFor);
+        const { a, usedBy, exhaustedCell, violations, refreshed, expires } = e;
         return `
         <tr>
           <td>${escapeHtml(a.label)}</td>
           <td><span class="health-badge ${escapeHtml(a.health)}">${escapeHtml(a.health)}</span></td>
-          <td>${usageCell}</td>
-          <td title="${escapeHtml(usageTitle)}">${fiveH}</td>
-          <td title="${escapeHtml(usageTitle)}">${sevenD}</td>
-          <td title="${escapeHtml(usageTitle)}">${refreshed}</td>
-          <td>${fiveReset}</td>
-          <td>${sevenReset}</td>
+          <td>${renderUsedByCell(usedBy)}</td>
+          <td>${exhaustedCell}</td>
+          <td>${violations}</td>
+          <td>${refreshed}</td>
           <td>${expires}</td>
-          <td><button class="btn" onclick="openPromoteModal('${escapeHtml(a.label)}')">Make primary…</button></td>
+          <td><button class="btn" onclick="openPromoteModal('${escapeHtml(a.label)}')">Make fleet-active…</button></td>
         </tr>
       `;
       }).join('');
       const cards = enriched.map(e => {
-        const { a, fiveH, sevenD, usageTitle, primaryFor, fallbackFor, refreshed, fiveReset, sevenReset, expires } = e;
-        const usageCell = renderUsageCell(primaryFor, fallbackFor);
+        const { a, usedBy, exhaustedCell, violations, refreshed, expires } = e;
         return `
         <div class="account-card">
           <div class="account-card-header">
             <div class="account-label">${escapeHtml(a.label)}</div>
             <span class="health-badge ${escapeHtml(a.health)}" style="margin-left:auto">${escapeHtml(a.health)}</span>
           </div>
-          <div class="account-usage">${usageCell}</div>
+          <div class="account-usage">${renderUsedByCell(usedBy)}</div>
           <div class="card-meta" style="padding:0">
-            <div class="meta-item" title="${escapeHtml(usageTitle)}"><label>5h% </label><span>${fiveH}</span></div>
-            <div class="meta-item" title="${escapeHtml(usageTitle)}"><label>7d% </label><span>${sevenD}</span></div>
-            <div class="meta-item" title="${escapeHtml(usageTitle)}"><label>Refreshed </label><span>${refreshed}</span></div>
-            <div class="meta-item"><label>5h reset </label><span>${fiveReset}</span></div>
-            <div class="meta-item"><label>7d reset </label><span>${sevenReset}</span></div>
+            <div class="meta-item"><label>Quota </label><span>${exhaustedCell}</span></div>
+            <div class="meta-item"><label>Threshold viols </label><span>${violations}</span></div>
+            <div class="meta-item"><label>Last refresh </label><span>${refreshed}</span></div>
             <div class="meta-item"><label>Expires </label><span>${expires}</span></div>
           </div>
           <div style="margin-top:0.75rem">
-            <button class="btn" onclick="openPromoteModal('${escapeHtml(a.label)}')">Make primary…</button>
+            <button class="btn" onclick="openPromoteModal('${escapeHtml(a.label)}')">Make fleet-active…</button>
           </div>
         </div>
       `;
@@ -670,9 +674,8 @@
           <table class="accounts-table">
             <thead><tr>
               <th>Label</th><th>Health</th><th>Used by</th>
-              <th>5h%</th><th>7d%</th>
-              <th>Refreshed</th><th>5h reset</th><th>7d reset</th>
-              <th>Expires</th><th></th>
+              <th>Quota</th><th>Threshold viols</th>
+              <th>Last refresh</th><th>Expires</th><th></th>
             </tr></thead>
             <tbody>${rows}</tbody>
           </table>
@@ -681,78 +684,40 @@
       `;
     }
 
-    function renderQuotaPct(pct, capturedAt) {
-      if (pct == null) return '<span class="quota-pct stale">—</span>';
-      // Stale = capture older than 1 hour. Quota refreshes opportunistically;
-      // anything beyond an hour likely doesn't reflect current consumption.
-      // Accept either an ISO string or a unix-ms number for capturedAt.
-      const capMs = capturedAt == null ? null
-        : typeof capturedAt === 'number' ? capturedAt
-        : new Date(capturedAt).getTime();
-      const stale = capMs && (Date.now() - capMs > 60 * 60 * 1000);
-      let cls = 'quota-pct';
-      if (stale) cls += ' stale';
-      else if (pct >= 80) cls += ' high';
-      else if (pct >= 50) cls += ' mid';
-      return `<span class="${cls}">${Math.round(pct)}%</span>`;
-    }
-
-    function renderUsageCell(primaryFor, fallbackFor) {
-      // Show primary agents inline as a green pill (most important signal),
-      // fallback on a second muted line. Truncate long lists with a count
-      // and a tooltip carrying the full enumeration.
-      if (primaryFor.length === 0 && fallbackFor.length === 0) {
+    function renderUsedByCell(usedBy) {
+      // RFC-H: a single fleet-active account plus optional per-agent
+      // overrides. `usedBy` is the flat list of agents currently bound
+      // to this account (either via fleet-active or an override). No
+      // more primary/fallback split — binding is singular post-RFC-H.
+      if (!usedBy || usedBy.length === 0) {
         return '<span style="color:var(--text-dim)">unused</span>';
       }
-      const MAX_INLINE = 3;
-      const fmt = (list) => {
-        if (list.length <= MAX_INLINE) return list.map(escapeHtml).join(', ');
-        const head = list.slice(0, MAX_INLINE).map(escapeHtml).join(', ');
-        return `${head} +${list.length - MAX_INLINE}`;
-      };
-      const parts = [];
-      if (primaryFor.length > 0) {
-        const title = `primary for: ${primaryFor.join(', ')}`;
-        parts.push(`<div><span class="usage-pill primary" title="${escapeHtml(title)}">Primary: ${fmt(primaryFor)}</span></div>`);
-      }
-      if (fallbackFor.length > 0) {
-        const title = `fallback for: ${fallbackFor.join(', ')}`;
-        parts.push(`<div class="agent-list" title="${escapeHtml(title)}" style="margin-top:0.2rem">Fallback: ${fmt(fallbackFor)}</div>`);
-      }
-      return parts.join('');
+      const MAX_INLINE = 4;
+      const title = `bound: ${usedBy.join(', ')}`;
+      const shown = usedBy.length <= MAX_INLINE
+        ? usedBy.map(escapeHtml).join(', ')
+        : `${usedBy.slice(0, MAX_INLINE).map(escapeHtml).join(', ')} +${usedBy.length - MAX_INLINE}`;
+      return `<span class="usage-pill primary" title="${escapeHtml(title)}">${shown}</span>`;
     }
 
     function openPromoteModal(label) {
-      // We need the list of agents that already have this account in their
-      // auth.accounts list — we can promote to any of them. Cross-reference
-      // primaryFor/fallbackFor on the cached account info.
-      const acct = accounts.find(a => a.label === label);
-      if (!acct) return;
-      const candidates = [...(acct.fallbackFor || [])].sort();
-      // Already-primary agents are valid targets (no-op) but not interesting;
-      // surface them as disabled options for clarity.
-      const alreadyPrimary = [...(acct.primaryFor || [])].sort();
-      if (candidates.length === 0 && alreadyPrimary.length === 0) {
-        showToast(`${label} isn't enabled on any agent yet — run \`switchroom auth enable ${label} <agent>\` first.`, false);
-        return;
-      }
-      const opts = candidates.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('') +
-        alreadyPrimary.map(n => `<option value="${escapeHtml(n)}" disabled>${escapeHtml(n)} (already primary)</option>`).join('');
+      // RFC-H: there is no per-agent promote. Setting the fleet-active
+      // account is a single fleet-wide knob (POST /api/auth/use); the
+      // broker fans the new credentials out to every agent's per-agent
+      // mirror. Confirm intent, then call.
       const html = `
         <div class="modal-backdrop" id="promote-backdrop">
           <div class="modal">
-            <h3>Make <code>${escapeHtml(label)}</code> primary</h3>
-            <label>Agent</label>
-            <select id="promote-agent">
-              <option value="all">all agents that already have this account</option>
-              ${opts}
-            </select>
-            <div style="margin-top:0.5rem; font-size:0.75rem; color:var(--text-dim)">
-              The promoted agents will need a restart to load the new credentials.
+            <h3>Make <code>${escapeHtml(label)}</code> the fleet-active account</h3>
+            <div style="margin-top:0.5rem; font-size:0.85rem;">
+              Every agent without a per-agent <code>auth.override</code> will
+              switch to <code>${escapeHtml(label)}</code>. The broker fans
+              the credentials out immediately; agents pick them up on their
+              next turn (no manual restart needed post-RFC-H).
             </div>
             <div class="modal-actions">
               <button class="btn" onclick="closePromoteModal()">Cancel</button>
-              <button class="btn btn-restart" onclick="confirmPromote('${escapeHtml(label)}')">Promote</button>
+              <button class="btn btn-restart" onclick="confirmPromote('${escapeHtml(label)}')">Make fleet-active</button>
             </div>
           </div>
         </div>`;
@@ -765,37 +730,28 @@
     }
 
     async function confirmPromote(label) {
-      const sel = document.getElementById('promote-agent');
-      if (!sel) return;
-      const agent = sel.value;
       closePromoteModal();
       try {
-        const res = await fetch(`${API}/api/accounts/${encodeURIComponent(label)}/promote`, {
+        // RFC-H endpoint. Body carries the label (avoids URL-encoding
+        // past the account-label charset). Response: { ok, active, fanned }.
+        const res = await fetch(`${API}/api/auth/use`, {
           method: 'POST',
           headers: { ...authHeaders(), 'Content-Type': 'application/json' },
-          body: JSON.stringify({ agent }),
+          body: JSON.stringify({ account: label }),
         });
         const data = await res.json();
         if (!res.ok || !data.ok) {
-          showToast(`Promote failed: ${data.error || `HTTP ${res.status}`}`, false);
+          showToast(`Set fleet-active failed: ${data.error || `HTTP ${res.status}`}`, false);
           return;
         }
-        const promoted = data.promoted || [];
-        const already = data.alreadyPrimary || [];
-        const fanFails = data.fanFails || [];
-        let msg;
-        if (promoted.length === 0 && already.length > 0) {
-          msg = `${label} already primary on: ${already.join(', ')}`;
-        } else {
-          msg = `${label} promoted on: ${promoted.join(', ')}. Restart needed.`;
-        }
-        if (fanFails.length > 0) {
-          msg += ` Fanout failed for: ${fanFails.map(f => f.agent).join(', ')}.`;
-        }
-        showToast(msg, fanFails.length === 0);
+        const fanned = data.fanned || [];
+        const msg = fanned.length > 0
+          ? `Fleet-active is now ${data.active}. Broker fanned to: ${fanned.join(', ')}.`
+          : `Fleet-active is now ${data.active}.`;
+        showToast(msg, true);
         fetchAccounts();
       } catch (err) {
-        showToast(`Promote failed: ${err.message}`, false);
+        showToast(`Set fleet-active failed: ${err.message}`, false);
       }
     }
 

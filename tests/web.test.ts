@@ -469,6 +469,15 @@ describe("handleGetSystemHealth", () => {
     expect(h.broker.error).toContain("broker down");
   });
 
+  it("formats an AuthBrokerError as `code: message` (reachable but protocol error)", async () => {
+    brokerImpl.run = async () => {
+      throw new brokerHoist.FakeBrokerError("EPROTO", "bad frame");
+    };
+    const h = await handleGetSystemHealth(home);
+    expect(h.broker.reachable).toBe(false);
+    expect(h.broker.error).toBe("EPROTO: bad frame");
+  });
+
   it("reads live hindsight env from docker inspect when running", async () => {
     asMock(getHindsightStatus).mockReturnValue("Up 3 hours");
     asMock(isHindsightRunning).mockReturnValue(true);

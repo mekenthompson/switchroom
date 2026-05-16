@@ -107,8 +107,10 @@ export interface GdriveMcpEntryOptions {
  *   2. resolves the OAuth client_secret from config / vault-broker,
  *   3. pre-seeds a credentials file (`{token:null, refresh_token, ...,
  *      expiry:null}`) into a per-agent `WORKSPACE_MCP_CREDENTIALS_DIR`,
- *   4. `exec`s `uvx --from git+...@<pinned-sha> google-workspace-mcp
- *      --single-user [--tool-tier <tier>]`.
+ *   4. `exec`s `uvx --from git+...@<pinned-sha> workspace-mcp
+ *      --single-user [--tool-tier <tier>]` (the upstream package's
+ *      MCP-server entrypoint is `workspace-mcp`, not
+ *      `google-workspace-mcp`).
  *
  * The `--single-user` + pre-seeded-file shape is what makes upstream run
  * browserless: token/expiry null forces the refresh branch, no OAuth

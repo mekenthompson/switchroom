@@ -37,6 +37,23 @@ RUN mkdir -p /tmp/tmux-shared
 
 # ─── Rare-changed install layers (FIRST, so dist/ churn doesn't bust them) ───
 #
+# uv / uvx — required by the Google Workspace MCP launcher
+# (`switchroom drive-mcp-launcher`, RFC G). The launcher execs
+# `uvx --from git+https://github.com/taylorwilsdon/google_workspace_mcp.git@<SHA>
+# google-workspace-mcp --single-user`; without `uvx` on PATH the
+# launcher fails fast with exit 127 ("Executable not found in $PATH:
+# uvx") and the agent gets no Drive tools. Same pre-bake rationale as
+# playwright below: bake it into the image, version-pinned, instead of
+# an on-demand per-agent install.
+#
+# astral's officially-recommended Docker install: copy the static
+# `uv`/`uvx` binaries from the published image. No network install
+# script, fully reproducible. Pin the uv version deliberately (bump in
+# lockstep with re-testing the Drive MCP launcher) — mirrors how the
+# google_workspace_mcp commit SHA is pinned in
+# src/memory/scaffold-integration.ts.
+COPY --from=ghcr.io/astral-sh/uv:0.7.13 /uv /uvx /usr/local/bin/
+
 # Playwright — pre-baked for skills that use browser automation
 # (calendar / scrape / UI-test). Pre-this-bake, agents called
 # `npx playwright` which triggered an on-demand download of the

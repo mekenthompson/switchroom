@@ -7806,8 +7806,13 @@ async function runSwitchroomCommandFormatted(ctx: Context, args: string[], label
 // every agent can self-restart without admin privilege. `/restart <other>`
 // is blocked just like any other admin verb.
 //
-// Invariant: when AGENT_ADMIN=true, this middleware is a no-op — bot.command()
-// handlers run normally for all admin verbs and Claude never sees them.
+// sec WS7-F2 (#1394): when AGENT_ADMIN=true this middleware is NO LONGER a
+// no-op — a `block`-classified verb (fleet-admin / `/restart <other>`)
+// requires OPERATOR-PRIVATE (a private chat from a strict
+// `access.allowFrom` sender), because the per-command `isAuthorizedSender`
+// gate treats an empty group `allowFrom` as "allow every member". Non-
+// admin-verb traffic (`pass-through`, incl. `/restart`-self and all normal
+// chat) is untouched and reaches `next()` exactly as before.
 bot.use(async (ctx, next) => {
   if (ctx.message?.text) {
     const myName = getMyAgentName()

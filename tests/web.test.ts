@@ -365,6 +365,30 @@ describe("isOriginAllowed — localhost-only bind (default)", () => {
   it("rejects when port in Origin doesn't match server port", () => {
     expect(isOriginAllowed(makeRequest("http://localhost:9999"), port, localhostOnly)).toBe(false);
   });
+
+  // Behind `tailscale serve`: loopback request carrying Tailscale-User-Login
+  // (only the tailscale daemon can inject it). The tailnet-host Origin must
+  // be allowed — this is the path the dashboard's own printed instructions
+  // tell users to use, and it previously 403'd here.
+  it("allows the tailnet Origin when the request is Tailscale-identified", () => {
+    expect(
+      isOriginAllowed(
+        makeRequest("https://example-host.tailnet.ts.net:8081"),
+        port,
+        localhostOnly,
+        /* tailscaleIdentified */ true,
+      ),
+    ).toBe(true);
+  });
+
+  it("STILL rejects a hostile cross-origin page that is NOT Tailscale-identified", () => {
+    // A malicious web page cannot set Tailscale-User-Login, so
+    // isTailscaleIdentified is false for it → origin allowlist still
+    // applies. CSRF protection for the original threat is unchanged.
+    expect(
+      isOriginAllowed(makeRequest("http://evil.example.com"), port, localhostOnly, false),
+    ).toBe(false);
+  });
 });
 
 describe("isOriginAllowed — network bind (--bind 0.0.0.0 or Tailscale IP)", () => {

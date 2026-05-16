@@ -156,11 +156,28 @@ export function isTailscaleIdentified(req: Request, server: { requestIP(req: Req
  *
  * Exported for unit-testing; not part of the public API.
  */
-export function isOriginAllowed(req: Request, port: number, localhostOnly: boolean): boolean {
+export function isOriginAllowed(
+  req: Request,
+  port: number,
+  localhostOnly: boolean,
+  tailscaleIdentified = false,
+): boolean {
   if (!localhostOnly) {
     // Non-loopback bind: token is the sole auth boundary; skip origin check.
     return true;
   }
+  // Behind `tailscale serve`: the request arrived on loopback carrying
+  // a `Tailscale-User-Login` header that only the tailscale daemon can
+  // inject (verified by isTailscaleIdentified — loopback source + the
+  // header). It is therefore NOT a hostile cross-origin web page hitting
+  // raw localhost — it came through the trusted serve proxy, whose
+  // Origin is the tailnet host. Allow it; this mirrors how checkAuth
+  // already trusts the same predicate, and makes the dashboard's own
+  // printed `tailscale serve` instructions actually work on a
+  // localhost-only bind (they previously 403'd here). A malicious page
+  // CANNOT set Tailscale-User-Login, so CSRF protection for the
+  // original threat (web page → raw 127.0.0.1) is unchanged.
+  if (tailscaleIdentified) return true;
   const origin = req.headers.get("Origin");
   if (!origin) return true;
   const allowed = [
@@ -429,7 +446,7 @@ export function startWebServer(
       // reject any Origin that isn't our own loopback address. When bound to
       // a non-loopback address the user has opted in to network exposure and
       // the bearer token is the sole security boundary (see isOriginAllowed).
-      if (!isOriginAllowed(req, port, localhostOnly)) {
+      if (!isOriginAllowed(req, port, localhostOnly, isTailscaleIdentified(req, server))) {
         return new Response("Forbidden", { status: 403 });
       }
 

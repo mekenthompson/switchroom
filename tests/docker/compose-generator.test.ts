@@ -434,24 +434,42 @@ describe("generateCompose", () => {
     expect(out).not.toContain("${HOME}");
   });
 
-  it("emits skills + credentials :ro mounts when host dirs exist (#907)", async () => {
+  it("emits skills (fleet-wide) + PER-AGENT credentials :ro mount (sec WS6-F2)", async () => {
     const { mkdtempSync, mkdirSync, rmSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { join } = await import("node:path");
     const tmp = mkdtempSync(join(tmpdir(), "compose-mounts-"));
     mkdirSync(join(tmp, ".switchroom", "skills"), { recursive: true });
-    mkdirSync(join(tmp, ".switchroom", "credentials"), { recursive: true });
+    // Per-agent credentials dir for agent "a" + a different agent's
+    // dir that must NOT leak into "a" post-WS6-F2.
+    mkdirSync(join(tmp, ".switchroom", "credentials", "a"), {
+      recursive: true,
+    });
+    mkdirSync(join(tmp, ".switchroom", "credentials", "b-other"), {
+      recursive: true,
+    });
     try {
       const out = generateCompose({
         config: makeConfig({ a: {} }),
         homeDir: tmp,
       });
+      // skills/ stays fleet-wide (operator-authored, non-secret).
       expect(out).toContain(
         `${tmp}/.switchroom/skills:${tmp}/.switchroom/skills:ro`,
       );
+      // credentials are PER-AGENT: agent "a" sees only its own subdir,
+      // mounted at the canonical flat in-container path.
       expect(out).toContain(
+        `${tmp}/.switchroom/credentials/a:${tmp}/.switchroom/credentials:ro`,
+      );
+      // WS6-F2 regression guard: the OLD fleet-wide flat mount
+      // (which let any agent read every other agent's/purpose's
+      // credentials) must NEVER be emitted again, and agent "a" must
+      // not receive b-other's dir.
+      expect(out).not.toContain(
         `${tmp}/.switchroom/credentials:${tmp}/.switchroom/credentials:ro`,
       );
+      expect(out).not.toContain(`/.switchroom/credentials/b-other`);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

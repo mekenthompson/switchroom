@@ -159,13 +159,16 @@ installPluginLogger()
   //     missing-feature bugs (no /issues card, no quota notifications, no
   //     graceful failover). A clean error is more honest.
   //
-  // To install the gateway: `switchroom setup` provisions the
-  // `switchroom-telegram-gateway` systemd unit. Inspect with
-  // `systemctl --user status switchroom-telegram-gateway`.
+  // In v0.7+ the gateway is an in-container sidecar started by start.sh
+  // (no systemd unit). On a Docker host inspect/recover with
+  // `docker logs switchroom-<agent>` / `switchroom agent restart <agent>`;
+  // on a legacy non-docker install it's the gateway systemd user unit.
+  const recover = process.env.SWITCHROOM_RUNTIME === 'docker'
+    ? 'check `docker logs switchroom-<agent>` then `switchroom agent restart <agent>`'
+    : 'run `switchroom setup` to install the gateway, or check `systemctl --user status switchroom-telegram-gateway`'
   process.stderr.write(
     `telegram channel: no gateway socket at ${_gatewaySocket}. ` +
-    `Run \`switchroom setup\` to install the gateway daemon, or check ` +
-    `\`systemctl --user status switchroom-telegram-gateway\`. Exiting sidecar.\n`,
+    `The gateway sidecar is not running — ${recover}. Exiting sidecar.\n`,
   )
   process.exit(1)
 }

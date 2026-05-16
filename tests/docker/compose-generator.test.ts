@@ -764,6 +764,42 @@ describe("generateCompose", () => {
     expect(block).not.toContain("SWITCHROOM_AUTH_BROKER_OPERATOR_UID");
   });
 
+  // The approval-kernel mirrors the same operator-socket bind so
+  // host-side `approvalList` (the web dashboard) can read decision
+  // metadata. SWITCHROOM_KERNEL_OPERATOR_UID enables the kernel's
+  // READ-ONLY operator listener (approval_list only — the kernel
+  // enforces that, not compose). Both halves pinned.
+  it("emits kernel operator bind + UID env when operatorUid is set", () => {
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+      operatorUid: 1000,
+    });
+    const block = /approval-kernel:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toMatch(/SWITCHROOM_KERNEL_OPERATOR_UID:\s*"1000"/);
+    expect(block).toMatch(
+      /-\s+\$\{HOME\}\/\.switchroom\/state\/kernel-operator:\/run\/switchroom\/kernel\/operator/,
+    );
+  });
+
+  it("omits kernel operator bind + UID env when operatorUid is not set (back-compat)", () => {
+    const out = generateCompose({ config: makeConfig({ a: {} }) });
+    const block = /approval-kernel:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).not.toContain("SWITCHROOM_KERNEL_OPERATOR_UID");
+    expect(block).not.toContain("kernel-operator:/run/switchroom/kernel/operator");
+  });
+
+  it("bakes the absolute kernel operator-bind host path under homeDir override", () => {
+    const out = generateCompose({
+      config: makeConfig({ a: {} }),
+      operatorUid: 1000,
+      homeDir: "/home/op",
+    });
+    const block = /approval-kernel:[\s\S]*?(?=\n  [a-z])/.exec(out)?.[0] ?? "";
+    expect(block).toContain(
+      "/home/op/.switchroom/state/kernel-operator:/run/switchroom/kernel/operator",
+    );
+  });
+
   // PR #1278: the auth-broker entry script reads `--operator-uid` as a
   // CLI flag, not an env var. The env var above is a fallback the
   // broker entry consumes (PR #1277) but the canonical wiring is a

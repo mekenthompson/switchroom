@@ -7,7 +7,14 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { resolveKernelSocketPath } from "./client.js";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  resolveKernelSocketPath,
+  resolveKernelOperatorSocket,
+  kernelOperatorSocketPath,
+} from "./client.js";
 
 describe("resolveKernelSocketPath (Phase 2b)", () => {
   let savedEnv: string | undefined;
@@ -62,5 +69,35 @@ describe("resolveKernelSocketPath (Phase 2b)", () => {
     expect(
       resolveKernelSocketPath({ kernelSocket: "/tmp/programmatic.sock" }),
     ).toBe("/run/switchroom/kernel/alice/sock");
+  });
+
+  it("host fallback resolver stays OUT of the pure resolver", () => {
+    // Even if the operator socket exists, resolveKernelSocketPath must
+    // not pick it up — that path is opt-in by the host caller only.
+    expect(resolveKernelSocketPath()).toBeNull();
+  });
+});
+
+describe("resolveKernelOperatorSocket (host operator fallback)", () => {
+  let home: string;
+
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), "kern-op-home-"));
+  });
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+
+  it("returns the operator sock path when it exists on disk", () => {
+    const dir = join(home, ".switchroom", "state", "kernel-operator");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "sock"), "");
+    expect(resolveKernelOperatorSocket(home)).toBe(
+      kernelOperatorSocketPath(home),
+    );
+  });
+
+  it("returns null when the operator sock is absent (host-mode unchanged)", () => {
+    expect(resolveKernelOperatorSocket(home)).toBeNull();
   });
 });

@@ -81,6 +81,7 @@ export default defineConfig({
       "**/src/vault/grants.test.ts",
       // Approval-kernel suites use bun:sqlite — run via test:bun.
       "**/src/vault/approvals/kernel.test.ts",
+      "**/src/vault/approvals/kernel-operator-acl.test.ts",
       "**/src/vault/approvals/schema-idempotent.test.ts",
       "**/src/vault/approvals/vd-unlock-dual-dispatch.test.ts",
       "**/src/vault/approvals/vault-grant-dual-dispatch.test.ts",
@@ -211,6 +212,7 @@ export default defineConfig({
       "**/src/drive/wrapper.test.ts",
       // Approval-kernel tests (RFC B) use bun:test + in-memory bun:sqlite.
       "**/src/vault/approvals/kernel.test.ts",
+      "**/src/vault/approvals/kernel-operator-acl.test.ts",
       "**/src/vault/broker/server-approvals.test.ts",
       // reaction-trigger tests (#1074) use bun:test — run via test:bun.
       "**/telegram-plugin/tests/reaction-trigger.test.ts",

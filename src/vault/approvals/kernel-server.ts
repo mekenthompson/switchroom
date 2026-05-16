@@ -174,12 +174,69 @@ async function bindAgentSocket(
   });
 }
 
+/**
+ * Bind the host operator socket at /run/switchroom/kernel/operator/sock.
+ *
+ * Same bind plumbing as bindAgentSocket (root-owned dir → listen →
+ * chown to the operator UID), but:
+ *   - the directory name is the reserved KERNEL_OPERATOR_NAME, excluded
+ *     from per-agent enumeration so it can never be treated as an agent;
+ *   - the socket is mode 0600 (operator-only), tighter than the 0660
+ *     per-agent sockets — only the single host operator UID connects;
+ *   - connections are flagged `isOperator`, which the deny-by-default
+ *     allowlist in handleRequest restricts to approval_list.
+ *
+ * Bound only when SWITCHROOM_KERNEL_OPERATOR_UID is set (compose emits
+ * it alongside the operator bind mount, gated on the same operatorUid
+ * config the auth-broker uses). Absent ⇒ no operator listener, behaviour
+ * unchanged.
+ */
+async function bindOperatorSocket(
+  parentDir: string,
+  operatorUid: number,
+  db: Database,
+): Promise<AgentListener> {
+  const dir = resolve(parentDir, KERNEL_OPERATOR_NAME);
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try { chownSync(dir, 0, 0); } catch { /* outside docker / no CAP_CHOWN */ }
+  try { chmodSync(dir, 0o700); } catch { /* idempotent */ }
+  const socketPath = resolve(dir, "sock");
+  if (existsSync(socketPath)) {
+    try {
+      unlinkSync(socketPath);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      process.stderr.write(
+        `[kernel] could not unlink stale operator socket sock=${socketPath}: ${msg}\n`,
+      );
+    }
+  }
+  return new Promise((resolveP, rejectP) => {
+    const server = net.createServer((sock) =>
+      handleConnection(sock, KERNEL_OPERATOR_NAME, db, true),
+    );
+    server.on("error", (err) => {
+      process.stderr.write(`[kernel] listen error operator sock=${socketPath}: ${err.message}\n`);
+      rejectP(err);
+    });
+    server.listen(socketPath, () => {
+      // 0600: only the operator UID may connect. Tighter than the
+      // per-agent 0660 because there is exactly one legitimate peer.
+      try { chmodSync(socketPath, 0o600); } catch { /* ignore */ }
+      try { chownSync(socketPath, operatorUid, operatorUid); } catch { /* see bindAgentSocket */ }
+      try { chownSync(dir, operatorUid, operatorUid); } catch { /* see bindAgentSocket */ }
+      resolveP({ agent: KERNEL_OPERATOR_NAME, socketPath, server });
+    });
+  });
+}
+
 // ─── Connection handling ─────────────────────────────────────────────────────
 
 function handleConnection(
   socket: net.Socket,
   agent: string,
   db: Database,
+  isOperator = false,
 ): void {
   // `agent` is the trusted identity — it came from the listener's directory
   // name, established at bind time before the connection existed. No
@@ -221,7 +278,7 @@ function handleConnection(
         continue;
       }
       try {
-        handleRequest(socket, req, agent, db, peerUid);
+        handleRequest(socket, req, agent, db, peerUid, isOperator);
       } catch (err) {
         socket.write(encodeResponse(errorResponse("INTERNAL", (err as Error).message)));
       }
@@ -230,13 +287,57 @@ function handleConnection(
   socket.on("error", () => { /* peer dropped — best-effort */ });
 }
 
+/**
+ * Connections accepted on the host operator socket
+ * (`/run/switchroom/kernel/operator/sock`, bound only when an operator
+ * UID is configured). Path-as-identity: this name is reserved and
+ * excluded from per-agent enumeration, so a connection is "operator"
+ * iff it arrived on the operator listener — never inferred from the
+ * wire.
+ */
+export const KERNEL_OPERATOR_NAME = "operator";
+
+/**
+ * Ops the operator socket may invoke. DENY-BY-DEFAULT — this is the
+ * inverse of the auth-broker's `operator ⇒ admin ⇒ allow-all` model,
+ * and that inversion is the entire security point of this socket.
+ *
+ * The kernel's mutating ops (`approval_consume` / `approval_revoke` /
+ * `approval_record` / `approval_request`) carry NO op-level ACL: their
+ * only gate is per-agent socket isolation. The operator socket is, by
+ * construction, not in any agent's per-agent dir, so it bypasses that
+ * isolation. An operator connection that could reach those ops would be
+ * unauthenticated fleet-wide grant forgery / nonce burning. So the
+ * operator socket is restricted to the single read-only op the
+ * dashboard needs — listing decision metadata. Widening this set
+ * without a per-op authorization story is a security regression.
+ */
+const OPERATOR_ALLOWED_OPS: ReadonlySet<string> = new Set(["approval_list"]);
+
 function handleRequest(
   socket: net.Socket,
   req: BrokerRequest,
   agent: string,
   db: Database,
   peerUid: number | null,
+  isOperator = false,
 ): void {
+  // Deny-by-default allowlist for the operator socket. Must be the
+  // FIRST check — before any op dispatch — so a mutating op can never
+  // execute on an operator connection even if a future refactor
+  // reorders the chain below.
+  if (isOperator && !OPERATOR_ALLOWED_OPS.has(req.op)) {
+    socket.write(
+      encodeResponse(
+        errorResponse(
+          "DENIED",
+          `kernel operator socket is read-only: '${req.op}' is not permitted (only ${[...OPERATOR_ALLOWED_OPS].join(", ")})`,
+        ),
+      ),
+    );
+    return;
+  }
+
   // Only approval ops are served here. Anything else (vault_get, list_grants,
   // etc.) is the broker's territory and gets a hard error.
   if (req.op === "approval_request") {
@@ -370,16 +471,20 @@ function handleRequest(
 
 // ─── Top-level entrypoint ─────────────────────────────────────────────────────
 
-interface KernelServerHandle {
+/** @internal exported for the operator-ACL integration test. */
+export interface KernelServerHandle {
   listeners: AgentListener[];
   db: Database;
   stop(): void;
 }
 
-async function bootstrap(opts: {
+/** @internal exported for the operator-ACL integration test. */
+export async function bootstrap(opts: {
   socketParent: string;
   agents: string[];
   dbPath: string;
+  /** When set, also bind the read-only host operator socket. */
+  operatorUid?: number;
 }): Promise<KernelServerHandle> {
   process.umask(0o077);
   mkdirSync(opts.socketParent, { recursive: true, mode: 0o755 });
@@ -391,6 +496,13 @@ async function bootstrap(opts: {
   for (const agent of opts.agents) {
     const l = await bindAgentSocket(opts.socketParent, agent, db);
     listeners.push(l);
+  }
+  if (opts.operatorUid !== undefined) {
+    const l = await bindOperatorSocket(opts.socketParent, opts.operatorUid, db);
+    listeners.push(l);
+    process.stdout.write(
+      `approval-kernel: operator socket bound at ${l.socketPath} (read-only: approval_list)\n`,
+    );
   }
   return {
     listeners,
@@ -412,6 +524,16 @@ export async function main(): Promise<void> {
   const socketParent = dirname(resolve(socketEnv));
   const dbPath = process.env.SWITCHROOM_KERNEL_DB_PATH ?? DEFAULT_DB_PATH;
   const configPath = process.env.SWITCHROOM_CONFIG;
+  // Host operator socket — opt-in via SWITCHROOM_KERNEL_OPERATOR_UID
+  // (compose emits it next to the operator bind mount, gated on the
+  // same operatorUid config the auth-broker uses). A non-integer /
+  // unset value leaves the operator listener unbound (behaviour
+  // unchanged). Read-only by construction (see OPERATOR_ALLOWED_OPS).
+  const operatorUidRaw = process.env.SWITCHROOM_KERNEL_OPERATOR_UID;
+  const operatorUid =
+    operatorUidRaw && /^\d+$/.test(operatorUidRaw)
+      ? Number(operatorUidRaw)
+      : undefined;
 
   let agents: string[] = [];
   // Primary: enumerate per-agent socket dirs that compose mounted in.
@@ -424,6 +546,11 @@ export async function main(): Promise<void> {
     if (existsSync(socketParent)) {
       agents = readdirSync(socketParent)
         .filter((name) => {
+          // The operator dir is NOT an agent. Excluding it here is
+          // defence-in-depth: even if the operator bind mount exists,
+          // it must never be bound as a per-agent listener (which
+          // would skip the deny-by-default operator allowlist).
+          if (name === KERNEL_OPERATOR_NAME) return false;
           try {
             const p = resolve(socketParent, name);
             return statSync(p).isDirectory();
@@ -476,7 +603,7 @@ export async function main(): Promise<void> {
     return;
   }
 
-  const handle = await bootstrap({ socketParent, agents, dbPath });
+  const handle = await bootstrap({ socketParent, agents, dbPath, operatorUid });
   for (const l of handle.listeners) {
     process.stdout.write(`approval-kernel: listening agent=${l.agent} sock=${l.socketPath}\n`);
   }

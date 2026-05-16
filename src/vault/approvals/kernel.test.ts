@@ -111,7 +111,7 @@ describe("approval kernel — request/consume/record/lookup", () => {
       approver_set: ["123"],
       why: "needs to call OpenAI",
     });
-    expect(r.request_id).toMatch(/^[0-9a-f]{8}$/);
+    expect(r.request_id).toMatch(/^[0-9a-f]{32}$/);
 
     expect(
       lookupDecision(db, {

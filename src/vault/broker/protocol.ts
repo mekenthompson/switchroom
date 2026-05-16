@@ -232,7 +232,7 @@ export const ApprovalLookupRequestSchema = z.object({
 export const ApprovalConsumeRequestSchema = z.object({
   v: z.literal(1),
   op: z.literal("approval_consume"),
-  request_id: z.string().regex(/^[0-9a-f]{8}$/),
+  request_id: z.string().regex(/^[0-9a-f]{32}$/),
 });
 
 export const ApprovalRevokeRequestSchema = z.object({
@@ -261,7 +261,7 @@ export type ApprovalDecisionMode = z.infer<typeof ApprovalDecisionModeSchema>;
 export const ApprovalRecordRequestSchema = z.object({
   v: z.literal(1),
   op: z.literal("approval_record"),
-  request_id: z.string().regex(/^[0-9a-f]{8}$/),
+  request_id: z.string().regex(/^[0-9a-f]{32}$/),
   decision: ApprovalDecisionModeSchema,
   approver_set: z.array(z.string()),
   granted_by_user_id: z.number().int(),

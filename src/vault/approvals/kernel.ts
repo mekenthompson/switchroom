@@ -48,7 +48,7 @@ export interface ApprovalRequestInput {
 }
 
 export interface RequestApprovalResult {
-  request_id: string;       // 8-hex; goes on the apv: callback_data
+  request_id: string;       // 32-hex (128-bit, #1399); goes on the apv: callback_data
   expires_at: number;       // unix-ms when the prompt times out
 }
 
@@ -84,8 +84,11 @@ export type LookupResult =
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function generateRequestId(): string {
-  // 8 hex chars — matches generateAskId convention in telegram-plugin/ask-user.ts
-  return randomBytes(4).toString("hex");
+  // 128-bit (32 hex chars). #1399: 32-bit (randomBytes(4)) was online-
+  // guessable against a long-lived daemon and compounded the cross-agent
+  // nonce/decision attack surface. Still well under Telegram's 64-byte
+  // callback_data limit (`apv:<32hex>:allow_always` ≈ 49 bytes).
+  return randomBytes(16).toString("hex");
 }
 
 function audit(

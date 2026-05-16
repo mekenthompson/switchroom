@@ -82,6 +82,7 @@ export default defineConfig({
       // Approval-kernel suites use bun:sqlite — run via test:bun.
       "**/src/vault/approvals/kernel.test.ts",
       "**/src/vault/approvals/kernel-operator-acl.test.ts",
+      "**/src/vault/approvals/kernel-listener-acl.test.ts",
       "**/src/vault/approvals/schema-idempotent.test.ts",
       "**/src/vault/approvals/vd-unlock-dual-dispatch.test.ts",
       "**/src/vault/approvals/vault-grant-dual-dispatch.test.ts",

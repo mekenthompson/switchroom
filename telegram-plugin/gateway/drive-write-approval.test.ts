@@ -66,7 +66,7 @@ function deps(overrides: Partial<DriveApprovalHandlerDeps> & { spy: Spy }): Driv
         ttl_ms: args.ttl_ms,
         approver_set: args.approver_set,
       });
-      return { request_id: "aabbccdd", expires_at_ms: Date.now() + args.ttl_ms };
+      return { request_id: "aabbccddaabbccddaabbccddaabbccdd", expires_at_ms: Date.now() + args.ttl_ms };
     },
     postCard: async (args) => {
       spy.posted.push({
@@ -123,7 +123,7 @@ describe("handleRequestDriveApproval — happy path", () => {
       type: "drive_approval_posted",
       correlationId: "corr-1",
       ok: true,
-      requestId: "aabbccdd",
+      requestId: "aabbccddaabbccddaabbccddaabbccdd",
     });
     expect(spy.sent[0]?.expiresAtMs).toBeGreaterThan(Date.now());
   });

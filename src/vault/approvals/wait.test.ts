@@ -53,7 +53,7 @@ describe("waitForApproval", () => {
       _request: async () =>
         ({
           state: "pending",
-          request_id: "abc12345",
+          request_id: "abc12345abc12345abc12345abc12345",
           expires_at: 9_999_999_999,
         }) satisfies ApprovalRequestResult,
       _lookup: async () => lookups.shift() ?? null,
@@ -63,7 +63,7 @@ describe("waitForApproval", () => {
       kind: "decided",
       state: "granted",
       decision: fakeDecision(),
-      request_id: "abc12345",
+      request_id: "abc12345abc12345abc12345abc12345",
     });
     expect(sleepSpy).toHaveBeenCalled();
   });

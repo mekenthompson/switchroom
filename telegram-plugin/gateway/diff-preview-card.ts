@@ -55,7 +55,7 @@ export interface DiffPreviewCardInput {
  * callback_data that the dispatcher rejects, but we'd rather fail
  * loudly at build time.
  */
-const REQUEST_ID_RE = /^[0-9a-f]{8}$/;
+const REQUEST_ID_RE = /^[0-9a-f]{32}$/;
 
 /**
  * Fragility-guard from B2 review: the `create_doc` prep helper

@@ -117,6 +117,13 @@ describe("buildUvxArgs — pinned upstream + --single-user", () => {
     expect(args).toEqual([
       "--from",
       `git+https://github.com/taylorwilsdon/google_workspace_mcp.git@${GOOGLE_WORKSPACE_MCP_PINNED_SHA}`,
+      // `--with aiofile==3.8.8` is load-bearing, not optional: without
+      // it the modern fastmcp→key_value→aiofile import chain crashes
+      // with `KeyError: 'Author'` and the MCP never starts (verified
+      // in-container; ==1.20.4 and latest PyPI crash identically). Must
+      // sit BEFORE the entrypoint positional (it's a uvx option).
+      "--with",
+      "aiofile==3.8.8",
       // MUST be `workspace-mcp` — the upstream package provides only
       // `workspace-mcp` and `workspace-cli`. The original
       // `google-workspace-mcp` made uvx exit "executable not provided
@@ -126,6 +133,10 @@ describe("buildUvxArgs — pinned upstream + --single-user", () => {
       "--single-user",
     ]);
     expect(args).not.toContain("google-workspace-mcp");
+    // Regression guard for the aiofile landmine — order matters
+    // (uvx options precede the entrypoint).
+    expect(args.indexOf("--with")).toBeLessThan(args.indexOf("workspace-mcp"));
+    expect(args).toContain("aiofile==3.8.8");
   });
 
   it("appends --tool-tier <tier> after --single-user when a tier is given", () => {

@@ -172,10 +172,30 @@ export function buildSeedCredentials(
  * package `workspace-mcp`" — verified in-container against the pinned
  * SHA.
  */
+// Upstream dependency landmine. `workspace-mcp` pulls a modern
+// `fastmcp` whose `oauth_proxy → key_value → filetree` import chain
+// imports `aiofile`. `aiofile/version.py` (still, on master) does
+// `package_metadata["Author"]`; under the `importlib_metadata`
+// backport's #371 behavior change (KeyError on a missing key) and
+// aiofile's newer wheels emitting only `Author-email`, that import
+// raises `KeyError: 'Author'` and the MCP server never starts. NOT a
+// switchroom bug and NOT fixed by repinning workspace-mcp (==1.20.4
+// and latest PyPI both crash identically — verified in-container).
+// Constraining the leaf package to a version whose wheel metadata
+// still carries `Author` defuses it with minimal blast radius (vs.
+// pinning the foundational importlib_metadata). `aiofile==3.8.8`
+// validated end-to-end in a real agent container: reaches "Starting
+// MCP server 'google_workspace' (stdio)". Bump in lockstep with the
+// upstream SHA + a re-test of the import+startup path.
+const AIOFILE_PIN = "aiofile==3.8.8";
+
 export function buildUvxArgs(tier?: string): string[] {
   const args = [
     "--from",
     `git+https://github.com/taylorwilsdon/google_workspace_mcp.git@${GOOGLE_WORKSPACE_MCP_PINNED_SHA}`,
+    // uvx option — must precede the `workspace-mcp` entrypoint positional.
+    "--with",
+    AIOFILE_PIN,
     "workspace-mcp",
     "--single-user",
   ];

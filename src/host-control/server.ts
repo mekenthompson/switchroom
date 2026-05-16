@@ -1098,18 +1098,6 @@ export function hostdSocketPathForAgent(agentName: string): string {
   return `/run/switchroom/hostd/${agentName}/sock`;
 }
 
-/** True iff the daemon's per-agent socket is bound (Linux UDS check). */
-export function isHostdReachable(agentName: string): boolean {
-  const path = hostdSocketPathForAgent(agentName);
-  if (!existsSync(path)) return false;
-  try {
-    const s = statSync(path);
-    return s.isSocket();
-  } catch {
-    return false;
-  }
-}
-
 // Exported for symmetry with src/vault/broker — most callers use the
 // class methods, but tests + cli wrappers reach in.
 export { readdirSync };

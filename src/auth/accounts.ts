@@ -195,17 +195,6 @@ export function writeSlotMeta(
   });
 }
 
-export function readSlotToken(agentDir: string, slot: string): string | null {
-  const p = slotTokenPath(agentDir, slot);
-  if (!existsSync(p)) return null;
-  try {
-    const v = readFileSync(p, "utf-8").trim();
-    return v.length > 0 ? v : null;
-  } catch {
-    return null;
-  }
-}
-
 /** Write a token + fresh meta into a slot.
  *
  * Preserves any pre-existing `accountLabel` on the slot — labels are
@@ -482,58 +471,6 @@ export function pickFallbackSlot(
 
 /* ── Quota detection + marking ───────────────────────────────────────── */
 
-/**
- * Best-guess quota-exhaustion detector.
- *
- * TODO: verify exact strings emitted by Claude Code when the 5-hour quota
- * trips. Patterns below are plausible but unconfirmed.
- */
-export function detectQuotaExhausted(chunk: string): {
-  hit: boolean;
-  resetAtMs?: number;
-} {
-  if (!chunk) return { hit: false };
-  const patterns: RegExp[] = [
-    /5-hour (usage )?limit/i,
-    /rate.?limit/i,
-    /usage limit/i,
-    /\b429\b/,
-    /quota (exceeded|exhausted)/i,
-    /too many requests/i,
-  ];
-  const hit = patterns.some((r) => r.test(chunk));
-  if (!hit) return { hit: false };
-
-  // Try to parse an explicit reset time: "resets at 14:05 UTC" or
-  // "try again in 42 minutes" or "retry after 3600" (seconds).
-  let resetAtMs: number | undefined;
-  const retryAfterSec = chunk.match(/retry.?after[^0-9]*(\d+)/i);
-  if (retryAfterSec) {
-    resetAtMs = Date.now() + parseInt(retryAfterSec[1], 10) * 1000;
-  } else {
-    const inMinutes = chunk.match(/in\s+(\d+)\s+minute/i);
-    if (inMinutes) {
-      resetAtMs = Date.now() + parseInt(inMinutes[1], 10) * 60_000;
-    }
-  }
-  return { hit: true, resetAtMs };
-}
-
-export function markSlotQuotaExhausted(
-  agentDir: string,
-  slot: string,
-  resetAtMs?: number,
-  reason?: string,
-): void {
-  const meta = readSlotMeta(agentDir, slot) ?? {
-    createdAt: Date.now(),
-    expiresAt: Date.now() + 365 * 24 * 60 * 60_000,
-    source: "unknown",
-  };
-  meta.quotaExhaustedUntil = resetAtMs ?? Date.now() + FIVE_HOURS_MS;
-  if (reason) meta.quotaReason = reason;
-  writeSlotMeta(agentDir, slot, meta);
-}
 
 /* ── High-level slot operations ──────────────────────────────────────── */
 

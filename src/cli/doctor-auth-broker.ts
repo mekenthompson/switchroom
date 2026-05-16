@@ -369,14 +369,3 @@ export function runAuthBrokerChecks(
   const rank: Record<CheckStatus, number> = { fail: 0, warn: 1, ok: 2 };
   return [...results].sort((a, b) => rank[a.status] - rank[b.status]);
 }
-
-/** Re-exported for inspection by tests that want to walk the state dir. */
-export function authBrokerStateFiles(deps: AuthBrokerProbeDeps = {}): string[] {
-  const stateDir = resolveStateDir(deps);
-  if (!existsSync(stateDir)) return [];
-  try {
-    return readdirSync(stateDir).sort();
-  } catch {
-    return [];
-  }
-}

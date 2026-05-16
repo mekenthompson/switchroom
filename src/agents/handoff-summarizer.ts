@@ -24,7 +24,7 @@
  */
 
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync, statSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { spawn } from "node:child_process";
 
 export const DEFAULT_SUMMARIZER_MODEL = "claude-haiku-4-5-20251001";
@@ -429,8 +429,4 @@ export function findLatestSessionJsonl(claudeConfigDir: string): string | null {
   };
   walk(projects);
   return latest ? (latest as { path: string; mtime: number }).path : null;
-}
-
-export function agentDirFromClaudeConfig(claudeConfigDir: string): string {
-  return dirname(claudeConfigDir);
 }

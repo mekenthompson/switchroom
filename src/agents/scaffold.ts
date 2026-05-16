@@ -654,8 +654,8 @@ cd ${shellSingleQuote(agentDir)}
 # subscription quota to API billing.
 unset ANTHROPIC_API_KEY
 export CLAUDE_CONFIG_DIR=${shellSingleQuote(agentDir + "/.claude")}
-# SWITCHROOM_AGENT_NAME mirrors the gateway unit's Environment= setting
-# (see src/agents/systemd.ts). Required so in-prompt \`switchroom issues
+# SWITCHROOM_AGENT_NAME mirrors the gateway's container/unit environment.
+# Required so in-prompt \`switchroom issues
 # record\` calls without an explicit --agent flag attribute correctly,
 # and so the vault broker client can resolve a default agent.
 export SWITCHROOM_AGENT_NAME=${shellSingleQuote(basename(agentDir))}

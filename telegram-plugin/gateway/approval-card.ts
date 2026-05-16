@@ -89,7 +89,7 @@ export function parseApprovalCallback(data: string): ParsedApprovalCallback | nu
   if (parts.length < 3) return null;
   const request_id = parts[1];
   const choiceStr = parts[2];
-  if (!/^[0-9a-f]{8}$/.test(request_id ?? "")) return null;
+  if (!/^[0-9a-f]{32}$/.test(request_id ?? "")) return null;
   switch (choiceStr) {
     case "once":
       return { request_id: request_id as string, choice: { kind: "once" } };

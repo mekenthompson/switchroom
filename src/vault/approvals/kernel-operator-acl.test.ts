@@ -3,11 +3,13 @@
  * listener (RFC: dashboard read-only kernel access).
  *
  * The kernel's mutating ops (approval_request/consume/revoke/record)
- * carry NO op-level ACL — their only gate is per-agent socket
- * isolation. The operator socket bypasses that isolation by design, so
- * it MUST be deny-by-default: only `approval_list` is permitted. These
- * tests pin that inversion over a real bound socket so a refactor that
- * reorders the op chain or widens the allowlist fails loudly.
+ * are gated by the listener-identity ACL (#1399 — see
+ * kernel-listener-acl.test.ts). That ACL keys off the bound agent name,
+ * so it cannot be satisfied on the operator socket (no agent identity).
+ * Independently, the operator socket MUST be deny-by-default: only
+ * `approval_list` is permitted. These tests pin that inversion over a
+ * real bound socket so a refactor that reorders the op chain or widens
+ * the allowlist fails loudly.
  *
  * bun test (openKernelDb → bun:sqlite); excluded from vitest.
  */
@@ -120,7 +122,7 @@ describe("kernel operator socket — deny-by-default ACL", () => {
     ],
     [
       "approval_consume",
-      { v: 1, op: "approval_consume", request_id: "0badf00d" },
+      { v: 1, op: "approval_consume", request_id: "0badf00d0badf00d0badf00d0badf00d" },
     ],
     [
       "approval_revoke",
@@ -131,7 +133,7 @@ describe("kernel operator socket — deny-by-default ACL", () => {
       {
         v: 1,
         op: "approval_record",
-        request_id: "0badf00d",
+        request_id: "0badf00d0badf00d0badf00d0badf00d",
         decision: "allow_always",
         approver_set: ["u1"],
         granted_by_user_id: 1,
@@ -158,7 +160,7 @@ describe("kernel operator socket — deny-by-default ACL", () => {
     const resp = await rpc(agentSock, {
       v: 1,
       op: "approval_record",
-      request_id: "0badf00d",
+      request_id: "0badf00d0badf00d0badf00d0badf00d",
       decision: "allow_always",
       approver_set: ["u1"],
       granted_by_user_id: 1,

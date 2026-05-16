@@ -54,6 +54,7 @@ import {
   listDecisions,
   recordDecision,
   getNonce,
+  getDecision,
   countPendingNonces,
   computeRetryAfterMs,
   MAX_PENDING_PER_AGENT,
@@ -303,14 +304,16 @@ export const KERNEL_OPERATOR_NAME = "operator";
  * and that inversion is the entire security point of this socket.
  *
  * The kernel's mutating ops (`approval_consume` / `approval_revoke` /
- * `approval_record` / `approval_request`) carry NO op-level ACL: their
- * only gate is per-agent socket isolation. The operator socket is, by
- * construction, not in any agent's per-agent dir, so it bypasses that
- * isolation. An operator connection that could reach those ops would be
- * unauthenticated fleet-wide grant forgery / nonce burning. So the
- * operator socket is restricted to the single read-only op the
- * dashboard needs — listing decision metadata. Widening this set
- * without a per-op authorization story is a security regression.
+ * `approval_record` / `approval_request`) are gated by a listener-identity
+ * ACL: the resolved nonce/decision's `agent_unit` must equal the listener's
+ * bind-time agent name (#1399 — `checkApprovalAclByAgent`). That ACL keys
+ * off the *bound listener*, so it cannot be satisfied on the operator
+ * socket at all (no agent identity). An operator connection reaching those
+ * ops would still be unauthenticated fleet-wide grant forgery / nonce
+ * burning, so the operator socket is independently restricted to the
+ * single read-only op the dashboard needs — listing decision metadata.
+ * Widening this set without a per-op authorization story is a security
+ * regression.
  */
 const OPERATOR_ALLOWED_OPS: ReadonlySet<string> = new Set(["approval_list"]);
 
@@ -408,6 +411,21 @@ function handleRequest(
     return;
   }
   if (req.op === "approval_consume") {
+    // Listener-identity ACL (#1399): resolve the nonce's owning agent_unit
+    // and refuse if it is not the listener's bound agent. Without this a
+    // compromised agent on its own legitimate socket could burn / self-
+    // consume any peer's (or its own unrequested) nonce. The generic DENIED
+    // message deliberately omits the owning agent name (no cross-agent
+    // existence/identity oracle); a null peek falls through to the existing
+    // {consumed:false} non-committal path.
+    const peek = getNonce(db, req.request_id);
+    if (peek !== null) {
+      const acl = checkApprovalAclByAgent(agent, peek.agent_unit);
+      if (!acl.allow) {
+        socket.write(encodeResponse(errorResponse("DENIED", "approval_consume denied: nonce does not belong to the calling agent")));
+        return;
+      }
+    }
     const nonce = consumeNonce(db, req.request_id);
     if (nonce === null) {
       socket.write(encodeResponse({ ok: true, consumed: false }));
@@ -424,6 +442,17 @@ function handleRequest(
     return;
   }
   if (req.op === "approval_revoke") {
+    // Listener-identity ACL (#1399): a decision may only be revoked from
+    // the socket of the agent it belongs to. A null lookup falls through
+    // to revokeDecision, which returns {revoked:false} (unchanged).
+    const dec = getDecision(db, req.decision_id);
+    if (dec !== null) {
+      const acl = checkApprovalAclByAgent(agent, dec.agent_unit);
+      if (!acl.allow) {
+        socket.write(encodeResponse(errorResponse("DENIED", "approval_revoke denied: decision does not belong to the calling agent")));
+        return;
+      }
+    }
     const revoked = revokeDecision(db, req.decision_id, req.actor, req.reason);
     socket.write(encodeResponse({ ok: true, revoked }));
     return;
@@ -436,6 +465,15 @@ function handleRequest(
     }
     if (nonce.consumed_at === null) {
       socket.write(encodeResponse(errorResponse("BAD_REQUEST", "nonce must be consumed before recording — call approval_consume first")));
+      return;
+    }
+    // Listener-identity ACL (#1399): the nonce being recorded must belong
+    // to the listener's bound agent. Without this a compromised agent could
+    // self-consume + self-record an allow_always decision for a gated tool
+    // call no operator ever approved (approval-integrity bypass).
+    const recordAcl = checkApprovalAclByAgent(agent, nonce.agent_unit);
+    if (!recordAcl.allow) {
+      socket.write(encodeResponse(errorResponse("DENIED", "approval_record denied: nonce does not belong to the calling agent")));
       return;
     }
     const decision_id = recordDecision(db, {

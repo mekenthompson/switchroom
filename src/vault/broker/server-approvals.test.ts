@@ -94,7 +94,7 @@ describe("VaultBroker: approval-kernel ops", () => {
     if (!(r1.ok && "kind" in r1 && r1.kind === "approval_request")) throw new Error("bad shape");
     if (r1.state !== "pending") throw new Error(`unexpected state ${r1.state}`);
     const reqId = r1.request_id;
-    expect(reqId).toMatch(/^[0-9a-f]{8}$/);
+    expect(reqId).toMatch(/^[0-9a-f]{32}$/);
 
     const r2 = await rpc(socketPath, {
       v: 1, op: "approval_lookup",

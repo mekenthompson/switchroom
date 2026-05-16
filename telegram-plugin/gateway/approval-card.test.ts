@@ -12,7 +12,7 @@ import {
 describe("approval card", () => {
   it("renders the pristine card with default buttons", () => {
     const card = buildApprovalCard({
-      request_id: "a3f1b9c2",
+      request_id: "a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2",
       agent: "klanker",
       scope_humanized: "secret:OPENAI_API_KEY",
       why: "needs to call OpenAI",
@@ -24,14 +24,14 @@ describe("approval card", () => {
     // Validate the inline_keyboard structure carries our four callback shapes
     const flat = card.reply_markup.inline_keyboard.flat();
     const datas = flat.map((b) => ("callback_data" in b ? b.callback_data : ""));
-    expect(datas).toContain("apv:a3f1b9c2:once");
-    expect(datas).toContain("apv:a3f1b9c2:deny");
-    expect(datas).toContain("apv:a3f1b9c2:always");
+    expect(datas).toContain("apv:a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2:once");
+    expect(datas).toContain("apv:a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2:deny");
+    expect(datas).toContain("apv:a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2:always");
   });
 
   it("respects offer_always=false and offer_ttl=true", () => {
     const card = buildApprovalCard({
-      request_id: "a3f1b9c2",
+      request_id: "a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2",
       agent: "k",
       scope_humanized: "x",
       offer_always: false,
@@ -40,13 +40,13 @@ describe("approval card", () => {
     const datas = card.reply_markup.inline_keyboard
       .flat()
       .map((b) => ("callback_data" in b ? b.callback_data : ""));
-    expect(datas).not.toContain("apv:a3f1b9c2:always");
-    expect(datas).toContain("apv:a3f1b9c2:ttl:1h");
+    expect(datas).not.toContain("apv:a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2:always");
+    expect(datas).toContain("apv:a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2:ttl:1h");
   });
 
   it("escapes HTML metacharacters in agent and scope", () => {
     const card = buildApprovalCard({
-      request_id: "deadbeef",
+      request_id: "deadbeefdeadbeefdeadbeefdeadbeef",
       agent: "<script>",
       scope_humanized: "a&b",
     });
@@ -58,21 +58,21 @@ describe("approval card", () => {
 
 describe("parseApprovalCallback", () => {
   it("parses every choice variant", () => {
-    expect(parseApprovalCallback("apv:a3f1b9c2:once"))
-      .toEqual({ request_id: "a3f1b9c2", choice: { kind: "once" } });
-    expect(parseApprovalCallback("apv:a3f1b9c2:always"))
-      .toEqual({ request_id: "a3f1b9c2", choice: { kind: "always" } });
-    expect(parseApprovalCallback("apv:a3f1b9c2:deny"))
-      .toEqual({ request_id: "a3f1b9c2", choice: { kind: "deny" } });
-    expect(parseApprovalCallback("apv:a3f1b9c2:ttl:1h"))
-      .toEqual({ request_id: "a3f1b9c2", choice: { kind: "ttl", param: "1h" } });
+    expect(parseApprovalCallback("apv:a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2:once"))
+      .toEqual({ request_id: "a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2", choice: { kind: "once" } });
+    expect(parseApprovalCallback("apv:a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2:always"))
+      .toEqual({ request_id: "a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2", choice: { kind: "always" } });
+    expect(parseApprovalCallback("apv:a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2:deny"))
+      .toEqual({ request_id: "a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2", choice: { kind: "deny" } });
+    expect(parseApprovalCallback("apv:a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2:ttl:1h"))
+      .toEqual({ request_id: "a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2", choice: { kind: "ttl", param: "1h" } });
   });
 
   it("rejects malformed prefixes and bad ids", () => {
     expect(parseApprovalCallback("perm:more:abc")).toBeNull();
     expect(parseApprovalCallback("apv:NOTHEX12:once")).toBeNull();
-    expect(parseApprovalCallback("apv:a3f1b9c2:bogus")).toBeNull();
-    expect(parseApprovalCallback("apv:a3f1b9c2:ttl")).toBeNull();
+    expect(parseApprovalCallback("apv:a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2:bogus")).toBeNull();
+    expect(parseApprovalCallback("apv:a3f1b9c2a3f1b9c2a3f1b9c2a3f1b9c2:ttl")).toBeNull();
   });
 });
 

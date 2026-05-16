@@ -41,8 +41,8 @@ describe("buildDiffPreviewCard — suggest mode (default)", () => {
     const preview = buildDiffPreview(baseInput({ agentSummary: "Added Hiring section" }));
     const card = buildDiffPreviewCard({
       preview,
-      suggestRequestId: "aabbccdd",
-      writeRequestId: "11223344",
+      suggestRequestId: "aabbccddaabbccddaabbccddaabbccdd",
+      writeRequestId: "11223344112233441122334411223344",
     });
 
     // Body: title bold + all preview lines.
@@ -59,19 +59,19 @@ describe("buildDiffPreviewCard — suggest mode (default)", () => {
     expect(r[0]?.[0]?.text).toBe("📖 Open in Drive");
     expect(r[0]?.[0]?.url).toBe("https://docs.google.com/document/d/DOC1/edit");
     expect(r[0]?.[1]?.text).toBe("✅ Apply as suggestion");
-    expect(r[0]?.[1]?.callback_data).toBe("apv:aabbccdd:once");
+    expect(r[0]?.[1]?.callback_data).toBe("apv:aabbccddaabbccddaabbccddaabbccdd:once");
     // Row 2: [Apply directly] [Cancel]
     expect(r[1]?.[0]?.text).toBe("⚠ Apply directly");
-    expect(r[1]?.[0]?.callback_data).toBe("apv:11223344:once");
+    expect(r[1]?.[0]?.callback_data).toBe("apv:11223344112233441122334411223344:once");
     expect(r[1]?.[1]?.text).toBe("🚫 Cancel");
-    expect(r[1]?.[1]?.callback_data).toBe("apv:aabbccdd:deny");
+    expect(r[1]?.[1]?.callback_data).toBe("apv:aabbccddaabbccddaabbccddaabbccdd:deny");
   });
 
   it("hides 'Apply directly' when writeRequestId is undefined", () => {
     const preview = buildDiffPreview(baseInput());
     const card = buildDiffPreviewCard({
       preview,
-      suggestRequestId: "aabbccdd",
+      suggestRequestId: "aabbccddaabbccddaabbccddaabbccdd",
     });
     const flat = rows(card.reply_markup).flat();
     expect(flat.find((b) => b.text === "⚠ Apply directly")).toBeUndefined();
@@ -91,8 +91,8 @@ describe("buildDiffPreviewCard — write mode (opt-in via expand)", () => {
       // callback's deny channel — semantically Cancel is "don't grant
       // either scope" but reusing the suggest id keeps the existing
       // approval-callback handler stateless.
-      suggestRequestId: "aabbccdd",
-      writeRequestId: "11223344",
+      suggestRequestId: "aabbccddaabbccddaabbccddaabbccdd",
+      writeRequestId: "11223344112233441122334411223344",
     });
 
     const r = rows(card.reply_markup);
@@ -100,7 +100,7 @@ describe("buildDiffPreviewCard — write mode (opt-in via expand)", () => {
     expect(flat.find((b) => b.text === "✅ Apply as suggestion")).toBeUndefined();
     const directly = flat.find((b) => b.text === "⚠ Apply directly");
     expect(directly).toBeDefined();
-    expect(directly?.callback_data).toBe("apv:11223344:once");
+    expect(directly?.callback_data).toBe("apv:11223344112233441122334411223344:once");
     // Title icon swaps to ⚠.
     expect(card.text).toContain("⚠");
   });
@@ -119,7 +119,7 @@ describe("buildDiffPreviewCard — input validation", () => {
     expect(() =>
       buildDiffPreviewCard({
         preview,
-        suggestRequestId: "aabbccdd",
+        suggestRequestId: "aabbccddaabbccddaabbccddaabbccdd",
         writeRequestId: "ABCDEF01", // wrong case
       }),
     ).toThrow(/8 hex chars/);
@@ -136,7 +136,7 @@ describe("buildDiffPreviewCard — fragility guards", () => {
     );
     const card = buildDiffPreviewCard({
       preview,
-      suggestRequestId: "aabbccdd",
+      suggestRequestId: "aabbccddaabbccddaabbccddaabbccdd",
     });
     const flat = rows(card.reply_markup).flat();
     expect(flat.find((b) => b.text === "📖 Open in Drive")).toBeUndefined();
@@ -150,7 +150,7 @@ describe("buildDiffPreviewCard — fragility guards", () => {
     );
     const card = buildDiffPreviewCard({
       preview,
-      suggestRequestId: "aabbccdd",
+      suggestRequestId: "aabbccddaabbccddaabbccddaabbccdd",
     });
     expect(card.text).not.toContain("<script>");
     expect(card.text).toContain("&lt;script&gt;");
@@ -162,7 +162,7 @@ describe("buildDiffPreviewCard — fragility guards", () => {
     );
     const card = buildDiffPreviewCard({
       preview,
-      suggestRequestId: "aabbccdd",
+      suggestRequestId: "aabbccddaabbccddaabbccddaabbccdd",
     });
     expect(card.text).not.toMatch(/💬.*<b>/);
     expect(card.text).toContain("&lt;b&gt;");
@@ -175,8 +175,8 @@ describe("buildDiffPreviewCard — audit fidelity", () => {
     const preview = buildDiffPreview(input);
     const card = buildDiffPreviewCard({
       preview,
-      suggestRequestId: "aabbccdd",
-      writeRequestId: "11223344",
+      suggestRequestId: "aabbccddaabbccddaabbccddaabbccdd",
+      writeRequestId: "11223344112233441122334411223344",
     });
     // The audit row captures both wrapper truth + agent framing,
     // exactly as surfaced on the card.

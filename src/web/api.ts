@@ -25,6 +25,7 @@ import {
   type SchedulerEntry,
   type DispatchResult,
 } from "../scheduler/dispatch.js";
+import { readRecentFires } from "../agent-scheduler/replay.js";
 import { captureEvent, captureException } from "../analytics/posthog.js";
 import { resolveAgentsDir } from "../config/loader.js";
 import { resolveAgentConfig } from "../config/merge.js";
@@ -538,23 +539,12 @@ export function handleGetSchedule(
   const recentByAgent: Record<string, DispatchResult[]> = {};
   const agents = new Set(entries.map((e) => e.agent));
   for (const agent of agents) {
-    const path = resolve(agentsDir, agent, "scheduler.jsonl");
-    if (!existsSync(path)) continue;
-    try {
-      const rows: DispatchResult[] = [];
-      for (const line of readFileSync(path, "utf-8").split("\n")) {
-        const t = line.trim();
-        if (!t) continue;
-        try {
-          rows.push(JSON.parse(t) as DispatchResult);
-        } catch {
-          /* skip a torn/partial JSONL line */
-        }
-      }
-      recentByAgent[agent] = rows.slice(-10);
-    } catch {
-      /* unreadable ledger — omit this agent, don't fail the view */
-    }
+    // Reuse the canonical ledger reader (existsSync + torn-line skip
+    // baked in) so the dashboard and the boot-replay path can't drift.
+    const rows = readRecentFires(
+      resolve(agentsDir, agent, "scheduler.jsonl"),
+    );
+    if (rows.length > 0) recentByAgent[agent] = rows.slice(-10);
   }
   return { entries, recentByAgent };
 }

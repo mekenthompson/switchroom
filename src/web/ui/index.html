@@ -533,9 +533,14 @@
     }
 
     function escapeHtml(s) {
-      const d = document.createElement('div');
-      d.textContent = s;
-      return d.innerHTML;
+      // Must cover attribute context too: values are interpolated into
+      // both text nodes AND title="..." attributes. The old
+      // textContent→innerHTML trick escapes &<> but NOT quotes, so an
+      // agent-authored string like `" onmouseover="x` could break out
+      // of a title= attribute. Escape the full set explicitly.
+      return String(s ?? '').replace(/[&<>"']/g, (c) => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+      }[c]));
     }
 
     function statusClass(agent) {

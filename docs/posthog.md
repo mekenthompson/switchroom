@@ -38,7 +38,7 @@ A random UUID is generated on first run and persisted at
 `~/.switchroom/analytics-id`. That file is the only personally identifiable
 value we keep. It's not tied to any OS-level identifier (username, MAC, etc.).
 
-If you run `switchroom auth login` and we gain access to a user-scoped identity
+If you run `switchroom auth add` and we gain access to a user-scoped identity
 in the future, call `client.identify({ distinctId, $anon_distinct_id: <uuid> })`
 to merge the anonymous ID into the real one. We don't do that today.
 

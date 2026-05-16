@@ -380,6 +380,77 @@ export function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;')
 }
 
+/**
+ * Last-resort renderer: turn (possibly malformed) Telegram HTML into
+ * readable plain text. Used by the gateway's send/edit path when
+ * Telegram rejects a chunk with a 400 "can't parse entities" /
+ * "unsupported start tag" — i.e. our HTML prevention (markdownToHtml +
+ * sanitizeForTelegram + splitHtmlChunks) let something through anyway.
+ *
+ * The caller resends the result with `parse_mode` UNSET, so the output
+ * is literal text — we intentionally do NOT re-escape `< > &`. The goal
+ * is "the agent's answer lands unformatted" instead of "the answer
+ * silently vanishes" (visibility + always-on).
+ *
+ * Transforms, in order:
+ *  1. `<a href="u">label</a>` → `label (u)` (or just `u` when label is
+ *     empty or equals the href). href/label are themselves stripped +
+ *     entity-decoded so we never emit nested markup.
+ *  2. Block / break boundaries → newline: `<br>`, `</p>`, `</div>`,
+ *     `</li>`, `</blockquote>`, `</pre>`. (These aren't Telegram-
+ *     supported tags, but a markdown→HTML slip that emits one is a
+ *     prime cause of the parse reject we're recovering from.)
+ *  3. Strip every remaining tag.
+ *  4. Decode the standard HTML entities Telegram uses.
+ *  5. Collapse 3+ blank lines to 2; trim trailing per-line whitespace.
+ */
+export function telegramHtmlToPlainText(html: string): string {
+  const decodeEntities = (s: string): string =>
+    s
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#0*39;|&#x0*27;|&apos;/gi, "'")
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&#(\d+);/g, (_m, d: string) => {
+        const cp = Number(d)
+        return Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff
+          ? String.fromCodePoint(cp)
+          : _m
+      })
+      .replace(/&#x([0-9a-fA-F]+);/g, (_m, h: string) => {
+        const cp = parseInt(h, 16)
+        return Number.isFinite(cp) && cp > 0 && cp <= 0x10ffff
+          ? String.fromCodePoint(cp)
+          : _m
+      })
+
+  const stripTags = (s: string): string =>
+    decodeEntities(
+      s
+        .replace(/<\s*br\s*\/?\s*>/gi, '\n')
+        .replace(/<\/\s*(?:p|div|li|blockquote|pre|h[1-6])\s*>/gi, '\n')
+        .replace(/<[^>]*>/g, ''),
+    )
+
+  // 1. Anchors → "label (href)". Handle double/single/unquoted href.
+  const withPlainLinks = html.replace(
+    /<a\b[^>]*\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))[^>]*>([\s\S]*?)<\/a>/gi,
+    (_m, dq: string | undefined, sq: string | undefined, uq: string | undefined, label: string) => {
+      const href = decodeEntities((dq ?? sq ?? uq ?? '').trim())
+      const text = stripTags(label).trim()
+      if (!href) return text
+      return !text || text === href ? href : `${text} (${href})`
+    },
+  )
+
+  return stripTags(withPlainLinks)
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 // ---------------------------------------------------------------------------
 // Output sanitizer — enforces fleet-wide Telegram formatting invariants
 // ---------------------------------------------------------------------------

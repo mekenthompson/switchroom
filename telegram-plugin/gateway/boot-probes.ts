@@ -959,7 +959,9 @@ export async function probeHindsight(
         status: 'fail',
         label: 'Hindsight',
         detail: 'unreachable',
-        nextStep: 'Hindsight server not responding on 127.0.0.1:18888 — start it with `hindsight serve` or check `systemctl --user status hindsight`',
+        nextStep: process.env.SWITCHROOM_RUNTIME === 'docker'
+          ? 'Hindsight server not responding on 127.0.0.1:18888 — check the hindsight container (`docker ps` / `docker logs`); it must be reachable on the host network.'
+          : 'Hindsight server not responding on 127.0.0.1:18888 — start it with `hindsight serve` (or check `systemctl --user status hindsight`).',
       }
     }
 

@@ -1,9 +1,9 @@
 /**
  * Shared formatters for Telegram status cards.
  *
- * Both the main progress card (`progress-card.ts`) and the pinned worker
- * card (`subagent-watcher.ts`) emit HTML to Telegram; before issue #94
- * each module had its own private copies of these helpers with subtly
+ * Both the main progress card (rendered via `stream-reply-handler.ts`)
+ * and the pinned worker card (`subagent-watcher.ts`) emit HTML to
+ * Telegram; before issue #94 each had its own private copies with subtly
  * different conventions:
  *
  *   - `formatDuration(500)` → progress-card returned `500ms`, watcher

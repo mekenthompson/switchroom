@@ -105,15 +105,6 @@ export async function captureException(
   }
 }
 
-export async function shutdownAnalytics(): Promise<void> {
-  if (!client) return;
-  try {
-    await client.shutdown(2000);
-  } catch {
-    // ignore
-  }
-}
-
 /**
  * Install process-level handlers for uncaught exceptions and unhandled
  * rejections so they're reported to PostHog before the process dies.

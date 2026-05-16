@@ -17,7 +17,7 @@
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { findLatestSessionJsonl } from "./handoff-summarizer.js";
 import { readTurnUsages, summarizeCache } from "./perf.js";
@@ -852,7 +852,3 @@ export function readCacheTelemetry(agentDir: string): CacheTelemetry | null {
     return null;
   }
 }
-
-// Keep `resolve` used — sanity import guard so we don't break bundling if
-// the function above is later split out.
-export const _unusedResolveGuard = resolve;

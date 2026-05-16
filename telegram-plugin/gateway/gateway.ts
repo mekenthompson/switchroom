@@ -7809,23 +7809,57 @@ async function runSwitchroomCommandFormatted(ctx: Context, args: string[], label
 // Invariant: when AGENT_ADMIN=true, this middleware is a no-op — bot.command()
 // handlers run normally for all admin verbs and Claude never sees them.
 bot.use(async (ctx, next) => {
-  if (!AGENT_ADMIN && ctx.message?.text) {
+  if (ctx.message?.text) {
     const myName = getMyAgentName()
     const decision = classifyAdminGate(ctx.message.text, myName)
     if (decision.action === 'block') {
-      // Block admin commands the LLM should never see. Reply with a concise
-      // "admin required" warning instead of forwarding to Claude.
-      process.stderr.write(
-        `telegram gateway: admin-gate blocked cmd=/${decision.cmd} agent=${process.env.SWITCHROOM_AGENT_NAME ?? '-'} reason=${decision.reason} (AGENT_ADMIN=false)\n`,
-      )
+      // `block` = a fleet-admin verb (ADMIN_COMMAND_NAMES) or
+      // `/restart <other-agent>`. classifyAdminGate already lets
+      // `/restart`-self and every non-admin command pass through, so
+      // this branch is exactly the privileged set.
       const cmdHtml = escapeHtmlForTg(`/${decision.cmd}`)
       const nameHtml = escapeHtmlForTg(myName)
-      const text =
+      const notFlagged =
         decision.reason === 'other-agent'
           ? `⚠️ <code>${cmdHtml}</code> targeting another agent is an admin operation — this agent (<code>${nameHtml}</code>) isn't admin-flagged. Run it from an admin agent, or set <code>admin: true</code> for this agent in switchroom.yaml. (Self-restart is allowed: send <code>/restart</code> with no arg.)`
           : `⚠️ <code>${cmdHtml}</code> is an admin command — this agent (<code>${nameHtml}</code>) isn't admin-flagged. Run it from an admin agent, or set <code>admin: true</code> for this agent in switchroom.yaml.`
-      await switchroomReply(ctx, text, { html: true })
-      return
+      if (!AGENT_ADMIN) {
+        // Unchanged behaviour: a non-admin agent never executes admin
+        // verbs locally and must not forward them to Claude.
+        process.stderr.write(
+          `telegram gateway: admin-gate blocked cmd=/${decision.cmd} agent=${process.env.SWITCHROOM_AGENT_NAME ?? '-'} reason=${decision.reason} (AGENT_ADMIN=false)\n`,
+        )
+        await switchroomReply(ctx, notFlagged, { html: true })
+        return
+      }
+      // sec WS7-F2 (#1394): fleet-admin is OPERATOR-PRIVATE. Honor it
+      // ONLY in a private chat from an `access.allowFrom` sender.
+      // Before this, when AGENT_ADMIN=true the middleware was a no-op
+      // and the per-command `isAuthorizedSender` gate treats an empty
+      // group `allowFrom` as "allow every member" — so any member of
+      // an admin agent's forum/group could run /vault, /update apply,
+      // /grant, /dangerous, etc. (the default shape for an agent
+      // created via `agent add --topology forum` + `admin: true`).
+      // Strict `access.allowFrom` + private-chat-only — never the
+      // group-permissive isAuthorizedSender.
+      const senderId = String(ctx.from?.id ?? '')
+      const operatorPrivate =
+        ctx.chat?.type === 'private' &&
+        loadAccess().allowFrom.includes(senderId)
+      if (!operatorPrivate) {
+        process.stderr.write(
+          `telegram gateway: admin-gate refused (not operator-private) cmd=/${decision.cmd} agent=${process.env.SWITCHROOM_AGENT_NAME ?? '-'} chat=${ctx.chat?.type ?? '?'} sender=${senderId}\n`,
+        )
+        await switchroomReply(
+          ctx,
+          `⚠️ <code>${cmdHtml}</code> is a fleet-admin command — it is <b>operator-private</b>. Send it as a direct message to me from your operator account (a private chat where your Telegram ID is on the access allowlist), not in a group or forum.`,
+          { html: true },
+        )
+        return
+      }
+      // operator-private admin verb on an admin agent → fall through
+      // to the bot.command() handler (which re-checks isAuthorizedSender
+      // — redundant but harmless in a private allowFrom chat).
     }
   }
   await next()

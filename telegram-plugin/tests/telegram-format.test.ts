@@ -6,7 +6,7 @@ import { describe, test, expect } from 'vitest'
 
 // Import from the side-effect-free format module so tests don't trigger
 // server.ts's startup (env load, token check, grammy init).
-import { markdownToHtml, splitHtmlChunks, isLikelyTelegramHtml, repairEscapedWhitespace, sanitizeForTelegram } from '../format.js'
+import { markdownToHtml, splitHtmlChunks, isLikelyTelegramHtml, repairEscapedWhitespace, sanitizeForTelegram, telegramHtmlToPlainText } from '../format.js'
 
 // ---------------------------------------------------------------------------
 // markdownToHtml
@@ -1089,5 +1089,80 @@ describe('markdownToHtml — markdown table rendering', () => {
     // Output is still a bullet list
     expect(result).toContain('• <b>AND</b>')
     expect(result).toContain('• <b>OR</b>')
+  })
+})
+
+describe('telegramHtmlToPlainText (HTML parse-reject fallback)', () => {
+  test('strips supported formatting tags, keeps the text', () => {
+    const out = telegramHtmlToPlainText('<b>Bold</b> and <i>italic</i> and <code>x=1</code>')
+    expect(out).toBe('Bold and italic and x=1')
+  })
+
+  test('anchors become "label (href)"', () => {
+    const out = telegramHtmlToPlainText('see <a href="https://example.com/x">the docs</a> now')
+    expect(out).toBe('see the docs (https://example.com/x) now')
+  })
+
+  test('anchor with label equal to href collapses to the bare url', () => {
+    const out = telegramHtmlToPlainText('<a href="https://example.com">https://example.com</a>')
+    expect(out).toBe('https://example.com')
+  })
+
+  test('anchor with empty label yields just the href', () => {
+    expect(telegramHtmlToPlainText('<a href="https://e.com"></a>')).toBe('https://e.com')
+  })
+
+  test('single-quoted and unquoted href forms are handled', () => {
+    expect(telegramHtmlToPlainText("<a href='https://a.co'>A</a>")).toBe('A (https://a.co)')
+    expect(telegramHtmlToPlainText('<a href=https://b.co>B</a>')).toBe('B (https://b.co)')
+  })
+
+  test('decodes the standard HTML entities (no double-decode of the result)', () => {
+    const out = telegramHtmlToPlainText('a &amp; b &lt;tag&gt; &quot;q&quot; &#39;s&#39; 5 &nbsp;€')
+    expect(out).toBe('a & b <tag> "q" \'s\' 5  €')
+  })
+
+  test('numeric + hex char references decode', () => {
+    expect(telegramHtmlToPlainText('&#8594; &#x2192;')).toBe('→ →')
+  })
+
+  test('out-of-range / malformed char refs are left literal', () => {
+    expect(telegramHtmlToPlainText('&#0; &#1114112; &#xZZ;')).toBe('&#0; &#1114112; &#xZZ;')
+  })
+
+  test('block/break boundaries become newlines', () => {
+    const out = telegramHtmlToPlainText('one<br>two<br/>three</p>four</blockquote>five')
+    expect(out).toBe('one\ntwo\nthree\nfour\nfive')
+  })
+
+  test('unsupported / malformed tags (the actual reject cause) are stripped, not escaped', () => {
+    // A markdown→HTML slip that emitted an unsupported tag is exactly
+    // what triggers Telegram's 400; the fallback must yield clean text.
+    const out = telegramHtmlToPlainText('<h2>Title</h2><span class=x>body </span><unknowntag>tail')
+    expect(out).toBe('Title\nbody tail')
+  })
+
+  test('result is literal (parse_mode unset) — no re-escaping of < > &', () => {
+    // We resend with parse_mode UNSET, so the output must be the raw
+    // characters, not HTML entities.
+    const out = telegramHtmlToPlainText('a &lt; b &amp;&amp; c &gt; d')
+    expect(out).toBe('a < b && c > d')
+    expect(out).not.toContain('&lt;')
+    expect(out).not.toContain('&amp;')
+  })
+
+  test('collapses 3+ blank lines and trims trailing line whitespace', () => {
+    const out = telegramHtmlToPlainText('a   \n\n\n\n\nb')
+    expect(out).toBe('a\n\nb')
+  })
+
+  test('nested formatting inside an anchor label is flattened', () => {
+    const out = telegramHtmlToPlainText('<a href="https://x.io"><b>Big</b> link</a>')
+    expect(out).toBe('Big link (https://x.io)')
+  })
+
+  test('empty / whitespace input is safe', () => {
+    expect(telegramHtmlToPlainText('')).toBe('')
+    expect(telegramHtmlToPlainText('   \n  ')).toBe('')
   })
 })

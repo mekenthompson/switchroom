@@ -62,6 +62,7 @@ import {
   createRetryApiCall,
   createSwallowingRetryApiCall,
   retryWithThreadFallback,
+  isHtmlParseRejectError,
 } from '../retry-api-call.js'
 import { installTgPostLogger, withTgPostTags } from '../shared/bot-runtime.js'
 import { buildAttachmentPath, assertInsideInbox } from '../attachment-path.js'
@@ -137,7 +138,7 @@ import { validateStringArray } from './access-validator.js'
  * identical envelope shapes.
  */
 const REPLY_TO_TEXT_MAX = 200
-import { markdownToHtml, splitHtmlChunks, repairEscapedWhitespace } from '../format.js'
+import { markdownToHtml, splitHtmlChunks, repairEscapedWhitespace, telegramHtmlToPlainText } from '../format.js'
 import {
   validateInlineKeyboard,
   type AnyButton,
@@ -3486,6 +3487,22 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
         }
       }
 
+      // Last-resort: resend this chunk as plain text (parse_mode unset).
+      // Keeps thread / reply / markup params; only the formatting is
+      // sacrificed. Used when Telegram rejects our HTML — better an
+      // unformatted answer than a vanished one.
+      const sendChunkPlainText = async (opts: Record<string, unknown>): Promise<void> => {
+        const plainOpts = { ...opts }
+        delete (plainOpts as { parse_mode?: unknown }).parse_mode
+        const plain = telegramHtmlToPlainText(chunks[i])
+        const sent = await lockedBot.api.sendMessage(chat_id, plain, plainOpts as never)
+        sentIds.push(sent.message_id)
+        logOutbound('reply', chat_id, sent.message_id, plain.length, `chunk=${i + 1}/${chunks.length} plaintext-fallback`)
+        process.stderr.write(
+          `telegram gateway: HTML parse-reject — resent chunk ${i + 1}/${chunks.length} as plain text\n`,
+        )
+      }
+
       try {
         const sent = await robustApiCall(
           () => lockedBot.api.sendMessage(chat_id, chunks[i], sendOpts as never),
@@ -3498,8 +3515,16 @@ async function executeReply(args: Record<string, unknown>): Promise<{ content: A
           threadId = undefined
           const retryOpts = { ...sendOpts }
           delete (retryOpts as any).message_thread_id
-          const sent = await lockedBot.api.sendMessage(chat_id, chunks[i], retryOpts as never)
-          sentIds.push(sent.message_id)
+          try {
+            const sent = await lockedBot.api.sendMessage(chat_id, chunks[i], retryOpts as never)
+            sentIds.push(sent.message_id)
+          } catch (retryErr) {
+            // Thread dropped, but the HTML is also unparseable — go plain.
+            if (isHtmlParseRejectError(retryErr)) await sendChunkPlainText(retryOpts)
+            else throw retryErr
+          }
+        } else if (isHtmlParseRejectError(err)) {
+          await sendChunkPlainText(sendOpts)
         } else {
           throw err
         }

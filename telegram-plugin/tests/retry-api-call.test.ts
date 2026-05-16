@@ -14,6 +14,7 @@ import {
   createRetryApiCall,
   createSwallowingRetryApiCall,
   retryWithThreadFallback,
+  isHtmlParseRejectError,
   type RetryObserver,
 } from '../retry-api-call.js'
 import { errors, makeGrammyError } from './fake-bot-api.js'
@@ -434,5 +435,80 @@ describe('retryWithThreadFallback (#1075)', () => {
       verb: 'editMessageText',
     })
     expect(result).toBe(true)
+  })
+})
+
+describe('isHtmlParseRejectError', () => {
+  it('matches the real Telegram parse-failure 400 descriptions', () => {
+    const descriptions = [
+      "can't parse entities: Unsupported start tag \"h2\" at byte offset 12",
+      'Bad Request: unsupported start tag "span"',
+      "can't find end of the entity starting at byte offset 40",
+      'Bad Request: unclosed start tag at byte offset 5',
+      'Bad Request: unexpected end tag at byte offset 9',
+      "Bad Request: can't parse entities: expected end tag",
+    ]
+    for (const d of descriptions) {
+      expect(
+        isHtmlParseRejectError(
+          makeGrammyError({ error_code: 400, description: d, method: 'sendMessage' }),
+        ),
+      ).toBe(true)
+    }
+  })
+
+  it('does NOT match other 400s (those have their own handling)', () => {
+    for (const d of [
+      'Bad Request: message is not modified',
+      'Bad Request: message to edit not found',
+      'Bad Request: message thread not found',
+      'Bad Request: chat not found',
+    ]) {
+      expect(
+        isHtmlParseRejectError(
+          makeGrammyError({ error_code: 400, description: d, method: 'sendMessage' }),
+        ),
+      ).toBe(false)
+    }
+  })
+
+  it('does not match non-400 GrammyErrors', () => {
+    expect(
+      isHtmlParseRejectError(
+        makeGrammyError({
+          error_code: 429,
+          description: "can't parse entities",
+          method: 'sendMessage',
+        }),
+      ),
+    ).toBe(false)
+    expect(
+      isHtmlParseRejectError(
+        makeGrammyError({
+          error_code: 403,
+          description: 'Forbidden: bot was blocked',
+          method: 'sendMessage',
+        }),
+      ),
+    ).toBe(false)
+  })
+
+  it('does not match plain Errors or non-error values', () => {
+    expect(isHtmlParseRejectError(new Error("can't parse entities"))).toBe(false)
+    expect(isHtmlParseRejectError('string')).toBe(false)
+    expect(isHtmlParseRejectError(null)).toBe(false)
+    expect(isHtmlParseRejectError(undefined)).toBe(false)
+  })
+
+  it('matches the curly-apostrophe variant Telegram sometimes emits', () => {
+    expect(
+      isHtmlParseRejectError(
+        makeGrammyError({
+          error_code: 400,
+          description: 'Bad Request: can’t parse entities: bad tag',
+          method: 'sendMessage',
+        }),
+      ),
+    ).toBe(true)
   })
 })

@@ -30,6 +30,7 @@ import {
   handleGetSystemHealth,
   handleGetGoogleAccounts,
   handleGetSchedule,
+  handleGetApprovals,
 } from "./api.js";
 import { handleWebhookIngest } from "./webhook-handler.js";
 
@@ -350,6 +351,11 @@ function parseRoute(
     return { handler: "getSchedule", params: {} };
   }
 
+  // GET /api/approvals
+  if (method === "GET" && pathname === "/api/approvals") {
+    return { handler: "getApprovals", params: {} };
+  }
+
   // GET /api/accounts
   if (method === "GET" && pathname === "/api/accounts") {
     return { handler: "getAccounts", params: {} };
@@ -537,6 +543,10 @@ export function startWebServer(
 
           case "getSchedule":
             return jsonResponse(handleGetSchedule(config));
+
+          case "getApprovals":
+            return (async () =>
+              jsonResponse(await handleGetApprovals()))();
 
           case "getAccounts":
             return (async () => jsonResponse(await handleGetAccounts(config)))();

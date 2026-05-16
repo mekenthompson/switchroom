@@ -26,6 +26,11 @@ import {
   type DispatchResult,
 } from "../scheduler/dispatch.js";
 import { readRecentFires } from "../agent-scheduler/replay.js";
+import {
+  approvalList,
+  resolveKernelOperatorSocket,
+} from "../vault/approvals/client.js";
+import type { ApprovalDecisionMeta } from "../vault/broker/protocol.js";
 import { captureEvent, captureException } from "../analytics/posthog.js";
 import { resolveAgentsDir } from "../config/loader.js";
 import { resolveAgentConfig } from "../config/merge.js";
@@ -547,4 +552,48 @@ export function handleGetSchedule(
     if (rows.length > 0) recentByAgent[agent] = rows.slice(-10);
   }
   return { entries, recentByAgent };
+}
+
+/**
+ * Approval-kernel decision ledger (RFC B) — the host read-only view
+ * over the operator socket added in #1362. The kernel restricts that
+ * socket to `approval_list`, so this is observation only: no grant /
+ * consume / revoke is reachable from here by construction.
+ *
+ * Three states, each rendered distinctly rather than collapsed:
+ *   - operator socket absent  → kernel not host-reachable on this
+ *     install (pre-#1362 deploy, or operatorUid unset). `reachable:false`.
+ *   - socket present, RPC null → kernel down / protocol error.
+ *   - ok → decisions[] (newest first for the table).
+ */
+export interface ApprovalsDashboard {
+  reachable: boolean;
+  decisions: ApprovalDecisionMeta[];
+  error?: string;
+}
+
+export async function handleGetApprovals(): Promise<ApprovalsDashboard> {
+  const opSock = resolveKernelOperatorSocket();
+  if (opSock === null) {
+    return {
+      reachable: false,
+      decisions: [],
+      error:
+        "approval-kernel operator socket not present — host-side approval " +
+        "listing needs operatorUid set (compose) and a post-#1362 deploy.",
+    };
+  }
+  // No agent_unit filter → fleet-wide. Pin opts.socket to the operator
+  // socket so the resolver doesn't fall through to the broker.
+  const decisions = await approvalList(undefined, { socket: opSock });
+  if (decisions === null) {
+    return {
+      reachable: false,
+      decisions: [],
+      error: "approval-kernel unreachable or returned an error",
+    };
+  }
+  // Newest first — most relevant grant at the top of the table.
+  const sorted = [...decisions].sort((a, b) => b.granted_at - a.granted_at);
+  return { reachable: true, decisions: sorted };
 }

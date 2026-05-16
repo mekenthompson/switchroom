@@ -296,7 +296,13 @@ function authFilesAreInaccessible(agentDir: string): boolean {
 
 /**
  * Write the token into the slot-aware storage AND mirror the legacy
- * top-level .oauth-token path so start.sh.hbs / Claude Code keep working.
+ * top-level .oauth-token path.
+ *
+ * LEGACY (post-RFC-H): the `.oauth-token` mirror is no longer
+ * load-bearing — the `switchroom-auth-broker` container is the sole
+ * writer of `.credentials.json` (which is what `claude` reads), and
+ * start.sh defensively unsets `CLAUDE_CODE_OAUTH_TOKEN`. This path is
+ * retained for back-compat / migration only.
  *
  * If `slot` is unspecified, writes to the active slot (migrating legacy
  * layout if needed); if no active slot exists, creates "default".
@@ -526,6 +532,9 @@ export function getAuthStatus(name: string, agentDir: string): AuthStatus {
   // accounts/ slot was written (e.g. during scaffold) but syncLegacyFromActive
   // hadn't run yet — legacy path was empty → status read "✗" until the next
   // restart actually mirrored the file.
+  // LEGACY (post-RFC-H): the `.oauth-token` mirror is no longer the path
+  // Claude Code reads at runtime — the auth-broker owns `.credentials.json`.
+  // This sync only affects this legacy status read, not agent boot.
   if (!existsSync(oauthTokenPath(agentDir))) {
     const activeSlot = readActiveSlot(agentDir);
     if (activeSlot && existsSync(slotTokenPath(agentDir, activeSlot))) {
@@ -823,7 +832,7 @@ export function submitAuthCode(
       tokenSaved: false,
       instructions: [
         `No pending auth session for agent "${name}".`,
-        `Start one with: switchroom auth login ${name}`,
+        `Start one with: switchroom auth add ${name}`,
       ],
     };
   }
@@ -967,9 +976,13 @@ export function submitAuthCode(
   rmSync(authLogPath(agentDir), { force: true });
   // Fix 2 (2026-04-25 gymbro incident): remove the agent's .credentials.json
   // so the running claude CLI doesn't shadow the new .oauth-token with a
-  // stale (possibly expired) credentials file. The env-var path
-  // (CLAUDE_CODE_OAUTH_TOKEN exported from start.sh) is the single source
-  // of truth at runtime. For the force path, credentials.json lives in the
+  // stale (possibly expired) credentials file.
+  // LEGACY (post-RFC-H): this comment's premise — that
+  // CLAUDE_CODE_OAUTH_TOKEN exported from start.sh is the runtime source
+  // of truth — no longer holds. start.sh defensively unsets that env var
+  // and the auth-broker is the sole writer of `.credentials.json`, which
+  // is what `claude` reads. This cleanup remains valid for the legacy
+  // slot-auth path. For the force path, credentials.json lives in the
   // throwaway temp dir which cleanupAuthTempDirs just wiped; this call is
   // a no-op there (force: true makes it safe).
   rmSync(credentialsPath(agentDir), { force: true });

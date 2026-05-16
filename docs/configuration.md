@@ -309,84 +309,66 @@ Host prerequisites:
 - Python venvs need `python3-venv` (on Debian/Ubuntu: `apt install python3.12-venv`). `switchroom health` reports missing deps.
 - Node envs use `bun` by default. `npm` is available as an alternate installer.
 
-## Multi-Account OAuth (Slot Pool)
+## Multi-Account OAuth (auth-broker)
 
-Each agent owns a **pool** of Claude OAuth account slots. One slot is
-active at a time; the others sit in the pool as automatic fallbacks when
-the active slot hits a quota window. Nothing in `switchroom.yaml`
-describes the pool — it's managed at runtime via `switchroom auth` (or
-`/auth` inside Telegram).
+Authentication is **account-scoped and fleet-wide**, not per-agent. One
+OAuth flow per Anthropic account; "use this account on these agents" is
+configuration, not another OAuth round. The `switchroom-auth-broker`
+compose singleton is the **sole writer** of every agent's
+`<agentDir>/.claude/.credentials.json` — agents never refresh tokens or
+write credentials themselves. There is no per-agent OAuth slot tree and
+no `CLAUDE_CODE_OAUTH_TOKEN` injection; `start.sh` defensively unsets
+that env var and `claude` reads `.credentials.json` directly.
 
-On-disk layout per agent:
+`switchroom.yaml` carries the fleet-wide `auth.active` (plus an
+optional `fallback_order` and rare per-agent `auth.override`):
 
+```yaml
+auth:
+  active: me@example.com        # fleet-wide active account
+  fallback_order:               # cycle list for `auth rotate` / 429 failover
+    - me@example.com
+    - work
 ```
-<agentDir>/.claude/
-  accounts/
-    <slot>/
-      .oauth-token             # token value
-      .oauth-token.meta.json   # { createdAt, expiresAt, quotaExhaustedUntil?, source }
-  active                       # text file: name of the active slot
-  .oauth-token                 # LEGACY path, mirrored from the active slot
-  .oauth-token.meta.json       # LEGACY path, mirrored from the active slot
+
+Bootstrap and day-to-day verbs:
+
+```bash
+switchroom auth add me --from-oauth   # browser OAuth flow
+switchroom auth add me --via-claude   # drives claude's native OAuth (broader scope)
+switchroom auth use me                # make it the fleet active account
+switchroom auth list                  # state of the fleet
+switchroom auth rotate                # cycle to next non-exhausted account
+switchroom auth refresh               # force a broker refresh tick
 ```
 
-Slot names must match `[A-Za-z0-9._-]+` (max 64 chars). The legacy
-top-level token paths are always kept in sync with the active slot so
-`start.sh` and the `claude` CLI see no layout change.
+> `switchroom auth login` and `switchroom auth status` were **removed**
+> with the auth-broker migration (RFC H). Use `auth add` / `auth use`
+> to authenticate and `auth list` / `auth show` to inspect state.
 
 ### Auto-fallback on quota exhaustion
 
-The switchroom telegram plugin polls each agent's quota. When the active
-slot crosses the exhaustion threshold (~99.5% utilisation) the plugin:
+Quota handling is broker-internal — there is no plugin-polled fallback
+loop. When any consumer (agent or hindsight) hits a 429 it calls the
+broker's `mark-exhausted` verb; the broker marks the account exhausted,
+walks every agent on it, looks up each agent's next non-exhausted
+account from `fallback_order`, and atomically rewrites their per-agent
+`.credentials.json`. Failover propagates in seconds without per-agent
+restarts. When the exhaustion window passes the broker clears the mark
+and agents that prefer the cleared account drift back on next idle.
 
-1. Marks the slot `quota-exhausted` (writes `quotaExhaustedUntil` into
-   the slot's meta file).
-2. Picks the next healthy slot in the pool and switches to it.
-3. Restarts the agent so the new token is picked up.
-4. Posts a short notice into the chat; if no fallback slot is available,
-   prompts you to `/auth add <agent>` another subscription.
+### Broker-internal token refresh
 
-A per-slot cooldown prevents fallback-loop storms if two polls race.
-Source: `telegram-plugin/auto-fallback.ts`, `src/auth/accounts.ts`.
+The broker runs one refresh loop per account (not per agent) and
+rewrites the canonical credentials when an access token's remaining
+lifetime drops below the refresh threshold. `switchroom auth refresh`
+forces a refresh tick; the broker decides which accounts actually need
+it. There is no host-side `refresh-tick` verb or cron line to wire up —
+the broker owns the cadence.
 
-### Switchroom-managed token refresh (`auth refresh-tick`)
-
-Anthropic's OAuth access tokens are short-lived (typically 8 hours). Pre-#429
-the only thing that rotated them was the agent's own `claude` process noticing
-expiry mid-turn — which fails for stop-hook subprocesses (where claude code
-strips `CLAUDE_CODE_OAUTH_TOKEN` from env) and for agents that haven't received
-a turn in 24h+. The result was silent 401s on the next inbound message.
-
-`switchroom auth refresh-tick` rotates tokens proactively. Iterate every
-agent, check `<agentDir>/.claude/.credentials.json`, and POST to Anthropic's
-OAuth refresh endpoint when the access token's remaining lifetime is below
-the threshold (default 1h) AND a `refreshToken` is present. The new token
-is atomically rewritten into both `.credentials.json` and the active slot's
-`.oauth-token` (so start.sh and the legacy mirror see it).
-
-```bash
-switchroom auth refresh-tick                       # default 1h threshold, prose output
-switchroom auth refresh-tick --json                # structured summary for logs
-switchroom auth refresh-tick --threshold-ms 7200000  # custom threshold (2h here)
-```
-
-The tick is idempotent and safe to run as often as you like — when nothing
-needs refreshing it makes no network calls and writes no files. Wire it to
-a cron line on the host (or to an agent's `schedule:` block, which fires
-through the in-agent scheduler sidecar — see [scheduling.md](./scheduling.md)):
-
-```
-# crontab — every 15 minutes
-*/15 * * * * switchroom auth refresh-tick --json >> ~/.switchroom/refresh.log 2>&1
-```
-
-Outcomes per agent: `refreshed`, `skipped-fresh`, `skipped-no-refresh-token`
-(boot-self-test will already be prompting the user to re-auth in chat),
-`skipped-no-credentials`, `skipped-malformed`, `failed`. Process exits
-non-zero only when every refresh attempt failed AND nothing was already
-fresh — partial failures stay visible without taking the timer down.
-
-Source: `src/auth/token-refresh.ts`.
+See [`docs/auth.md`](auth.md) for the full model (mental model,
+filename conventions, refresh windows, drift detection, the Telegram
+`/auth` surface, and ephemeral consumers).
 
 ## Google Workspace (`google_workspace:`)
 

@@ -841,9 +841,29 @@ describe("hostd server — Phase 2 fleet mutations + lock", () => {
       },
     );
     expect(resp.result).toBe("completed");
+    // #1401: `--` separates the fixed `docker exec <container>` prefix
+    // from caller-supplied argv so no element can be reparsed as a
+    // docker flag.
     expect(resp.stdout_tail).toContain(
-      "docker: exec switchroom-bob ls -la /state",
+      "docker: exec switchroom-bob -- ls -la /state",
     );
+  });
+
+  it("agent_exec: argv element with a newline/NUL/CR is denied (#1401)", async () => {
+    const sock = server.getBoundPaths().find((p) => p.endsWith("/klanker/sock"))!;
+    const resp = await hostdRequest(
+      { socketPath: sock },
+      {
+        v: 1,
+        op: "agent_exec",
+        request_id: "exec-ctrl-1",
+        // argv[0] is allowlisted; the smuggle is in a later element.
+        args: { name: "bob", argv: ["cat", "/state\n--privileged"] },
+      },
+    );
+    expect(resp.result).toBe("denied");
+    expect(resp.error).toMatch(/NUL or newline\/CR/);
+    expect(resp.error).toMatch(/#1401/);
   });
 
   it("agent_exec: non-allowlisted argv[0] is denied with a clear pointer to the deferred scope", async () => {

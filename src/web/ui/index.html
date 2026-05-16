@@ -410,6 +410,7 @@
     <button id="tab-system" onclick="switchTab('system')">System</button>
     <button id="tab-google" onclick="switchTab('google')">Google</button>
     <button id="tab-schedule" onclick="switchTab('schedule')">Schedule</button>
+    <button id="tab-approvals" onclick="switchTab('approvals')">Approvals</button>
   </nav>
   <main>
     <div id="error"></div>
@@ -418,6 +419,7 @@
     <div id="system" style="display:none"></div>
     <div id="google" style="display:none"></div>
     <div id="schedule" style="display:none"></div>
+    <div id="approvals" style="display:none"></div>
   </main>
 
   <script>
@@ -511,8 +513,19 @@
       }
     }
 
+    async function fetchApprovals() {
+      try {
+        const res = await fetch(`${API}/api/approvals`, { headers: authHeaders() });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        renderApprovals(await res.json());
+        clearError();
+      } catch (err) {
+        showError(`Failed to fetch approvals: ${err.message}`);
+      }
+    }
+
     function switchTab(tab) {
-      const tabs = ['agents', 'accounts', 'system', 'google', 'schedule'];
+      const tabs = ['agents', 'accounts', 'system', 'google', 'schedule', 'approvals'];
       for (const t of tabs) {
         document.getElementById(`tab-${t}`).classList.toggle('active', tab === t);
         document.getElementById(t).style.display = tab === t ? '' : 'none';
@@ -521,6 +534,7 @@
       if (tab === 'system') fetchSystemHealth();
       if (tab === 'google') fetchGoogleAccounts();
       if (tab === 'schedule') fetchSchedule();
+      if (tab === 'approvals') fetchApprovals();
     }
 
     function showError(msg) {
@@ -894,6 +908,60 @@
         </div>`;
       }).join('');
       container.innerHTML = cards;
+    }
+
+    function renderApprovals(data) {
+      const container = document.getElementById('approvals');
+      const dim = (s) => `<span style="color:var(--text-dim)">${escapeHtml(s)}</span>`;
+      if (!data || data.reachable === false) {
+        const why = (data && data.error) ? escapeHtml(data.error) : 'approval-kernel not reachable from host';
+        container.innerHTML = `<div class="loading">Approval ledger unavailable — ${why}</div>`;
+        return;
+      }
+      const decisions = data.decisions || [];
+      if (decisions.length === 0) {
+        container.innerHTML = '<div class="loading">No approval decisions recorded yet.</div>';
+        return;
+      }
+      const now = Date.now();
+      const statusOf = (d) => {
+        if (d.revoked_at) return ['revoked', 'inactive'];
+        if (d.ttl_expires_at && d.ttl_expires_at < now) return ['expired', 'inactive'];
+        return ['active', 'active'];
+      };
+      const rows = decisions.map(d => {
+        const [label, dot] = statusOf(d);
+        // Drive write scopes are the headline use of the approval flow —
+        // make them visually distinct.
+        const isDrive = /(^|:)(doc|drive|gdrive|sheets)/i.test(d.scope || '');
+        const scopeCell = isDrive
+          ? `<span class="usage-pill primary">${escapeHtml(d.scope)}</span>`
+          : escapeHtml(d.scope || '—');
+        return `
+        <tr>
+          <td><span class="status-dot ${dot}" style="display:inline-block;vertical-align:middle"></span> ${escapeHtml(label)}</td>
+          <td>${escapeHtml(d.agent_unit || '—')}</td>
+          <td>${scopeCell}</td>
+          <td>${escapeHtml(d.action || '—')}</td>
+          <td>${escapeHtml(d.decision || '—')}</td>
+          <td>${d.granted_at ? formatTimestamp(d.granted_at) : dim('—')}</td>
+          <td>${d.ttl_expires_at ? formatTimestamp(d.ttl_expires_at) : dim('—')}</td>
+          <td title="${d.revoke_reason ? escapeHtml(d.revoke_reason) : ''}">${d.revoked_at ? formatTimestamp(d.revoked_at) : dim('—')}</td>
+        </tr>`;
+      }).join('');
+      container.innerHTML = `
+        <div style="margin-bottom:0.6rem;font-size:0.8rem;color:var(--text-dim)">
+          Read-only view via the kernel operator socket — ${decisions.length} decision(s). Drive scopes highlighted.
+        </div>
+        <div class="accounts-table-wrap">
+          <table class="accounts-table">
+            <thead><tr>
+              <th>Status</th><th>Agent</th><th>Scope</th><th>Action</th>
+              <th>Decision</th><th>Granted</th><th>TTL expires</th><th>Revoked</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`;
     }
 
     function openPromoteModal(label) {

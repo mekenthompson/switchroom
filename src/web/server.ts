@@ -624,6 +624,23 @@ export function startWebServer(
               { stdio: ["ignore", "pipe", "pipe"] }
             );
 
+            // A missing `docker` binary (or exec failure) emits an
+            // 'error' event with no stdout/stderr; without a handler
+            // Node treats it as unhandled and crashes the server.
+            // Surface it to the client as a log_error instead.
+            child.on("error", (err: Error) => {
+              try {
+                ws.send(JSON.stringify({
+                  type: "log_error",
+                  agent: agentName,
+                  data: `failed to stream logs: ${err.message}\n`,
+                }));
+              } catch {
+                // Client already gone — nothing to clean up; the
+                // process never started so there's no pid to kill.
+              }
+            });
+
             child.stdout.on("data", (chunk: Buffer) => {
               try {
                 ws.send(JSON.stringify({

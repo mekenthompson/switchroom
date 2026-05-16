@@ -249,8 +249,9 @@ export interface UseAccountResult {
 
 /**
  * Set the fleet-wide active account. Replaces the pre-RFC-H
- * `/api/auth/promote` endpoint. No YAML rewrite from this code path —
- * the broker owns mirror writes; the CLI handles YAML when present.
+ * `/api/accounts/:label/promote` endpoint. No YAML rewrite from this
+ * code path — the broker owns mirror writes; the CLI handles YAML
+ * when present.
  */
 export async function handleUseAccount(label: string): Promise<UseAccountResult> {
   try {

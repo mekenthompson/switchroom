@@ -11566,7 +11566,24 @@ bot.on('callback_query:data', async ctx => {
   // Routed through the generic kernel handler so any surface that uses
   // buildApprovalCard inherits consume → record → confirmation UX without
   // each surface re-implementing it.
+  //
+  // SECURITY (sec WS7-F1, #1394): this is the human-in-the-loop gate for
+  // EVERY dangerous tool call + Drive write. handleApprovalCallback records
+  // whoever tapped as the approver (`granted_by_user_id = ctx.from.id`) and
+  // the approval-kernel performs NO server-side approver validation, so an
+  // unauthorized tap is laundered into a real grant. The card is delivered
+  // to the agent's chat(s) — for a forum/group agent that is every member.
+  // Refuse callbacks from anyone outside `access.allowFrom`, BEFORE the
+  // approval_consume nonce burn. Strict `access.allowFrom` — identical to
+  // the drvpick:/op:/vd:/vg:/vra:/vrs:/vrd: families; the absence of this
+  // check (not a deliberate exemption) was the vulnerability.
   if (data.startsWith('apv:')) {
+    const access = loadAccess()
+    const senderId = String(ctx.from?.id ?? '')
+    if (!access.allowFrom.includes(senderId)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' })
+      return
+    }
     const { handleApprovalCallback } = await import('./approval-callback.js')
     await handleApprovalCallback(ctx, data)
     return
@@ -11577,10 +11594,11 @@ bot.on('callback_query:data', async ctx => {
   // grant writes an allow_always kernel decision at
   // doc:gdrive:folder/<id>/** and edits the card to a confirmation.
   //
-  // Auth gate: the picker grant is an OPERATOR action (mirrors the
-  // `op:`/`vd:`/`vg:` family, not the `apv:` agent-approval shape).
-  // Mirror those patterns — refuse callbacks from anyone outside
-  // `access.allowFrom`. Without this, a group member who isn't in
+  // Auth gate: the picker grant is an OPERATOR action — same strict
+  // `access.allowFrom` check as every other callback family (`op:`/
+  // `vd:`/`vg:`/`apv:` since sec WS7-F1, …). Refuse callbacks from
+  // anyone outside `access.allowFrom`. Without this, a group member
+  // who isn't in
   // the operator allowlist could still tap [✅ Allow "<folder>"] on
   // a card that landed in the group and write an `allow_always`
   // decision attributed to themselves.

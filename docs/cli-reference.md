@@ -86,10 +86,10 @@ switchroom issues prune
 
 *Grounded in:* `src/cli/issues.ts`.
 
-## `switchroom perf` — per-agent cache-hit telemetry
+## `switchroom agent perf` — per-agent cache-hit telemetry
 
 ```sh
-switchroom perf <name> [--last <n>] [--full] [--json]
+switchroom agent perf <name> [--last <n>] [--full] [--json]
 ```
 
 Reads the agent's latest session JSONL and reports prompt-cache

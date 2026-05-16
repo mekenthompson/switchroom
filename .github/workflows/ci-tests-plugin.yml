@@ -41,10 +41,10 @@ jobs:
       relevant: ${{ steps.filter.outputs.relevant }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Filter changed paths
         id: filter
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590  # v3
         with:
           filters: |
             relevant:
@@ -55,6 +55,14 @@ jobs:
               - 'telegram-plugin/bun.lock'
               - '.github/actions/setup-switchroom/**'
               - '.github/workflows/ci-tests-plugin.yml'
+              # sec WS9-F1 (#1402): don't skip→pass the required gate on
+              # a security-load-bearing non-telegram-plugin change. See
+              # ci-tests-core.yml for the rationale.
+              - 'profiles/**'
+              - 'bin/**'
+              - 'skills/**'
+              - 'docker/**'
+              - '.github/workflows/**'
 
   bun-test-run:
     needs: changes
@@ -65,7 +73,7 @@ jobs:
       TELEGRAM_BOT_TOKEN: "123456:stub-for-tests"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Set up workspace
         uses: ./.github/actions/setup-switchroom

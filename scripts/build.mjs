@@ -2,7 +2,7 @@
 // Build script for npm publish — bundles CLI + fixes shebang for Node.
 // Runs under bun (preferred) or node (with esbuild fallback if bun missing).
 import { execSync } from "node:child_process";
-import { readFileSync, writeFileSync, chmodSync, mkdirSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, chmodSync, mkdirSync, rmSync, cpSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { escapeBundleNonAscii } from "./escape-bundle-non-ascii.mjs";
@@ -111,6 +111,23 @@ chmodSync(outFile, 0o755);
 const cliEscape = escapeBundleNonAscii(outFile);
 if (cliEscape.changed) {
   console.log(`[build] ASCII-escaped ${cliEscape.nonAsciiCount} non-ASCII code units in dist/cli/switchroom.js`);
+}
+
+// Copy the web dashboard static assets next to the bundled CLI. The
+// web server resolves its UI dir as `resolve(import.meta.dirname,
+// "ui")` — at runtime that's `dist/cli/ui/` (the bundle lives in
+// dist/cli/). Without this copy `switchroom web` serves the API but
+// 404s `GET /` because package.json `files` ships only `dist/`, not
+// `src/`. The dashboard only ever rendered via `bun run dev` from a
+// source checkout (where import.meta.dirname is src/web/). Ship the
+// HTML so the built/published CLI serves a usable dashboard.
+const webUiSrc = resolve(root, "src/web/ui");
+const webUiDest = resolve(outDir, "ui");
+if (existsSync(webUiSrc)) {
+  cpSync(webUiSrc, webUiDest, { recursive: true });
+  console.log("[build] copied src/web/ui -> dist/cli/ui (dashboard static assets)");
+} else {
+  console.warn("[build] WARNING: src/web/ui not found — dashboard UI will 404");
 }
 
 // Bundle the drive-write-pretool hook — RFC E §4.2 Cut 2. Same

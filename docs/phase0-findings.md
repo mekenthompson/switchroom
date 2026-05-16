@@ -1,3 +1,5 @@
+> **Archived — point-in-time snapshot (Phase 0, 2026-05-08). Not current guidance.**
+
 # Phase 0 — narrative findings
 
 ## Summary

@@ -17,7 +17,7 @@ Three PostHog products are wired in:
 ## Where the code lives
 
 - [`src/analytics/posthog.ts`](../src/analytics/posthog.ts) — singleton PostHog client, `captureEvent`, `captureException`, `installGlobalErrorHandlers`, `shutdownAnalytics`.
-- [`src/analytics/logs.ts`](../src/analytics/logs.ts) — OTel log forwarder (`initLogs`, `getLogger`, `shutdownLogs`). Lazy imports keep OTel out of short-lived CLI commands.
+- `src/analytics/logs.ts` — *(removed)* the OpenTelemetry OTLP log forwarder (`initLogs`, `getLogger`, `shutdownLogs`) no longer ships; there is no `src/analytics/logs.ts` and no `@opentelemetry` dependency in `src/`. The "Log forwarding" section below documents the removed-but-not-yet-pruned design and is stale — treat product analytics + error tracking via `src/analytics/posthog.ts` as the only live telemetry paths.
 - [`src/cli/index.ts`](../src/cli/index.ts) — installs global error handlers and a `preAction` hook that fires `cli_command_invoked` on every command.
 
 ## Environment variables
@@ -56,12 +56,12 @@ also auto-stamp `agent` (the agent name) and `switchroom_version`.
 |-------------------------|---------------------------------|----------------------------------------------------|
 | `cli_command_invoked`   | [src/cli/index.ts](../src/cli/index.ts) (preAction hook) | `command`, `version`, `node_version`, `platform`   |
 | `setup_completed`       | [src/cli/setup.ts](../src/cli/setup.ts)                  | `agent_count`, `interactive`                       |
-| `init_completed`        | [src/cli/init.ts](../src/cli/init.ts)                    | `agents_total`, `agents_scaffolded`, `example`     |
+| `init_completed`        | *(removed — `src/cli/init.ts` and the standalone `init` command no longer exist; scaffolding folded into `apply`)* | ~~`agents_total`, `agents_scaffolded`, `example`~~ |
 | `web_server_started`    | [src/cli/web.ts](../src/cli/web.ts)                      | `port`, `agent_count`, `auth_configured`           |
 | `agent_started`         | [src/web/api.ts](../src/web/api.ts)                      | `agent`, `source`                                  |
 | `agent_stopped`         | [src/web/api.ts](../src/web/api.ts)                      | `agent`, `source`                                  |
 | `agent_restarted`       | [src/web/api.ts](../src/web/api.ts)                      | `agent`, `source`                                  |
-| `integration_verified`  | [scripts/posthog-smoke-test.mjs](../scripts/posthog-smoke-test.mjs) | smoke-test only                        |
+| `integration_verified`  | *(removed — no `scripts/posthog-smoke-test.mjs`; no emitter in-tree)* | smoke-test only                       |
 
 ### Gateway / runtime events (#1122)
 

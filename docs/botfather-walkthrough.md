@@ -16,7 +16,7 @@ Switchroom uses **one Telegram bot per agent**. For a minimal install
 you create one bot; for an admin-bot setup you create two. There's no
 separate "admin bot" concept — an admin agent is just a regular agent
 whose gateway intercepts fleet-management slash commands (the
-[three-tier model](architecture.md#) — see docs/architecture.md).
+[three-tier model](architecture.md) — see docs/architecture.md).
 
 | Bot | Purpose | Where the token goes |
 |---|---|---|

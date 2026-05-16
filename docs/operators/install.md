@@ -1,7 +1,9 @@
 # Operator install — Docker fleet from GHCR
 
 Switchroom publishes its container images to GitHub Container Registry
-(GHCR) at `ghcr.io/switchroom/switchroom-{base,agent,broker,kernel}`.
+(GHCR). The fleet pulls four runtime images —
+`ghcr.io/switchroom/switchroom-{agent,broker,kernel,auth-broker}`
+(`switchroom-base` is a build-stage parent, not pulled at runtime).
 The supported install path on Linux pulls those images and brings the
 fleet up via `docker compose`. No `docker build` on the operator's host.
 
@@ -21,9 +23,12 @@ curl -fsSL https://github.com/switchroom/switchroom/raw/main/install.sh | sh
 ```
 
 This drops a self-contained `switchroom` binary in `/usr/local/bin`
-(falls back to `~/.local/bin` if the former isn't writable). No `bun`,
-no `node`, no source checkout required on the host. The binary is the
-operator CLI; the agent runtime is pulled from GHCR by Docker.
+(falls back to `~/.local/bin` if the former isn't writable). The
+`switchroom` binary itself needs no `bun`, `node`, or source checkout;
+the agent runtime is pulled from GHCR by Docker. Note: the OAuth step
+below still requires the `claude` CLI on the host (Node 20.11+, per
+Prerequisites) — that requirement is not optional even on the binary
+install.
 
 Then bring up your fleet:
 
@@ -34,7 +39,7 @@ switchroom setup
 # 2. Authenticate with your Claude subscription (one OAuth flow,
 #    fleet-wide). The auth-broker becomes the sole writer of every
 #    agent's credentials.
-switchroom auth add me --from-oauth
+switchroom auth add me --via-claude
 switchroom auth use me
 
 # 3. Scaffold agents + write ~/.switchroom/compose/docker-compose.yml.
@@ -71,8 +76,13 @@ The generated compose pins each service to a tagged GHCR ref:
 ```
 ghcr.io/switchroom/switchroom-broker:latest
 ghcr.io/switchroom/switchroom-kernel:latest
+ghcr.io/switchroom/switchroom-auth-broker:latest
 ghcr.io/switchroom/switchroom-agent:latest
 ```
+
+(Four runtime images: `broker`, `kernel`, `auth-broker`, `agent`.
+`base` is a build-stage parent, not pulled; `hindsight`/`hostd` run in
+their own separate compose projects.)
 
 `:latest` floats with the canonical repo's `main`. To pin to a specific
 release tag, set `imageTag` directly when calling `generateCompose()`
@@ -123,7 +133,7 @@ docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 
 ## Troubleshooting
 
-- **First `docker compose up` is slow** — pulls 5 images
+- **First `docker compose up` is slow** — pulls 4 images
   (~1-2 GB total) on a fresh host. Subsequent `up` calls only pull
   changed layers.
 - **`unauthorized` on pull** — the published images are public; if you

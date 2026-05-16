@@ -157,7 +157,7 @@ Then log out and back in so the docker group takes effect, and:
 
 ```bash
 switchroom setup                       # interactive: Telegram + vault + first agent
-switchroom auth add me --from-oauth    # OAuth into your Claude Pro or Max account (one flow, fleet-wide)
+switchroom auth add me --via-claude    # OAuth into your Claude Pro/Max account, broader scope (first-time setup)
 switchroom apply                       # write ~/.switchroom/compose/docker-compose.yml
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 ```
@@ -329,10 +329,11 @@ Model aliases: the bare names `opus`, `sonnet`, `haiku` are accepted alongside t
 The **Anthropic account is the unit of authentication.** One OAuth flow per account, then every agent in the fleet inherits the fleet-wide active account. The `switchroom-auth-broker` daemon owns the refresh loop and is the sole writer of every `credentials.json`. Per-account quota state fans out across the fleet in seconds. See [`docs/auth.md`](docs/auth.md) for the full operator guide.
 
 ```bash
-switchroom auth add <label> --from-oauth          # New account via OAuth (one flow per Anthropic account)
+switchroom auth add <label> --via-claude          # New account, broader scope — recommended for first-time
+switchroom auth add <label> --from-oauth          # Narrow scope=user:inference (rejected by agents in server: mode)
 switchroom auth add <label> --from-agent <name>   # Seed from an existing agent's creds
 switchroom auth add <label> --from-credentials <path>  # Import a credentials.json
-switchroom auth add <label> --from-oauth --replace     # Re-auth an existing label (drift recovery)
+switchroom auth add <label> --via-claude --replace     # Re-auth an existing label (drift recovery)
 
 switchroom auth list                              # Accounts + health + which one is fleet-active
 switchroom auth show [agent]                      # Full snapshot (fleet + agents + consumers), or one agent

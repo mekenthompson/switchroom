@@ -125,6 +125,7 @@ import {
   findExistingClaudeJson,
   copyOnboardingState,
   preTrustWorkspace,
+  ensureMcpServersTrusted,
   createMinimalClaudeConfig,
   loadUserConfig,
 } from "../setup/onboarding.js";
@@ -1764,6 +1765,32 @@ export const DOCKER_CONFIG_PATH = "/state/config/switchroom.yaml";
 export const DOCKER_SWITCHROOM_CLI_PATH = "/usr/local/bin/switchroom";
 
 /**
+ * In-container path to the auth-broker UDS. The gdrive launcher resolves
+ * Google credentials through the auth-broker; Claude Code spawns MCP
+ * servers with a sanitized env (NOT the container env), so this MUST be
+ * threaded explicitly onto the gdrive `.mcp.json` entry or the launcher
+ * talks to the wrong (default) socket and dies.
+ * MUST mirror src/agents/compose.ts emitAgentService env (compose.ts:1312).
+ */
+export const DOCKER_AUTH_BROKER_SOCKET = "/run/switchroom/auth-broker/sock";
+
+/**
+ * In-container path to the vault-broker UDS. Needed when the configured
+ * `google_client_secret` is a `vault:` reference the launcher must
+ * resolve through the vault broker.
+ * MUST mirror src/agents/compose.ts emitAgentService env (compose.ts:1304).
+ */
+export const DOCKER_VAULT_BROKER_SOCKET = "/run/switchroom/broker/sock";
+
+/**
+ * In-container HOME for the agent. The launcher (and uvx beneath it)
+ * writes to ~/.cache, ~/.config, ~/.local; without HOME pointed at the
+ * writable bind mount it defaults to "/" on the read-only root fs.
+ * MUST mirror src/agents/compose.ts emitAgentService env (compose.ts:1248).
+ */
+export const DOCKER_AGENT_HOME = "/state/agent/home";
+
+/**
  * Decide whether the per-agent `gdrive` MCP entry should be written into
  * `mcpServers`, and if so produce it.
  *
@@ -1799,10 +1826,27 @@ export function resolveGdriveMcpEntry(
   const tier =
     agentConfig.google_workspace?.tier ??
     switchroomConfig?.google_workspace?.tier;
-  return getGdriveMcpSettingsEntry(
+  const entry = getGdriveMcpSettingsEntry(
     DOCKER_SWITCHROOM_CLI_PATH,
     tier ? { tier } : {},
   );
+  // Claude Code spawns MCP servers with a SANITIZED env (not the
+  // parent/container env), so the drive-mcp-launcher gets none of the
+  // compose-emitted SWITCHROOM_* / HOME vars unless we thread them onto
+  // the entry explicitly. Without this block the launcher dies at spawn
+  // ("No switchroom.yaml found", or it connects to the wrong broker
+  // socket). Every value here MUST mirror the canonical value emitted by
+  // src/agents/compose.ts emitAgentService env (line cited per key) so
+  // the in-MCP-spawn env can never disagree with the container env.
+  entry.value.env = {
+    SWITCHROOM_CONFIG: DOCKER_CONFIG_PATH, // compose.ts SWITCHROOM_CONFIG / volume mount (scaffold.ts:1755)
+    SWITCHROOM_AGENT_NAME: agentName, // compose.ts:1275 (a.name)
+    SWITCHROOM_CONTAINER: "1", // compose.ts:1276
+    SWITCHROOM_AUTH_BROKER_SOCKET: DOCKER_AUTH_BROKER_SOCKET, // compose.ts:1312
+    SWITCHROOM_VAULT_BROKER_SOCK: DOCKER_VAULT_BROKER_SOCKET, // compose.ts:1304
+    HOME: DOCKER_AGENT_HOME, // compose.ts:1248
+  };
+  return entry;
 }
 
 export function scaffoldAgent(
@@ -2207,6 +2251,13 @@ export function scaffoldAgent(
       skipped,
       0o600,
     );
+    // Claude Code only loads project `.mcp.json` servers that are on the
+    // per-project trust allowlist. preTrustWorkspace sets
+    // hasTrustDialogAccepted but never enabledMcpjsonServers, so any
+    // server scaffolded after original onboarding (gdrive, plus
+    // agent-config/hostd for non-original agents) is silently ignored.
+    // Union every server we just wrote into the allowlist.
+    ensureMcpServersTrusted(agentDir, Object.keys(mcpServers));
   }
 
   // --- Render template-specific files ---
@@ -3986,6 +4037,11 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
       writeFileSync(mcpJsonPath, after, { encoding: "utf-8", mode: 0o600 });
       changes.push(mcpJsonPath);
     }
+    // Mirror scaffoldAgent: keep every scaffolded server on Claude
+    // Code's per-project trust allowlist (idempotent — runs every
+    // reconcile so a newly-added gdrive/hostd is trusted on the next
+    // `switchroom apply`, not just at original onboarding).
+    ensureMcpServersTrusted(agentDir, Object.keys(mcpServers));
   }
 
   // --- Re-seed workspace bootstrap files from the profile.

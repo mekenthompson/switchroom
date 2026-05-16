@@ -81,6 +81,37 @@ describe("resolveGdriveMcpEntry — emits when broker-authorized", () => {
     const args = entry?.value.args ?? [];
     expect(args[args.indexOf("--tier") + 1]).toBe("extended");
   });
+
+  // Bug A regression: Claude Code spawns MCP servers with a sanitized
+  // env, so the launcher gets none of the compose container env unless
+  // the entry carries it explicitly. All six keys must mirror
+  // src/agents/compose.ts emitAgentService env exactly.
+  it("emits the full sanitized-env block with agentName threaded", () => {
+    const entry = resolveGdriveMcpEntry(
+      "carrie",
+      agent({ google_workspace: { account: "you@example.com" } }),
+      ENABLED,
+    );
+    expect(entry?.value.env).toEqual({
+      SWITCHROOM_CONFIG: "/state/config/switchroom.yaml",
+      SWITCHROOM_AGENT_NAME: "carrie",
+      SWITCHROOM_CONTAINER: "1",
+      SWITCHROOM_AUTH_BROKER_SOCKET: "/run/switchroom/auth-broker/sock",
+      SWITCHROOM_VAULT_BROKER_SOCK: "/run/switchroom/broker/sock",
+      HOME: "/state/agent/home",
+    });
+  });
+
+  it("threads a different agent name through SWITCHROOM_AGENT_NAME", () => {
+    const entry = resolveGdriveMcpEntry(
+      "clerk",
+      agent({ google_workspace: { account: "you@example.com" } }),
+      ENABLED,
+    );
+    expect(entry?.value.env?.SWITCHROOM_AGENT_NAME).toBe("clerk");
+    // tier arg still preserved alongside the env block
+    expect(entry?.value.args).toEqual(["drive-mcp-launcher"]);
+  });
 });
 
 describe("resolveGdriveMcpEntry — does NOT emit", () => {

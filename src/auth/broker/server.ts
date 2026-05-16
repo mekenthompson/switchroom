@@ -24,6 +24,7 @@ import {
   chmodSync,
   chownSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -1621,16 +1622,126 @@ export class AuthBroker {
     return this.mirrorAccountToAgent(effective, name);
   }
 
+  /**
+   * Symlink guard for the per-agent mirror write path (#1393, WS1).
+   *
+   * `~/.switchroom/agents/<name>/` is recursively chowned to the
+   * agent's per-agent UID (`scaffold.ts` `chown -R`) and RW
+   * bind-mounted into the agent container. A prompt-injected /
+   * compromised agent owns that tree and can pre-plant `.claude`
+   * (or `agentDir`, or the target file) as a **symlink**. The
+   * auth-broker runs as root with `CAP_DAC_OVERRIDE`; if it then
+   * does `mkdirSync({recursive})` / `openSync` / `chownSync` over
+   * that path it dereferences the attacker-controlled symlink and
+   * writes a root-owned file at an arbitrary host path — an
+   * agent→host trust-boundary crossing on every fanout
+   * (`switchroom update` boot, set-active, refresh-tick, …).
+   *
+   * `atomicWriteFileSync`'s tempfile+rename only defeats a swap of
+   * the *final* file, not a symlinked *parent dir* (both the
+   * recursive mkdir and the tempfile `openSync` resolve through a
+   * symlinked `claudeDir`). So we must `lstat` every controllable
+   * component — `agentsDir`, `agentDir`, `agentDir/.claude`, and
+   * the target file — and refuse if any existing component is a
+   * symlink (or not the expected type). Fail closed: skip *this*
+   * agent's mirror with a logged + audited reason; never crash the
+   * whole fanout (one poisoned agent must not deny-of-service the
+   * fleet's auth).
+   *
+   * Returns the validated paths on success, or `null` if the mirror
+   * must be skipped (reason already logged + audited).
+   */
+  private resolveMirrorPathsSafe(
+    agentName: string,
+  ): { agentDir: string; claudeDir: string; targetPath: string } | null {
+    const agentsDir = resolveAgentsDir(this.config);
+    const agentDir = resolve(agentsDir, agentName);
+    const claudeDir = join(agentDir, ".claude");
+    const targetPath = join(claudeDir, ".credentials.json");
+
+    const refuse = (component: string, reason: string): null => {
+      this.logErr(
+        `fanout ${agentName}: REFUSING mirror — ${component} ${reason} ` +
+          `(symlink-guard #1393; agent-owned tree may be attacker-poisoned)`,
+      );
+      this.audit({
+        op: "mirror-symlink-refused",
+        identity: { kind: "agent", name: agentName, admin: false },
+        ok: false,
+        error: `${component}:${reason}`,
+      });
+      return null;
+    };
+
+    // `agentsDir` is operator/root-owned and bind-mounted from the
+    // host root of the agents tree — must be a real directory, not a
+    // symlink the agent could have swapped (it can't write here, but
+    // guard the anchor anyway for defence-in-depth).
+    const agentsStat = this.lstatOrNull(agentsDir);
+    if (!agentsStat) return refuse("agentsDir", "does-not-exist");
+    if (agentsStat.isSymbolicLink())
+      return refuse("agentsDir", "is-a-symlink");
+    if (!agentsStat.isDirectory())
+      return refuse("agentsDir", "is-not-a-directory");
+
+    // `agentDir` (~/.switchroom/agents/<name>) — agent-UID-owned and
+    // agent-writable. If it doesn't exist there is nothing to mirror
+    // (mirror only lands for scaffolded agents); a symlink here means
+    // a poisoned tree.
+    const agentDirStat = this.lstatOrNull(agentDir);
+    if (!agentDirStat) return null; // not scaffolded yet — silently skip (matches prior !existsSync behaviour)
+    if (agentDirStat.isSymbolicLink())
+      return refuse("agentDir", "is-a-symlink");
+    if (!agentDirStat.isDirectory())
+      return refuse("agentDir", "is-not-a-directory");
+
+    // `.claude` — the primary attack target. `mkdirSync({recursive})`
+    // would dereference an existing symlink here; reject before any
+    // mkdir. If it doesn't exist yet that's fine (we create it).
+    const claudeStat = this.lstatOrNull(claudeDir);
+    if (claudeStat) {
+      if (claudeStat.isSymbolicLink())
+        return refuse(".claude", "is-a-symlink");
+      if (!claudeStat.isDirectory())
+        return refuse(".claude", "is-not-a-directory");
+    }
+
+    // The target file — `atomicWriteFileSync` renames over it, so a
+    // symlink here is largely defeated by the tempfile dance, but a
+    // dangling/regular-vs-symlink mismatch is still a clear poisoning
+    // signal. Reject a symlink; allow absent or a regular file.
+    const targetStat = this.lstatOrNull(targetPath);
+    if (targetStat) {
+      if (targetStat.isSymbolicLink())
+        return refuse(".credentials.json", "is-a-symlink");
+      if (!targetStat.isFile())
+        return refuse(".credentials.json", "is-not-a-regular-file");
+    }
+
+    return { agentDir, claudeDir, targetPath };
+  }
+
+  private lstatOrNull(path: string): ReturnType<typeof lstatSync> | null {
+    try {
+      return lstatSync(path);
+    } catch {
+      return null;
+    }
+  }
+
   private mirrorAccountToAgent(label: string, agentName: string): boolean {
     const credsPath = accountCredentialsPath(label, this.home);
     if (!existsSync(credsPath)) return false;
     // enrichMirrorContent: defense-in-depth on top of #1280's write-
     // time enrichment for stale legacy source files. See its docstring.
     const mirrorContent = enrichMirrorContent(readFileSync(credsPath, "utf-8"));
-    const agentsDir = resolveAgentsDir(this.config);
-    const agentDir = resolve(agentsDir, agentName);
-    if (!existsSync(agentDir)) return false;
-    const claudeDir = join(agentDir, ".claude");
+    // Symlink guard (#1393): validate every controllable path
+    // component is a real (non-symlink) dir/file BEFORE any
+    // mkdir/write/chown. Fail closed — skip this agent, don't crash
+    // the fanout.
+    const safe = this.resolveMirrorPathsSafe(agentName);
+    if (!safe) return false;
+    const { claudeDir, targetPath } = safe;
     mkdirSync(claudeDir, { recursive: true, mode: 0o700 });
     // Claude Code (2.x) reads OAuth credentials from `.credentials.json`
     // (dotfile, see the binary string table). The pre-RFC-H fanout used
@@ -1639,8 +1750,8 @@ export class AuthBroker {
     // .oauth-token — claude never actually read the on-disk mirror.
     // RFC H §7.4 deletes the env-injection path, so the on-disk mirror
     // must land at the dotfile path or agents silently lose auth on
-    // first restart. Pinned by tests in server.test.ts.
-    const targetPath = join(claudeDir, ".credentials.json");
+    // first restart. Pinned by tests in server.test.ts. `targetPath`
+    // is the symlink-guarded path from `resolveMirrorPathsSafe`.
     try {
       atomicWriteFileSync(targetPath, mirrorContent, 0o600);
       try {

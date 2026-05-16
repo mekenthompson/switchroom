@@ -107,7 +107,7 @@ This is the default. One OAuth flow per Anthropic account, then every agent in t
 ## What not to do
 
 - **Do not** run `switchroom setup` non-interactively or pipe input to it — it's designed for a human.
-- **Do not** edit `~/.switchroom/vault.enc` or any file under `~/.switchroom/` directly. Use the CLI.
-- **Do not** run `docker build` on the operator's host. The 5 fleet images are published on GHCR; `switchroom apply` writes a compose file that pulls them.
-- **Do not** suggest the legacy `switchroom up` / `switchroom init` / `switchroom update` verbs — they were removed in v0.7. The current flow is `switchroom apply && docker compose pull && docker compose up -d`.
+- **Do not** edit the vault (`~/.switchroom/vault/`) or any file under `~/.switchroom/` directly. Use the CLI.
+- **Do not** run `docker build` on the operator's host. The fleet images are published on GHCR; `switchroom apply` writes a compose file that pulls them.
+- **Do not** suggest the legacy `switchroom up` / `switchroom init` verbs — they were removed. NOTE: `switchroom update` is **current and canonical** — it is the one-shot upgrade path (pull images + apply + recreate + doctor); recommend it for "how do I update". A fresh install/redeploy is `switchroom apply && docker compose pull && docker compose up -d`.
 - **Do not** reinstall over an existing install without asking. If the user wants a clean slate, have them run `switchroom uninstall` first (or confirm they want to blow away `~/.switchroom/`).

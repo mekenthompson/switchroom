@@ -109,10 +109,19 @@ operation. Future work: an opt-in strict-isolation mode with
 `extra_hosts: host.docker.internal`.
 
 **Self-restart commands (`/restart`, `/new`, `/reset`, `/update apply`).**
-The gateway shells `switchroom <verb>` via `spawnSwitchroomDetached`
-(`telegram-plugin/gateway/gateway.ts`). Two load-bearing primitives in
-that helper that are easy to "simplify away" and break the self-
-restart case:
+Since RFC C Phase 2 (default-flip, #1338) `host_control.enabled`
+defaults **true**, so the gateway dispatches these four verbs through
+the **`switchroom-hostd`** daemon (a host-side container in its own
+compose project with the docker socket mounted) over UDS —
+`telegram-plugin/gateway/hostd-dispatch.ts` is the primary path.
+`spawnSwitchroomDetached` (`telegram-plugin/gateway/gateway.ts`) is now
+the **fallback**, used only when hostd is `"not-configured"`
+(host_control explicitly disabled, per-agent socket absent, or daemon
+unreachable). There is deliberately *no* silent spawn fallback when
+hostd is configured-on.
+
+Two load-bearing primitives in the spawn-detached *fallback* path that
+are easy to "simplify away" and break the self-restart case:
 
   1. **Detached spawn + restart-marker dance.** The gateway runs
      inside the agent container in v0.7+; when it asks docker (via
@@ -138,15 +147,15 @@ restart case:
 
 **`/update apply` docker-availability guard (#926).** The agent
 container has no docker binary or `/var/run/docker.sock` mount.
-`isDockerReachable()` in the gateway probes both before invoking
-`switchroom update`; on failure it surfaces a clean error pointing
-at the host CLI rather than letting the detached child fail with
-opaque exit-127. The proper fix is the host-control daemon (RFC C
-at `docs/rfcs/host-control-daemon.md`): a host-side docker
-container — outside the switchroom compose project, with the
-docker socket mounted — that the gateway calls into via UDS.
-Phase 1 (library + opt-in flag + per-agent socket bind mounts) has
-landed; Phase 2 swaps the gateway callsites.
+`isDockerReachable()` in the gateway probes both before the
+spawn-detached fallback; on failure it surfaces a clean error
+pointing at the host CLI rather than an opaque exit-127. The proper
+fix — the host-control daemon (RFC C,
+`docs/rfcs/host-control-daemon.md`) — **has landed**: Phase 1
+(library + per-agent socket bind mounts) and Phase 2 (gateway
+callsites swapped, default-on, #1306/#1338) are both shipped, so
+hostd is the primary path described above. Phase 3 (removing the
+legacy `systemd-run` fallback branch) is the only remaining step.
 
 **Agent-scheduler env knobs.**
 - `SWITCHROOM_INLINE_SCHEDULER` — set to `0` in the compose env to

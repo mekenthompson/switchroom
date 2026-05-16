@@ -234,11 +234,14 @@ List cron jobs and scheduled tasks.
 
 ### Step 1 — Show live timers
 
-Cron timers in v0.7+ run inside the per-agent scheduler container. Inspect
-its log to see fired jobs:
+Since Phase 4 (#893) cron runs **in-container** as the `agent-scheduler`
+sidecar inside each agent — the old `switchroom-<agent>-scheduler` /
+`switchroom-cron` singleton container no longer exists. Inspect fired
+jobs in the agent's own log; scheduler lines are prefixed
+`agent-scheduler:`:
 
 ```bash
-docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml logs switchroom-<agent>-scheduler --tail 100
+docker logs --tail 100 switchroom-<agent> 2>&1 | grep agent-scheduler:
 ```
 
 ### Step 2 — Show declared schedule entries

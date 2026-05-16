@@ -74,11 +74,13 @@ Switchroom's standard log map (resolve `<agent>` from the user or from `SWITCHRO
 |---|---|---|
 | Gateway events | `~/.switchroom/agents/<agent>/telegram/gateway.log` | Inbound/outbound messages, IPC, progress card, watcher, classifier output |
 | Claude stdout/stderr | `~/.switchroom/agents/<agent>/service.log` | The agent's own session output, tool calls, errors |
-| Systemd lifecycle | `journalctl --user -u switchroom-agent-<agent>` | Boot/restart/crash, exit codes |
-| Cron lifecycle | `journalctl --user -u switchroom-agent-<agent>-cron` | Scheduled-task firings |
-| Vault broker | `journalctl --user -u switchroom-vault-broker` | Audit log, ACL gates |
+| Container lifecycle | `docker logs switchroom-<agent>` | Boot/restart/crash, exit codes |
+| Cron firings | `docker logs switchroom-<agent>` (lines prefixed `agent-scheduler:`) | Scheduled-task firings (in-container sidecar since Phase 4) |
+| Vault broker | `docker logs switchroom-vault-broker` | Audit log, ACL gates |
 
-For each relevant source: extract the slice that brackets the symptom window. Use `awk '/<start-ts>/,/<end-ts>/'` or `journalctl --since "10 min ago"`. Do **not** paste raw multi-MB dumps; cap each excerpt at the lines that actually matter and signpost what was clipped.
+(v0.7+ agents run in Docker — there is no systemd/`journalctl` in-container; logs are `docker logs`. Only a legacy non-docker install would use `journalctl --user -u switchroom-…`.)
+
+For each relevant source: extract the slice that brackets the symptom window. Use `docker logs --since 10m switchroom-<agent>` or pipe through `awk '/<start-ts>/,/<end-ts>/'`. Do **not** paste raw multi-MB dumps; cap each excerpt at the lines that actually matter and signpost what was clipped.
 
 If the gateway.log doesn't have what you need, check whether `progress-card.log`, `bridge.log`, or `subagent-watcher.log` are configured separately on this agent (some setups split).
 

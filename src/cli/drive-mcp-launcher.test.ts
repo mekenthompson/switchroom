@@ -117,9 +117,15 @@ describe("buildUvxArgs — pinned upstream + --single-user", () => {
     expect(args).toEqual([
       "--from",
       `git+https://github.com/taylorwilsdon/google_workspace_mcp.git@${GOOGLE_WORKSPACE_MCP_PINNED_SHA}`,
-      "google-workspace-mcp",
+      // MUST be `workspace-mcp` — the upstream package provides only
+      // `workspace-mcp` and `workspace-cli`. The original
+      // `google-workspace-mcp` made uvx exit "executable not provided
+      // by package workspace-mcp" (verified in-container). This is the
+      // assertion that previously encoded the bug.
+      "workspace-mcp",
       "--single-user",
     ]);
+    expect(args).not.toContain("google-workspace-mcp");
   });
 
   it("appends --tool-tier <tier> after --single-user when a tier is given", () => {

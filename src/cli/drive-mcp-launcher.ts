@@ -162,13 +162,21 @@ export function buildSeedCredentials(
  * different upstream revisions.
  *
  *   uvx --from git+https://github.com/taylorwilsdon/google_workspace_mcp.git@<sha> \
- *       google-workspace-mcp --single-user [--tool-tier <tier>]
+ *       workspace-mcp --single-user [--tool-tier <tier>]
+ *
+ * NB: the executable is `workspace-mcp`, NOT `google-workspace-mcp`.
+ * The upstream package is named `workspace-mcp` and provides exactly
+ * two entrypoints — `workspace-mcp` (the MCP server) and
+ * `workspace-cli`. Passing `google-workspace-mcp` makes uvx exit with
+ * "An executable named `google-workspace-mcp` is not provided by
+ * package `workspace-mcp`" — verified in-container against the pinned
+ * SHA.
  */
 export function buildUvxArgs(tier?: string): string[] {
   const args = [
     "--from",
     `git+https://github.com/taylorwilsdon/google_workspace_mcp.git@${GOOGLE_WORKSPACE_MCP_PINNED_SHA}`,
-    "google-workspace-mcp",
+    "workspace-mcp",
     "--single-user",
   ];
   if (tier && tier.length > 0) {

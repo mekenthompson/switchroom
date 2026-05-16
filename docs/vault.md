@@ -75,10 +75,13 @@ passphrase — the broker is for scheduled (non-interactive) access.
 
 ### Populate the vault
 
-The vault store is created on first `set` (it prompts for a passphrase
-when no store exists yet — there is no separate `vault init` verb).
+Create the encrypted vault store first with `switchroom vault init` (or
+the `switchroom setup` wizard does it for you); both prompt for a
+passphrase. `switchroom vault set` requires an existing store and
+errors with `Vault file not found` if you skip init.
 
 ```sh
+switchroom vault init                          # create the encrypted vault store (prompts for passphrase)
 switchroom vault set <key>                     # set a secret interactively
 switchroom vault set <key> --file /path/to     # read value from file (PEM, JSON, etc.)
 switchroom vault get <key>                     # decrypt and print (direct, not via broker)

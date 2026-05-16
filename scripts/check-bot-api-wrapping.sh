@@ -118,7 +118,13 @@ ALLOWLIST=(
   # Re-bumped 2026-05-15 for #1345 (quota align): +2 lines inserted above
   # (quota-check import + a startBootCard wiring line) shifted the
   # unchanged callsite 3499 -> 3501, just past the old 3500 bound.
-  "telegram-plugin/gateway/gateway.ts:3160-3505:reply chunk-loop THREAD_NOT_FOUND fallback (intentional raw)"
+  # Re-bumped 2026-05-16 for the HTML→plaintext parse-reject fallback:
+  # the sendChunkPlainText helper + restructured try/catch (~25 lines)
+  # shifted the THREAD_NOT_FOUND raw send 3501 -> 3519. The new
+  # sendChunkPlainText raw send (~3498) is the SAME intentional-raw
+  # rationale — a terminal last-resort resend that must not re-enter
+  # the retry/parse-mode policy that just rejected the payload.
+  "telegram-plugin/gateway/gateway.ts:3160-3540:reply chunk-loop THREAD_NOT_FOUND + plaintext-fallback raw sends (intentional)"
 
   # credit-watch notification. No thread_id (DM).
   # Range bumped 2026-05-13 for stuck-turn-recovery (#1136) v2 cleanup

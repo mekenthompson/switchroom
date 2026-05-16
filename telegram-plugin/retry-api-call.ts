@@ -250,3 +250,27 @@ export async function retryWithThreadFallback<T>(
     throw err
   }
 }
+
+/**
+ * True when Telegram rejected a message because it couldn't parse the
+ * HTML/entities we sent — our prevention (markdownToHtml +
+ * sanitizeForTelegram + splitHtmlChunks) let something malformed
+ * through anyway. These 400s are deliberately NOT swallowed or retried
+ * by `retryApiCall` (only not-modified / not-found / thread-not-found
+ * are) — they surface to the caller, which recovers by resending the
+ * chunk as plain text (parse_mode unset). Same "caller-level fallback"
+ * shape as the THREAD_NOT_FOUND contract above.
+ */
+export function isHtmlParseRejectError(err: unknown): boolean {
+  if (!(err instanceof GrammyError) || err.error_code !== 400) return false
+  const d = (err.description || '').toLowerCase()
+  return (
+    d.includes("can't parse entities") ||
+    d.includes('can’t parse entities') ||
+    d.includes('unsupported start tag') ||
+    d.includes('unclosed start tag') ||
+    d.includes("can't find end of the entity") ||
+    // covers both "expected end tag" and "unexpected end tag"
+    d.includes('expected end tag')
+  )
+}

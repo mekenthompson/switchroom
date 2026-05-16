@@ -106,3 +106,79 @@ describe("scaffoldAgent: .mcp.json content-aware regeneration (#883)", () => {
     expect(second.skipped).toContain(mcpPath);
   });
 });
+
+// Regression: the per-agent `gdrive` MCP must land in the written
+// .mcp.json — the file Claude Code actually loads for
+// switchroom-telegram-plugin agents — NOT only in
+// settings.json.mcpServers. PR #1355 wired it solely into the settings
+// path, so `resolveGdriveMcpEntry` returned the entry and unit tests
+// passed, yet the agent never saw a Drive tool (verified empirically:
+// carrie's in-container .mcp.json had no `gdrive`). These tests assert
+// the actual .mcp.json output, which is what was missing.
+describe("scaffoldAgent: gdrive lands in .mcp.json (not just settings)", () => {
+  let tmpDir: string;
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), "switchroom-gdrive-mcpjson-"));
+  });
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  function cfg(
+    name: string,
+    agentConfig: AgentConfig,
+    googleAccounts?: Record<string, { enabled_for?: string[] }>,
+  ): SwitchroomConfig {
+    return {
+      ...makeSwitchroomConfig(name, agentConfig),
+      ...(googleAccounts ? { google_accounts: googleAccounts } : {}),
+    } as SwitchroomConfig;
+  }
+
+  it("broker-authorized agent → .mcp.json contains the gdrive entry", () => {
+    const name = "carrie";
+    const agentConfig = makeAgentConfig({
+      google_workspace: { account: "you@example.com" },
+    } as Partial<AgentConfig>);
+    const sc = cfg(name, agentConfig, {
+      "you@example.com": { enabled_for: ["carrie"] },
+    });
+
+    const res = scaffoldAgent(name, agentConfig, tmpDir, telegramConfig, sc);
+    const mcp = JSON.parse(
+      readFileSync(join(res.agentDir, ".mcp.json"), "utf-8"),
+    );
+    expect(Object.keys(mcp.mcpServers)).toContain("gdrive");
+    expect(mcp.mcpServers.gdrive.command).toBeTruthy();
+  });
+
+  it("agent NOT in enabled_for → .mcp.json has NO gdrive entry", () => {
+    const name = "carrie";
+    const agentConfig = makeAgentConfig({
+      google_workspace: { account: "you@example.com" },
+    } as Partial<AgentConfig>);
+    const sc = cfg(name, agentConfig, {
+      "you@example.com": { enabled_for: ["someone-else"] },
+    });
+
+    const res = scaffoldAgent(name, agentConfig, tmpDir, telegramConfig, sc);
+    const mcp = JSON.parse(
+      readFileSync(join(res.agentDir, ".mcp.json"), "utf-8"),
+    );
+    expect(Object.keys(mcp.mcpServers)).not.toContain("gdrive");
+  });
+
+  it("no google_workspace.account → .mcp.json has NO gdrive entry", () => {
+    const name = "carrie";
+    const agentConfig = makeAgentConfig();
+    const sc = cfg(name, agentConfig, {
+      "you@example.com": { enabled_for: ["carrie"] },
+    });
+
+    const res = scaffoldAgent(name, agentConfig, tmpDir, telegramConfig, sc);
+    const mcp = JSON.parse(
+      readFileSync(join(res.agentDir, ".mcp.json"), "utf-8"),
+    );
+    expect(Object.keys(mcp.mcpServers)).not.toContain("gdrive");
+  });
+});

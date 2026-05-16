@@ -2186,6 +2186,17 @@ export function scaffoldAgent(
       }
     }
 
+    // Per-agent conditional `gdrive` MCP. THIS .mcp.json (not
+    // settings.json.mcpServers) is the surface Claude Code actually
+    // loads for switchroom-telegram-plugin agents — see the block
+    // comment at the top of this branch. Same shared broker-ACL gate.
+    if (switchroomConfig) {
+      const gdrive = resolveGdriveMcpEntry(name, agentConfig, switchroomConfig);
+      if (gdrive) {
+        mcpServers[gdrive.key] = gdrive.value;
+      }
+    }
+
     // .mcp.json is purely template-driven. writeIfChanged so a stale
     // file from a pre-v0.7.6 release (different plugin path resolution)
     // is rewritten on the next `switchroom apply`.
@@ -3950,6 +3961,19 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
       const hindsightEntry = getHindsightSettingsEntry(name, switchroomConfig);
       if (hindsightEntry) {
         mcpServers[hindsightEntry.key] = hindsightEntry.value;
+      }
+    }
+
+    // Per-agent conditional `gdrive` MCP. THIS .mcp.json (not
+    // settings.json.mcpServers) is the surface Claude Code actually
+    // loads for switchroom-telegram-plugin agents. mcpServers is rebuilt
+    // fresh from the hardcoded set each reconcile, so a retracted gdrive
+    // simply isn't re-added (no explicit delete needed). Same shared
+    // broker-ACL gate as scaffoldAgent / settings paths.
+    {
+      const gdrive = resolveGdriveMcpEntry(name, agentConfig, switchroomConfig);
+      if (gdrive) {
+        mcpServers[gdrive.key] = gdrive.value;
       }
     }
 

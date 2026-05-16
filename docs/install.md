@@ -141,13 +141,16 @@ You can skip this step for a single-agent install.
 ## Step 5 — Authenticate with your Claude subscription
 
 ```sh
-switchroom auth add me --from-oauth
+switchroom auth add me --via-claude
 switchroom auth use me
 ```
 
-`auth add` opens an OAuth browser flow — log in with your Claude Pro or
-Max account, paste the code back at the prompt. `auth use` makes that
-account the fleet-wide active account; every agent inherits.
+`--via-claude` drives `claude`'s own native OAuth flow (broader scope)
+— log in with your Claude Pro or Max account when prompted. Use
+`--via-claude` for first-time setup: `--from-oauth` mints
+`scope=user:inference` only, which agents running in `server:` mode
+reject at boot. `auth use` makes that account the fleet-wide active
+account; every agent inherits it via the auth-broker.
 
 One OAuth flow per Anthropic account, ever. New agents you add later
 don't need their own login — they inherit the fleet active. See

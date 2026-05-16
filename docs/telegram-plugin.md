@@ -94,6 +94,21 @@ broker logs the state and agents see expired-token errors until the
 window resets or an operator runs `switchroom auth add` for a new
 account. See `src/auth/broker/` for the implementation.
 
+**There is no `/authfallback` command.** Pre-RFC-H builds had a
+per-agent `/authfallback` verb that switched an agent to the next slot.
+It was retired with the slot-pool model — fallback is now automatic and
+fleet-wide (the broker rewires every affected agent without a command),
+and the canonical *manual* control is `/auth use <label>` (swap the
+whole fleet to a named healthy account) or `/auth rotate` (cycle to the
+next non-exhausted account in `auth.fallback_order`). When the model is
+unreachable, the "model unavailable" card now points at `/auth use`,
+`/auth add`, and `/usage` — not `/authfallback`.
+
+*Grounded in:* `telegram-plugin/model-unavailable.ts` (the card's
+"What to try" block explicitly notes `/authfallback` is no longer a
+verb post-RFC-H), `telegram-plugin/welcome-text.ts`,
+`telegram-plugin/gateway/auth-command.ts`.
+
 ### Forum topic support
 
 Messages from Telegram forum topics carry `message_thread_id`. The plugin:

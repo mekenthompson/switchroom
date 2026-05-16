@@ -4,6 +4,27 @@ outcome: One `claude setup-token` per Anthropic account covers every agent, sub-
 stakes: When auth is per-agent, six agents on one Pro subscription means six OAuth flows, six independent refresh cycles, six places quota state can drift, and six 401-storms when the user adds a seventh agent. The user starts to feel the fleet — and asks why "one subscription" demands six logins.
 ---
 
+## Status — SHIPPED (RFC H)
+
+**This is built and is the current model.** The `switchroom-auth-broker`
+daemon (`src/auth/broker/`) is the sole writer of every
+`credentials.json`; authentication is per **Anthropic account**, not
+per agent; the fleet shares one `auth.active` and quota / fallback
+state fans out across every consumer in seconds. Operator surface:
+`switchroom auth add|list|show|use|rotate|rm` (CLI) and `/auth
+show|use|rotate` (Telegram). See [`docs/auth.md`](../docs/auth.md) for
+the operator guide and `src/auth/broker/protocol.ts` for the wire
+protocol.
+
+> **Read the body below as the *pre-RFC-H problem statement*, not a
+> description of current behaviour.** Present-tense passages like
+> "Today, every agent has its own private OAuth slot pool", "the user
+> runs `claude setup-token` six times", and any "no migration shipped"
+> language describe the world *before* this RFC and are **false as of
+> the v0.7+ broker rollout**. They are retained as design history — the
+> reasoning that motivated the account-as-unit model — not as an
+> open to-do list.
+
 # The job
 
 The user pays Anthropic for a subscription. That subscription is the

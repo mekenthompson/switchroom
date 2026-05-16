@@ -1,11 +1,36 @@
 ---
-status: rfc — draft, awaiting sign-off
+status: shipped (closed) — TDD verification landed; 2 narrow follow-ups tracked
 serves: `know-what-my-agent-is-doing.md`
 supersedes: nothing (extends `reference/status-card-design.md` with TDD verification)
 relates: #709 #776 #782 #788 #64 #757
 ---
 
 # Sub-agent visibility — TDD verification + design RFC
+
+## Status — SHIPPED / CLOSED
+
+The frontmatter previously read `rfc — draft, awaiting sign-off`; that
+is stale. The verification work this RFC proposed **landed**: the UAT
+scenarios were written and run, and Bugs 1–5 in the changelog table
+below merged (#1057, #1059, #1060, #1063, #1066). Five of six
+acceptance assertions pass. Treat this RFC as **closed** — its purpose
+(prove the background-dispatch path with a regression-locked test) is
+done. Two narrow defects remain open as ordinary tracked follow-ups,
+**not** as RFC-blocking work: Bug 6 (bg `sub_agent_turn_end` never
+fires for some Claude Code bg dispatches → card can stay on 🌀
+Background until the heartbeat ceiling) and Bug 7 (driver-side
+parent-tool-use correlation race). They have their own diagnoses in
+§"Bug 6 diagnosis" below.
+
+> **Card model superseded.** This RFC reasons about the *two-zone*
+> progress-card model from `reference/status-card-design.md`. That
+> two-zone design has since been **superseded by
+> [`reference/conversational-pacing.md`](conversational-pacing.md)**,
+> and `reference/status-card-design.md` is archived. The acceptance
+> criteria and bug diagnoses here are still valid as the historical
+> record of how sub-agent visibility was verified, but the current
+> card-pacing contract lives in `conversational-pacing.md` — read that
+> for present-day behaviour.
 
 ## TL;DR
 

@@ -15,7 +15,7 @@ import { join, resolve } from "node:path";
 import { createPublicKey, createPrivateKey } from "node:crypto";
 import { listSecrets, getStringSecret } from "../vault/vault.js";
 import { resolveAgentsDir, resolvePath } from "../config/loader.js";
-import { resolveStatePath } from "../config/paths.js";
+import { resolveStatePath, LEGACY_STATE_DIR } from "../config/paths.js";
 import { getConfig, getConfigPath, withConfigError } from "./helpers.js";
 import { getAllAgentStatuses } from "../agents/lifecycle.js";
 import { readQuarantineMarkerForAgent } from "../agents/quarantine.js";
@@ -439,6 +439,59 @@ export function checkConfig(config: SwitchroomConfig, configPath: string): Check
         ? undefined
         : "Add defaults.subagents to switchroom.yaml to enable Sonnet/Haiku delegation. See docs/sub-agents.md for the worker/researcher/reviewer pattern.",
   });
+
+  return results;
+}
+
+/**
+ * Deprecation notice (announced v0.12.0 → shims removed v0.13.0): WARN when
+ * legacy `~/.clerk` state or the v0.6 host-side broker socket is present, so
+ * operators migrate before the back-compat shims (src/config/paths.ts dual-
+ * read + the `clerk:` YAML alias + src/vault/broker/client.ts
+ * LEGACY_SOCKET_PATH) are deleted. There is no automatic migration. `warn`
+ * keeps exit 0, so this never breaks CI/automation.
+ */
+export function checkLegacyState(): CheckResult[] {
+  const results: CheckResult[] = [];
+  const h = process.env.HOME ?? "/root";
+
+  const clerkDir = join(h, LEGACY_STATE_DIR);
+  const clerkPresent = existsSync(clerkDir);
+  results.push({
+    name: "legacy ~/.clerk state",
+    status: clerkPresent ? "warn" : "ok",
+    detail: clerkPresent ? `${clerkDir} present` : "none",
+    ...(clerkPresent
+      ? {
+          fix:
+            "Legacy state detected. Run `mv ~/.clerk ~/.switchroom` and rename "
+            + "any top-level `clerk:` key in switchroom.yaml to `switchroom:`. "
+            + "This back-compat shim is REMOVED in v0.13.0 — no automatic "
+            + "migration exists.",
+        }
+      : {}),
+  });
+
+  const legacySock = join(h, ".switchroom", "vault-broker.sock");
+  let sockStat: ReturnType<typeof lstatSync> | null = null;
+  try {
+    sockStat = lstatSync(legacySock);
+  } catch {
+    /* absent — fine */
+  }
+  if (sockStat) {
+    results.push({
+      name: "legacy v0.6 broker socket",
+      status: "warn",
+      detail: sockStat.isSymbolicLink()
+        ? `${legacySock} (symlink) present`
+        : `${legacySock} present`,
+      fix:
+        "v0.6 host-side broker socket detected. v0.7+ docker installs use the "
+        + "per-agent broker-operator socket; remove the legacy socket. The "
+        + "LEGACY_SOCKET_PATH fallback is REMOVED in v0.13.0.",
+    });
+  }
 
   return results;
 }
@@ -2167,6 +2220,7 @@ export function registerDoctorCommand(program: Command): void {
           { title: "Skills Prerequisites", results: checkSkillsPrerequisites() },
           { title: "Manifest Drift", results: await checkManifestDrift() },
           { title: "Configuration", results: checkConfig(config, configPath) },
+          { title: "Legacy State", results: checkLegacyState() },
           { title: "Vault", results: checkVault(config) },
           { title: "Memory (Hindsight)", results: await checkHindsight(config) },
           { title: "Telegram", results: await checkTelegram(config) },

@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.12.0 — legacy-state deprecation notices
+
+Schedules the long-lived `clerk → switchroom` rename shims for removal so they don't sit indefinitely. No behaviour change for migrated hosts; no automatic migration is performed.
+
+### Changes
+
+#### Deprecations
+
+- **deprecate(state):** `switchroom doctor` now WARNs (exit 0) when legacy `~/.clerk` state or the v0.6 host-side `~/.switchroom/vault-broker.sock` is present. Additionally, any CLI/agent invocation that actually reads from `~/.clerk` now emits a one-time stderr deprecation notice (doctor alone is insufficient — the silent dual-read failure mode is total state loss). These back-compat shims (`src/config/paths.ts` dual-read, the top-level `clerk:` switchroom.yaml alias, and `src/vault/broker/client.ts` `LEGACY_SOCKET_PATH`) are **REMOVED in v0.13.0**.
+
+### Upgrade notes
+
+- If `~/.clerk` exists on a host: migrate before upgrading to v0.13.0 with `mv ~/.clerk ~/.switchroom`, and rename any top-level `clerk:` key in `switchroom.yaml` to `switchroom:`. There is no automatic migration — v0.13.0 silently treats un-migrated state as a fresh install (vault/agents/auth read as absent).
+
 ## v0.11.1 — hostd default-on + CI infra-resilience follow-ups
 
 A small follow-up release: RFC C Phase 2 flips the host-control daemon on by default (so `/restart`, `/new`, `/reset`, `/update apply` work on docker-mode installs without per-install opt-in), `/audit hostd` gets its bind-mount, and the GHA queue-fail class (#1336) gets a manual recovery lever plus an alert backstop.

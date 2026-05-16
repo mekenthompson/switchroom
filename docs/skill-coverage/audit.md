@@ -4,9 +4,25 @@ Companion to `inventory.md`. Read that first — this file references skills by 
 
 This audit feeds the probabilistic skill-coverage harness. Verdicts are biased toward "what will the fuzzer actually fire on?" rather than reading the SKILL.md charitably.
 
+> **`buildkite-*` scope caveat.** The `NEEDS-FIX` verdicts on the eight
+> `buildkite-*` skills below describe their *trigger-precision* shape
+> for the harness — they are **not** a recommendation to invest in
+> fixing those descriptions, and not a retirement call either. Whether
+> the `buildkite-*` skills stay in the bundle at all (switchroom's own
+> Buildkite CI is retired) is an unresolved maintainer decision tracked
+> in [#1384](https://github.com/switchroom/switchroom/issues/1384).
+> Treat any "highest-impact fix" / priority-ordering language about
+> `buildkite-*` in this file as conditional on #1384 resolving *keep*;
+> if it resolves *remove*, these rows simply drop out of harness scope.
+> Don't action `buildkite-*` description fixes ahead of #1384.
+>
+> The estimates in §5 are *predictions* (the harness has not been
+> live-run end-to-end against a real agent here); read them as relative
+> risk ordering, not measured precision/recall.
+
 ## 1. Executive summary
 
-- **Pervasive missing negatives.** 21 of 27 skills carry `no-negatives` — most buildkite-* skills, `humanizer`, `humanizer-calibrate`, `mcp-builder`, `pdf`, `pptx`, `telegram-test-harness`, `webapp-testing`. Adjacent-but-wrong phrasings will rubber-stamp a fire. Highest-impact fixes are the `buildkite-cli` / `buildkite-pipelines` / `buildkite-api` triangle and the `pdf` / `pptx` / `webapp-testing` set.
+- **Pervasive missing negatives.** 21 of 27 skills carry `no-negatives` — most buildkite-* skills, `humanizer`, `humanizer-calibrate`, `mcp-builder`, `pdf`, `pptx`, `telegram-test-harness`, `webapp-testing`. Adjacent-but-wrong phrasings will rubber-stamp a fire. Among the non-`buildkite-*` skills the most exposed are the `pdf` / `pptx` / `webapp-testing` set; the `buildkite-cli` / `buildkite-pipelines` / `buildkite-api` triangle is the worst-overlapping cluster but its prioritisation is gated on #1384 (see caveat above).
 - **Switchroom-internal cluster is the cleanest negative-control discipline in the bundle** (`switchroom-cli`, `switchroom-status`, `switchroom-manage`, `switchroom-install`, `switchroom-architecture` all cite the rivals to defer to). The harness should expect ≥0.9 F1 there.
 - **`humanizer-calibrate`, `webapp-testing`, `mcp-builder` are likely under-triggers** — descriptions are abstract, no plain-language utterance enumeration. Will miss natural phrasings.
 - **`switchroom-runtime` cannot be fully NL-fuzzed.** Three of its five gates are side-channel signals (env var, sentinel file) — the harness must label those triggers as non-NL.

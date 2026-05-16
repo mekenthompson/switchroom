@@ -1,7 +1,7 @@
 /**
  * Format 2 — health-grouped /auth snapshot + causal auto-fallback
  * announcement. Pure functions; the gateway handles the live-API probe
- * (via `fetchAccountQuota({force: true})`) and the broker `listState`,
+ * (via the broker `probe-quota` op, #1336) and the broker `listState`,
  * then hands shaped data to these formatters.
  *
  * JTBD this module serves:
@@ -588,9 +588,9 @@ function escapeHtml(s: string): string {
  * results (same length, same order), return the AccountSnapshot[] the
  * formatters need.
  *
- * The gateway calls this after running `Promise.all(accounts.map(a =>
- * fetchAccountQuota(a.label, {force: true})))` — both arrays are
- * caller-provided, this is just a zip + classify.
+ * The gateway calls this after probing quota via the broker
+ * `probe-quota` op (#1336) — both arrays are caller-provided, this
+ * is just a zip + classify.
  */
 export function buildSnapshotsFromState(
   state: ListStateData,

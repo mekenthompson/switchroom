@@ -80,12 +80,3 @@ export const CRON_SCRIPT_BASENAME_RE = /^cron-[0-9a-f]{12}\.sh$/;
  * command to find files that still need renaming.
  */
 export const LEGACY_CRON_SCRIPT_BASENAME_RE = /^cron-(\d+)\.sh$/;
-
-/**
- * Either-scheme matcher — used by `classifyChangeKind` during the
- * brief period in which an unmigrated host still has legacy filenames
- * on disk. After `switchroom migrate cron-unit-names` runs, only the
- * new scheme remains; the legacy clause is kept as a belt-and-braces
- * defence rather than a supported coexistence mode.
- */
-export const CRON_SCRIPT_BASENAME_ANY_RE = /^cron-(?:\d+|[0-9a-f]{12})\.sh$/;

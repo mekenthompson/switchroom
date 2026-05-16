@@ -174,9 +174,9 @@ export interface SetActiveData {
 /**
  * Per-account probe result returned by `probe-quota`. The broker
  * runs each probe server-side and returns the parsed
- * rate-limit-utilization headers. `result` is the same shape the
- * pre-#1336 `fetchAccountQuota` returned, so callers can swap the
- * source without changing the format layer.
+ * rate-limit-utilization headers. `result` is a `QuotaResult`
+ * (same shape `fetchQuota` returns), so the format layer is shared
+ * with the direct-probe path.
  */
 export interface ProbeQuotaEntry {
   label: string;

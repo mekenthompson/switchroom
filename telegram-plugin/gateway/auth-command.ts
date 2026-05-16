@@ -260,8 +260,8 @@ export interface AuthCommandContext {
    * working without spinning up the Anthropic API path.
    *
    * Returns a parallel array (same length, same order as
-   * `state.accounts`) of QuotaResult — the gateway passes
-   * `accounts.map(a => fetchAccountQuota(a.label, {force: true}))`.
+   * `state.accounts`) of QuotaResult — sourced from the broker
+   * `probe-quota` op (#1336).
    */
   liveQuotas?: (
     accounts: AccountState[],

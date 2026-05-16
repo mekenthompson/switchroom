@@ -174,13 +174,3 @@ export function formatForCli(
   }
   return out;
 }
-
-/** Telegram-flavoured formatter — same columns, suited for fenced code
- *  block. Caller wraps in <pre>…</pre>. */
-export function formatForTelegram(
-  entries: readonly AuditEntry[],
-  opts: { verbose?: boolean } = {},
-): string {
-  if (entries.length === 0) return "(no matching entries)";
-  return formatForCli(entries, opts).join("\n");
-}

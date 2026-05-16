@@ -6694,7 +6694,7 @@ async function handleInbound(
       } else {
         // Fresh turn — priorTurnInFlight is false, so priorActive is
         // provably undefined. Earlier `if (priorActive)` block was dead
-        // code (mirrors first-paint.ts cleanup).
+        // code, removed in the same first-paint cleanup pass.
         const sKey = streamKey(chat_id, messageThreadId)
         const priorStream = activeDraftStreams.get(sKey)
         if (priorStream && !priorStream.isFinal()) {

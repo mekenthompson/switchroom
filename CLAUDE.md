@@ -255,7 +255,8 @@ src/                    TypeScript source for the `switchroom` CLI
 
 telegram-plugin/        The enhanced MCP Telegram plugin (own Bun tests)
   server.ts             MCP stdio server entry
-  progress-card.ts      Pinned progress-card renderer
+  card-format.ts        Shared status-card formatters (progress card
+                        rendered via stream-reply-handler.ts + subagent-watcher.ts)
   tool-labels.ts        Tool-use label formatting
   auth-slot-parser.ts   /auth router (add/use/list/rm)
   auto-fallback.ts      Quota-exhaustion auto-fallback
@@ -490,8 +491,8 @@ contract" above. The pointers below are for *implementation*.)
 - **"How does config resolution work?"** → `src/config/merge.ts` +
   `docs/configuration.md`.
 - **"How does the progress card render?"** →
-  `telegram-plugin/progress-card.ts` + `docs/telegram-plugin.md`
-  (streaming modes section).
+  `telegram-plugin/stream-reply-handler.ts` + `telegram-plugin/card-format.ts`
+  + `docs/telegram-plugin.md` (streaming modes section).
 - **"How does auth work?"** → `src/auth/accounts.ts` (slot storage) +
   `src/auth/manager.ts` (OAuth flow). Telegram `/auth` routing lives in
   `telegram-plugin/auth-slot-parser.ts`.

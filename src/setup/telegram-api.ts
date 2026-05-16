@@ -17,11 +17,6 @@ export interface DmPairResult {
   chatId: number;
 }
 
-export interface GroupJoinResult {
-  chatId: number;
-  title: string;
-}
-
 /**
  * Validate a bot token by calling getMe.
  * Returns bot info on success, throws on failure.
@@ -161,117 +156,6 @@ export async function pollForDmStart(
   }
 
   throw new Error("Timed out waiting for /start DM");
-}
-
-/**
- * Poll getUpdates looking for a my_chat_member event in a supergroup with is_forum.
- * This fires when the bot is added to a forum group.
- */
-export async function pollForGroupJoin(
-  token: string,
-  timeoutMs: number = 120_000,
-): Promise<GroupJoinResult> {
-  const deadline = Date.now() + timeoutMs;
-  let offset = 0;
-
-  while (Date.now() < deadline) {
-    const url = `https://api.telegram.org/bot${token}/getUpdates?offset=${offset}&timeout=2&allowed_updates=["my_chat_member"]`;
-    let data: any;
-    try {
-      const response = await fetch(url);
-      data = await response.json();
-    } catch {
-      await sleep(2000);
-      continue;
-    }
-
-    if (data.ok && Array.isArray(data.result)) {
-      for (const update of data.result) {
-        offset = update.update_id + 1;
-
-        const member = update.my_chat_member;
-        if (
-          member &&
-          member.chat?.type === "supergroup" &&
-          member.chat?.is_forum === true
-        ) {
-          return {
-            chatId: member.chat.id,
-            title: member.chat.title ?? "Unknown group",
-          };
-        }
-      }
-    }
-
-    await sleep(2000);
-  }
-
-  throw new Error("Timed out waiting for bot to be added to a forum group");
-}
-
-/**
- * Validate that the bot is an admin in the given chat.
- */
-export async function validateGroupAdmin(
-  token: string,
-  chatId: string,
-): Promise<boolean> {
-  // First get bot info
-  const botInfo = await validateBotToken(token);
-
-  const url = `https://api.telegram.org/bot${token}/getChatMember`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      chat_id: chatId,
-      user_id: botInfo.id,
-    }),
-  });
-
-  const data = (await response.json()) as {
-    ok: boolean;
-    result?: { status: string };
-    description?: string;
-  };
-
-  if (!data.ok || !data.result) {
-    throw new Error(
-      `Failed to check admin status: ${data.description ?? "Unknown error"}`,
-    );
-  }
-
-  const adminStatuses = ["administrator", "creator"];
-  return adminStatuses.includes(data.result.status);
-}
-
-/**
- * Validate that a chat is a forum (has topics enabled).
- */
-export async function validateGroupForum(
-  token: string,
-  chatId: string,
-): Promise<boolean> {
-  const url = `https://api.telegram.org/bot${token}/getChat`;
-  const response = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ chat_id: chatId }),
-  });
-
-  const data = (await response.json()) as {
-    ok: boolean;
-    result?: { type: string; is_forum?: boolean };
-    description?: string;
-  };
-
-  if (!data.ok || !data.result) {
-    throw new Error(
-      `Failed to get chat info: ${data.description ?? "Unknown error"}`,
-    );
-  }
-
-  return data.result.is_forum === true;
 }
 
 function sleep(ms: number): Promise<void> {

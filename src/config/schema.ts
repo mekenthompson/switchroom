@@ -795,6 +795,23 @@ export const DriveConfigSchema = GoogleWorkspaceConfigSchema;
  */
 export const AgentGoogleWorkspaceConfigSchema = z
   .object({
+    account: z
+      .string()
+      .regex(/^[^@\s:]+@[^@\s:]+\.[^@\s:]+$/, {
+        message:
+          "google_workspace.account must be a Google account email like " +
+          "'alice@example.com' (colons not allowed)",
+      })
+      .transform((v) => v.trim().toLowerCase())
+      .optional()
+      .describe(
+        "RFC G: the Google account this agent uses for the Workspace MCP. " +
+        "Must be a key in top-level `google_accounts:` with this agent " +
+        "listed in its `enabled_for[]`. Read by the auth-broker " +
+        "(get-credentials, provider=google) and by the scaffold to decide " +
+        "whether to emit the `gdrive` MCP entry. Normalized to lowercase " +
+        "so it matches the google_accounts key (which is also normalized)."
+      ),
     approvers: z
       .array(ApproverIdSchema)
       .min(1)

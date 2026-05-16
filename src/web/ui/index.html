@@ -407,11 +407,13 @@
   <nav class="tabs">
     <button id="tab-agents" class="active" onclick="switchTab('agents')">Agents</button>
     <button id="tab-accounts" onclick="switchTab('accounts')">Accounts</button>
+    <button id="tab-system" onclick="switchTab('system')">System</button>
   </nav>
   <main>
     <div id="error"></div>
     <div id="agents" class="loading">Loading agents...</div>
     <div id="accounts" style="display:none"></div>
+    <div id="system" style="display:none"></div>
   </main>
 
   <script>
@@ -472,12 +474,25 @@
       }
     }
 
+    async function fetchSystemHealth() {
+      try {
+        const res = await fetch(`${API}/api/system-health`, { headers: authHeaders() });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        renderSystemHealth(await res.json());
+        clearError();
+      } catch (err) {
+        showError(`Failed to fetch system health: ${err.message}`);
+      }
+    }
+
     function switchTab(tab) {
-      document.getElementById('tab-agents').classList.toggle('active', tab === 'agents');
-      document.getElementById('tab-accounts').classList.toggle('active', tab === 'accounts');
-      document.getElementById('agents').style.display = tab === 'agents' ? '' : 'none';
-      document.getElementById('accounts').style.display = tab === 'accounts' ? '' : 'none';
+      const tabs = ['agents', 'accounts', 'system'];
+      for (const t of tabs) {
+        document.getElementById(`tab-${t}`).classList.toggle('active', tab === t);
+        document.getElementById(t).style.display = tab === t ? '' : 'none';
+      }
       if (tab === 'accounts') fetchAccounts();
+      if (tab === 'system') fetchSystemHealth();
     }
 
     function showError(msg) {
@@ -698,6 +713,76 @@
         ? usedBy.map(escapeHtml).join(', ')
         : `${usedBy.slice(0, MAX_INLINE).map(escapeHtml).join(', ')} +${usedBy.length - MAX_INLINE}`;
       return `<span class="usage-pill primary" title="${escapeHtml(title)}">${shown}</span>`;
+    }
+
+    function renderSystemHealth(h) {
+      const container = document.getElementById('system');
+      const b = h.broker || {};
+      const hs = h.hindsight || {};
+      const hd = h.hostd || {};
+
+      const dot = (ok) => `<span class="status-dot ${ok ? 'active' : 'inactive'}" style="display:inline-block;vertical-align:middle"></span>`;
+      const dim = (s) => `<span style="color:var(--text-dim)">${escapeHtml(s)}</span>`;
+
+      const brokerBody = b.reachable
+        ? `<div class="card-meta" style="padding:0">
+             <div class="meta-item"><label>Fleet-active </label><span>${escapeHtml(b.active || '—')}</span></div>
+             <div class="meta-item"><label>Accounts </label><span>${b.accounts ?? '—'}</span></div>
+             <div class="meta-item"><label>Agents </label><span>${b.agents ?? '—'}</span></div>
+             <div class="meta-item"><label>Consumers </label><span>${b.consumers ?? '—'}</span></div>
+           </div>`
+        : `<div style="color:var(--red)">unreachable${b.error ? ' — ' + escapeHtml(b.error) : ''}</div>`;
+
+      const statelessCell = hs.mcpStateless == null
+        ? dim('unknown')
+        : hs.mcpStateless ? 'stateless' : '<span style="color:var(--yellow)">stateful</span>';
+      const hindsightBody = `
+        <div class="card-meta" style="padding:0">
+          <div class="meta-item"><label>Container </label><span>${hs.containerStatus ? escapeHtml(hs.containerStatus) : dim('absent')}</span></div>
+          <div class="meta-item"><label>Model </label><span>${hs.model ? escapeHtml(hs.model) : dim('unknown')}</span></div>
+          <div class="meta-item"><label>Provider </label><span>${hs.provider ? escapeHtml(hs.provider) : dim('unknown')}</span></div>
+          <div class="meta-item"><label>MCP </label><span>${statelessCell}</span></div>
+        </div>`;
+
+      let hostdBody;
+      if (!hd.auditLogPresent) {
+        hostdBody = dim(hd.error ? `audit log error: ${hd.error}` : 'no audit log yet (hostd has handled no privileged verbs)');
+      } else if (!hd.recent || hd.recent.length === 0) {
+        hostdBody = dim('audit log present, no entries');
+      } else {
+        const rows = hd.recent.slice().reverse().map(e => {
+          const caller = e.caller && e.caller.kind === 'agent' ? escapeHtml(e.caller.name) : 'operator';
+          const ok = e.result === 'ok' || e.exit_code === 0;
+          return `<tr>
+            <td>${dot(ok)} ${escapeHtml(e.op || '?')}</td>
+            <td>${caller}</td>
+            <td>${escapeHtml(e.result || '?')}${e.exit_code != null ? ` (${e.exit_code})` : ''}</td>
+            <td>${escapeHtml(shortTs(e.ts))}</td>
+          </tr>`;
+        }).join('');
+        hostdBody = `<table class="accounts-table" style="margin-top:0.5rem">
+          <thead><tr><th>Verb</th><th>Caller</th><th>Result</th><th>When</th></tr></thead>
+          <tbody>${rows}</tbody></table>`;
+      }
+
+      container.innerHTML = `
+        <div class="agents-grid">
+          <div class="agent-card"><div class="card-header" style="cursor:default">
+            ${dot(b.reachable)}<span class="agent-name">auth-broker</span></div>
+            <div style="padding:0 1.25rem 1rem">${brokerBody}</div></div>
+          <div class="agent-card"><div class="card-header" style="cursor:default">
+            ${dot(hs.running)}<span class="agent-name">hindsight</span></div>
+            <div style="padding:0 1.25rem 1rem">${hindsightBody}</div></div>
+        </div>
+        <div class="agent-card" style="margin-top:1rem"><div class="card-header" style="cursor:default">
+          ${dot(hd.auditLogPresent)}<span class="agent-name">hostd — recent privileged verbs</span></div>
+          <div style="padding:0 1.25rem 1rem">${hostdBody}</div></div>`;
+    }
+
+    function shortTs(ts) {
+      if (!ts) return '—';
+      // 2026-05-15T04:15:13.465Z → 2026-05-15 04:15:13
+      return String(ts).replace('T', ' ').replace(/\.\d+Z?$/, '').replace(/Z$/, '');
     }
 
     function openPromoteModal(label) {

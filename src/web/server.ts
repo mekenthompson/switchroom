@@ -27,6 +27,7 @@ import {
   handleGetAgentAccounts,
   handleGetAgentConfig,
   handleUseAccount,
+  handleGetSystemHealth,
 } from "./api.js";
 import { handleWebhookIngest } from "./webhook-handler.js";
 
@@ -332,6 +333,11 @@ function parseRoute(
     return { handler: "getSubagents", params: { name: subagentsMatch[1] } };
   }
 
+  // GET /api/system-health
+  if (method === "GET" && pathname === "/api/system-health") {
+    return { handler: "getSystemHealth", params: {} };
+  }
+
   // GET /api/accounts
   if (method === "GET" && pathname === "/api/accounts") {
     return { handler: "getAccounts", params: {} };
@@ -509,6 +515,9 @@ export function startWebServer(
             }
             return jsonResponse(result.subagents);
           }
+
+          case "getSystemHealth":
+            return (async () => jsonResponse(await handleGetSystemHealth()))();
 
           case "getAccounts":
             return (async () => jsonResponse(await handleGetAccounts(config)))();

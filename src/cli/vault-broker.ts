@@ -356,18 +356,26 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
     });
 
   // ── enable-auto-unlock ───────────────────────────────────────────────────
-  // Encrypt the vault passphrase via systemd-creds and write it to the
-  // configured credential path, then flip vault.broker.autoUnlock=true,
-  // reconcile, and restart the broker. After this the broker unit declares
-  // LoadCredentialEncrypted= and systemd injects the passphrase at every
-  // boot — no user interaction required. See issue #152.
+  // Encrypt the vault passphrase machine-bound (key derived from
+  // /etc/machine-id, HKDF-SHA256 — NOT systemd-creds; that wording was
+  // vestigial v0.6 text, see RFC J §2.1) and write it to the configured
+  // credential path, then flip vault.broker.autoUnlock=true, reconcile,
+  // and restart the broker. The dockerized broker decrypts it from the
+  // host-mounted /etc/machine-id at every boot — no user interaction,
+  // and a stolen vault+blob off-host is useless without that host's
+  // machine-id. See issue #152 / RFC J.
   //
-  // The encryption cascade (user-scope → host-scope → sudo) is handled in
-  // ./vault-auto-unlock.ts so the same flow can run inside the setup wizard.
+  // The encryption cascade is handled in ./vault-auto-unlock.ts so the
+  // same flow runs inside `switchroom setup`. The passphrase is sourced
+  // from $SWITCHROOM_VAULT_PASSPHRASE when set (the unattended signal
+  // used by setup + the gateway), else prompted/piped — so an
+  // unattended `setup --non-interactive` can establish auto-unlock
+  // (RFC J Phase 1; previously it could not — install-validation
+  // 2026-05-17).
   broker
     .command("enable-auto-unlock")
     .description(
-      "Set up vault auto-unlock at boot: encrypt the passphrase via systemd-creds, " +
+      "Set up vault auto-unlock at boot: encrypt the passphrase machine-bound, " +
       "enable vault.broker.autoUnlock, and restart the broker.",
     )
     .option(
@@ -392,13 +400,23 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
       const vaultPath = getVaultPath(parentOpts.config);
 
       // Prompt + verify BEFORE writing anything. We must not encrypt a typo.
+      // $SWITCHROOM_VAULT_PASSPHRASE is the established unattended signal
+      // (setup --non-interactive, the gateway, materialize-bot-token all
+      // honor it); consume it here so an unattended install can establish
+      // auto-unlock without a TTY. Falls back to the interactive/piped
+      // prompt otherwise. (RFC J Phase 1.)
       let passphrase: string;
-      try {
-        passphrase = await promptPassphrase();
-      } catch (err) {
-        console.error(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-        return; // unreachable; satisfies TS narrowing
+      const envPass = process.env.SWITCHROOM_VAULT_PASSPHRASE;
+      if (envPass && envPass.length > 0) {
+        passphrase = envPass;
+      } else {
+        try {
+          passphrase = await promptPassphrase();
+        } catch (err) {
+          console.error(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+          return; // unreachable; satisfies TS narrowing
+        }
       }
 
       try {

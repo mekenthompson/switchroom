@@ -2488,6 +2488,19 @@ export class VaultBroker {
       DEFAULT_AUTO_UNLOCK_PATH;
     const filePath = resolvePath(configuredPath);
     if (!existsSync(filePath)) return false;
+    // A zero-length blob is semantically "nothing provisioned", not
+    // "corrupt": the docker-compose bind-mount auto-materializes an
+    // empty host file when ~/.switchroom/vault-auto-unlock doesn't
+    // exist (non-interactive setup that didn't enable auto-unlock).
+    // Treat it exactly like absent — quiet fall-through, NOT the
+    // alarming "auto-unlock decrypt failed (format): malformed (wrong
+    // length or version)" line that masked the real state in
+    // install-validation 2026-05-17 (RFC J Phase 1 / §2.4).
+    try {
+      if (statSync(filePath).size === 0) return false;
+    } catch {
+      return false;
+    }
 
     let passphrase: string;
     try {

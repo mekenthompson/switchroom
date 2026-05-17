@@ -750,10 +750,18 @@ export function getAgentLogs(name: string, follow: boolean): void {
  * agent container.
  *
  * The categories intentionally collapse together:
- *   - "cron"     — `telegram/cron-*.sh` script regeneration. The script
- *                  file lives on the host bind-mount, so a rewrite is
- *                  visible to the in-container agent-scheduler on its
- *                  next fire without any container touch.
+ *   - "cron"     — `telegram/cron-*.sh` script regeneration (a legacy
+ *                  artifact). The Phase-4 in-container agent-scheduler
+ *                  (`src/agent-scheduler/`) reads its schedule entries
+ *                  from the cascade-resolved config at boot and closes
+ *                  over each entry's cron+prompt at registration time —
+ *                  it does NOT exec these scripts, nor re-read config
+ *                  per fire. So a cron change is observed only after the
+ *                  scheduler re-reads config (next container/scheduler
+ *                  restart), not "on the next fire". We tag it "cron"
+ *                  only so the caller can skip a destructive bounce on a
+ *                  prompt tweak (see applyCronChangesHot) — the change
+ *                  still waits for the next natural restart.
  *   - "skill"    — `.claude/skills/` symlinks / payload. Phase C will
  *                  build hot-reload for these; for now they still need
  *                  a restart, but we tag them so #1163's Phase C can
@@ -792,21 +800,28 @@ export interface ApplyCronChangesHotResult {
    * If a host-side agent-scheduler IPC reload channel becomes available
    * (per the Phase F design plan in switchroom#1163), this will flip
    * true once that signal is delivered. Today it's always false — the
-   * host has no scheduler-reload socket; the scheduler lives inside the
-   * container and reads its schedule at boot. Cron-script CONTENT edits
-   * are picked up on the next fire (bind-mount + exec). Cron-EXPRESSION
-   * edits in switchroom.yaml require the next natural container restart
-   * to be observed, which is the documented trade for not killing the
-   * running session on every prompt tweak.
+   * host has no scheduler-reload socket; the in-container scheduler
+   * snapshots its schedule entries at boot (it closes over each
+   * entry's cron+prompt at node-cron registration time). So EVERY cron
+   * change — prompt content or cron expression — is observed only after
+   * the scheduler restarts; there is no "content edits are hot, only
+   * expression edits need a restart" split. The documented trade still
+   * holds: rather than killing the running session on a prompt tweak,
+   * the change waits for the next natural container/scheduler restart.
    */
   ipcSignalled: boolean;
 }
 
 /**
  * Apply cron-only reconcile changes without restarting the agent
- * container. `reconcileAgent` has already rewritten the per-task
- * `telegram/cron-<i>.sh` scripts on the host bind-mount, so the
- * in-container scheduler sees the new content on its next fire.
+ * container. `reconcileAgent` has already rewritten the bind-mounted
+ * agent dir (config + legacy `telegram/cron-<i>.sh` scripts). This
+ * helper deliberately performs NO restart — so a prompt tweak doesn't
+ * kill the running session — but note it also does NOT make the change
+ * live: the in-container scheduler snapshots its entries at boot, so
+ * the new schedule is observed only on the scheduler's next
+ * boot/restart (image pull, OOM bounce, host reboot, or an explicit
+ * `switchroom agent restart`).
  *
  * This helper exists as a named seam so:
  *   1. Phase F's decision in `reconcileAndRestartAgent` has a single
@@ -824,11 +839,13 @@ export function applyCronChangesHot(
 ): ApplyCronChangesHotResult {
   const cronScripts = changes.filter((p) => classifyChangeKind(p) === "cron");
   // No host-side cron systemd units exist in this codebase — scheduling
-  // is internal to the agent container (see src/agent-scheduler/). The
-  // bind-mount carrying the agent dir makes the rewritten scripts live
-  // immediately. Intentionally no docker / systemctl call here: that's
-  // the whole point of the hot-cron-reload path. `name` is accepted for
-  // symmetry with restartAgent / future IPC plumbing.
+  // is internal to the agent container (see src/agent-scheduler/).
+  // Intentionally no docker / systemctl call here: skipping a
+  // destructive bounce on a prompt tweak is the point of this seam. The
+  // rewritten config is on the bind-mount but the in-container scheduler
+  // only re-reads it at boot, so the change goes live on the next
+  // restart, not "immediately". `name` is accepted for symmetry with
+  // restartAgent / future IPC plumbing.
   void name;
   return { cronScripts, ipcSignalled: false };
 }

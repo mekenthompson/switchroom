@@ -420,6 +420,15 @@ export const SessionContinuitySchema = z
  */
 export const TelegramChannelSchema = z
   .object({
+    enabled: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Master switch for the per-agent Telegram gateway sidecar. " +
+        "When false, start.sh skips the gateway supervise loop and the " +
+        "agent boots without bot-token requirements (smoke-test + " +
+        "offline-dev use case).",
+      ),
     plugin: z
       .enum(["switchroom", "official"])
       .optional()
@@ -906,9 +915,40 @@ export const ReactionsSchema = z
   })
   .optional();
 
+/**
+ * Release-channel pin / pointer for the update flow.
+ *
+ * Either `channel` (track a moving pointer — dev / rc / latest) OR
+ * `pin` (lock to a specific build identifier — `sha-<7-40 hex>` or
+ * `v<semver>`). The two are mutually exclusive: a pin overrides any
+ * channel implication and a channel implies "follow the pointer."
+ *
+ * Allowed at the root (fleet default) and per-agent (override).
+ * Per-agent `release` REPLACES the root entirely — it is NOT field-
+ * merged (a pinned agent should not silently inherit a channel from
+ * the root, and vice versa).
+ */
+export const ReleaseBlock = z
+  .object({
+    channel: z.enum(["dev", "rc", "latest"]).optional(),
+    pin: z
+      .string()
+      .regex(/^(sha-[0-9a-f]{7,40}|v\d+\.\d+\.\d+)$/)
+      .optional(),
+  })
+  .strict()
+  .refine((r) => !(r.channel && r.pin), {
+    message: "release.channel and release.pin are mutually exclusive",
+  });
+
 const profileFields = {
   extends: z.string().optional(),
   bot_token: z.string().optional(),
+  release: ReleaseBlock.optional().describe(
+    "Release-channel pin / pointer. Either `channel` (dev|rc|latest) or " +
+    "`pin` (sha-<hex>|v<semver>) — mutually exclusive. Per-agent value " +
+    "REPLACES the root entirely (no field merge).",
+  ),
   timezone: z
     .string()
     .regex(
@@ -1145,6 +1185,11 @@ export const AgentSchema = z.object({
     .string()
     .optional()
     .describe("Per-agent Telegram bot token or vault reference (overrides global telegram.bot_token)"),
+  release: ReleaseBlock.optional().describe(
+    "Per-agent release-channel pin / pointer. REPLACES the root " +
+    "`release` block entirely (no field merge) — a pinned agent does " +
+    "not inherit the fleet channel, and vice versa.",
+  ),
   bot_username: z
     .string()
     .optional()
@@ -1793,6 +1838,11 @@ export const SwitchroomConfigSchema = z.object({
       ),
   }),
   telegram: TelegramConfigSchema,
+  release: ReleaseBlock.optional().describe(
+    "Fleet-wide default release-channel pin / pointer for the update " +
+    "flow. Either `channel` (dev|rc|latest) or `pin` (sha-<hex>|v<semver>) " +
+    "— mutually exclusive. Per-agent `release` REPLACES this entirely.",
+  ),
   memory: MemoryBackendConfigSchema.optional(),
   vault: VaultConfigSchema.optional(),
   auth: z

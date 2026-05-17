@@ -67,7 +67,10 @@ describe("workspace git versioning (Phase 4)", () => {
     expect(existsSync(gitignorePath)).toBe(true);
 
     const gitignoreContent = readFileSync(gitignorePath, "utf-8");
-    expect(gitignoreContent).toContain("SOUL.md");
+    // SOUL.md is user-owned (seed-once) and intentionally tracked so
+    // persona edits are versioned/recoverable — it must NOT be ignored.
+    const gitignoreLines = gitignoreContent.split("\n").map((l) => l.trim());
+    expect(gitignoreLines).not.toContain("SOUL.md");
     expect(gitignoreContent).toContain("*.log");
     expect(gitignoreContent).toContain(".DS_Store");
 
@@ -79,7 +82,7 @@ describe("workspace git versioning (Phase 4)", () => {
     expect(log).toContain("seed workspace from switchroom scaffold");
   });
 
-  it("excludes SOUL.md from git tracking (gitignored)", () => {
+  it("tracks SOUL.md in git (user-owned, versioned persona)", () => {
     if (!isGitAvailable()) {
       console.log("Skipping test: git not available");
       return;
@@ -92,21 +95,17 @@ describe("workspace git versioning (Phase 4)", () => {
     const result = scaffoldAgent("test-agent", config, tmpDir, telegramConfig);
     const workspaceDir = join(result.agentDir, "workspace");
 
-    // Verify SOUL.md exists
     const soulPath = join(workspaceDir, "SOUL.md");
     expect(existsSync(soulPath)).toBe(true);
 
-    // Verify SOUL.md is not tracked by git. Use line-level equality
-    // rather than substring containment: PR #1181 added `SOUL.md.fingerprint`
-    // (a tracked re-render watermark) which is correctly tracked but
-    // accidentally satisfied a naive `.toContain("SOUL.md")` substring
-    // match, hiding any real regression where SOUL.md itself slipped
-    // into the index.
+    // SOUL.md is the user's persona file: seeded once, then hand-edited
+    // and never regenerated. It must be tracked so edits are versioned
+    // and recoverable (`git diff` / restore from the workspace repo).
     const trackedFiles = execSync("git ls-files", {
       cwd: workspaceDir,
       encoding: "utf-8",
     }).split("\n").filter(Boolean);
-    expect(trackedFiles).not.toContain("SOUL.md");
+    expect(trackedFiles).toContain("SOUL.md");
   });
 
   it("tracks user-editable workspace files (AGENTS.md, MEMORY.md, etc.)", () => {

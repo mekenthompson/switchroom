@@ -3,7 +3,7 @@ import chalk from "chalk";
 import { existsSync, copyFileSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { loadConfig, resolveAgentsDir, resolvePath, findConfigFile, ConfigError } from "../config/loader.js";
-import type { SwitchroomConfig } from "../config/schema.js";
+import type { AgentConfig, SwitchroomConfig } from "../config/schema.js";
 import { scaffoldAgent } from "../agents/scaffold.js";
 import { syncTopics } from "../telegram/topic-manager.js";
 import { loadTopicState } from "../telegram/state.js";
@@ -838,6 +838,47 @@ async function stepScaffoldAgents(
   // Load topic state for topic IDs
   const topicState = loadTopicState();
 
+  // Persona seed. SOUL.md is user-owned: seeded once here from these
+  // answers (or the profile default when skipped), then never
+  // overwritten by update/reconcile. Answers are folded into the
+  // in-memory agent config so scaffoldAgent's seed render picks them
+  // up; we deliberately do NOT write them back to switchroom.yaml —
+  // post-seed the file is the source of truth, not config. Skipped
+  // wholesale in non-interactive mode (profile default persona).
+  if (!nonInteractive && isInteractive()) {
+    console.log(
+      chalk.gray(
+        "\n  Persona — give each agent a voice. Press Enter to skip any " +
+          "line and use the profile default. You can edit SOUL.md freely " +
+          "afterwards; updates never overwrite it.",
+      ),
+    );
+    for (const name of agentNames) {
+      const agentConfig = config.agents[name];
+      console.log(
+        `\n  ${chalk.bold(name)} ${chalk.gray(
+          `(${agentConfig.extends ?? "default"})`,
+        )}`,
+      );
+      const personaName = await ask("    Name");
+      const style = await ask("    Style in a sentence");
+      const boundaries = await ask("    Anything it must never do");
+      const soul: Record<string, string> = {};
+      if (personaName) soul.name = personaName;
+      if (style) soul.style = style;
+      if (boundaries) soul.boundaries = boundaries;
+      if (Object.keys(soul).length > 0) {
+        // Cast mirrors src/config/merge.ts: AgentSoulSchema nominally
+        // requires name+style, but a partial persona is valid here —
+        // SOUL.md.hbs renders missing fields via {{#if}}.
+        agentConfig.soul = {
+          ...(agentConfig.soul ?? {}),
+          ...soul,
+        } as AgentConfig["soul"];
+      }
+    }
+  }
+
   let scaffolded = 0;
   let scaffoldFailed = 0;
   for (const name of agentNames) {
@@ -898,6 +939,16 @@ async function stepScaffoldAgents(
     );
   }
   console.log(chalk.green(`  ${STEP_DONE} ${summary}`));
+  if (scaffolded > 0) {
+    console.log(
+      chalk.gray(
+        "  Each agent's persona lives in its SOUL.md and is yours to edit " +
+          "— `switchroom soul path <agent>` shows where. `switchroom " +
+          "update` never overwrites it; `switchroom soul reset <agent>` " +
+          "re-seeds from the profile (backing the old one up first).",
+      ),
+    );
+  }
 
   // RFC H §4.6: first-run defaults `auth.active` to "default" so the
   // first OAuth flow (run as `switchroom auth add default --from-oauth`)

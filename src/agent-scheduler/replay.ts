@@ -251,6 +251,89 @@ export function findMissedFires(opts: {
 }
 
 /**
+ * Default ceiling for the stale-skipped scan: 14 days. An agent down
+ * longer than this is a different conversation than "you missed a
+ * morning briefing" — one notice is enough, and an unbounded
+ * minute-by-minute walk over months of downtime is pointless work.
+ * Override with SWITCHROOM_AGENT_SCHEDULER_STALE_MAX_MIN.
+ */
+export const STALE_LOOKBACK_MAX_MIN = 14 * 24 * 60;
+
+/**
+ * A scheduled run that was missed entirely — older than the replay
+ * window, so it will NOT be re-run, and the user is owed a plain-language
+ * notice instead of silence (`survive-reboots` JTBD: scheduled jobs are
+ * "fired on return OR explicitly skipped, not silently dropped").
+ */
+export interface StaleSkippedFire {
+  entry: SchedulerEntry;
+  /** Minute-aligned timestamp of the most recent missed (out-of-window) run. */
+  expectedFireMs: number;
+}
+
+/**
+ * For each entry, find the most recent cron occurrence that is OLDER
+ * than the replay window and was never covered by a successful run.
+ * "Covered" = any exitCode=0 audit row for that entry at-or-after the
+ * occurrence (within ±90s tolerance) — meaning the user already saw an
+ * equal-or-later run, so an older gap is water under the bridge and
+ * shouldn't nag. The skip-notice path writes an exitCode=0 sentinel row
+ * at `expectedFireMs` after notifying, so a subsequent boot sees the
+ * occurrence as covered and does not re-nag.
+ *
+ * In-window misses are handled by `findMissedFires` (they get replayed);
+ * this only reports the genuinely-dropped, won't-be-re-run case.
+ *
+ * Pure function: no IO. At most one entry per schedule (the most recent
+ * uncovered occurrence).
+ */
+export function findStaleSkippedFires(opts: {
+  entries: SchedulerEntry[];
+  recentFires: DispatchResult[];
+  now: Date;
+  windowMinutes: number;
+  maxLookbackMinutes?: number;
+}): StaleSkippedFire[] {
+  const out: StaleSkippedFire[] = [];
+  const cap = opts.maxLookbackMinutes ?? STALE_LOOKBACK_MAX_MIN;
+  if (cap <= opts.windowMinutes) return out;
+  const nowMs = opts.now.getTime();
+  const baseMs = nowMs - (nowMs % 60_000);
+
+  const successByKey = new Map<string, number[]>();
+  for (const row of opts.recentFires) {
+    if (row.exitCode !== 0) continue;
+    const key = `${row.agent}::${row.scheduleIndex}`;
+    let bucket = successByKey.get(key);
+    if (!bucket) {
+      bucket = [];
+      successByKey.set(key, bucket);
+    }
+    bucket.push(row.startedAt);
+  }
+
+  for (const entry of opts.entries) {
+    const key = `${entry.agent}::${entry.scheduleIndex}`;
+    const successes = successByKey.get(key) ?? [];
+    // Scan strictly OUTSIDE the replay window (i starts at
+    // windowMinutes) back to the cap. First cron match is the most
+    // recent out-of-window occurrence.
+    for (let i = opts.windowMinutes; i < cap; i++) {
+      const candidateMs = baseMs - i * 60_000;
+      if (!cronMatchesDate(entry.cron, new Date(candidateMs))) continue;
+      // Covered if any successful run landed at-or-after this minute
+      // (a later run means the user isn't actually in the dark).
+      const covered = successes.some(
+        (ts) => ts >= candidateMs - AUDIT_TOLERANCE_MS,
+      );
+      if (!covered) out.push({ entry, expectedFireMs: candidateMs });
+      break;
+    }
+  }
+  return out;
+}
+
+/**
  * Read the most recent N audit rows from a JSONL file. Returns an
  * empty array if the file doesn't exist (first boot of a fresh agent).
  * Lines are tab/space-tolerant; malformed JSON is silently skipped.

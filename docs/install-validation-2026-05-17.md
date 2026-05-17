@@ -250,3 +250,60 @@ Prioritised:
   **host**. The tmux socket+session contract lives *inside* the agent
   container; host attach is `docker exec -it … tmux`. Confirm host
   tmux is unneeded.
+
+## Follow-up resolution (post-loop, 2026-05-17)
+
+Every code finding from this loop was fixed and merged to
+`switchroom/switchroom:main`, each via a fresh separate-process
+reviewer:
+
+| PR | Finding | Notes |
+|---|---|---|
+| #1422 | Headline P0 chain | onboarding `hasCompletedOnboarding` flag; docs auth/up ordering + label; `--from-oauth`→`--via-claude`; auth-heal EACCES. E2E verified (blank box → Telegram reply, 7 s). |
+| #1423 | R3/R7 | one bot per agent — example ships ONE active agent, rest commented w/ own `bot_token`; install.md + botfather docs. |
+| #1426 | R1 (prior #30) | `setup` bootstraps to `~/.switchroom/switchroom.yaml`; `stepConfigFile` mirrors `findConfigFile`. |
+| #1428 | per-agent vault seed | `storeTokenInVault` takes explicit ref; per-agent `vault:` tokens now persisted. |
+| #1425 | R2 (prior #25) | `SWITCHROOM_MEMORY_BACKEND=none` honored. Took **4 review rounds** — env override was respected at 1 of ~11 sites. Resolution: a single exported `isHindsightEnabled()` helper; every scaffold/reconcile/CLI/diagnostic gate routes through it; zero inline gates remain. |
+
+### Two-bot admin-gate matrix (goal DoD #4)
+
+- ✅ **Admin-gate enforced (core security property):** `/agents`
+  to the non-admin bot returned the exact gateway rejection —
+  *"⚠️ /agents is an admin command — this agent (assistant) isn't
+  admin-flagged. Run it from an admin agent, or set admin: true…"*.
+  Gateway intercepted; Claude never saw it.
+- ✅ Distinct bot identities (admin `7767260960` / normal
+  `8803564120`); admin agent scaffolded `admin: true` + own
+  vault-scoped token. Single-bot conversational reply proven (#1422).
+- ⚠️ **Admin-bot `/agents` + conversational reply BLOCKED** — not
+  an admin-gate defect. New finding below.
+
+### New finding — vault-broker re-lock fragility (P1; extends #32)
+
+`switchroom apply` (e.g. adding an agent) recreates the dockerized
+`switchroom-vault-broker` container **locked**, because
+non-interactive `setup` writes a **0-byte** `vault-auto-unlock`
+blob and never populates it (and `vault broker enable-auto-unlock`
+has no non-interactive path — aborts "Empty passphrase"). The
+docker-native machine-id auto-unlock mechanism *is implemented and
+does run* (`server.ts:_tryAutoUnlockFromMachineBoundFile`); it just
+has a malformed empty blob to decrypt → "staying locked". Every
+agent gateway with a `vault:` bot_token then crash-loops; the
+supervisor **permanently gives up after 10 restarts/60 s**
+(`profiles/_base/start.sh.hbs:68`); no operator unlock path works
+in the docker model (host `vault broker unlock` drives a *separate*
+host daemon — #32; broker image lacks the CLI); the broker
+healthcheck reports "healthy" while locked; the gateway's error
+names a non-existent command (`switchroom vault unlock`). Agents
+that resolved their token before the recreate keep working on a
+held long-poll, masking it.
+
+Strategic resolution captured as **RFC J — Vault-broker resilience
+& default auto-unlock** (`docs/rfcs/vault-broker-resilience.md`):
+(1) auto-unlock as the unattended default — mechanism already
+exists, wire it into non-interactive setup; (2) supervisor
+exponential-backoff + indefinite retry for the transient-dependency
+class (the always-on backbone); (3) collapse the host/in-container
+broker duality (#32); (4) honest healthcheck + operator messages.
+This is the single biggest install-correctness gap remaining after
+this loop's PRs.

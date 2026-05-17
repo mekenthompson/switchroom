@@ -1030,9 +1030,9 @@ describe("scaffoldAgent — docker-mode tmux supervisor preamble (v0.7.5)", () =
     // sides are pinned in tests so a Dockerfile rename surfaces here.
     expect(startSh).toContain("/opt/switchroom/autoaccept-poll.js");
     // v0.7.6: autoaccept now runs under _switchroom_supervise, which
-    // restarts it on crash up to a per-window cap. The supervisor
-    // line backgrounds with `&` and writes through the supervisor
-    // logfile (not the bare command's stdout).
+    // restarts it on crash with exponential backoff (RFC J Phase 2).
+    // The supervisor line backgrounds with `&` and writes through
+    // the supervisor logfile (not the bare command's stdout).
     expect(startSh).toMatch(
       /_switchroom_supervise autoaccept \/var\/log\/switchroom\/autoaccept\.log[\s\S]*?bun \/opt\/switchroom\/autoaccept-poll\.js "carol" &/,
     );
@@ -1075,16 +1075,27 @@ describe("scaffoldAgent — docker-mode tmux supervisor preamble (v0.7.5)", () =
     expect(gatewayForkIdx).toBeGreaterThan(stateDirIdx);
   });
 
-  it("supervisor caps restarts at 10 in 60s (avoids tight-loop CPU burn)", () => {
-    // Pin the cap shape so a future "make it 100" change forces a
-    // discussion: 10/60s is "give up after a clearly-broken
-    // first-minute" without making operators wait too long.
+  it("supervisor backs off exponentially and never permanently gives up (RFC J Phase 2)", () => {
+    // The old "10 restarts in 60s -> give up forever" turned a
+    // routine broker recreate (which relocks the dockerized broker)
+    // into a dead fleet until a human intervened — a direct
+    // always-on violation (install-validation 2026-05-17 / RFC J).
+    // New contract: EX_CONFIG=78 is the ONLY non-retry path; every
+    // other exit backs off exponentially (capped) and retries
+    // INDEFINITELY so the agent self-heals when the broker returns.
+    // Reintroducing a permanent give-up must fail this test.
     const config = makeAgentConfig({ topic_id: 1 });
     const result = scaffoldAgent("greta", config, tmpDir, telegramConfig);
     const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
     expect(startSh).toContain("_switchroom_supervise()");
-    expect(startSh).toContain("if [ $_restarts -ge 10 ]");
-    expect(startSh).toMatch(/if \[ \$\(\(_now - _window_start\)\) -ge 60 \]/);
+    // EX_CONFIG=78 quarantine preserved — the only stop path.
+    expect(startSh).toContain("if [ $_exit -eq 78 ]");
+    expect(startSh).toContain("quarantined, not restarting");
+    // Exponential backoff with a cap; no permanent give-up.
+    expect(startSh).toMatch(/_delay=\$\(\(_delay \* 2\)\)/);
+    expect(startSh).toMatch(/_delay -gt \$_cap/);
+    expect(startSh).not.toContain("if [ $_restarts -ge 10 ]");
+    expect(startSh).not.toMatch(/giving up|hit 10 restarts/i);
   });
 
   it("re-execs into tmux with the v0.6-systemd socket+session contract", () => {

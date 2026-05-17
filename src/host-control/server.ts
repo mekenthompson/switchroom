@@ -736,8 +736,21 @@ export class HostdServer {
         Date.now() - started,
       );
     }
+    // #1401: reject NUL / newline / CR in any argv element (audit-log
+    // line injection + arg smuggling) before the call.
+    if (!req.args.argv.every(isSafeExecArgvElement)) {
+      return deniedResponse(
+        req.request_id,
+        `agent_exec: an argv element contains a NUL or newline/CR ` +
+          `control character, which is not permitted (#1401).`,
+        Date.now() - started,
+      );
+    }
     const container = `switchroom-${req.args.name}`;
-    const res = await this.runDocker(["exec", container, ...req.args.argv]);
+    // #1401: `--` terminates docker's own option parsing, so no
+    // user-supplied argv element can be reinterpreted as a `docker
+    // exec` flag (-e / -u / -w / --privileged / --entrypoint, …).
+    const res = await this.runDocker(["exec", container, "--", ...req.args.argv]);
     return {
       v: 1,
       request_id: req.request_id,
@@ -1089,6 +1102,18 @@ export const READONLY_EXEC_ALLOWLIST = [
 
 export function isAllowlistedReadOnlyArgv(argv0: string): boolean {
   return (READONLY_EXEC_ALLOWLIST as readonly string[]).includes(argv0);
+}
+
+/**
+ * #1401: every argv element must be free of NUL / LF / CR. Those have
+ * no legitimate place in a read-only inspection command (paths, flags
+ * like `-n`, and grep patterns are all unaffected) and exist only to
+ * smuggle behaviour: a newline/CR enables audit-log line injection and,
+ * before the `--` separator landed, docker-flag confusion. argv[0] is
+ * separately allowlist-gated by isAllowlistedReadOnlyArgv.
+ */
+export function isSafeExecArgvElement(s: string): boolean {
+  return !/[\u0000\n\r]/.test(s);
 }
 
 /** Probe whether an agent socket exists at the canonical in-container

@@ -1922,8 +1922,16 @@ export function scaffoldAgent(
   const hadExplicitAllow = rawAllow.length > 0;
   const readOnlyDefaults =
     !dangerousMode && !hadExplicitAllow ? DEFAULT_READ_ONLY_PREAPPROVED_TOOLS : [];
+  // SWITCHROOM_MEMORY_BACKEND=none force-disables hindsight even when the
+  // (bundled) config hardcodes `memory.backend: hindsight`. This mirrors
+  // the precedence in src/cli/setup.ts:stepMemoryBackend — the two sites
+  // MUST agree, or scaffold tries to create banks for an install the
+  // operator explicitly opted out of (install-validation 2026-05-17, R2 /
+  // prior #25: 4 spurious "Failed to create Hindsight bank" warnings on a
+  // `SWITCHROOM_MEMORY_BACKEND=none` setup).
+  const envBackend = process.env.SWITCHROOM_MEMORY_BACKEND;
   const memoryBackend = switchroomConfig?.memory?.backend;
-  const hindsightEnabled = memoryBackend === "hindsight";
+  const hindsightEnabled = envBackend !== "none" && memoryBackend === "hindsight";
   const permissionAllow = dedupe([
     ...baseAllow,
     ...readOnlyDefaults,

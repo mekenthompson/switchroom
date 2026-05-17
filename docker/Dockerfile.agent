@@ -135,6 +135,24 @@ RUN chmod 0755 /opt/switchroom/autoaccept-poll.js
 COPY dist/cli/drive-write-pretool.mjs /opt/switchroom/hooks/drive-write-pretool.mjs
 RUN chmod 0755 /opt/switchroom/hooks/drive-write-pretool.mjs
 
+# Image-baked security-hooks plugin (sec WS8-F1 / #1416). A separate,
+# minimal --plugin-dir holding ONLY the load-bearing PreToolUse safety
+# hooks (secret-exfil guard + Drive-write approval gate). Loaded from
+# this read-only in-image path by start.sh; Claude Code unions
+# plugin-dir hooks with settings.json hooks and an agent CANNOT
+# suppress plugin-dir-loaded hooks by rewriting its own
+# /state/agent/.claude/settings.json. The settings.json copy stays as
+# a harmless union fallback — this copy is the unstrippable authority.
+# Deliberately NOT --plugin-dir /opt/switchroom/telegram-plugin to
+# avoid any interaction with the --dangerously-load-development-channels
+# load of the same-named plugin. The two .mjs are self-contained
+# (node builtins / pre-bundled), so a flat copy is sufficient.
+COPY docker/security-plugin/.claude-plugin /opt/switchroom/security-plugin/.claude-plugin
+COPY docker/security-plugin/hooks/hooks.json /opt/switchroom/security-plugin/hooks/hooks.json
+COPY telegram-plugin/hooks/secret-guard-pretool.mjs /opt/switchroom/security-plugin/hooks/secret-guard-pretool.mjs
+COPY dist/cli/drive-write-pretool.mjs /opt/switchroom/security-plugin/hooks/drive-write-pretool.mjs
+RUN chmod 0755 /opt/switchroom/security-plugin/hooks/*.mjs
+
 # switchroom CLI bundle: the in-container telegram-plugin gateway sidecar
 # shells out to `switchroom <verb>` for /auth, /vault, /agent, /topics
 # and friends (see telegram-plugin/gateway/gateway.ts:switchroomExec).

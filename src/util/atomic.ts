@@ -27,7 +27,37 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { closeSync, fsyncSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
+import { closeSync, constants, fsyncSync, openSync, renameSync, rmSync, writeSync } from "node:fs";
+
+/**
+ * Tempfile open flags — sec #1410 (follow-up to CRITICAL #1393).
+ *
+ * Both brokers run as ROOT and write secret-bearing files. #1409's
+ * `resolveMirrorPathsSafe` lstat-guards the auth-broker mirror's
+ * directory components, but a narrow sub-millisecond TOCTOU remained
+ * between that lstat sweep and the final tempfile `openSync` here: an
+ * attacker who wins the race could plant a symlink at the tempfile
+ * path and have the root broker write a secret through it.
+ *
+ *   - `O_NOFOLLOW` — if the final component is a symlink, fail (ELOOP)
+ *     instead of following it. Closes the planted-symlink race.
+ *   - `O_EXCL` (with `O_CREAT`) — the open MUST create the file; fail
+ *     if anything already exists at the tempfile path. The temp name
+ *     is unique per-pid + 4 random bytes so this never trips in
+ *     legitimate use; it defeats a pre-planted file/FIFO at a guessed
+ *     path and makes the old `"w"` flag's `O_TRUNC` unnecessary (the
+ *     file is always brand-new).
+ *
+ * Fail-closed: any of these tripping throws; the caller cleans the
+ * tempfile and rethrows; the destination is left untouched.
+ * O_NOFOLLOW is Linux/macOS (the broker runtime); `?? 0` keeps the
+ * primitive importable where it's absent.
+ */
+const TMP_OPEN_FLAGS =
+  constants.O_WRONLY |
+  constants.O_CREAT |
+  constants.O_EXCL |
+  (constants.O_NOFOLLOW ?? 0);
 
 export function atomicWriteFileSync(
   destPath: string,
@@ -38,7 +68,7 @@ export function atomicWriteFileSync(
   const buf = typeof contents === "string" ? Buffer.from(contents, "utf-8") : contents;
   let fd: number | null = null;
   try {
-    fd = openSync(tmp, "w", mode);
+    fd = openSync(tmp, TMP_OPEN_FLAGS, mode);
     writeSync(fd, buf, 0, buf.length, 0);
     fsyncSync(fd);
     closeSync(fd);

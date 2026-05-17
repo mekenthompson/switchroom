@@ -390,6 +390,13 @@ interface AgentServiceData {
   /** Capability extras the operator requested AND we stripped. */
   strippedCaps: string[];
   /**
+   * sec WS6-F1 (#1390) / feature #1413. "host" (default) → the
+   * pre-#1413 `network_mode: host`. "strict" → the agent joins its
+   * OWN dedicated bridge network (no sibling reachability) with host
+   * services via `host.docker.internal`. Opt-in; cascade-resolved.
+   */
+  networkIsolation: "host" | "strict";
+  /**
    * Yaml-level `admin: true` flag — when set, surfaces as
    * `SWITCHROOM_AGENT_ADMIN=true` on the agent container so the
    * gateway permits admin slash commands (`/vault`, `/agents`,
@@ -465,6 +472,10 @@ export function describeAgents(config: SwitchroomConfig): AgentServiceData[] {
       profile,
       resources,
       strippedCaps,
+      // sec WS6-F1 / #1413: cascade-resolved opt-in network mode.
+      // Unset → "host" (zero behaviour change vs. pre-#1413).
+      networkIsolation:
+        resolved.network_isolation === "strict" ? "strict" : "host",
       admin: agent.admin === true,
       // Per-agent only (no cascade) — see AgentServiceData.bindMounts
       // doc comment for the rationale.
@@ -1173,6 +1184,26 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   }
   lines.push("");
 
+  // ── networks (sec WS6-F1 / #1413) ──────────────────────────────────
+  // One dedicated bridge network per `network_isolation: strict` agent.
+  // A network with exactly one attached service gives that agent NO
+  // route to sibling agents (true inter-agent isolation); host
+  // services are reached via the per-service `host.docker.internal:
+  // host-gateway` extra_hosts. Emitted ONLY when at least one agent
+  // opted in — a default (all-host) fleet's compose is byte-identical
+  // to pre-#1413 (no networks: block at all).
+  const strictAgents = describeAgents(config).filter(
+    (a) => a.networkIsolation === "strict",
+  );
+  if (strictAgents.length > 0) {
+    lines.push(`networks:`);
+    for (const a of strictAgents) {
+      lines.push(`  switchroom-net-${a.name}:`);
+      lines.push(`    driver: bridge`);
+    }
+    lines.push("");
+  }
+
   return lines.join("\n");
 }
 
@@ -1230,7 +1261,21 @@ function emitAgentService(
   // assumed shared-host operation. Future work: a strict-isolation
   // mode that puts agents on a custom network and routes hindsight
   // through an explicit `extra_hosts` entry for `host.docker.internal`.
-  lines.push(`    network_mode: host`);
+  // #1413 builds exactly that as an OPT-IN mode (default stays host).
+  if (a.networkIsolation === "strict") {
+    // Dedicated per-agent bridge network → the agent cannot reach
+    // sibling agents (true inter-agent isolation, WS6-F1). Host
+    // services (hindsight 127.0.0.1:18888, operator-LAN env) are
+    // reached via host.docker.internal:host-gateway instead of the
+    // shared host stack. The top-level `networks:` block defines
+    // `switchroom-net-<name>` (see the networks section emitter).
+    lines.push(`    networks:`);
+    lines.push(`      - switchroom-net-${a.name}`);
+    lines.push(`    extra_hosts:`);
+    lines.push(`      - "host.docker.internal:host-gateway"`);
+  } else {
+    lines.push(`    network_mode: host`);
+  }
   lines.push(`    restart: unless-stopped`);
   lines.push(`    init: false`);
   // PTY allocation — claude's interactive mode requires a TTY at stdin

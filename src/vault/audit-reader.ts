@@ -56,6 +56,14 @@ export function parseAuditLine(line: string): AuditEntry | null {
       caller: obj.caller,
       pid: obj.pid,
       cgroup: typeof obj.cgroup === "string" ? obj.cgroup : undefined,
+      // sec WS10-F6 (#1420): `agent_name` is the socket-path-derived
+      // TRUSTED identity (the ACL field). Pre-#1420 parseAuditLine
+      // dropped it, so every consumer attributed by `caller` (cgroup
+      // unit OR `pid:<n>` — frequently null/legacy post-docker, #1383
+      // identity drift). Surface it so it can be the canonical
+      // attribution; caller/cgroup are informational.
+      agent_name:
+        typeof obj.agent_name === "string" ? obj.agent_name : undefined,
       result: obj.result,
     };
   } catch {
@@ -75,7 +83,14 @@ export function filterAuditEntries(
 
   if (filters.who !== undefined) {
     const needle = filters.who.toLowerCase();
-    result = result.filter((e) => e.caller.toLowerCase().includes(needle));
+    // sec WS10-F6 (#1420): match the canonical trusted agent_name too,
+    // not just the informational caller — otherwise filtering by an
+    // agent's real name misses rows where caller drifted to pid:<n>.
+    result = result.filter(
+      (e) =>
+        e.caller.toLowerCase().includes(needle) ||
+        (e.agent_name?.toLowerCase().includes(needle) ?? false),
+    );
   }
 
   if (filters.key !== undefined) {
@@ -104,9 +119,14 @@ export function filterAuditEntries(
 /**
  * Format a single AuditEntry as a human-readable line.
  *
- * Format: timestamp · op · key · caller · result
- * Example:
- *   2026-04-28 14:33:00  get    stripe/live-key       switchroom-my-agent-cron-0.service  allowed
+ * Format: timestamp · op · key · who · result
+ *
+ * sec WS10-F6 (#1420): `who` is the TRUSTED `agent_name`
+ * (socket-path-derived, the ACL field) when present, falling back to
+ * the informational `caller` (cgroup unit / `pid:<n>`) only on the
+ * legacy/host paths where no agent_name was recorded. Pre-#1420 this
+ * displayed `caller` unconditionally, so post-docker identity drift
+ * (#1383) routinely showed `pid:<n>` for a known agent.
  */
 export function formatAuditEntry(entry: AuditEntry): string {
   // Shorten ISO timestamp to local-ish display: "2026-04-28 14:33:00"
@@ -114,15 +134,14 @@ export function formatAuditEntry(entry: AuditEntry): string {
 
   const op = entry.op.padEnd(8);
   const key = (entry.key ?? "(no key)").padEnd(28);
-  // Truncate long caller names for readability
-  const caller =
-    entry.caller.length > 50
-      ? entry.caller.slice(0, 47) + "..."
-      : entry.caller;
-  const callerPadded = caller.padEnd(52);
+  // Canonical attribution: trusted agent_name first, caller as fallback.
+  const whoRaw = entry.agent_name ?? entry.caller;
+  const who =
+    whoRaw.length > 50 ? whoRaw.slice(0, 47) + "..." : whoRaw;
+  const whoPadded = who.padEnd(52);
   const result = entry.result;
 
-  return `${ts}  ${op}  ${key}  ${callerPadded}  ${result}`;
+  return `${ts}  ${op}  ${key}  ${whoPadded}  ${result}`;
 }
 
 /**

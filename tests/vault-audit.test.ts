@@ -234,3 +234,53 @@ describe("formatAuditLines", () => {
     expect(result).toHaveLength(50);
   });
 });
+
+// ── WS10-F6 (#1420): agent_name attribution ────────────────────────────────
+
+describe("WS10-F6 — agent_name canonical attribution", () => {
+  const chained = JSON.stringify({
+    ts: "2026-05-17T00:00:00.000Z",
+    op: "get",
+    key: "k",
+    caller: "pid:9999", // drifted/legacy informational identity
+    pid: 9999,
+    agent_name: "klanker", // trusted socket-path identity
+    result: "allowed",
+  });
+
+  it("parseAuditLine surfaces agent_name (previously dropped)", () => {
+    const e = parseAuditLine(chained)!;
+    expect(e).not.toBeNull();
+    expect(e.agent_name).toBe("klanker");
+    expect(e.caller).toBe("pid:9999");
+  });
+
+  it("formatAuditEntry shows the trusted agent_name, not the drifted caller", () => {
+    const e = parseAuditLine(chained)!;
+    const line = formatAuditEntry(e);
+    expect(line).toContain("klanker");
+    expect(line).not.toContain("pid:9999");
+  });
+
+  it("formatAuditEntry falls back to caller when no agent_name (host/legacy rows)", () => {
+    const e = parseAuditLine(
+      JSON.stringify({
+        ts: "2026-05-17T00:00:00.000Z",
+        op: "unlock",
+        caller: "switchroom-host.service",
+        pid: 1,
+        result: "allowed",
+      }),
+    )!;
+    expect(e.agent_name).toBeUndefined();
+    expect(formatAuditEntry(e)).toContain("switchroom-host.service");
+  });
+
+  it("--who filter matches the canonical agent_name even when caller drifted", () => {
+    const e = parseAuditLine(chained)!;
+    expect(filterAuditEntries([e], { who: "klanker" })).toHaveLength(1);
+    // still matches the informational caller too (back-compat)
+    expect(filterAuditEntries([e], { who: "pid:9999" })).toHaveLength(1);
+    expect(filterAuditEntries([e], { who: "nope" })).toHaveLength(0);
+  });
+});

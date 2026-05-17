@@ -194,6 +194,34 @@ evals:
       - "schedule|cron|trigger|every hour|0 \\*"
     tags: ["schedule", "cron"]
 
+  # ── restart-required readback (#1430) + skip-notice (#1424) ────────────────────────
+  - id: "schedule-007"
+    question: "I just added a cron entry to my agent's schedule. Is it running now?"
+    primary_skill: "switchroom-cli"
+    expected_contains:
+      - "restart|not (yet )?live|take effect|won'?t .* until|switchroom (agent )?restart|reconcile"
+    expected_not_contains:
+      - "yes,? it'?s (now )?running|already (active|live)|it'?s live now"
+    tags: ["schedule", "restart-required"]
+
+  - id: "schedule-008"
+    question: "Did my agent miss any scheduled tasks while it was offline last night?"
+    primary_skill: "switchroom-cli"
+    expected_contains:
+      - "agent-scheduler|scheduler\\.jsonl|skipped|replay|missed run|boot notice"
+    expected_not_contains:
+      - "I cannot|no way to know|impossible to tell|I don'?t have access"
+    tags: ["schedule", "skip-notice"]
+
+  - id: "schedule-009"
+    question: "Install the pdf skill onto the assistant agent — will it work right away?"
+    primary_skill: "switchroom-cli"
+    expected_contains:
+      - "restart|not (yet )?live|take effect|won'?t .* until|switchroom (agent )?restart"
+    expected_not_contains:
+      - "works right away|immediately available|ready to use now|already active"
+    tags: ["schedule", "restart-required", "skill-install"]
+
   # ── switchroom-restart ─────────────────────────────────────────────────────────────
   - id: "restart-001"
     question: "Restart the assistant agent"

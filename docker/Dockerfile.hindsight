@@ -27,7 +27,10 @@
 # before exec'ing the upstream start-all.sh. The credentials never
 # touch persistent disk and the broker remains the single writer of
 # OAuth state (RFC H invariant).
-FROM ghcr.io/vectorize-io/hindsight:latest
+# sec WS9-F4 (#1418): pinned by digest — third-party mutable `:latest`
+# from another org; an upstream repoint would otherwise flow into the
+# published hindsight image undetected. Dependabot tracks bumps.
+FROM ghcr.io/vectorize-io/hindsight:latest@sha256:f0f9e9a73d6aedde9eaf4010ab604c3e015494e494318b26f1011144856b8112
 
 USER root
 

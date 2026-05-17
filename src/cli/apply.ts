@@ -17,7 +17,7 @@
  */
 import { Option, type Command } from "commander";
 import chalk from "chalk";
-import { accessSync, constants as fsConstants, copyFileSync, existsSync, readdirSync, writeFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, copyFileSync, existsSync, mkdirSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { spawnSync as childSpawnSync } from "node:child_process";
 import readline from "node:readline";
@@ -57,6 +57,8 @@ import {
 } from "../config/loader.js";
 import { scaffoldAgent, alignAgentUid } from "../agents/scaffold.js";
 import { generateCompose, allocateAgentUid } from "../agents/compose.js";
+import { resolveImageTag, resolveRelease } from "../config/release-resolve.js";
+import { detectInstallType } from "./install-detect.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { captureEvent, captureException } from "../analytics/posthog.js";
 
@@ -75,6 +77,15 @@ export const COMPOSE_PROJECT = "switchroom";
 export interface ApplyOptions {
   buildLocal?: boolean;
   buildContext?: string;
+  /**
+   * One-shot release-block override for this apply run. When set, this
+   * REPLACES the resolved per-agent / root `release` block from the
+   * cascade — used by `--channel <c>` / `--pin <p>` CLI flags and by
+   * `switchroom update` to pass through its own flag values. Mutually
+   * exclusive channel/pin enforced upstream by ReleaseBlock's Zod
+   * refinement; this struct mirrors that shape.
+   */
+  releaseOverride?: { channel?: "dev" | "rc" | "latest"; pin?: string };
   /** Override compose output path (defaults to {@link DEFAULT_COMPOSE_PATH}). */
   outPath?: string;
   /** Optional example name to copy before applying (e.g. "minimal"). */
@@ -450,6 +461,38 @@ function detectAndReportLegacyGdriveSlots(vaultPath: string): void {
 }
 
 /**
+ * Write `~/.switchroom/install-type.json` so the hostd daemon (and any
+ * other reader) can discover how this host's switchroom CLI is
+ * installed without re-running the detector on every audit row.
+ *
+ * `apply` is the canonical cache invalidator: it runs every time the
+ * operator changes anything, so a stale cache can only persist across
+ * one apply cycle. Idempotent — overwrites unconditionally.
+ *
+ * Atomic write via `.tmp + renameSync` so a SIGKILL mid-write never
+ * leaves a torn JSON on disk. Mode 0o644 (world-readable) so the hostd
+ * container can read the bind-mounted host-home copy without needing
+ * matching uid.
+ *
+ * Exported for the apply.test.ts cache-write assertion.
+ */
+export function writeInstallTypeCache(homeDir: string = homedir()): string {
+  const ctx = detectInstallType();
+  const dir = join(homeDir, ".switchroom");
+  const out = join(dir, "install-type.json");
+  const tmp = `${out}.tmp`;
+  mkdirSync(dir, { recursive: true });
+  const payload = {
+    install_type: ctx.install_type,
+    detected_at: new Date().toISOString(),
+    source_paths: ctx.source_paths,
+  };
+  writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o644 });
+  renameSync(tmp, out);
+  return out;
+}
+
+/**
  * Pure orchestrator. Exported for unit tests and the deprecation aliases
  * (`switchroom up`, `switchroom init`) which forward straight to here.
  *
@@ -469,6 +512,20 @@ export async function runApply(
   // Both checks throw with operator-actionable messages; the action
   // wrapper catches and prints them red.
   runApplyPreflight(config, { detectComposeV2: deps.detectComposeV2 });
+
+  // Refresh the install-type cache early so downstream readers (hostd
+  // daemon, audit-row population) see up-to-date detection. Fail-soft:
+  // a write failure (read-only filesystem etc.) is logged but does not
+  // block the apply.
+  try {
+    writeInstallTypeCache();
+  } catch (err) {
+    writeErr(
+      chalk.gray(
+        `  (install-type cache write failed: ${(err as Error).message})\n`,
+      ),
+    );
+  }
 
   const agentsDir = resolveAgentsDir(config);
   const allAgentNames = Object.keys(config.agents);
@@ -758,8 +815,23 @@ export async function runApply(
     }
     return undefined;
   })();
+  // Resolve the release block for this apply run. Priority:
+  //   1. CLI flag override (--channel/--pin on `apply` or `update`)
+  //   2. Root `release` block from switchroom.yaml
+  //   3. Default {channel:"latest"} (implicit, via resolveImageTag's
+  //      undefined fallback)
+  // Per-agent `release` overrides are not (yet) plumbed through to
+  // compose tag selection — compose currently emits one image tag for
+  // the whole fleet. The data is still validated by the schema and
+  // surfaced in audit rows for forensic visibility.
+  const composeRelease = resolveRelease({
+    override: options.releaseOverride,
+    root: config.release,
+  });
+  const composeImageTag = resolveImageTag(composeRelease);
   const composeContent = generateCompose({
     config,
+    imageTag: composeImageTag,
     buildMode: options.buildLocal ? "local" : "pull",
     buildContext: options.buildContext,
     // Bake the operator's HOME absolute path into volume sources at
@@ -1097,6 +1169,22 @@ export function registerApplyCommand(program: Command): void {
       "--no-doctor",
       "Skip the post-apply doctor sweep that surfaces stale start.sh / unhealthy agents (#929). Default: doctor runs after a successful scaffold so the operator sees whether the v0.7+ post-Phase-4 supervisor block is now in place. `switchroom update` passes this internally to avoid running doctor twice (it has its own doctor step).",
     )
+    .addOption(
+      new Option(
+        "--channel <c>",
+        "Override the resolved `release` block for this apply run: " +
+        "follow the named channel pointer (dev|rc|latest). Mutually " +
+        "exclusive with --pin.",
+      ).choices(["dev", "rc", "latest"]).conflicts("pin"),
+    )
+    .addOption(
+      new Option(
+        "--pin <p>",
+        "Override the resolved `release` block for this apply run: " +
+        "pin to a specific build (sha-<7-40 hex> or v<semver>). " +
+        "Mutually exclusive with --channel.",
+      ).conflicts("channel"),
+    )
     .option(
       "--print-sudo-cmd",
       "Print the sudo invocation that `apply` would re-exec itself with when escalation is needed, then exit. Operators who want to script the escalation themselves (CI, custom orchestration) can capture this. Note: tokens are space-separated and not shell-quoted; re-quote arguments if pasting into a shell.",
@@ -1118,6 +1206,8 @@ export function registerApplyCommand(program: Command): void {
         composeOnly?: boolean;
         printSudoCmd?: boolean;
         skipSelfElevate?: boolean;
+        channel?: "dev" | "rc" | "latest";
+        pin?: string;
         // Commander auto-coerces --no-doctor → opts.doctor = false; default true.
         doctor?: boolean;
       }) => {
@@ -1194,6 +1284,27 @@ export function registerApplyCommand(program: Command): void {
               ? opts.buildLocal
               : process.cwd();
 
+          // Build the release override from CLI flags. Mutual exclusion
+          // is enforced by commander's `.conflicts(...)` above, so we
+          // never see both set here.
+          const releaseOverride: ApplyOptions["releaseOverride"] | undefined =
+            opts.channel
+              ? { channel: opts.channel }
+              : opts.pin
+                ? { pin: opts.pin }
+                : undefined;
+          // Defensive: validate --pin shape early (commander's choices()
+          // already covers --channel). Mirror the regex from
+          // ReleaseBlock so a malformed pin fails fast at the CLI layer
+          // rather than landing as a bogus image tag.
+          if (opts.pin && !/^(sha-[0-9a-f]{7,40}|v\d+\.\d+\.\d+)$/.test(opts.pin)) {
+            console.error(
+              chalk.red(
+                `--pin "${opts.pin}" is invalid. Expected sha-<7-40 hex> or v<semver>.`,
+              ),
+            );
+            process.exit(2);
+          }
           const result = await runApply(
             config,
             {
@@ -1205,6 +1316,7 @@ export function registerApplyCommand(program: Command): void {
               allowUnaligned: opts.allowUnaligned ?? false,
               only: opts.only,
               composeOnly: opts.composeOnly ?? false,
+              releaseOverride,
             },
             {},
             switchroomConfigPath,

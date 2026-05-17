@@ -490,6 +490,100 @@ describe("runApply", () => {
       }
     });
 
+    it("writeInstallTypeCache writes install-type.json with mode 0o644", async () => {
+      const { writeInstallTypeCache } = await import("./apply.js");
+      const { mkdtempSync, statSync, readFileSync, rmSync } = await import("node:fs");
+      const home = mkdtempSync(join(tmpdir(), "switchroom-itc-"));
+      try {
+        const out = writeInstallTypeCache(home);
+        expect(out).toBe(join(home, ".switchroom", "install-type.json"));
+        const st = statSync(out);
+        expect(st.mode & 0o777).toBe(0o644);
+        const parsed = JSON.parse(readFileSync(out, "utf-8"));
+        expect(typeof parsed.install_type).toBe("string");
+        expect(typeof parsed.detected_at).toBe("string");
+        expect(parsed.source_paths).toBeTypeOf("object");
+      } finally {
+        rmSync(home, { recursive: true, force: true });
+      }
+    });
+
+    it("runApply writes ~/.switchroom/install-type.json on every call", async () => {
+      const sandbox = await mkdtemp(join(tmpdir(), "switchroom-apply-itc-"));
+      const agentsDir = join(sandbox, "agents");
+      const composePath = join(sandbox, "compose.yml");
+      // Sandbox HOME so the write lands inside the test dir.
+      const prevHome = process.env.HOME;
+      process.env.HOME = sandbox;
+      try {
+        vi.spyOn(scaffoldModule, "scaffoldAgent").mockResolvedValue(undefined as never);
+        vi.spyOn(scaffoldModule, "alignAgentUid").mockResolvedValue(undefined as never);
+        const config = makeStubConfig(agentsDir);
+        await runApply(
+          config,
+          { outPath: composePath, nonInteractive: true },
+          SKIP_COMPOSE_PREFLIGHT,
+        );
+        const { existsSync, readFileSync } = await import("node:fs");
+        const p = join(sandbox, ".switchroom", "install-type.json");
+        expect(existsSync(p)).toBe(true);
+        const parsed = JSON.parse(readFileSync(p, "utf-8"));
+        expect(typeof parsed.install_type).toBe("string");
+      } finally {
+        if (prevHome !== undefined) process.env.HOME = prevHome;
+        else delete process.env.HOME;
+      }
+    });
+
+    it("runApply with releaseOverride={channel:'dev'} emits compose with :dev image tags", async () => {
+      const sandbox = await mkdtemp(join(tmpdir(), "switchroom-relov-"));
+      const agentsDir = join(sandbox, "agents");
+      const composePath = join(sandbox, "compose.yml");
+      const config = makeStubConfig(agentsDir);
+      vi.spyOn(scaffoldModule, "scaffoldAgent").mockResolvedValue(undefined as never);
+      vi.spyOn(scaffoldModule, "alignAgentUid").mockResolvedValue(undefined as never);
+      await runApply(
+        config,
+        {
+          outPath: composePath,
+          nonInteractive: true,
+          releaseOverride: { channel: "dev" },
+        },
+        SKIP_COMPOSE_PREFLIGHT,
+      );
+      const content = await readFile(composePath, "utf-8");
+      // Every emitted `image:` line must end with :dev
+      const imageLines = content.split("\n").filter((l) => /^\s*image:/.test(l));
+      expect(imageLines.length).toBeGreaterThan(0);
+      for (const ln of imageLines) {
+        expect(ln).toMatch(/:dev\s*$/);
+      }
+    });
+
+    it("runApply with releaseOverride={pin:'sha-abc1234'} emits compose with :sha-abc1234 image tags", async () => {
+      const sandbox = await mkdtemp(join(tmpdir(), "switchroom-relov2-"));
+      const agentsDir = join(sandbox, "agents");
+      const composePath = join(sandbox, "compose.yml");
+      const config = makeStubConfig(agentsDir);
+      vi.spyOn(scaffoldModule, "scaffoldAgent").mockResolvedValue(undefined as never);
+      vi.spyOn(scaffoldModule, "alignAgentUid").mockResolvedValue(undefined as never);
+      await runApply(
+        config,
+        {
+          outPath: composePath,
+          nonInteractive: true,
+          releaseOverride: { pin: "sha-abc1234" },
+        },
+        SKIP_COMPOSE_PREFLIGHT,
+      );
+      const content = await readFile(composePath, "utf-8");
+      const imageLines = content.split("\n").filter((l) => /^\s*image:/.test(l));
+      expect(imageLines.length).toBeGreaterThan(0);
+      for (const ln of imageLines) {
+        expect(ln).toMatch(/:sha-abc1234\s*$/);
+      }
+    });
+
     it("buildSelfElevateArgv preserves env vars and adds the --skip-self-elevate guard", async () => {
       const { buildSelfElevateArgv } = await import("./apply.js");
       const argv = buildSelfElevateArgv();

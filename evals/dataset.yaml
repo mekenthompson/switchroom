@@ -198,10 +198,15 @@ evals:
   - id: "schedule-007"
     question: "I just added a cron entry to my agent's schedule. Is it running now?"
     primary_skill: "switchroom-cli"
+    # Positive terms only appear in a correct restart-aware answer
+    # (bare "restart" was dropped — it matches "no restart needed" too).
     expected_contains:
-      - "restart|not (yet )?live|take effect|won'?t .* until|switchroom (agent )?restart|reconcile"
+      - "not (yet )?live|won'?t take effect|will not take effect|takes? effect (only )?(on|after|once|when) .*restart|switchroom (agent )?restart|(needs?|requires?|need) (a )?restart"
+    # Phrases that only occur in a WRONG (claims-live) answer. Avoid bare
+    # "running now"/"live now" — they substring-match the correct
+    # negation "not running now" and would false-fail.
     expected_not_contains:
-      - "yes,? it'?s (now )?running|already (active|live)|it'?s live now"
+      - "no restart (is )?(needed|required)|does ?n'?t (need|require) (a )?restart|picks? (it|the change|the entry)? ?up automatically|already (active|live|scheduled and running)"
     tags: ["schedule", "restart-required"]
 
   - id: "schedule-008"
@@ -217,9 +222,9 @@ evals:
     question: "Install the pdf skill onto the assistant agent — will it work right away?"
     primary_skill: "switchroom-cli"
     expected_contains:
-      - "restart|not (yet )?live|take effect|won'?t .* until|switchroom (agent )?restart"
+      - "not (yet )?live|won'?t take effect|will not take effect|not .* until .*restart|switchroom (agent )?restart|(needs?|requires?|need) (a )?restart|after (a |the )?restart"
     expected_not_contains:
-      - "works right away|immediately available|ready to use now|already active"
+      - "works right away|immediately (available|active|usable)|ready to use (now|right away)|no restart (is )?(needed|required)|does ?n'?t (need|require) (a )?restart|already (active|loaded|available)"
     tags: ["schedule", "restart-required", "skill-install"]
 
   # ── switchroom-restart ─────────────────────────────────────────────────────────────

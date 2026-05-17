@@ -26,6 +26,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { chainRow, seedChain, type ChainState } from "../../util/audit-hashchain.js";
 
 /** Operations the broker can perform. */
 export type AuditOp = "get" | "put" | "set" | "delete" | "list" | "unlock" | "lock" | "mint_grant" | "list_grants" | "revoke_grant";
@@ -129,13 +130,22 @@ export function callerFromPeer(peer: {
  */
 export function createAuditLogger(opts: AuditLoggerOptions = {}): AuditLogger {
   const logPath = opts.path ?? defaultAuditLogPath();
+  // sec WS10-F2 / #1417: per-row hash chain for tamper-evidence.
+  // Seeded once from the existing log tail at broker startup; advanced
+  // in-process per write (single-writer-process contract — see
+  // audit-hashchain.ts). State is only committed AFTER a durable write
+  // so a failed append can't desync the chain from disk.
+  let chain: ChainState = seedChain(logPath);
 
   return {
     write(entry: AuditEntry): void {
-      // Build the JSON line. Control characters are not a concern for the
-      // fields we log (ISO timestamps, key names, unit names, pid numbers),
-      // but JSON.stringify handles them correctly anyway.
-      const line = JSON.stringify(entry) + "\n";
+      // Build the chained JSON line. Control characters are not a
+      // concern for the fields we log (ISO timestamps, key names, unit
+      // names, pid numbers); JSON.stringify handles them anyway.
+      const { line, next } = chainRow(
+        chain,
+        entry as unknown as Record<string, unknown>,
+      );
 
       let fd: number;
       try {
@@ -151,6 +161,8 @@ export function createAuditLogger(opts: AuditLoggerOptions = {}): AuditLogger {
 
       try {
         fs.writeSync(fd, line);
+        // Durable: advance the chain only now.
+        chain = next;
       } catch (err) {
         process.stderr.write(
           `[vault-audit] ERROR: could not write to audit log ${logPath}: ${(err as Error).message}\n`,

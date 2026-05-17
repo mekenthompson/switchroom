@@ -444,3 +444,81 @@ describe("ACL: google: slot routing through google_accounts[]", () => {
     if (!r.allow) expect(r.reason).toContain("not configured");
   });
 });
+
+describe("ACL: an agent may read its OWN configured bot_token (install-validation 2026-05-18)", () => {
+  // Regression: a per-agent bot token added via the documented
+  // `switchroom vault set telegram-<agent>-bot-token` + uncomment-the-
+  // agent flow was broker-ACL-denied to its own agent (no schedule
+  // secrets, no bot-token allowance) — masked before because the
+  // global token only ever resolved via the <agent>/telegram/.env
+  // materialization side-channel. #31/#1428-adjacent.
+  function cfg(
+    agents: Record<string, unknown>,
+    globalBotToken: string,
+  ): SwitchroomConfig {
+    return {
+      switchroom: { version: 1 },
+      telegram: { bot_token: globalBotToken, forum_chat_id: "123" },
+      vault: { path: "~/.switchroom/vault.enc", broker: { socket: "s", enabled: true } },
+      agents,
+    } as unknown as SwitchroomConfig;
+  }
+
+  it("per-agent bot_token vault ref → that agent may read that key (no schedule needed)", () => {
+    const config = cfg(
+      { admin: { topic_name: "Admin", bot_token: "vault:telegram-admin-bot-token", admin: true } },
+      "vault:telegram-bot-token",
+    );
+    expect(checkAclByAgent(config, "admin", "telegram-admin-bot-token").allow).toBe(true);
+  });
+
+  it("agent on the GLOBAL telegram.bot_token vault ref may read the global key", () => {
+    const config = cfg(
+      { assistant: { topic_name: "General" } },
+      "vault:telegram-bot-token",
+    );
+    expect(checkAclByAgent(config, "assistant", "telegram-bot-token").allow).toBe(true);
+  });
+
+  it("per-agent override wins: admin reads its own key, NOT the global, NOT another agent's", () => {
+    const config = cfg(
+      {
+        admin: { topic_name: "Admin", bot_token: "vault:telegram-admin-bot-token", admin: true },
+        coach: { topic_name: "Fitness", bot_token: "vault:telegram-coach-bot-token" },
+      },
+      "vault:telegram-bot-token",
+    );
+    expect(checkAclByAgent(config, "admin", "telegram-admin-bot-token").allow).toBe(true);
+    // admin overrides the global → must NOT get the global key via this path…
+    expect(checkAclByAgent(config, "admin", "telegram-bot-token").allow).toBe(false);
+    // …and definitely not a sibling agent's per-agent bot token.
+    expect(checkAclByAgent(config, "admin", "telegram-coach-bot-token").allow).toBe(false);
+    expect(checkAclByAgent(config, "coach", "telegram-admin-bot-token").allow).toBe(false);
+  });
+
+  it("does not open a hole: a literal (non-vault:) bot_token grants nothing; unrelated keys still gated", () => {
+    const config = cfg(
+      { admin: { topic_name: "Admin", bot_token: "123:literaltoken", admin: true } },
+      "alsoliteral",
+    );
+    // literal token isn't a vault key → no allowance, and no schedule → deny
+    expect(checkAclByAgent(config, "admin", "123:literaltoken").allow).toBe(false);
+    expect(checkAclByAgent(config, "admin", "some-other-key").allow).toBe(false);
+  });
+
+  it("regression: schedule.secrets gating for NON-bot keys is unchanged", () => {
+    const config = cfg(
+      {
+        admin: {
+          topic_name: "Admin",
+          bot_token: "vault:telegram-admin-bot-token",
+          schedule: [{ cron: "0 8 * * *", prompt: "x", secrets: ["briefing_key"] }],
+        } as unknown as SwitchroomConfig["agents"][string],
+      },
+      "vault:telegram-bot-token",
+    );
+    expect(checkAclByAgent(config, "admin", "telegram-admin-bot-token").allow).toBe(true); // own bot token
+    expect(checkAclByAgent(config, "admin", "briefing_key").allow).toBe(true);  // schedule.secrets still works
+    expect(checkAclByAgent(config, "admin", "random_key").allow).toBe(false);   // still gated
+  });
+});

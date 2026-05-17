@@ -2,6 +2,7 @@ import type { SwitchroomConfig } from "../config/schema.js";
 import {
   generateHindsightMcpConfig,
   getCollectionForAgent,
+  isHindsightEnabled,
   type McpServerConfig,
 } from "./hindsight.js";
 
@@ -15,8 +16,17 @@ export function getHindsightSettingsEntry(
   agentName: string,
   config: SwitchroomConfig,
 ): { key: string; value: McpServerConfig } | null {
+  // Honors SWITCHROOM_MEMORY_BACKEND=none like every other hindsight
+  // gate (install-validation 2026-05-17, R2 review round 3). Guarding
+  // INSIDE this function makes every caller correct — including the
+  // un-gated scaffold/reconcile settings.json merge sites — so a
+  // `none` install no longer writes the hindsight MCP server entry.
   const memoryConfig = config.memory;
-  if (!memoryConfig || memoryConfig.backend !== "hindsight") {
+  if (!isHindsightEnabled(config)) {
+    return null;
+  }
+  // isHindsightEnabled true ⇒ memory.backend === "hindsight" ⇒ defined.
+  if (!memoryConfig) {
     return null;
   }
 

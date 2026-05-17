@@ -982,8 +982,18 @@ async function stepAutoUnlock(
 ): Promise<void> {
   stepHeader(8, "Vault auto-unlock at boot", STEP_ACTIVE);
 
-  if (nonInteractive) {
-    console.log(chalk.gray("  Skipping in non-interactive mode."));
+  const envPass = process.env.SWITCHROOM_VAULT_PASSPHRASE;
+  if (nonInteractive && !(envPass && envPass.length > 0)) {
+    // Unattended install that did NOT supply the passphrase signal:
+    // leave auto-unlock unconfigured — do not weaken an install that
+    // didn't opt into unattended operation. With the passphrase
+    // present we proceed: an always-on fleet MUST survive a broker
+    // recreate (routine `switchroom apply`) with no human in the
+    // loop. Previously this ALWAYS skipped non-interactively, so the
+    // canonical unattended install could never auto-unlock — every
+    // `apply` then bricked vault-ref agents (install-validation
+    // 2026-05-17 / RFC J Phase 1).
+    console.log(chalk.gray("  Skipping (non-interactive, no SWITCHROOM_VAULT_PASSPHRASE)."));
     return;
   }
 
@@ -1009,19 +1019,32 @@ async function stepAutoUnlock(
 
   console.log(chalk.gray("  Without this, vault must be unlocked manually after every reboot."));
   console.log(chalk.gray("  Encrypted with a key derived from this machine's id — disk theft is safe; the same user on this box is not."));
-  const enable = await askYesNo("  Enable vault auto-unlock at boot?", true);
-  if (!enable) {
-    console.log(chalk.gray("  Skipped. Run later with: switchroom vault broker enable-auto-unlock"));
-    return;
+  if (!nonInteractive) {
+    const enable = await askYesNo("  Enable vault auto-unlock at boot?", true);
+    if (!enable) {
+      console.log(chalk.gray("  Skipped. Run later with: switchroom vault broker enable-auto-unlock"));
+      return;
+    }
+  } else {
+    // Non-interactive + passphrase present (guarded at the top): the
+    // operator opted into unattended operation, so auto-unlock is the
+    // correct default — proceed without prompting (RFC J Phase 1).
+    console.log(chalk.gray("  Enabling (non-interactive, SWITCHROOM_VAULT_PASSPHRASE present)."));
   }
 
-  // Masked passphrase prompt — handing it to AES-GCM, not echoing.
+  // $SWITCHROOM_VAULT_PASSPHRASE is the unattended signal (same source
+  // setup/gateway use); else masked prompt. Handed to AES-GCM, not
+  // echoed.
   let passphrase: string;
-  try {
-    passphrase = await promptPassphrase();
-  } catch (err) {
-    console.log(chalk.yellow(`  Skipped: ${err instanceof Error ? err.message : String(err)}`));
-    return;
+  if (envPass && envPass.length > 0) {
+    passphrase = envPass;
+  } else {
+    try {
+      passphrase = await promptPassphrase();
+    } catch (err) {
+      console.log(chalk.yellow(`  Skipped: ${err instanceof Error ? err.message : String(err)}`));
+      return;
+    }
   }
 
   try {
@@ -1062,6 +1085,14 @@ async function stepAutoUnlock(
       ),
     );
     console.log(chalk.gray("  Retry with: switchroom apply && docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml restart vault-broker"));
+  }
+
+  if (nonInteractive) {
+    // The approval-posture choice below is interactive-only. A
+    // non-interactive install keeps the default (passphrase /
+    // two-factor) posture — auto-unlock is now configured, which was
+    // the goal of this step.
+    return;
   }
 
   // Posture prompt: passphrase (two-factor, default) vs telegram-id

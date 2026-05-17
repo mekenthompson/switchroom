@@ -41,6 +41,19 @@ import { unlockSocketFor } from "./peercred.js";
 import { isDockerRuntime } from "../../runtime-mode.js";
 
 const DEFAULT_TIMEOUT_MS = 2000;
+// `unlock` is NOT a cheap RPC like status/get: the broker performs a
+// full synchronous vault decrypt (detectVaultLayoutDrift + openVault,
+// AES-256-GCM) BEFORE it writes "OK\n". On a loaded host (concurrent
+// docker builds / image pulls / many agents) that easily exceeds the
+// 2s generic-RPC budget, so the client timed out and destroyed the
+// socket WHILE the broker was successfully unlocking — reporting a
+// false "Timeout waiting for broker" for an unlock that actually
+// succeeded (install-validation 2026-05-18 / RFC J Phase 4b). A
+// genuinely unreachable broker still fails fast via the connection
+// error path (ECONNREFUSED/ENOENT settle immediately, not via this
+// timer); this longer budget only covers "connected, decrypt in
+// progress". Callers may still override via opts.timeoutMs.
+const UNLOCK_TIMEOUT_MS = 30_000;
 /**
  * v0.6 legacy host-side socket path. Pre-v0.7 the broker daemon ran
  * directly on the host as a systemd-user unit and bound its data socket
@@ -654,7 +667,7 @@ export async function unlockViaBroker(
   // the v0.6 flat-shape legacy socket (foo.sock → foo.unlock.sock)
   // both pair correctly.
   const unlockSocketPath = unlockSocketFor(dataSocketPath);
-  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutMs = opts?.timeoutMs ?? UNLOCK_TIMEOUT_MS;
 
   return new Promise<UnlockResult>((resolve) => {
     let settled = false;

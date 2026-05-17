@@ -1,14 +1,22 @@
 # Changelog
 
-## v0.12.0 — legacy-state deprecation notices
+## v0.12.0 — user-owned SOUL.md + broker healthcheck honesty + legacy-state deprecations
 
-Schedules the long-lived `clerk → switchroom` rename shims for removal so they don't sit indefinitely. No behaviour change for migrated hosts; no automatic migration is performed.
+Headline: agent persona (`workspace/SOUL.md`) becomes a user-owned, seed-once file — switchroom seeds it once and never overwrites it again, matching the OpenClaw/Hermes "my persona sticks" expectation while the machinery (`CLAUDE.md`) keeps propagating fleet-wide. Also: the vault-broker healthcheck now reports honestly (a locked/never-unlocked broker reads unhealthy instead of false-healthy), the operator unlock hint is corrected, and the long-lived `clerk → switchroom` rename shims are scheduled for removal. No automatic state migration is performed.
 
 ### Changes
 
 #### Features
 
 - **feat(persona):** `workspace/SOUL.md` is now **user-owned** — seeded once (from the setup wizard's new per-agent persona prompts, or the profile `SOUL.md.hbs` + `soul:` config when skipped) and then **never overwritten** by `apply`/`reconcile`/`update`. This is the deliberate inverse of the root `CLAUDE.md`, which stays switchroom-managed so machinery/template updates keep propagating fleet-wide. New `switchroom soul {path,show,reset}` verb; `soul reset <agent>` re-seeds from the agent's current profile after backing the existing file up to `SOUL.md.bak`. `soul:` config and profile `SOUL.md.hbs` are now seed-time inputs only. See [docs/configuration.md § Persona & SOUL.md ownership](docs/configuration.md#persona--soulmd-ownership).
+
+#### Fixes
+
+- **fix(broker):** RFC J Phase 4a — the vault-broker healthcheck is now honest. The probe additionally requires a `.ready` sentinel, so a broker that is locked or has never been unlocked reads **unhealthy** instead of false-healthy (the 2026-05-17 install-validation failure mode). Strictly more restrictive (fail-closed); empty-fleet and path-as-identity semantics unchanged. The operator unlock hint is corrected to `switchroom vault broker unlock` (the stale `switchroom vault unlock` string is gone). (#1455)
+
+#### Chore
+
+- **chore(ci):** GitHub Actions major-version bumps — `actions/upload-artifact` 4→7, `actions/download-artifact` 4→8, `docker/setup-buildx-action` 3→4, `docker/login-action` 3→4, `docker/setup-qemu-action` 3→4 (Node24 runtime; shared Artifacts-v4 backend, no workflow behavior change). (#1439–#1443)
 
 #### Deprecations
 

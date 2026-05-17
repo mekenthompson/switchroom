@@ -19,17 +19,22 @@ RUN echo "switchroom/agent building for arch=${TARGETARCH}" >&2
 #
 # /var/log/switchroom is the destination for `_switchroom_supervise`
 # log files (gateway-supervisor, autoaccept, agent-scheduler) written
-# by start.sh. The compose `user:` directive runs start.sh as the
-# per-agent UID (10001-10999, see Dockerfile.base) — but the dir is
-# created here as root with default umask. Without an explicit
-# 0777, start.sh hits "Permission denied" writing the supervisor
-# logs and the three sidecars (gateway / autoaccept / scheduler)
-# never start; the agent then hangs forever on the Claude Code
-# first-run theme picker because autoaccept-poll isn't there to
-# dispatch keystrokes. (Install-validation finding #19.)
+# by start.sh, which runs as a per-agent UID (10001-10999).
+#
+# In the production compose path this dir is bind-mounted from
+# ~/.switchroom/logs/<name> (host-side, chowned to that agent's UID),
+# so the image dir's perms are shadowed entirely. The image perms only
+# matter in a non-compose `docker run` of the image — and there the
+# process runs as the image default `USER 10001` (sec WS6-F5, set at
+# the end of this file). So chown to the sentinel UID 10001 + 0755 is
+# both correct for the unshadowed path AND closes WS6-F6: pre-#1419
+# this was `chmod 0777` (world-writable in any unshadowed run — finding
+# #19's fix, but over-broad). 10001 = AGENT_UID_MIN (Dockerfile.base
+# pre-creates passwd entries for 10001-10999).
 RUN mkdir -p /state/agent /state/.claude /var/log/switchroom \
  && mkdir -p /run/switchroom \
- && chmod 0777 /var/log/switchroom
+ && chown 10001:10001 /var/log/switchroom \
+ && chmod 0755 /var/log/switchroom
 
 # Make sure tmux's runtime dir exists; the per-agent UID will own it via
 # the compose `user:` directive at runtime.
@@ -168,6 +173,17 @@ COPY telegram-plugin/dist /opt/switchroom/telegram-plugin/dist
 # agent-scheduler bundle. node-cron was npm-installed above; this COPY
 # only drops the (frequently-changing) bundle into the existing dir.
 COPY dist/agent-scheduler/index.js /opt/switchroom/agent-scheduler/index.js
+
+# sec WS6-F5 (#1419): non-root image default. Pre-#1419 the agent
+# image had NO `USER`, so its effective default was root — all agent
+# privilege-reduction was compose-emitted only (the four root
+# singletons even bake `USER 0:0`, so least-privilege was inverted for
+# the agent). Set the image default to the sentinel non-root UID so
+# root is never the effective default even on a non-compose `docker
+# run`. The compose path's per-agent `user: <10001-10999>` still
+# overrides this at runtime; 10001 has a passwd entry from
+# Dockerfile.base. Placed last — every preceding COPY/RUN needs root.
+USER 10001
 
 # tini handles zombies + signal forwarding. The actual command is
 # /state/agent/start.sh, which the scaffold renders into the bind-mount.

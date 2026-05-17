@@ -67,22 +67,43 @@ const OPERATOR_SOCKET_PATH = join(homedir(), ".switchroom", "broker-operator", "
  * Under systemd mode (v0.6), the legacy `~/.switchroom/vault-broker.sock`
  * is bound directly by the host-side broker daemon.
  *
- * If we're in Docker mode but the operator socket isn't there yet
- * (broker container not yet recreated post-`switchroom apply`), fall
- * back to the legacy path so the resulting "unreachable" error message
- * points operators at a path they actually expect rather than at the
- * dummy operator path.
+ * Deployment truth beats runtime guessing (RFC J Phase 3 / #32).
+ * `isDockerRuntime()` is just `SWITCHROOM_RUNTIME==="docker"`, which
+ * compose sets on the CONTAINERS but is unset in a plain host
+ * operator shell. The previous `if (isDockerRuntime())` gate
+ * therefore mis-routed `switchroom vault broker {status,unlock,lock}`
+ * run from the docker host to the LEGACY host-daemon socket — so
+ * `status` reported a phantom host daemon (and `start` spawned one)
+ * while the real containerized broker, serving an operator socket
+ * right there on disk, was ignored and reported "down" while up
+ * (install-validation 2026-05-17). The operator socket is bound +
+ * chowned ONLY by the dockerized broker, so its presence on disk is
+ * unambiguous proof that a containerized broker is serving here —
+ * regardless of whether this shell happens to have SWITCHROOM_RUNTIME
+ * set. Check that first.
  */
 function defaultBrokerSocketPath(): string {
-  if (isDockerRuntime()) {
-    if (fs.existsSync(OPERATOR_SOCKET_PATH)) return OPERATOR_SOCKET_PATH;
-    // Docker mode but no operator socket yet — try operator path anyway
-    // (so the connect error names the path operators should see). Falls
-    // through to legacy below only if the operator path also isn't
-    // configured at all (extremely unusual).
-    return OPERATOR_SOCKET_PATH;
-  }
+  // 1. Operator socket present → a dockerized broker is serving it
+  //    (deployment truth; works from host shells too).
+  if (fs.existsSync(OPERATOR_SOCKET_PATH)) return OPERATOR_SOCKET_PATH;
+  // 2. In-container docker mode before the operator socket is bound
+  //    (broker not yet recreated post-`apply`) — name the operator
+  //    path so the "unreachable" error points where operators expect.
+  if (isDockerRuntime()) return OPERATOR_SOCKET_PATH;
+  // 3. v0.6 host/systemd mode — legacy host-daemon socket.
   return LEGACY_SOCKET_PATH;
+}
+
+/**
+ * True when a dockerized (compose-managed) broker is serving here.
+ * The operator socket is bound + chowned ONLY by the containerized
+ * broker, so its presence is unambiguous deployment truth from a
+ * host shell (where SWITCHROOM_RUNTIME is unset). Used to stop
+ * `vault broker start/stop` from spawning/killing a phantom host
+ * daemon on a docker host (RFC J Phase 3 / #32).
+ */
+export function brokerIsComposeManaged(): boolean {
+  return fs.existsSync(OPERATOR_SOCKET_PATH);
 }
 
 const DEFAULT_SOCKET_PATH = LEGACY_SOCKET_PATH; // preserved for tests / back-compat

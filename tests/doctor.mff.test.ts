@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -12,7 +12,11 @@ import {
   checkMffAuthFlow,
   checkMffCloudflareUa,
   checkMff,
+  mffAgentName,
+  mffEnvPath,
+  mffEnvState,
 } from "../src/cli/doctor.js";
+import type { SwitchroomConfig } from "../src/config/schema.js";
 import { generateKeyPairSync } from "node:crypto";
 import { createVault, setStringSecret } from "../src/vault/vault.js";
 
@@ -359,10 +363,13 @@ describe("checkMffAuthFlow", () => {
   });
 
   it("returns fail when claude-auth.py exits non-zero", async () => {
-    const envPath = join(tempDir, ".env");
-    writeFileSync(envPath, `MFF_API_URL=https://mff.example.com\n`);
     const credDir = join(tempDir, ".switchroom/credentials/my-family-finance");
     mkdirSync(credDir, { recursive: true });
+    // .env and claude-auth.py are colocated in the per-agent dir (the
+    // real WS6-F2 layout) — the probe resolves the script from
+    // dirname(envPath).
+    const envPath = join(credDir, ".env");
+    writeFileSync(envPath, `MFF_API_URL=https://mff.example.com\n`);
     const authScript = join(credDir, "claude-auth.py");
     writeFileSync(authScript, "import sys\nprint('error: auth failed', file=sys.stderr)\nsys.exit(1)\n");
 
@@ -378,10 +385,13 @@ describe("checkMffAuthFlow", () => {
   });
 
   it("returns fail when claude-auth.py prints no token", async () => {
-    const envPath = join(tempDir, ".env");
-    writeFileSync(envPath, `MFF_API_URL=https://mff.example.com\n`);
     const credDir = join(tempDir, ".switchroom/credentials/my-family-finance");
     mkdirSync(credDir, { recursive: true });
+    // .env and claude-auth.py are colocated in the per-agent dir (the
+    // real WS6-F2 layout) — the probe resolves the script from
+    // dirname(envPath).
+    const envPath = join(credDir, ".env");
+    writeFileSync(envPath, `MFF_API_URL=https://mff.example.com\n`);
     const authScript = join(credDir, "claude-auth.py");
     writeFileSync(authScript, "# empty output\n");
 
@@ -397,10 +407,13 @@ describe("checkMffAuthFlow", () => {
   });
 
   it("returns ok when auth script produces a token accepted by the API", async () => {
-    const envPath = join(tempDir, ".env");
-    writeFileSync(envPath, `MFF_API_URL=https://mff.example.com\n`);
     const credDir = join(tempDir, ".switchroom/credentials/my-family-finance");
     mkdirSync(credDir, { recursive: true });
+    // .env and claude-auth.py are colocated in the per-agent dir (the
+    // real WS6-F2 layout) — the probe resolves the script from
+    // dirname(envPath).
+    const envPath = join(credDir, ".env");
+    writeFileSync(envPath, `MFF_API_URL=https://mff.example.com\n`);
     const authScript = join(credDir, "claude-auth.py");
     writeFileSync(authScript, "print('valid-session-token-abc')\n");
 
@@ -418,10 +431,13 @@ describe("checkMffAuthFlow", () => {
   });
 
   it("returns fail when token is rejected by the API", async () => {
-    const envPath = join(tempDir, ".env");
-    writeFileSync(envPath, `MFF_API_URL=https://mff.example.com\n`);
     const credDir = join(tempDir, ".switchroom/credentials/my-family-finance");
     mkdirSync(credDir, { recursive: true });
+    // .env and claude-auth.py are colocated in the per-agent dir (the
+    // real WS6-F2 layout) — the probe resolves the script from
+    // dirname(envPath).
+    const envPath = join(credDir, ".env");
+    writeFileSync(envPath, `MFF_API_URL=https://mff.example.com\n`);
     const authScript = join(credDir, "claude-auth.py");
     writeFileSync(authScript, "print('bad-token')\n");
 
@@ -519,7 +535,7 @@ describe("checkMff", () => {
     const envPath = join(tempDir, ".env");
     writeFileSync(envPath, "OTHER=x\n");
     globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 })) as typeof fetch;
-    const results = await checkMff(undefined, vaultPath, envPath);
+    const results = await checkMff(undefined, vaultPath, undefined, envPath);
     expect(results).toHaveLength(6);
   });
 
@@ -536,11 +552,109 @@ describe("checkMff", () => {
     // Stub fetch — /api/health and /api/categories both return 200
     globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 })) as typeof fetch;
 
-    const results = await checkMff(passphrase, vaultPath, envPath);
+    const results = await checkMff(passphrase, vaultPath, undefined, envPath);
     expect(results).toHaveLength(6);
 
     for (const r of results) {
       expect(["ok", "warn"]).toContain(r.status);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Per-agent resolution + WS6-F2 agent-private semantics (#1390 follow-up)
+// ---------------------------------------------------------------------------
+
+const isRoot =
+  typeof process.getuid === "function" && process.getuid() === 0;
+
+function cfg(agents: Record<string, { skills?: string[] }>): SwitchroomConfig {
+  return { agents } as unknown as SwitchroomConfig;
+}
+
+describe("mffAgentName", () => {
+  it("returns the first agent that enables the MFF skill", () => {
+    expect(
+      mffAgentName(cfg({ clerk: { skills: ["foo", "my-family-finance"] }, finn: {} })),
+    ).toBe("clerk");
+  });
+  it("returns undefined when no agent enables MFF", () => {
+    expect(mffAgentName(cfg({ clerk: { skills: ["foo"] } }))).toBeUndefined();
+  });
+  it("returns undefined for missing/empty config", () => {
+    expect(mffAgentName(undefined)).toBeUndefined();
+    expect(mffAgentName(cfg({}))).toBeUndefined();
+  });
+});
+
+describe("mffEnvPath", () => {
+  it("resolves the per-agent path when an MFF agent is configured", () => {
+    const p = mffEnvPath(cfg({ clerk: { skills: ["my-family-finance"] } }));
+    expect(p).toContain("/credentials/clerk/my-family-finance/.env");
+  });
+  it("falls back to the legacy flat path when no MFF agent", () => {
+    const p = mffEnvPath(cfg({ clerk: { skills: [] } }));
+    expect(p).toContain("/credentials/my-family-finance/.env");
+    expect(p).not.toContain("/credentials/clerk/");
+  });
+});
+
+describe("mffEnvState", () => {
+  let tempDir: string;
+  beforeEach(() => { tempDir = makeTempDir(); });
+  afterEach(() => { rmSync(tempDir, { recursive: true, force: true }); });
+
+  it("returns 'absent' when the path does not exist", () => {
+    expect(mffEnvState(join(tempDir, "nope.env"))).toBe("absent");
+  });
+  it("returns 'readable' for a normal file", () => {
+    const p = join(tempDir, ".env");
+    writeFileSync(p, "MFF_API_URL=https://x\n");
+    expect(mffEnvState(p)).toBe("readable");
+  });
+  it.skipIf(isRoot)(
+    "returns 'agent-private' when the file exists but is unreadable",
+    () => {
+      const p = join(tempDir, ".env");
+      writeFileSync(p, "MFF_API_URL=https://x\n");
+      chmodSync(p, 0o000);
+      expect(mffEnvState(p)).toBe("agent-private");
+    },
+  );
+});
+
+describe("WS6-F2 agent-private behaviour", () => {
+  let tempDir: string;
+  beforeEach(() => { tempDir = makeTempDir(); });
+  afterEach(() => { rmSync(tempDir, { recursive: true, force: true }); });
+
+  it.skipIf(isRoot)(
+    "checkMffEnvFile returns ok (not fail) for an agent-private .env",
+    () => {
+      const p = join(tempDir, ".env");
+      writeFileSync(p, "MFF_API_URL=https://x\n");
+      chmodSync(p, 0o000);
+      const r = checkMffEnvFile(p);
+      expect(r.status).toBe("ok");
+      expect(r.detail).toContain("agent-private");
+    },
+  );
+
+  it.skipIf(isRoot)(
+    "deep probes skip (warn) on an agent-private .env — no host read of agent secrets",
+    async () => {
+      const p = join(tempDir, ".env");
+      writeFileSync(p, "MFF_API_URL=https://x\n");
+      chmodSync(p, 0o000);
+      const api = await checkMffApiReachable(p);
+      expect(api.status).toBe("warn");
+      expect(api.detail).toContain("agent-private");
+    },
+  );
+
+  it("deep probes skip (warn) when the .env is absent", async () => {
+    const api = await checkMffApiReachable(join(tempDir, "nope.env"));
+    expect(api.status).toBe("warn");
+    expect(api.detail).toContain("not found");
   });
 });

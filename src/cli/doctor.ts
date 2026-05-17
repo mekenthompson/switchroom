@@ -26,6 +26,7 @@ import { loadManifest, detectDrift, type DriftProbers } from "../manifest.js";
 import { probeHindsight, isHindsightEnabled } from "../memory/hindsight.js";
 import { isDockerMode, runDockerChecks } from "./doctor-docker.js";
 import { runAuthBrokerChecks } from "./doctor-auth-broker.js";
+import { runHostdChecks } from "./doctor-hostd.js";
 import { runDriveChecks } from "./doctor-drive.js";
 import { runCredentialsMigrationChecks } from "./doctor-credentials-migration.js";
 import { runInlinedSecretChecks } from "./doctor-inlined-secrets.js";
@@ -2317,6 +2318,7 @@ export function registerDoctorCommand(program: Command): void {
           { title: "Audit integrity (WS10-F4)", results: runAuditIntegrityChecks() },
           { title: "Docker (Phase 1a)", results: runDockerSection(config) },
           { title: "Auth Broker", results: runAuthBrokerChecks(config) },
+          { title: "Host control (hostd)", results: runHostdChecks(config) },
           { title: "Google Drive", results: runDriveChecks(config) },
           { title: "MFF Skill", results: await checkMff(passphrase, vaultPath, config) },
         ];

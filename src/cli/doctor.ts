@@ -23,7 +23,7 @@ import { getAllAuthStatuses } from "../auth/manager.js";
 import { getSlotInfos, type SlotInfo } from "../auth/accounts.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { loadManifest, detectDrift, type DriftProbers } from "../manifest.js";
-import { probeHindsight } from "../memory/hindsight.js";
+import { probeHindsight, isHindsightEnabled } from "../memory/hindsight.js";
 import { isDockerMode, runDockerChecks } from "./doctor-docker.js";
 import { runAuthBrokerChecks } from "./doctor-auth-broker.js";
 import { runDriveChecks } from "./doctor-drive.js";
@@ -693,8 +693,7 @@ function probeAuthBrokerSocket(
 }
 
 async function checkHindsight(config: SwitchroomConfig): Promise<CheckResult[]> {
-  const memoryBackend = config.memory?.backend;
-  if (memoryBackend !== "hindsight") {
+  if (!isHindsightEnabled(config)) {
     return [];
   }
 
@@ -1510,7 +1509,7 @@ export function checkAgents(config: SwitchroomConfig, configPath: string): Check
         try {
           const mcp = JSON.parse(readFileSync(mcpJsonPath, "utf-8"));
           const hasSwitchroomTelegram = !!mcp.mcpServers?.["switchroom-telegram"];
-          const memoryEnabled = config.memory?.backend === "hindsight";
+          const memoryEnabled = isHindsightEnabled(config);
           const hasHindsight = !!mcp.mcpServers?.hindsight;
 
           if (!hasSwitchroomTelegram) {

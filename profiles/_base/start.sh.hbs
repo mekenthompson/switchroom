@@ -32,44 +32,56 @@ if [ "$SWITCHROOM_RUNTIME" = "docker" ] && [ -z "$SWITCHROOM_DOCKER_TMUX_INNER" 
   # same path the rest of start.sh + the MCP sidecar expects.
   export TELEGRAM_STATE_DIR="{{agentDir}}/telegram"
 
-  # Tiny in-process supervisor: runs cmd in a respawn loop. Caps at
-  # 10 restarts in 60s before giving up — protects against tight
-  # crash loops that would otherwise burn CPU and obscure the root
-  # cause in logs. The sidecar's own structured logging is written
+  # Tiny in-process supervisor: runs cmd in a respawn loop with
+  # exponential backoff (1→2→4…→60s cap) and NEVER permanently gives
+  # up. Rationale (RFC J / install-validation 2026-05-17): the
+  # gateway's hardest dependency is the vault-broker, which gets
+  # recreated+relocked by a routine `switchroom apply`. The old
+  # "10 restarts in 60s → give up forever" turned that transient
+  # outage into a dead agent until a human recreated the container —
+  # a direct violation of the always-on outcome. Backoff bounds CPU
+  # during an outage; indefinite retry means the agent self-heals
+  # within one backoff cycle the moment the broker is back. The ONLY
+  # non-retry path is EX_CONFIG=78 (genuine permanent misconfig).
+  # The sidecar's own structured logging is written
   # directly to its log file; this wrapper only handles process
   # lifecycle. Ampersand-backgrounded by callers below.
   _switchroom_supervise() {
     local _name="$1"; local _logfile="$2"; shift 2
-    local _restarts=0
-    local _window_start=$SECONDS
+    local _cap=60
+    local _delay=1
+    local _attempt=0
     while true; do
+      local _start=$SECONDS
       "$@" >> "$_logfile" 2>&1
       local _exit=$?
-      local _now=$SECONDS
+      local _ran=$((SECONDS - _start))
       # Exit 78 = sysexits EX_CONFIG, the "permanent config error, do
       # not restart" sentinel. The gateway uses this on a 401 from
       # Telegram (#1076 — revoked / wrong-typed bot token). Restarting
-      # would just re-hit the same 401, burn the 10-in-60 s budget,
-      # and leave the agent silently dead. The supervisor instead
-      # records the quarantine in the log and stops — the host CLI
-      # (`switchroom doctor`, `switchroom agent restart`) reads the
-      # quarantine marker at <TELEGRAM_STATE_DIR>/quarantine.json and
-      # surfaces it to the operator.
+      # just re-hits the same 401, so we quarantine and stop — the
+      # host CLI (`switchroom doctor`, `switchroom agent restart`)
+      # reads the marker at <TELEGRAM_STATE_DIR>/quarantine.json and
+      # surfaces it. This is the ONLY non-retry path: a transient
+      # dependency (vault-broker locked/recreating — RFC J) must never
+      # be terminal for an always-on agent.
       if [ $_exit -eq 78 ]; then
         echo "[supervise] $_name exit 78 (EX_CONFIG) — quarantined, not restarting. Operator action required." >> "$_logfile"
         return 0
       fi
-      if [ $((_now - _window_start)) -ge 60 ]; then
-        _restarts=0
-        _window_start=$_now
+      # A run that stayed up for at least the backoff cap means the
+      # dependency was healthy and this exit is a fresh transient
+      # blip — reset backoff so recovery latency is minimal. Only
+      # consecutive fast failures escalate the delay.
+      if [ $_ran -ge $_cap ]; then
+        _delay=1
+        _attempt=0
       fi
-      _restarts=$((_restarts + 1))
-      echo "[supervise] $_name exited (status=$_exit, restart=$_restarts in $((_now - _window_start))s window)" >> "$_logfile"
-      if [ $_restarts -ge 10 ]; then
-        echo "[supervise] $_name hit 10 restarts in <60s — giving up" >> "$_logfile"
-        return 1
-      fi
-      sleep 1
+      _attempt=$((_attempt + 1))
+      echo "[supervise] $_name exited (status=$_exit, ran=${_ran}s, attempt=$_attempt) — retrying in ${_delay}s (transient deps self-heal; never gives up)" >> "$_logfile"
+      sleep $_delay
+      _delay=$((_delay * 2))
+      [ $_delay -gt $_cap ] && _delay=$_cap
     done
   }
 
@@ -79,9 +91,10 @@ if [ "$SWITCHROOM_RUNTIME" = "docker" ] && [ -z "$SWITCHROOM_DOCKER_TMUX_INNER" 
   #    switchroom-<name>-gateway.service unit. Talks to the broker
   #    over SWITCHROOM_VAULT_BROKER_SOCK (set by compose) for the bot
   #    token. Failure modes: vault locked → gateway boots, fails to
-  #    fetch token, exits non-zero, supervisor respawns; bot token
-  #    invalid → 401 from Telegram, gateway exits, same loop. The
-  #    cap avoids an infinite vault-locked respawn storm.
+  #    fetch token, exits non-zero, supervisor backs off and keeps
+  #    retrying — it recovers on its own the moment the broker
+  #    unlocks (no human, no container recreate); bot token invalid
+  #    → 401 → gateway exits 78 → quarantined (operator action).
   _gateway_bundle=/opt/switchroom/telegram-plugin/dist/gateway/gateway.js
   if [ -f "$_gateway_bundle" ] && command -v bun >/dev/null 2>&1; then
     _switchroom_supervise gateway /var/log/switchroom/gateway-supervisor.log \
@@ -90,8 +103,8 @@ if [ "$SWITCHROOM_RUNTIME" = "docker" ] && [ -z "$SWITCHROOM_DOCKER_TMUX_INNER" 
 
   # 2) autoaccept-poll — first-run TUI prompt dispatcher. Single-shot
   #    by design (exits cleanly after idle-timeout once prompts have
-  #    fired); supervisor's restart cap means a flaky autoaccept won't
-  #    masquerade as a tight loop.
+  #    fired); the supervisor's exponential backoff keeps a flaky
+  #    autoaccept from busy-looping.
   if [ -f /opt/switchroom/autoaccept-poll.js ] && command -v bun >/dev/null 2>&1; then
     _switchroom_supervise autoaccept /var/log/switchroom/autoaccept.log \
       bun /opt/switchroom/autoaccept-poll.js "{{name}}" &

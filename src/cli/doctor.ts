@@ -29,6 +29,7 @@ import { runAuthBrokerChecks } from "./doctor-auth-broker.js";
 import { runDriveChecks } from "./doctor-drive.js";
 import { runCredentialsMigrationChecks } from "./doctor-credentials-migration.js";
 import { runInlinedSecretChecks } from "./doctor-inlined-secrets.js";
+import { runAuditIntegrityChecks } from "./doctor-audit-integrity.js";
 
 /**
  * Result of a single doctor check.
@@ -2231,6 +2232,7 @@ export function registerDoctorCommand(program: Command): void {
           { title: "Telegram", results: await checkTelegram(config) },
           { title: "Agents", results: checkAgents(config, configPath) },
           { title: "Credentials", results: runCredentialsMigrationChecks(config) },
+          { title: "Audit integrity (WS10-F4)", results: runAuditIntegrityChecks() },
           { title: "Docker (Phase 1a)", results: runDockerSection(config) },
           { title: "Auth Broker", results: runAuthBrokerChecks(config) },
           { title: "Google Drive", results: runDriveChecks(config) },

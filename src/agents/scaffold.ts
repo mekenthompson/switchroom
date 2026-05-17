@@ -115,7 +115,7 @@ import {
 import { reconcileAgentDefaultSkills } from "./reconcile-default-skills.js";
 import { applyTelegramProgressGuidance, applyCronTelegramGuidance } from "./sub-agent-telegram-prompt.js";
 import type { McpServerConfig } from "../memory/hindsight.js";
-import { createBank, updateBankMissions, ensureUserProfileMentalModel, DEFAULT_RETAIN_MISSION } from "../memory/hindsight.js";
+import { createBank, updateBankMissions, ensureUserProfileMentalModel, DEFAULT_RETAIN_MISSION, isHindsightEnabled } from "../memory/hindsight.js";
 import { loadTopicState } from "../telegram/state.js";
 import { resolveDualPath } from "../config/paths.js";
 import { resolvePath } from "../config/loader.js";
@@ -1922,16 +1922,9 @@ export function scaffoldAgent(
   const hadExplicitAllow = rawAllow.length > 0;
   const readOnlyDefaults =
     !dangerousMode && !hadExplicitAllow ? DEFAULT_READ_ONLY_PREAPPROVED_TOOLS : [];
-  // SWITCHROOM_MEMORY_BACKEND=none force-disables hindsight even when the
-  // (bundled) config hardcodes `memory.backend: hindsight`. This mirrors
-  // the precedence in src/cli/setup.ts:stepMemoryBackend — the two sites
-  // MUST agree, or scaffold tries to create banks for an install the
-  // operator explicitly opted out of (install-validation 2026-05-17, R2 /
-  // prior #25: 4 spurious "Failed to create Hindsight bank" warnings on a
-  // `SWITCHROOM_MEMORY_BACKEND=none` setup).
-  const envBackend = process.env.SWITCHROOM_MEMORY_BACKEND;
-  const memoryBackend = switchroomConfig?.memory?.backend;
-  const hindsightEnabled = envBackend !== "none" && memoryBackend === "hindsight";
+  // Single source of truth — honors SWITCHROOM_MEMORY_BACKEND=none
+  // (install-validation 2026-05-17, R2 / prior #25).
+  const hindsightEnabled = isHindsightEnabled(switchroomConfig);
   const permissionAllow = dedupe([
     ...baseAllow,
     ...readOnlyDefaults,
@@ -2116,7 +2109,7 @@ export function scaffoldAgent(
       // get dueling instructions (write to local .md files vs use
       // Hindsight). The settings flag gates the memory system-prompt
       // block at the source.
-      const hindsightOn = switchroomConfig.memory?.backend === "hindsight"
+      const hindsightOn = isHindsightEnabled(switchroomConfig)
         && switchroomConfig.agents[name]?.memory?.auto_recall !== false;
       if (hindsightOn) {
         settings.autoMemoryEnabled = false;
@@ -3415,8 +3408,11 @@ export function reconcileAgent(
     !reconcileDangerousMode && !reconcileHadExplicitAllow
       ? DEFAULT_READ_ONLY_PREAPPROVED_TOOLS
       : [];
-  const memoryBackend = switchroomConfig.memory?.backend;
-  const hindsightEnabled = memoryBackend === "hindsight";
+  // Single source of truth — must honor SWITCHROOM_MEMORY_BACKEND=none
+  // here too: `switchroom agent restart` always reconciles first, so a
+  // config-only check would re-wire Hindsight on every restart of a
+  // `none` install (install-validation 2026-05-17, R2 review round 2).
+  const hindsightEnabled = isHindsightEnabled(switchroomConfig);
   // #235: drop legacy mcp__switchroom__* tokens from any pre-existing
   // allowlist on every reconcile so existing agents converge on the
   // same shape new ones get.

@@ -25,6 +25,7 @@ import {
   statusViaBroker,
   lockViaBroker,
   unlockViaBroker,
+  brokerIsComposeManaged,
   resolveBrokerSocketPath,
 } from "../vault/broker/client.js";
 import { VaultBroker, registerShutdownHandlers } from "../vault/broker/server.js";
@@ -222,8 +223,25 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
           console.error(`[vault-broker] Failed to start: ${msg}`);
           process.exit(1);
         }
+      } else if (brokerIsComposeManaged()) {
+        // A dockerized broker is already serving here (operator socket
+        // present). Spawning a detached HOST daemon would create a
+        // phantom second broker that `status` then reports on while
+        // the real containerized one is ignored — exactly the #32
+        // confusion that masked install-validation 2026-05-17. The
+        // container's lifecycle is docker compose's job.
+        console.log(
+          "vault-broker is managed by docker compose (operator socket present).",
+        );
+        console.log(
+          "  It starts with the project: `switchroom apply` / " +
+            "`docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d`.",
+        );
+        console.log("  To unlock it: `switchroom vault broker unlock`.");
+        process.exit(0);
       } else {
-        // Detached mode: spawn a background process and exit.
+        // Detached mode (v0.6 host/systemd): spawn a background
+        // process and exit.
         const self = process.argv[1];
         const args = ["vault", "broker", "start", "--foreground"];
         if (parentOpts.config) args.unshift("--config", parentOpts.config);
@@ -248,10 +266,24 @@ export function registerVaultBrokerCommand(vaultCmd: Command, program: Command):
         socket: getSocketPath(parentOpts.config),
       });
 
-      // Send lock RPC first (best-effort)
+      // Send lock RPC first (best-effort) — routes to the operator
+      // socket under docker, so this locks the real containerized
+      // broker (the security-relevant effect of "stop").
       await lockViaBroker({ socket });
 
-      // Read PID file and send SIGTERM
+      if (brokerIsComposeManaged()) {
+        // No host PID to kill — the container's lifecycle is docker
+        // compose's. The broker is now locked; stopping the container
+        // is a separate compose operation (RFC J Phase 3 / #32).
+        console.log("vault-broker locked. It is managed by docker compose;");
+        console.log(
+          "  to stop the container: `docker compose -p switchroom " +
+            "-f ~/.switchroom/compose/docker-compose.yml stop vault-broker`.",
+        );
+        process.exit(0);
+      }
+
+      // v0.6 host/systemd: read PID file and send SIGTERM
       const pidPath = resolvePath(DEFAULT_PID_FILE);
       if (!existsSync(pidPath)) {
         console.error("vault-broker PID file not found — is the daemon running?");

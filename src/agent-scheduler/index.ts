@@ -41,7 +41,12 @@ import {
   type InjectIpcClient,
 } from "./ipc-client.js";
 import { acquireLock, releaseLock } from "./lock.js";
-import { findMissedFires, readRecentFires } from "./replay.js";
+import {
+  findMissedFires,
+  findStaleSkippedFires,
+  readRecentFires,
+  STALE_LOOKBACK_MAX_MIN,
+} from "./replay.js";
 
 /**
  * Minimum node-cron-shaped surface — same as the host scheduler. The
@@ -275,46 +280,136 @@ export async function main(): Promise<void> {
     process.env.SWITCHROOM_AGENT_SCHEDULER_REPLAY_MIN ?? "30",
     10,
   );
+  const windowMinutes = Number.isFinite(replayWindowMin) ? replayWindowMin : 30;
+  const staleMaxRaw = Number.parseInt(
+    process.env.SWITCHROOM_AGENT_SCHEDULER_STALE_MAX_MIN
+      ?? String(STALE_LOOKBACK_MAX_MIN),
+    10,
+  );
+  const staleMaxMin = Number.isFinite(staleMaxRaw)
+    ? staleMaxRaw
+    : STALE_LOOKBACK_MAX_MIN;
   const recentFires = readRecentFires(resolve(jsonlPath));
+  const replayNow = new Date();
   const missed = findMissedFires({
     entries,
     recentFires,
-    now: new Date(),
-    windowMinutes: Number.isFinite(replayWindowMin) ? replayWindowMin : 30,
+    now: replayNow,
+    windowMinutes,
   });
-  if (missed.length > 0) {
+  // Genuinely-dropped runs: matched the cron but are older than the
+  // replay window, so they will NOT be re-run. The survive-reboots
+  // JTBD requires these be "explicitly skipped, not silently dropped"
+  // — emit one summary turn (not one per entry). A per-entry
+  // exitCode=0 sentinel row, written only once the notice is
+  // delivered, dedups subsequent boots.
+  const staleSkipped = findStaleSkippedFires({
+    entries,
+    recentFires,
+    now: replayNow,
+    windowMinutes,
+    maxLookbackMinutes: staleMaxMin,
+  });
+  if (missed.length > 0 || staleSkipped.length > 0) {
     const connected = await ipcClient.waitForConnect(5_000);
     if (connected) {
-      process.stdout.write(
-        `agent-scheduler: replaying ${missed.length} missed fire(s) ` +
-        `from past ${replayWindowMin}min — ` +
-        missed
-          .map((m) => `[idx=${m.entry.scheduleIndex} key=${m.entry.promptKey}]`)
-          .join(" ") + "\n",
-      );
-      for (const m of missed) {
+      if (missed.length > 0) {
+        process.stdout.write(
+          `agent-scheduler: replaying ${missed.length} missed fire(s) ` +
+          `from past ${windowMinutes}min — ` +
+          missed
+            .map((m) => `[idx=${m.entry.scheduleIndex} key=${m.entry.promptKey}]`)
+            .join(" ") + "\n",
+        );
+        for (const m of missed) {
+          const startedAt = Date.now();
+          const result = dispatchAsInbound(
+            m.entry,
+            { chatId: channel.chatId, threadId: channel.threadId },
+            dispatcher,
+          );
+          sink.recordFire({
+            agent: m.entry.agent,
+            scheduleIndex: m.entry.scheduleIndex,
+            promptKey: m.entry.promptKey,
+            exitCode: result.delivered ? 0 : -1,
+            outputSummary: result.delivered
+              ? `replayed (originally scheduled at ${new Date(m.expectedFireMs).toISOString()})`
+              : "replay attempted but gateway not connected",
+            startedAt,
+            finishedAt: Date.now(),
+          });
+        }
+      }
+      if (staleSkipped.length > 0) {
+        process.stdout.write(
+          `agent-scheduler: ${staleSkipped.length} scheduled run(s) ` +
+          `skipped (older than ${windowMinutes}min window) — notifying user\n`,
+        );
+        const lines = staleSkipped.map((s) => {
+          const oneLine = s.entry.prompt.replace(/\s+/g, " ").trim().slice(0, 80);
+          return `- "${oneLine}" — cron \`${s.entry.cron}\`, ` +
+            `most recent missed run ~${new Date(s.expectedFireMs).toISOString()}`;
+        });
+        const noticeText =
+          "[switchroom scheduler notice] While this agent was offline, the " +
+          "following scheduled task(s) had at least one run skipped. They were " +
+          `older than the ${windowMinutes}-minute catch-up window, so they ` +
+          "will NOT be re-run:\n" +
+          lines.join("\n") +
+          "\n\nBriefly and plainly tell the user these scheduled runs did not " +
+          "happen so they are not left in the dark. Do not perform the tasks " +
+          "now unless the user asks.";
+        const noticeEntry: SchedulerEntry = {
+          agent: agentName,
+          scheduleIndex: -1,
+          cron: "",
+          prompt: noticeText,
+          promptKey: "skip-notice",
+        };
         const startedAt = Date.now();
         const result = dispatchAsInbound(
-          m.entry,
+          noticeEntry,
           { chatId: channel.chatId, threadId: channel.threadId },
           dispatcher,
         );
         sink.recordFire({
-          agent: m.entry.agent,
-          scheduleIndex: m.entry.scheduleIndex,
-          promptKey: m.entry.promptKey,
+          agent: agentName,
+          scheduleIndex: -1,
+          promptKey: "skip-notice",
           exitCode: result.delivered ? 0 : -1,
           outputSummary: result.delivered
-            ? `replayed (originally scheduled at ${new Date(m.expectedFireMs).toISOString()})`
-            : "replay attempted but gateway not connected",
+            ? `skip-notice sent for ${staleSkipped.length} dropped run(s)`
+            : "skip-notice attempted but gateway not connected",
           startedAt,
           finishedAt: Date.now(),
         });
+        // Stamp the per-entry "acknowledged" sentinel ONLY if the
+        // notice reached the gateway. On failed delivery, leave the
+        // entries uncovered so the next boot retries the notice rather
+        // than swallowing it.
+        if (result.delivered) {
+          for (const s of staleSkipped) {
+            sink.recordFire({
+              agent: s.entry.agent,
+              scheduleIndex: s.entry.scheduleIndex,
+              promptKey: s.entry.promptKey,
+              exitCode: 0,
+              outputSummary:
+                `skip-notice: run at ${new Date(s.expectedFireMs).toISOString()} ` +
+                `was older than the ${windowMinutes}min replay window and was ` +
+                "not executed",
+              startedAt: s.expectedFireMs,
+              finishedAt: s.expectedFireMs,
+            });
+          }
+        }
       }
     } else {
       process.stderr.write(
-        `agent-scheduler: ${missed.length} missed fire(s) detected but ` +
-        `gateway socket not up after 5s — skipping replay this boot\n`,
+        `agent-scheduler: ${missed.length} missed + ${staleSkipped.length} ` +
+        "stale-skipped fire(s) detected but gateway socket not up after 5s — " +
+        "skipping this boot\n",
       );
     }
   }

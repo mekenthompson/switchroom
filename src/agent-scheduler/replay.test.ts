@@ -18,6 +18,7 @@ import { join } from "node:path";
 import {
   cronMatchesDate,
   findMissedFires,
+  findStaleSkippedFires,
   matchField,
   normalizeAliases,
   readRecentFires,
@@ -284,6 +285,128 @@ describe("findMissedFires", () => {
     });
     const missedIdx = result.map((r) => r.entry.scheduleIndex).sort();
     expect(missedIdx).toEqual([0, 2]);
+  });
+});
+
+describe("findStaleSkippedFires", () => {
+  function entry(idx: number, cron: string): SchedulerEntry {
+    return {
+      agent: "klanker",
+      scheduleIndex: idx,
+      cron,
+      prompt: `prompt-${idx}`,
+      promptKey: `key${idx}`,
+    };
+  }
+  function audit(idx: number, startedAt: number, exitCode = 0): DispatchResult {
+    return {
+      agent: "klanker",
+      scheduleIndex: idx,
+      promptKey: `key${idx}`,
+      exitCode,
+      outputSummary: "ok",
+      startedAt,
+      finishedAt: startedAt + 100,
+    };
+  }
+
+  // Wed 2024-01-10 12:00 local; daily-weekday 08:00 entry. The 08:00
+  // run is 240 min ago — well outside a 30-min replay window.
+  const now = new Date(2024, 0, 10, 12, 0, 0);
+  const eightAm = new Date(2024, 0, 10, 8, 0, 0).getTime();
+
+  it("reports the most recent out-of-window run with no audit", () => {
+    const result = findStaleSkippedFires({
+      entries: [entry(0, "0 8 * * 1-5")],
+      recentFires: [],
+      now,
+      windowMinutes: 30,
+    });
+    expect(result).toHaveLength(1);
+    expect(result[0]!.entry.scheduleIndex).toBe(0);
+    expect(result[0]!.expectedFireMs).toBe(eightAm);
+  });
+
+  it("does not report when a successful audit covers the run", () => {
+    const result = findStaleSkippedFires({
+      entries: [entry(0, "0 8 * * 1-5")],
+      recentFires: [audit(0, eightAm + 3_000)],
+      now,
+      windowMinutes: 30,
+    });
+    expect(result).toHaveLength(0);
+  });
+
+  it("does not report when a later run already caught the user up", () => {
+    // No 08:00 audit, but a 09:00 success — user isn't in the dark.
+    const nineAm = new Date(2024, 0, 10, 9, 0, 0).getTime();
+    const result = findStaleSkippedFires({
+      entries: [entry(0, "0 8 * * 1-5")],
+      recentFires: [audit(0, nineAm)],
+      now,
+      windowMinutes: 30,
+    });
+    expect(result).toHaveLength(0);
+  });
+
+  it("treats a failed (exitCode!=0) audit as still-missing", () => {
+    const result = findStaleSkippedFires({
+      entries: [entry(0, "0 8 * * 1-5")],
+      recentFires: [audit(0, eightAm, -1)],
+      now,
+      windowMinutes: 30,
+    });
+    expect(result).toHaveLength(1);
+  });
+
+  it("ignores in-window occurrences (those are replay's job)", () => {
+    // Fires at 09:15 only. now 09:30, window 30 → 09:15 is in-window.
+    // Cap at 60 so yesterday's 09:15 is out of reach: nothing stale.
+    const at930 = new Date(2024, 0, 10, 9, 30, 0);
+    const result = findStaleSkippedFires({
+      entries: [entry(0, "15 9 * * *")],
+      recentFires: [],
+      now: at930,
+      windowMinutes: 30,
+      maxLookbackMinutes: 60,
+    });
+    expect(result).toHaveLength(0);
+  });
+
+  it("respects the maxLookback ceiling", () => {
+    // Only the 08:00 run exists; cap 60 min only scans back to 11:00.
+    const result = findStaleSkippedFires({
+      entries: [entry(0, "0 8 * * 1-5")],
+      recentFires: [],
+      now,
+      windowMinutes: 30,
+      maxLookbackMinutes: 60,
+    });
+    expect(result).toHaveLength(0);
+  });
+
+  it("returns [] when the cap is <= the replay window", () => {
+    const result = findStaleSkippedFires({
+      entries: [entry(0, "0 8 * * 1-5")],
+      recentFires: [],
+      now,
+      windowMinutes: 30,
+      maxLookbackMinutes: 30,
+    });
+    expect(result).toHaveLength(0);
+  });
+
+  it("handles multiple entries independently", () => {
+    const result = findStaleSkippedFires({
+      entries: [
+        entry(0, "0 8 * * 1-5"), // stale, uncovered
+        entry(1, "0 8 * * 1-5"), // covered by a success
+      ],
+      recentFires: [audit(1, eightAm + 2_000)],
+      now,
+      windowMinutes: 30,
+    });
+    expect(result.map((r) => r.entry.scheduleIndex)).toEqual([0]);
   });
 });
 

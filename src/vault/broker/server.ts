@@ -357,6 +357,34 @@ export class VaultBroker {
     // lifetime; the broker's retained reference is the only authorised
     // long-lived store.
     this.passphrase = passphrase;
+    this._setReadinessSentinel(true);
+  }
+
+  /**
+   * Best-effort readiness sentinel for the docker healthcheck (RFC J
+   * Phase 4). On unlock we touch SWITCHROOM_VAULT_BROKER_READY_PATH;
+   * on lock we remove it. The compose healthcheck tests this file so
+   * `docker compose ps` reflects unlocked-AND-serving — a locked
+   * broker reads unhealthy instead of the bind-presence-only "healthy"
+   * that masked the install-validation 2026-05-17 incident.
+   *
+   * MUST NOT throw: this runs inside the security-critical unlock/lock
+   * paths and a sentinel I/O hiccup must never affect vault state. The
+   * env var is set only by the dockerized vault-broker service; unset
+   * (host/test) → no-op, so non-docker behaviour is unchanged.
+   */
+  private _setReadinessSentinel(ready: boolean): void {
+    const p = process.env.SWITCHROOM_VAULT_BROKER_READY_PATH;
+    if (!p || p.length === 0) return;
+    try {
+      if (ready) {
+        writeFileSync(p, "", { mode: 0o600 });
+      } else if (existsSync(p)) {
+        unlinkSync(p);
+      }
+    } catch {
+      /* best-effort: never let sentinel I/O affect lock/unlock */
+    }
   }
 
   /**
@@ -381,6 +409,7 @@ export class VaultBroker {
     // caveat as the secret values above — the underlying bytes survive in the
     // string-pool until GC, but the broker's only reference is gone.
     this.passphrase = null;
+    this._setReadinessSentinel(false);
   }
 
   /**

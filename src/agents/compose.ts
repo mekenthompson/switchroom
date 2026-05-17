@@ -804,11 +804,17 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // sockets) reports unhealthy. Acceptable: a switchroom install
   // without any agents has no business running the broker; an
   // operator who's mid-install has minutes-scale exposure to this.
-  // We do NOT speak the broker's app protocol here — that requires
-  // peercred-checked auth and would generate audit-log noise on
-  // every healthcheck tick. Bind-presence is the right level.
+  // We still do NOT speak the broker's auth'd app protocol here
+  // (peercred + audit-log noise). Instead the probe also requires a
+  // 0-byte readiness sentinel the broker writes on unlock and
+  // unlinks on lock (SWITCHROOM_VAULT_BROKER_READY_PATH). So the
+  // health state is `serving AND unlocked` — a LOCKED broker now
+  // reads unhealthy. Reporting a locked broker "healthy" is exactly
+  // what masked the install-validation 2026-05-17 incident, where a
+  // routine `apply` relocked the broker and `docker compose ps`
+  // still said healthy (RFC J §2.4 / Phase 4).
   lines.push(`    healthcheck:`);
-  lines.push(`      test: ["CMD-SHELL", "ls /run/switchroom/broker/*/sock 2>/dev/null | head -1 | grep -q ."]`);
+  lines.push(`      test: ["CMD-SHELL", "ls /run/switchroom/broker/*/sock 2>/dev/null | head -1 | grep -q . && test -f /run/switchroom/broker/.ready"]`);
   lines.push(`      interval: 30s`);
   lines.push(`      timeout: 5s`);
   lines.push(`      retries: 3`);
@@ -867,6 +873,10 @@ export function generateCompose(opts: ComposeGeneratorOptions): string {
   // parent dir so saveVault's write-temp-then-rename works.
   lines.push(`      SWITCHROOM_VAULT_PATH: /state/vault/vault.enc`);
   lines.push(`      SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH: /state/vault-auto-unlock`);
+  // Readiness sentinel the broker writes on unlock / unlinks on lock.
+  // The healthcheck above tests it so `docker compose ps` reflects
+  // unlocked-AND-serving, not just socket bind-presence (RFC J Phase 4).
+  lines.push(`      SWITCHROOM_VAULT_BROKER_READY_PATH: /run/switchroom/broker/.ready`);
   // Operator UID — when set, the broker binds an additional listener at
   // /run/switchroom/broker/operator/sock and chowns it to this UID so
   // the host operator's shell can talk to the broker through the bind

@@ -2140,8 +2140,22 @@ describe("singleton healthchecks (silent-down regression — see plans/singleton
     // it actually exercises the binding code, not some sibling pidfile
     // or status sentinel. Pin the exact glob.
     const out = generateCompose({ config: makeConfig({ alice: {} }) });
-    expect(out).toContain(`"ls /run/switchroom/broker/*/sock 2>/dev/null | head -1 | grep -q ."`);
+    expect(out).toContain(`"ls /run/switchroom/broker/*/sock 2>/dev/null | head -1 | grep -q . && test -f /run/switchroom/broker/.ready"`);
     expect(out).toContain(`"ls /run/switchroom/kernel/*/sock 2>/dev/null | head -1 | grep -q ."`);
+  });
+
+  it("broker health = serving AND unlocked (RFC J Phase 4 readiness sentinel)", () => {
+    // A locked broker reading "healthy" (bind-presence only) masked
+    // the install-validation 2026-05-17 incident. The probe now also
+    // requires the readiness sentinel the broker writes on unlock /
+    // unlinks on lock, fed via SWITCHROOM_VAULT_BROKER_READY_PATH.
+    const out = generateCompose({ config: makeConfig({ alice: {} }) });
+    const block = blockFor(out, "vault-broker");
+    expect(block).toContain("SWITCHROOM_VAULT_BROKER_READY_PATH: /run/switchroom/broker/.ready");
+    expect(block).toContain("test -f /run/switchroom/broker/.ready");
+    // kernel healthcheck unchanged (no readiness sentinel there).
+    const kblock = blockFor(out, "approval-kernel");
+    expect(kblock).not.toContain(".ready");
   });
 });
 

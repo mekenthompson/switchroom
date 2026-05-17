@@ -11,6 +11,7 @@ import {
   resolveAgentWorkspaceDir,
 } from "../agents/workspace.js";
 import { resolveAgentConfig, usesSwitchroomTelegramPlugin } from "../config/merge.js";
+import { isHindsightEnabled } from "../memory/hindsight.js";
 
 /**
  * `switchroom debug` commands for observability into what the model sees.
@@ -329,7 +330,7 @@ export function registerDebugCommand(program: Command): void {
         // Hindsight recall (we can't recover the exact recall from logs easily,
         // so we just note whether it would have fired)
         const hindsightEnabled =
-          config.memory?.backend === "hindsight" &&
+          isHindsightEnabled(config) &&
           agentConfig.memory?.auto_recall !== false;
 
         if (hindsightEnabled) {

@@ -138,29 +138,7 @@ or the OAuth token is expired.
 
 You can skip this step for a single-agent install.
 
-## Step 5 — Authenticate with your Claude subscription
-
-```sh
-switchroom auth add me --via-claude
-switchroom auth use me
-```
-
-`--via-claude` drives `claude`'s own native OAuth flow (broader scope)
-— log in with your Claude Pro or Max account when prompted. Use
-`--via-claude` for first-time setup: `--from-oauth` mints
-`scope=user:inference` only, which agents running in `server:` mode
-reject at boot. `auth use` makes that account the fleet-wide active
-account; every agent inherits it via the auth-broker.
-
-One OAuth flow per Anthropic account, ever. New agents you add later
-don't need their own login — they inherit the fleet active. See
-[`docs/auth.md`](auth.md) for the full model.
-
-> **No API keys.** The whole point: this uses your existing Pro/Max
-> subscription via OAuth, exactly like the desktop app. No per-token
-> billing.
-
-## Step 6 — Bring the fleet up
+## Step 5 — Bring the fleet up
 
 ```sh
 switchroom apply
@@ -171,12 +149,46 @@ docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
 pulls images from GHCR (first run is slow — ~1-2 GiB across 4 images)
 and starts the broker, kernel, and your agent container(s).
 
+> **Why this comes before authentication.** Authentication is brokered
+> by the `switchroom-auth-broker` container — it registers your
+> account and is the sole writer of each agent's credentials. Running
+> `switchroom auth …` before the fleet is up just prints
+> `auth-broker unreachable` and registers nothing. Bring the fleet up
+> first.
+
 Check status:
 
 ```sh
 switchroom agent list
 docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml ps
 ```
+
+## Step 6 — Authenticate with your Claude subscription
+
+With the fleet (and the auth-broker) up, register your account. Use
+the label **`default`** — `switchroom setup` initialises
+`auth.active: default`, so this is the account every agent already
+expects:
+
+```sh
+switchroom auth add default --via-claude
+switchroom auth use default
+```
+
+`--via-claude` drives `claude`'s own native OAuth flow (broader scope)
+— log in with your Claude Pro or Max account when prompted. Use
+`--via-claude` for first-time setup: `--from-oauth` mints
+`scope=user:inference` only, which agents running in `server:` mode
+reject at boot. `auth use` makes that account the fleet-wide active
+account and the broker mirrors credentials to every agent.
+
+One OAuth flow per Anthropic account, ever. New agents you add later
+don't need their own login — they inherit the fleet active. See
+[`docs/auth.md`](auth.md) for the full model.
+
+> **No API keys.** The whole point: this uses your existing Pro/Max
+> subscription via OAuth, exactly like the desktop app. No per-token
+> billing.
 
 ## Step 7 — Verify in Telegram
 

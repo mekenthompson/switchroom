@@ -38,7 +38,7 @@ import { getBundledSkillsPoolDir } from "../agents/reconcile-default-skills.js";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import type { ReconcileFn } from "./agent-config-write.js";
-import { appendAudit } from "./agent-config.js";
+import { appendAudit, restartRequiredNote } from "./agent-config.js";
 
 /** Per-agent skill cap. Matches the schedule cap (20). */
 export const MAX_SKILLS_PER_AGENT = 20;
@@ -84,6 +84,11 @@ export interface SkillResult {
   source: string;
   resolved_skill_name: string;
   would_recreate: false;
+  /** On disk + reconciled, but claude loads skills at process start —
+   *  not live until the agent restarts (skill hot-reload is unbuilt
+   *  Phase C; see lifecycle.ts:classifyChangeKind). */
+  restart_required: true;
+  restart_hint: string;
 }
 
 export interface SkillErrorResult {
@@ -266,11 +271,20 @@ export function skillInstall(opts: SkillInstallOpts): SkillResult | SkillErrorRe
     source: opts.source,
     resolved_skill_name: skillName,
     would_recreate: false,
+    restart_required: true,
+    restart_hint: restartRequiredNote(agent),
   };
 }
 
 /** Remove a skill from the agent's overlay. */
-export function skillRemove(opts: SkillRemoveOpts): { ok: true; slug: string } | SkillErrorResult {
+export interface SkillRemoveResult {
+  ok: true;
+  slug: string;
+  restart_required: true;
+  restart_hint: string;
+}
+
+export function skillRemove(opts: SkillRemoveOpts): SkillRemoveResult | SkillErrorResult {
   let agent: string;
   try {
     agent = resolveAgentName(opts.agent);
@@ -323,7 +337,12 @@ export function skillRemove(opts: SkillRemoveOpts): { ok: true; slug: string } |
       }
     }
   }
-  return { ok: true, slug };
+  return {
+    ok: true,
+    slug,
+    restart_required: true,
+    restart_hint: restartRequiredNote(agent),
+  };
 }
 
 export function registerAgentConfigSkillWriteCommands(program: Command): void {
@@ -385,6 +404,8 @@ export function registerAgentConfigSkillWriteCommands(program: Command): void {
         path: r.path,
         source: r.source,
         resolved_skill_name: r.resolved_skill_name,
+        restart_required: r.restart_required,
+        restart_hint: r.restart_hint,
       }) + "\n");
       try {
         appendAudit(
@@ -402,7 +423,7 @@ export function registerAgentConfigSkillWriteCommands(program: Command): void {
     .requiredOption("--name <slug>", "Slug passed at install time")
     .option("--agent <name>", "Target agent (defaults to $SWITCHROOM_AGENT_NAME)")
     .action(async (opts: { agent?: string; name: string }) => {
-      let r: { ok: true; slug: string } | SkillErrorResult;
+      let r: SkillRemoveResult | SkillErrorResult;
       let resolvedAgent = opts.agent ?? "<unknown>";
       try {
         r = skillRemove({ agent: opts.agent, name: opts.name });
@@ -429,7 +450,12 @@ export function registerAgentConfigSkillWriteCommands(program: Command): void {
         } catch { /* ignore */ }
         process.exit(r.exit);
       }
-      process.stdout.write(JSON.stringify({ ok: true, slug: r.slug }) + "\n");
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        slug: r.slug,
+        restart_required: r.restart_required,
+        restart_hint: r.restart_hint,
+      }) + "\n");
       try {
         appendAudit(resolvedAgent, "skill.remove", { slug: r.slug }, 0);
       } catch { /* ignore */ }

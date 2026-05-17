@@ -37,6 +37,7 @@ import { parse as parseYaml, stringify as yamlStringify } from "yaml";
 import {
   appendAudit,
   resolveTargetAgent,
+  restartRequiredNote,
 } from "./agent-config.js";
 import {
   writeOverlayEntry,
@@ -175,6 +176,10 @@ export interface ScheduleAddResult {
   path: string;
   cron_hash: string;
   would_recreate: false;
+  /** Entry is on disk but the in-container scheduler captured its
+   *  entries at boot — not live until the agent restarts. */
+  restart_required: true;
+  restart_hint: string;
 }
 
 export interface ScheduleErrorResult {
@@ -344,6 +349,8 @@ export function scheduleAdd(opts: AddOpts): ScheduleAddResult | ScheduleErrorRes
     path,
     cron_hash: hash,
     would_recreate: false,
+    restart_required: true,
+    restart_hint: restartRequiredNote(agent),
   };
 }
 
@@ -418,6 +425,8 @@ export interface ScheduleRemoveResult {
   ok: true;
   slug: string;
   path: string;
+  restart_required: true;
+  restart_hint: string;
 }
 
 export function scheduleRemove(opts: RemoveOpts): ScheduleRemoveResult | ScheduleErrorResult {
@@ -496,7 +505,13 @@ export function scheduleRemove(opts: RemoveOpts): ScheduleRemoveResult | Schedul
       };
     }
   }
-  return { ok: true, slug: match.slug, path: match.path };
+  return {
+    ok: true,
+    slug: match.slug,
+    path: match.path,
+    restart_required: true,
+    restart_hint: restartRequiredNote(agent),
+  };
 }
 
 export function registerAgentConfigWriteCommands(program: Command): void {
@@ -586,6 +601,8 @@ export function registerAgentConfigWriteCommands(program: Command): void {
         cron_hash: r.cron_hash,
         path: r.path,
         would_recreate: false,
+        restart_required: r.restart_required,
+        restart_hint: r.restart_hint,
       }) + "\n");
       appendAudit(
         resolvedAgent,
@@ -712,7 +729,13 @@ export function registerAgentConfigWriteCommands(program: Command): void {
         appendAudit(resolvedAgent, "schedule.remove", { ...opts, code: r.code }, r.exit);
         process.exit(r.exit);
       }
-      process.stdout.write(JSON.stringify({ ok: true, slug: r.slug, path: r.path }) + "\n");
+      process.stdout.write(JSON.stringify({
+        ok: true,
+        slug: r.slug,
+        path: r.path,
+        restart_required: r.restart_required,
+        restart_hint: r.restart_hint,
+      }) + "\n");
       appendAudit(resolvedAgent, "schedule.remove", { ...opts, slug: r.slug }, 0);
     });
 }

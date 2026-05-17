@@ -377,6 +377,79 @@ describe("scaffoldAgent", () => {
     expect(settings.permissions.defaultMode).toBeUndefined();
   });
 
+  // #1400 apex-chain link 1: the hostd MCP server exposes mutating /
+  // host-control verbs (update_apply, agent_exec, agent_restart, …).
+  // The pre-#1400 scaffold blanket-pre-approved `mcp__hostd__*`, so a
+  // prompt-injected admin agent could invoke them with NO Telegram
+  // approval prompt. Only the pure read-only `update_check` may be
+  // pre-approved; everything else must fall through to the human
+  // approval card. A typo here silently re-wedges or re-opens the
+  // chain — same drift-guard rationale as the switchroom-telegram
+  // tool-list test below.
+  it("pre-approves ONLY hostd update_check, never the mutating verbs or the blanket wildcard", () => {
+    const config = makeAgentConfig({ tools: { allow: [], deny: [] } });
+    const result = scaffoldAgent("hostd-narrow", config, tmpDir, telegramConfig);
+    const settings = JSON.parse(
+      readFileSync(join(result.agentDir, ".claude", "settings.json"), "utf-8"),
+    );
+    const allow: string[] = settings.permissions.allow;
+
+    // The one safe read-only verb stays pre-approved (no first-use wedge).
+    expect(allow).toContain("mcp__hostd__update_check");
+    // The blanket grants are gone.
+    expect(allow).not.toContain("mcp__hostd");
+    expect(allow).not.toContain("mcp__hostd__*");
+    // Every mutating / host-control verb must be ABSENT so it routes
+    // through the Telegram approval card.
+    for (const verb of [
+      "mcp__hostd__update_apply",
+      "mcp__hostd__agent_exec",
+      "mcp__hostd__agent_restart",
+      "mcp__hostd__agent_start",
+      "mcp__hostd__agent_stop",
+      "mcp__hostd__agent_logs",
+    ]) {
+      expect(allow).not.toContain(verb);
+    }
+  });
+
+  it("reconcile actively retracts a pre-existing blanket mcp__hostd__* from settings.json", () => {
+    const config = makeAgentConfig({ tools: { allow: [], deny: [] } });
+    const scaffolded = scaffoldAgent("hostd-retract", config, tmpDir, telegramConfig);
+    const settingsPath = join(scaffolded.agentDir, ".claude", "settings.json");
+
+    // Simulate a pre-#1400 agent: hand-inject the old blanket grant
+    // into the persisted allowlist the way old scaffolds baked it in.
+    const pre = JSON.parse(readFileSync(settingsPath, "utf-8"));
+    pre.permissions.allow = [
+      ...pre.permissions.allow.filter(
+        (t: string) => t !== "mcp__hostd__update_check",
+      ),
+      "mcp__hostd",
+      "mcp__hostd__*",
+    ];
+    writeFileSync(settingsPath, JSON.stringify(pre, null, 2));
+
+    reconcileAgent(
+      "hostd-retract",
+      config,
+      tmpDir,
+      telegramConfig,
+      {
+        switchroom: { version: 1, agents_dir: tmpDir },
+        telegram: telegramConfig,
+        agents: { "hostd-retract": config },
+      } as SwitchroomConfig,
+    );
+
+    const after: string[] = JSON.parse(
+      readFileSync(settingsPath, "utf-8"),
+    ).permissions.allow;
+    expect(after).not.toContain("mcp__hostd");
+    expect(after).not.toContain("mcp__hostd__*");
+    expect(after).toContain("mcp__hostd__update_check");
+  });
+
   it("expands tools.allow: [all] into the full built-in tool list", () => {
     // Claude Code rejects the literal string "all" in permissions.allow.
     // When users write `tools.allow: [all]` in switchroom.yaml, the scaffold

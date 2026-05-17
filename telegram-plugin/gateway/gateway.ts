@@ -9088,7 +9088,39 @@ async function runCreditWatch(): Promise<void> {
 }
 
 bot.command("auth", async ctx => {
-  if (!isAuthorizedSender(ctx)) return
+  // sec WS7-F2b (#1394): `/auth` drives the auth-broker credential
+  // lifecycle (`/auth add` mints/attaches an Anthropic account token,
+  // `/auth use` switches the active account, …). It is NOT in
+  // ADMIN_COMMAND_NAMES (deliberately gateway-handled even on
+  // non-admin agents so it works when the model is unreachable — that
+  // routing is unchanged), so the WS7-F2 operator-private middleware
+  // does not cover it, and its only sender gate was the
+  // group-permissive `isAuthorizedSender` (empty group `allowFrom` =
+  // allow every member). On an `admin:true` forum agent any
+  // forum/supergroup member could therefore run privileged `/auth`.
+  // Credential-plane admin is OPERATOR-PRIVATE, exactly like the
+  // ADMIN_COMMAND_NAMES verbs (WS7-F2 / #1408): honor `/auth` ONLY in
+  // a private chat from a strict `access.allowFrom` sender — never the
+  // group-permissive isAuthorizedSender. The agent-admin-flag /
+  // broker-side enforcement (isAuthAdmin below) is orthogonal and
+  // unchanged; operator auth-recovery is via DM (same as #1408).
+  const authSenderId = String(ctx.from?.id ?? '')
+  const authOperatorPrivate =
+    ctx.chat?.type === 'private' &&
+    loadAccess().allowFrom.includes(authSenderId)
+  if (!authOperatorPrivate) {
+    if (ctx.chat?.type !== 'private') {
+      process.stderr.write(
+        `telegram gateway: /auth refused (not operator-private) agent=${process.env.SWITCHROOM_AGENT_NAME ?? '-'} chat=${ctx.chat?.type ?? '?'} sender=${authSenderId}\n`,
+      )
+      await switchroomReply(
+        ctx,
+        `⚠️ <code>/auth</code> manages account credentials — it is <b>operator-private</b>. Send it as a direct message to me from your operator account (a private chat where your Telegram ID is on the access allowlist), not in a group or forum.`,
+        { html: true },
+      ).catch(() => {})
+    }
+    return
+  }
   const text = ctx.message?.text ?? ""
   const parsed = parseAuthCommand(text)
   if (!parsed) return

@@ -146,7 +146,13 @@ ALLOWLIST=(
   # (~85 lines added near line 8475 shifted the vault wizard callsites
   # further down past the prior 10100 ceiling).
   # Re-bumped 2026-05-15 for #1308 folder-picker handler integration.
-  "telegram-plugin/gateway/gateway.ts:9340-10300:vault grant wizard ctx.api.editMessageText already has .catch swallow"
+  # Re-bumped 2026-05-17 for sec WS7-F2b (#1394): the /auth
+  # operator-private gate inserted ~32 lines above bot.command("auth"),
+  # shifting the vault-wizard callsites past the prior 10300 ceiling
+  # (the flagged callsite moved 10270 -> 10302). End extended with
+  # headroom; the inserted code uses switchroomReply (wrapped), so the
+  # slightly-wider span introduces no un-allowlisted raw call.
+  "telegram-plugin/gateway/gateway.ts:9340-10340:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter
   # via DI. The gateway wires those adapters through robustApiCall (see

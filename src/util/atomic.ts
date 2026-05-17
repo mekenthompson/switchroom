@@ -39,8 +39,9 @@ import { closeSync, constants, fsyncSync, openSync, renameSync, rmSync, writeSyn
  * attacker who wins the race could plant a symlink at the tempfile
  * path and have the root broker write a secret through it.
  *
- *   - `O_NOFOLLOW` — if the final component is a symlink, fail (ELOOP)
- *     instead of following it. Closes the planted-symlink race.
+ *   - `O_NOFOLLOW` — if the final component is a symlink, fail
+ *     instead of following it (ELOOP; or EEXIST when O_EXCL fires
+ *     first on the planted inode). Closes the planted-symlink race.
  *   - `O_EXCL` (with `O_CREAT`) — the open MUST create the file; fail
  *     if anything already exists at the tempfile path. The temp name
  *     is unique per-pid + 4 random bytes so this never trips in

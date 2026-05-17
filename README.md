@@ -313,7 +313,7 @@ switchroom agent unquarantine <name>          # Clear a crash-quarantine and res
 switchroom agent rename <old> <new>           # Rename an agent slug (#168)
 switchroom agent destroy <name>               # Remove from compose + scaffold dir
 switchroom agent attach <name>                # Interactive tmux session
-switchroom agent send <name> <text>           # Inject a message into the agent's chat
+switchroom agent send <name> <slash-cmd>      # Inject a slash command into the agent's tmux pane
 switchroom agent logs <name> [-f]             # View logs
 switchroom agent grant <name> <tool>          # Grant a tool permission
 switchroom agent permissions <name>           # Show allow/deny list

@@ -1,23 +1,96 @@
 # Changelog
 
-## v0.12.0 — legacy-state deprecation notices
+## v0.12.0 — user-owned SOUL.md + broker healthcheck honesty + legacy-state deprecations
 
-Schedules the long-lived `clerk → switchroom` rename shims for removal so they don't sit indefinitely. No behaviour change for migrated hosts; no automatic migration is performed.
+Headline: agent persona (`workspace/SOUL.md`) becomes a user-owned, seed-once file — switchroom seeds it once and never overwrites it again, matching the OpenClaw/Hermes "my persona sticks" expectation while the machinery (`CLAUDE.md`) keeps propagating fleet-wide. Also: the vault-broker healthcheck now reports honestly (a locked/never-unlocked broker reads unhealthy instead of false-healthy), the operator unlock hint is corrected, and the long-lived `clerk → switchroom` rename shims are scheduled for removal. No automatic state migration is performed.
 
 ### Changes
 
 #### Features
 
-- **feat(persona):** `workspace/SOUL.md` is now **user-owned** — seeded once (from the setup wizard's new per-agent persona prompts, or the profile `SOUL.md.hbs` + `soul:` config when skipped) and then **never overwritten** by `apply`/`reconcile`/`update`. This is the deliberate inverse of the root `CLAUDE.md`, which stays switchroom-managed so machinery/template updates keep propagating fleet-wide. New `switchroom soul {path,show,reset}` verb; `soul reset <agent>` re-seeds from the agent's current profile after backing the existing file up to `SOUL.md.bak`. `soul:` config and profile `SOUL.md.hbs` are now seed-time inputs only. See [docs/configuration.md § Persona & SOUL.md ownership](docs/configuration.md#persona--soulmd-ownership).
+- **feat(persona):** `workspace/SOUL.md` is now **user-owned** — seeded once (from the setup wizard's new per-agent persona prompts, or the profile `SOUL.md.hbs` + `soul:` config when skipped) and then **never overwritten** by `apply`/`reconcile`/`update`. This is the deliberate inverse of the root `CLAUDE.md`, which stays switchroom-managed so machinery/template updates keep propagating fleet-wide. New `switchroom soul {path,show,reset}` verb; `soul reset <agent>` re-seeds from the agent's current profile after backing the existing file up to `SOUL.md.bak`. `soul:` config and profile `SOUL.md.hbs` are now seed-time inputs only. See [docs/configuration.md § Persona & SOUL.md ownership](docs/configuration.md#persona--soulmd-ownership). (#1458)
+- **feat(update-flow):** end-to-end release-channel/pin redesign. A `release` config block (`channel: dev|rc|latest` *or* `pin: sha-…|vX.Y.Z`, mutually exclusive, per-agent REPLACES root) at every cascade layer (#1415); `switchroom apply --channel/--pin` + `resolveImageTag()` threading the resolved tag into compose/CLI/hostd/MCP (#1431); gateway boot-card surfaces the last `update_apply` audit outcome and honors `channels.telegram.enabled` in `start.sh` (#1456); dual-tag (`:dev` + `:sha-<7>`) docker-images workflow + operator `promote.yml` (dev→rc→latest, retag-without-rebuild) (#1461).
+- **feat(vault):** auto-unlock is the unattended default — RFC J Phase 1 (#1454).
+- **feat(auth-google):** native Google Drive onboarding — self-documenting `auth google connect` wizard (#1344), opt-in Drive **write** scope via `--write` (#1354), refresh-token seed launcher + per-agent scaffold wiring (#1355).
+- **feat(web):** dashboard build-out — auth-broker/hindsight/hostd health (#1359), Google Workspace + cron Schedule panels (#1360), read-only Approvals kernel-ledger panel (#1363), real per-account usage % + Summary tab (#1381).
+- **feat(audit):** tamper-evident hash-chain for the vault and hostd audit logs — sec WS10-F2 (#1433).
+- **feat(doctor):** flags inlined plaintext secrets in `switchroom.yaml` — sec WS6-F3 (#1434).
+- **feat(kernel):** read-only host operator socket, deny-by-default (#1362).
+- **feat(telegram):** automatic HTML→plaintext fallback on a Telegram 400 parse-reject (#1356).
+- **feat(scheduler):** boot-time notice for runs dropped past the replay window (no more silent drops); deprecate the unused `model:` schedule field; rebuilt scheduling docs (#1424).
+- **feat(agent-config):** restart-required readback on `skill_install` / `schedule add` / `schedule remove` (#1430).
+- **feat(hostd-audit):** persist stderr/stdout tails so failed mutations survive a container recreate (#1351).
+
+#### Fixes
+
+- **fix(install):** fresh-install agents now boot authenticated end-to-end — `createMinimalClaudeConfig()` writes `hasCompletedOnboarding:true`, install docs reorder auth after fleet-up (the 2026-05-17 blank-server validation wedge) (#1422).
+- **fix(setup):** persist per-agent bot tokens to the vault (#1428); bootstrap config to `~/.switchroom` mirroring `findConfigFile` (#1426).
+- **fix(vault-broker):** route the host CLI to the containerized broker — RFC J Phase 3 (#1457).
+- **fix(oauth):** correct device-code client type + 401 `invalid_client` tier-fallthrough (#1352).
+- **fix(quota):** align `/auth show` + boot card on the broker-canonical quota (#1345).
+- **fix(auth-google):** `account add` resolves `vault:` refs via the broker (#1348); connect wizard writes secrets via the vault-broker, not the file (#1347).
+- **fix(drive-mcp):** reliability hardening closing the silent-failure class (#1368); doctor EACCES false-positive + pin-regression (#1369); pin `USER_GOOGLE_EMAIL` to the seeded account (#1367); pin `aiofile==3.8.8` via `uvx --with` (#1365); correct uvx exec name `workspace-mcp` (#1364); inject gdrive into `.mcp.json` not just `settings.json` (#1358); sanitize Pydantic anyOf-root input schemas + boot tool validation (#1388).
+- **fix(scaffold):** wire gdrive MCP env + trust scaffolded servers (#1366); honor `SWITCHROOM_MEMORY_BACKEND=none` (#1425).
+- **fix(docker):** install `uv`/`uvx` in the agent image — the Drive MCP launcher needs it (#1361).
+- **fix(web):** dashboard caught up with v0.7 Docker + RFC-H migrations (#1357); usable under fleet load — batched docker status + tailscale-serve origin (#1380).
+- **fix(build):** ship the web dashboard UI in the bundled CLI (`dist/cli/ui`) (#1374).
+- **fix(examples):** one bot per agent — ship 1 active agent, others commented with their own `bot_token` (#1423).
+- **fix(codex):** correct pre-Docker assumptions on live agent/operator paths (#1376).
+- **fix(docs):** `vault.md` wrongly said `set` auto-creates the store (#1379).
+
+#### Security (epic #1400 / workstream hardening)
+
+- **fix(gateway):** require operator authz on the `apv:` approval callback (WS7-F1, #1404); fleet-admin verbs operator-private (WS7-F2, #1408); `/auth` operator-private (WS7-F2b, #1414).
+- **fix(hostd):** harden `agent_exec` argv — `--` separator + NUL/CR/LF rejection (#1411); reject all C0/DEL controls + cap argv element size (#1429).
+- **fix(scaffold):** de-pre-approve mutating hostd MCP verbs (#1427).
+- **fix(approval-kernel):** listener-identity ACL on consume/revoke/record + 128-bit request ids (#1406).
+- **fix(auth-broker):** symlink-guard the per-agent credential mirror (#1409).
+- **fix(compose):** per-agent `credentials/` scope + migration-safe doctor warn (WS6-F2, #1407); UID-collision hard-fail + non-root agent image + logdir perms (WS6-F4/F5/F6, #1435).
+- **fix(atomic):** `O_NOFOLLOW` + `O_EXCL` on the broker tempfile open (#1444).
+- **fix(audit,doctor):** canonical `agent_name` attribution + audit-integrity doctor check (WS10-F6/F4, #1436).
+- **fix(agent):** image-baked unstrippable security-hooks plugin (WS8-F1, #1432).
+- **feat(sec):** opt-in strict inter-agent network isolation (WS6-F1, #1446).
+- **ci(security):** close the sentinel path-filter blind spot + SHA-pin all actions (WS9-F1/F6, #1405); image provenance/SBOM + base images pinned `@sha256` (WS9-F3/F4, #1437).
+- **docs(CLAUDE.md):** reconcile CI/governance prose to actual posture (WS9-F2, #1412).
+
+#### Reliability / Ops
+
+- **fix(supervisor):** exponential backoff + never-give-up restart policy — RFC J Phase 2 (#1453).
+- **fix(broker):** honest, fail-closed healthcheck (a locked/never-unlocked broker reads **unhealthy** instead of false-healthy — the 2026-05-17 install-validation failure mode); corrected operator unlock hint to `switchroom vault broker unlock` — RFC J Phase 4a (#1455).
+- **ci:** real sentinel pattern for required checks — docs-only PRs hard-block, fixes #1331 (#1350).
+
+#### Docs
+
+- **docs(audit):** repo-wide documentation audit across all tiers — onboarding-breaking + operator-hazard defects (#1385), hygiene + structure (#1386), coverage gaps + reference Status banners (#1387).
+- **docs:** RFC J spec — vault-broker resilience & default auto-unlock (#1450); code-grounded diagram regeneration specs (#1343); `applyCronChangesHot` prose corrected (#1459); retire pre-Docker / pre-RFC-H narrative in user docs + agent CLAUDE.md/skills (#1378, #1377); Drive access model corrected + stale pin literals retired (#1371).
+
+#### Chore / CI
+
+- **chore(deps):** GitHub Actions major-version bumps — `actions/upload-artifact` 4→7, `actions/download-artifact` 4→8, `docker/login-action` 3→4, `docker/setup-qemu-action` 3→4, `docker/setup-buildx-action` 3→4 (Node24 runtime; shared Artifacts-v4 backend, no workflow behavior change) (#1439–#1443).
+- **fix(ci):** constrain Dependabot docker to digest/patch, not Node major bumps (#1460).
+- **chore/test:** Tier-1/2 dead-code + stale-comment cleanup + CI-eval-summary fix (#1370, #1372); strip residual Buildkite cruft post-GHA-cutover (#1353); evals cover restart-required readback + skip-notice guidance (#1452); docker tests pass `--user 0` to read-only-rootfs + cap_drop probes (#1451); sharpen auth-google edge-case messages (#1349).
 
 #### Deprecations
 
-- **deprecate(state):** `switchroom doctor` now WARNs (exit 0) when legacy `~/.clerk` state or the v0.6 host-side `~/.switchroom/vault-broker.sock` is present. Additionally, any CLI/agent invocation that actually reads from `~/.clerk` now emits a one-time stderr deprecation notice (doctor alone is insufficient — the silent dual-read failure mode is total state loss). These back-compat shims (`src/config/paths.ts` dual-read, the top-level `clerk:` switchroom.yaml alias, and `src/vault/broker/client.ts` `LEGACY_SOCKET_PATH`) are **REMOVED in v0.13.0**.
+- **deprecate(state):** `switchroom doctor` now WARNs (exit 0) when legacy `~/.clerk` state or the v0.6 host-side `~/.switchroom/vault-broker.sock` is present; any CLI/agent invocation that reads from `~/.clerk` emits a one-time stderr deprecation notice. These back-compat shims (`src/config/paths.ts` dual-read, the top-level `clerk:` switchroom.yaml alias, and `src/vault/broker/client.ts` `LEGACY_SOCKET_PATH`) are **REMOVED in v0.13.0** (#1373).
+- **schema:** the `model:` field on a `schedule:` entry is documented DEPRECATED/IGNORED post cron-fold-in (kept optional, non-breaking) (#1424).
 
 ### Upgrade notes
 
-- **SOUL.md ownership flip:** existing agents already have a rendered `workspace/SOUL.md`. The first `update` after upgrading stops regenerating it — the agent's *current* persona freezes in place as your owned file (no content lost). The stale `SOUL.md.fingerprint` sidecar becomes vestigial and can be ignored or deleted. If you relied on `soul:` in `defaults:`/profiles propagating persona changes to running agents on reconcile, that no longer happens by design — edit `workspace/SOUL.md` directly, or run `switchroom soul reset <agent>` to re-seed from the profile.
-- If `~/.clerk` exists on a host: migrate before upgrading to v0.13.0 with `mv ~/.clerk ~/.switchroom`, and rename any top-level `clerk:` key in `switchroom.yaml` to `switchroom:`. There is no automatic migration — v0.13.0 silently treats un-migrated state as a fresh install (vault/agents/auth read as absent).
+- **RFC J — vault auto-unlock is now the unattended default (#1454).** A broker with a machine-bound auto-unlock blob unlocks itself on boot with no operator interaction. Hosts that deliberately want interactive-only unlock must opt out; review RFC J (#1450) before upgrading where unattended unlock is unacceptable.
+- **RFC J — broker healthcheck is fail-closed (#1455).** A locked or never-unlocked broker now reads **unhealthy** (was false-healthy). Empty-fleet/path-as-identity semantics unchanged; expect previously-green-but-locked brokers to flip to unhealthy until unlocked. The operator unlock hint is now `switchroom vault broker unlock` (the old `switchroom vault unlock` string is gone).
+- **RFC J — supervisor never gives up (#1453).** The broker/kernel supervisor now backs off exponentially and retries indefinitely instead of restart-capping. A persistently-failing dependency is retried forever rather than left dead — monitor logs after upgrade.
+- **Opt-in strict inter-agent network isolation (#1446).** New and **opt-in** (default unchanged: `network_mode: host`, shared host netns). Operators wanting inter-agent isolation must explicitly enable it; review the tradeoffs before flipping.
+- **Security epic #1400 — operator-private surfaces.** `/auth` (#1414), fleet-admin verbs (#1408), and the `apv:` approval callback (#1404) now require operator authz; mutating hostd MCP verbs are no longer pre-approved (#1427). Non-operator chats that previously reached these will now be denied — confirm your operator identity is configured.
+- **Security epic #1400 — non-root agent image + UID-collision hard-fail (#1435).** The agent image is now non-root and a UID collision is a hard failure (was a silent overlap). On `apply`/`update`, a previously-tolerated UID collision will now block — resolve duplicate agent UIDs before upgrading.
+- **Security epic #1400 — per-agent `credentials/` scoping (#1407).** Compose now scopes credentials per-agent with a migration-safe doctor warn. Run `switchroom doctor` after upgrading and address any credential-scope warnings.
+- **Security epic #1400 — plaintext-secret doctor flag (#1434).** `switchroom doctor` now flags inlined plaintext secrets in `switchroom.yaml`. Move flagged secrets into the vault (`switchroom vault`) — these surface as new doctor findings on first run post-upgrade.
+- **Security — base images pinned `@sha256` + provenance/SBOM (#1437).** Image pulls now resolve to pinned digests; air-gapped/mirror operators must ensure the pinned digests are available in their registry mirror.
+- **Update-flow redesign — new `release` config block (#1415/#1431/#1456/#1461).** New optional `release: { channel | pin }` at every cascade layer; per-agent `release` REPLACES root (does not field-merge). Default unchanged (`latest`), but operators adopting channels/pins should note the replace-not-merge semantics. The `:dev`/`:sha-<7>` tags and the operator `promote` workflow are now live.
+- **Install flow reordered (#1422).** `docs/install.md` now brings the fleet up *before* authenticating (the auth-broker is the sole credential writer and does not exist until `up`). Operators following the old order on a fresh install must use the new order.
+- **SOUL.md ownership flip (#1458).** Existing `workspace/SOUL.md` files freeze in place as user-owned on first `update` (no content lost); `soul:`/profile changes no longer propagate to running agents on reconcile — edit `workspace/SOUL.md` directly, or run `switchroom soul reset <agent>` to re-seed. The stale `SOUL.md.fingerprint` sidecar becomes vestigial.
+- **Legacy `~/.clerk` shims removed in v0.13.0 (#1373).** This release only WARNs. Before upgrading to v0.13.0: `mv ~/.clerk ~/.switchroom` and rename any top-level `clerk:` key in `switchroom.yaml` to `switchroom:` — there is no automatic migration (v0.13.0 treats un-migrated state as a fresh install).
+- **Dependabot docker constrained to digest/patch (#1460).** Node major-version bumps via Dependabot docker are now blocked; major base-image moves are deliberate manual changes going forward.
 
 ## v0.11.1 — hostd default-on + CI infra-resilience follow-ups
 

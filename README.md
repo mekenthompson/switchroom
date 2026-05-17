@@ -87,9 +87,12 @@ You (Telegram)
            ├─ Progress cards             ├─ Approval kernel ◄─────┤   settings.json (tools, hooks, MCP)
            ├─ Pin / unpin lifecycle      │   (allow/deny broker)  ├─ Hindsight plugin (memory)
            ├─ SQLite history             ├─ Vault broker ◄────────┤   Drive MCP, Playwright MCP, …
-           ├─ Card-events.jsonl audit    │   (cron secrets, IPC)  └─ scheduled tasks across reboots
-           ├─ Emoji reactions            │
-           └─ Format conversion          └─ Docker Compose restart (unless-stopped)
+           ├─ Card-events.jsonl audit    ├─ Auth broker ◄─────────┤   in-agent scheduler sidecar
+           ├─ Emoji reactions            │   (OAuth refresh,       └─ (cron, fires across reboots)
+           └─ Format conversion          │    sole creds writer)
+                                         ├─ hostd (host-control:
+                                         │   /restart, /update apply)
+                                         └─ Docker Compose restart (unless-stopped)
 ```
 
 See [`docs/architecture.md`](docs/architecture.md) for the process model, IPC layout, supervisor choice, and how each layer maps to the `claude` CLI.
@@ -157,12 +160,13 @@ Then log out and back in so the docker group takes effect, and:
 
 ```bash
 switchroom setup                       # interactive: Telegram + vault + first agent
-switchroom auth add me --via-claude    # OAuth into your Claude Pro/Max account, broader scope (first-time setup)
-switchroom apply                       # write ~/.switchroom/compose/docker-compose.yml
-docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d
+switchroom apply                       # regenerate ~/.switchroom/compose/docker-compose.yml
+docker compose -p switchroom -f ~/.switchroom/compose/docker-compose.yml up -d   # bring the fleet up
+switchroom auth add default --via-claude   # OAuth your Claude Pro/Max account — run AFTER the fleet is up
+switchroom auth use default                # make it the fleet-wide active account
 ```
 
-After the last command you talk to the agent from Telegram. You don't touch the server again.
+Auth comes *after* the fleet is up on purpose: the `switchroom-auth-broker` is the sole writer of credentials and doesn't exist until the compose stack is running (`switchroom auth …` beforehand just prints a "fleet not up" hint). After this you talk to the agent from Telegram and don't touch the server again. To catch a running host up later — pull images, refresh scaffolds, recreate — use **`switchroom update`**, not a raw `docker compose up` (a bare compose-up on a live fleet skips the operator restart-marker, so the boot cards render as crashes).
 
 ### Already have Docker + Node ≥ 20.11
 
@@ -187,7 +191,7 @@ If you already use Claude Code, this is the shortest path. Inside any session:
 
 ### Static binary (planned, not yet shipped)
 
-Pre-built single-binary releases (no Node or Bun required on the host) are scaffolded in [`install.sh`](install.sh) and referenced from the GitHub Releases page, but **the release workflow that publishes those binaries does not yet exist**. Until v0.9, use the one-script or npm paths above. Tracking work: switching the release pipeline to actually upload `switchroom-linux-{amd64,arm64}` and `switchroom-macos-{amd64,arm64}` on every tag.
+Pre-built single-binary releases (no Node or Bun required on the host) are scaffolded in [`install.sh`](install.sh) and referenced from the GitHub Releases page, but **the release workflow that publishes those binaries still does not exist as of v0.12.0**. Use the one-script or npm paths above. Tracking work: switching the release pipeline to actually upload `switchroom-linux-{amd64,arm64}` and `switchroom-macos-{amd64,arm64}` on every tag.
 
 ### One-shot happy path (no wizard)
 
@@ -292,7 +296,8 @@ Disable with `switchroom vault broker disable-auto-unlock`.
 ```bash
 switchroom setup                              # Interactive wizard
 switchroom doctor                             # Health check
-switchroom apply                              # Reconcile + (re)write docker-compose.yml; bring fleet up via `docker compose ... up -d`
+switchroom apply                              # Reconcile + regenerate docker-compose.yml (self-elevates via sudo for scaffolds). Does NOT run docker — prints the `up` command
+switchroom update [--check|--status|--rebuild] # Operator catch-up: pull images + apply + recreate fleet + doctor
 switchroom restart [agent] [--force]          # Bounce agent(s); drains in-flight turn by default
 switchroom version                            # Show versions + running agent health summary
 
@@ -304,14 +309,22 @@ switchroom agent bootstrap <name> --profile <p> --bot-token <t>  # One-shot scaf
 switchroom agent reconcile <name|all>         # Re-apply switchroom.yaml (without pulling/building)
 switchroom agent start|stop|restart <name>    # Lifecycle (with preflight)
 switchroom agent interrupt <name>             # Cancel in-flight turn without restarting
+switchroom agent unquarantine <name>          # Clear a crash-quarantine and resume supervision
 switchroom agent rename <old> <new>           # Rename an agent slug (#168)
 switchroom agent destroy <name>               # Remove from compose + scaffold dir
 switchroom agent attach <name>                # Interactive tmux session
+switchroom agent send <name> <slash-cmd>      # Inject a slash command into the agent's tmux pane
 switchroom agent logs <name> [-f]             # View logs
 switchroom agent grant <name> <tool>          # Grant a tool permission
 switchroom agent permissions <name>           # Show allow/deny list
 switchroom agent dangerous <name> [off]       # Toggle full tool access
+
+switchroom soul path|show|reset <name>        # Manage the agent's user-owned SOUL.md (persona)
+switchroom hostd install|status|uninstall|audit # Host-control daemon (/restart, /update apply, …)
+switchroom drive connect|disconnect <agent>   # Per-agent Google Drive OAuth
 ```
+
+`switchroom --help` lists every verb (also `deps`, `issues`, `migrate`).
 
 Profiles live in `profiles/` at the repo root. Bundled ones for `--profile`: `coding`, `default`, `executive-assistant`, `health-coach` (the `_base/` dir is framework-internal render templates and is not a user-selectable profile).
 
@@ -351,7 +364,9 @@ The same surface is reachable from Telegram in any agent's chat: `/auth show` (r
 
 ### Workspace (agent bootstrap layer)
 
-Each agent has a workspace directory (`~/.switchroom/agents/<name>/workspace/`) with editable stable files (`AGENTS.md`, `SOUL.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`) and dynamic files (`MEMORY.md`, `memory/YYYY-MM-DD.md`, `HEARTBEAT.md`) that are injected into the model's context at turn time.
+Each agent has a workspace directory (`~/.switchroom/agents/<name>/workspace/`) with editable stable files (`AGENTS.md`, `USER.md`, `IDENTITY.md`, `TOOLS.md`) and dynamic files (`MEMORY.md`, `memory/YYYY-MM-DD.md`, `HEARTBEAT.md`) injected into the model's context at turn time.
+
+`SOUL.md` (the persona) is a special case since v0.12.0: it's **user-owned and seeded once** — switchroom writes it at first scaffold (from the setup wizard's persona prompts or the profile default) and then *never overwrites it*, the deliberate inverse of the switchroom-managed `CLAUDE.md`. Edit it freely; `switchroom update` won't touch it. Use `switchroom soul reset <agent>` to re-seed from the profile (it backs the old one up first). See [docs/configuration.md § Persona & SOUL.md ownership](docs/configuration.md#persona--soulmd-ownership).
 
 ```bash
 switchroom workspace path <agent>                 # Print the workspace dir
@@ -415,7 +430,7 @@ Overlay entries win on collision with built-in defaults. Unknown files that appe
 | **[Vault](docs/vault.md)** | Architecture, per-cron secrets, ACL, audit log, threat model |
 | **[Telegram Plugin](docs/telegram-plugin.md)** | Progress cards, 15 MCP tools, native checklists, sticker aliases, voice-in |
 | **[Sub-Agents](docs/sub-agents.md)** | Model routing, delegation patterns, frontmatter spec |
-| **[Scheduling](docs/scheduling.md)** | Cron tasks (per-agent scheduler container), model selection |
+| **[Scheduling](docs/scheduling.md)** | Cron tasks (in-agent scheduler sidecar), model selection |
 | **[Session Management](docs/session-optimization.md)** | Continuity, compaction, freshness policy |
 | **[OpenClaw alternative](docs/vs-openclaw.md)** | Switchroom vs OpenClaw |
 | **[NanoClaw alternative](docs/vs-nanoclaw.md)** | Switchroom vs NanoClaw |

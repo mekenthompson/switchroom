@@ -39,6 +39,7 @@ interface MakeConfigAgent {
   bind_mounts?: Array<{ source: string; target?: string; mode?: "ro" | "rw" }>;
   resources?: { memory?: string; memory_reservation?: string; pids_limit?: number; cpus?: number };
   timezone?: string;
+  network_isolation?: "host" | "strict";
 }
 
 function makeConfig(
@@ -66,6 +67,7 @@ function makeConfig(
           bind_mounts: cfg.bind_mounts,
           resources: cfg.resources,
           timezone: cfg.timezone,
+          network_isolation: cfg.network_isolation,
           schedule: [],
           tools: { allow: [], deny: [] },
           hooks: undefined,
@@ -2236,5 +2238,84 @@ describe("auth-broker per-consumer volume naming (cross-project)", () => {
     const out = generateCompose({ config: cfg as unknown as SwitchroomConfig });
     expect(out).toMatch(/^ {2}auth-broker-hindsight-sock:\n {4}name: auth-broker-hindsight-sock$/m);
     expect(out).toMatch(/^ {2}auth-broker-indexer-sock:\n {4}name: auth-broker-indexer-sock$/m);
+  });
+});
+
+describe("network_isolation — sec WS6-F1 / feature #1413", () => {
+  it("ZERO regression: default fleet still emits network_mode: host, no networks block", () => {
+    const out = generateCompose({ config: makeConfig({ klanker: {}, bob: {} }) });
+    expect(out).toContain("network_mode: host");
+    // None of the strict-mode tokens leak into a default fleet.
+    expect(out).not.toContain("switchroom-net-");
+    expect(out).not.toContain("host.docker.internal:host-gateway");
+    expect(out).not.toMatch(/^networks:$/m);
+  });
+
+  it("explicit network_isolation: host is identical to the default", () => {
+    const def = generateCompose({ config: makeConfig({ klanker: {} }) });
+    const explicit = generateCompose({
+      config: makeConfig({ klanker: { network_isolation: "host" } }),
+    });
+    expect(explicit).toBe(def);
+  });
+
+  it("strict: dedicated per-agent network + host-gateway, no network_mode host", () => {
+    const out = generateCompose({
+      config: makeConfig({ klanker: { network_isolation: "strict" } }),
+    });
+    // Service block: joins ONLY its own net, reaches host via gateway.
+    expect(out).toMatch(/agent-klanker:[\s\S]*?networks:\n {6}- switchroom-net-klanker/);
+    expect(out).toMatch(
+      /agent-klanker:[\s\S]*?extra_hosts:\n {6}- "host\.docker\.internal:host-gateway"/,
+    );
+    const klankerBlock =
+      /agent-klanker:[\s\S]*?(?=\n {2}agent-|\nvolumes:)/.exec(out)?.[0] ?? "";
+    expect(klankerBlock).not.toContain("network_mode: host");
+    // Top-level networks block defines the dedicated bridge.
+    expect(out).toMatch(/^networks:\n {2}switchroom-net-klanker:\n {4}driver: bridge/m);
+  });
+
+  it("cascades from defaults (global opt-in) to an agent with no override", () => {
+    const cfg = makeConfig({ klanker: {} });
+    (cfg as unknown as { defaults: Record<string, unknown> }).defaults = {
+      network_isolation: "strict",
+    };
+    const out = generateCompose({ config: cfg });
+    const block =
+      /agent-klanker:[\s\S]*?(?=\n {2}agent-|\nvolumes:)/.exec(out)?.[0] ?? "";
+    expect(block).toContain("switchroom-net-klanker");
+    expect(block).not.toContain("network_mode: host");
+  });
+
+  it("per-agent override beats the global default", () => {
+    const cfg = makeConfig({ klanker: { network_isolation: "host" } });
+    (cfg as unknown as { defaults: Record<string, unknown> }).defaults = {
+      network_isolation: "strict",
+    };
+    const out = generateCompose({ config: cfg });
+    const block =
+      /agent-klanker:[\s\S]*?(?=\n {2}agent-|\nvolumes:)/.exec(out)?.[0] ?? "";
+    expect(block).toContain("network_mode: host");
+    expect(block).not.toContain("switchroom-net-klanker");
+  });
+
+  it("mixed fleet: host agent unchanged, only strict agents get a network", () => {
+    const out = generateCompose({
+      config: makeConfig({
+        hostagent: {},
+        isolated: { network_isolation: "strict" },
+      }),
+    });
+    const hostBlock =
+      /agent-hostagent:[\s\S]*?(?=\n {2}agent-|\nvolumes:)/.exec(out)?.[0] ?? "";
+    expect(hostBlock).toContain("network_mode: host");
+    expect(hostBlock).not.toContain("switchroom-net-");
+    const isoBlock =
+      /agent-isolated:[\s\S]*?(?=\n {2}agent-|\nvolumes:)/.exec(out)?.[0] ?? "";
+    expect(isoBlock).toContain("switchroom-net-isolated");
+    expect(isoBlock).not.toContain("network_mode: host");
+    // Top-level networks lists ONLY the strict agent's net.
+    expect(out).toContain("switchroom-net-isolated:");
+    expect(out).not.toContain("switchroom-net-hostagent:");
   });
 });

@@ -313,6 +313,15 @@ export function mergeAgentConfig(
   if (defaults.dangerous_mode !== undefined && merged.dangerous_mode === undefined) {
     merged.dangerous_mode = defaults.dangerous_mode;
   }
+  // sec WS6-F1 / #1413: scalar override cascade, identical shape to
+  // dangerous_mode — a global/profile `network_isolation` applies to
+  // agents that don't set their own; a per-agent value wins.
+  if (
+    defaults.network_isolation !== undefined &&
+    merged.network_isolation === undefined
+  ) {
+    merged.network_isolation = defaults.network_isolation;
+  }
   if (defaults.thinking_effort !== undefined && merged.thinking_effort === undefined) {
     merged.thinking_effort = defaults.thinking_effort;
   }

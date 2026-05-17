@@ -180,7 +180,13 @@ export const AgentExecRequestSchema = z.object({
   args: z.object({
     name: AgentNameSchema,
     /** Command + args as a list, e.g. ["ls", "-la", "/state"]. argv[0]
-     *  is the program; argv[1..] are its arguments. */
+     *  is the program; argv[1..] are its arguments. argv[0] is
+     *  allowlist-gated and every element is charclass/length-gated
+     *  server-side — see isAllowlistedReadOnlyArgv +
+     *  isSafeExecArgvElement / MAX_EXEC_ARGV_ELEMENT_BYTES in
+     *  host-control/server.ts (#1401 / #1400 target 3). The wire
+     *  schema stays permissive-but-bounded; the security charclass is
+     *  enforced at dispatch so the denial carries a clear reason. */
     argv: z.array(z.string().min(1)).min(1).max(32),
   }),
 });

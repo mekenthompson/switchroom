@@ -1,8 +1,8 @@
 import type { Command } from "commander";
 import chalk from "chalk";
-import { existsSync, copyFileSync, readFileSync, writeFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { loadConfig, resolveAgentsDir, resolvePath, ConfigError } from "../config/loader.js";
+import { existsSync, copyFileSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { resolve, dirname } from "node:path";
+import { loadConfig, resolveAgentsDir, resolvePath, findConfigFile, ConfigError } from "../config/loader.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { scaffoldAgent } from "../agents/scaffold.js";
 import { syncTopics } from "../telegram/topic-manager.js";
@@ -179,14 +179,20 @@ async function stepConfigFile(
 ): Promise<LoadedConfig> {
   stepHeader(1, "Config file", STEP_ACTIVE);
 
-  const cwd = process.cwd();
-  const existingConfig =
-    configPath ??
-    (existsSync(resolve(cwd, "switchroom.yaml"))
-      ? resolve(cwd, "switchroom.yaml")
-      : existsSync(resolve(cwd, "switchroom.yml"))
-        ? resolve(cwd, "switchroom.yml")
-        : null);
+  // Mirror the loader's own resolution ($SWITCHROOM_CONFIG → cwd →
+  // ~/.switchroom/switchroom.yaml) so re-running setup from any
+  // directory finds an existing user-wide config instead of
+  // bootstrapping a duplicate (install-validation 2026-05-17, R1 /
+  // prior #30: setup only checked cwd, so an existing
+  // ~/.switchroom/switchroom.yaml was invisible from any other cwd).
+  let existingConfig: string | null = configPath ?? null;
+  if (!existingConfig) {
+    try {
+      existingConfig = findConfigFile();
+    } catch {
+      existingConfig = null;
+    }
+  }
 
   if (existingConfig && existsSync(existingConfig)) {
     if (!nonInteractive) {
@@ -195,7 +201,7 @@ async function stepConfigFile(
         true,
       );
       if (!useExisting) {
-        return await copyExampleConfig(cwd, nonInteractive);
+        return await copyExampleConfig(nonInteractive);
       }
     }
     console.log(chalk.gray(`  Loading ${existingConfig}`));
@@ -215,11 +221,10 @@ async function stepConfigFile(
   // fresh install, which was a P0 blocker for any scripted/CI install
   // (the same code path that works interactively works fine
   // non-interactively; nothing about the bootstrap requires a TTY).
-  return await copyExampleConfig(cwd, nonInteractive);
+  return await copyExampleConfig(nonInteractive);
 }
 
 async function copyExampleConfig(
-  cwd: string,
   nonInteractive: boolean,
 ): Promise<LoadedConfig> {
   const examplesDir = resolve(import.meta.dirname, "../../examples");
@@ -229,23 +234,31 @@ async function copyExampleConfig(
     choice = "switchroom";
   } else {
     choice = await askChoice("  Which example config?", [
-      "switchroom — Full example with 4 agents",
+      "switchroom — Full example: one active agent + commented templates",
       "minimal — Minimal single-agent config",
     ]);
     choice = choice.split(" ")[0];
   }
 
   const srcFile = resolve(examplesDir, `${choice}.yaml`);
-  const destFile = resolve(cwd, "switchroom.yaml");
+  // Bootstrap to the canonical user-wide path, NOT cwd. Every later
+  // command (apply, agent ops, daemonized gateways) resolves config
+  // via findConfigFile, which ranks ~/.switchroom/switchroom.yaml as
+  // the user-wide default. Writing to cwd made the freshly
+  // bootstrapped config invisible the moment the operator changed
+  // directories (install-validation 2026-05-17, R1 / prior #30).
+  // docs/install.md has always told users it lands here.
+  const destFile = resolvePath("~/.switchroom/switchroom.yaml");
 
   if (!existsSync(srcFile)) {
     throw new ConfigError(`Example config not found: ${choice}.yaml`);
   }
 
+  mkdirSync(dirname(destFile), { recursive: true });
   copyFileSync(srcFile, destFile);
-  console.log(chalk.green(`  Copied ${choice}.yaml -> switchroom.yaml`));
+  console.log(chalk.green(`  Copied ${choice}.yaml -> ${destFile}`));
   console.log(
-    chalk.yellow("  Edit switchroom.yaml to customize, then re-run switchroom setup."),
+    chalk.yellow(`  Edit ${destFile} to customize, then re-run switchroom setup.`),
   );
 
   const config = loadConfig(destFile);

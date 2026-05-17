@@ -21,6 +21,20 @@ updates:
     labels:
       - "dependencies"
       - "security"
+    # WS9-F4's intent is reviewed *digest* refreshes of the pinned
+    # base images (security rebuilds WITHIN the chosen, tested major)
+    # — not being dragged onto a brand-new Node major that breaks the
+    # build. Unconstrained, Dependabot proposed node 22→26 (#1438,
+    # e2e-red). Ignore major/minor version-updates for node so it only
+    # raises digest + 22.x-patch PRs; a base-image major bump is a
+    # deliberate, separately-validated decision, never an auto-PR.
+    # (hindsight is pinned via `:latest@sha256` — no semver applies, so
+    # its digest-follow PRs are unaffected by this rule.)
+    ignore:
+      - dependency-name: "node"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
 
   - package-ecosystem: "github-actions"
     directory: "/"

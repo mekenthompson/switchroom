@@ -1563,21 +1563,21 @@ describe("reconcileAgent", () => {
     expect(after.mcpServers.hindsight.url).toBe("http://localhost:18888/mcp/");
   });
 
-  it("does not touch CLAUDE.md or telegram user-content files (Phase 2: workspace/SOUL.md regenerates)", () => {
+  it("does not touch CLAUDE.md, SOUL.md, or telegram user-content files on reconcile", () => {
     // start.sh is intentionally NOT in this list — it's purely
     // template-driven (no user content) and reconcile re-renders it
     // so config changes (like enabling Hindsight or switching ports)
     // propagate without forcing a full re-scaffold.
     //
-    // Phase 2: workspace/SOUL.md is also regenerated every reconcile (it's
-    // the authoritative persona source from config). User customizations
-    // belong in SOUL.custom.md sidecar.
+    // workspace/SOUL.md is user-owned (seed-once): reconcile must
+    // preserve hand-edits, never regenerate from config.
     const agentConfig = makeAgentConfig();
     const initialConfig = buildSwitchroomConfig(agentConfig);
     scaffoldAgent("test-agent", agentConfig, tmpDir, telegramConfig, initialConfig);
 
     const userEditedFiles = [
       join(tmpDir, "test-agent", "CLAUDE.md"),
+      join(tmpDir, "test-agent", "workspace", "SOUL.md"),
       join(tmpDir, "test-agent", "telegram", ".env"),
       join(tmpDir, "test-agent", "telegram", "access.json"),
     ];

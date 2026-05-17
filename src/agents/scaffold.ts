@@ -599,6 +599,26 @@ function composeWithSidecar(renderedBase: string, sidecarPath: string): string {
 }
 
 /**
+ * Render the persona SOUL.md for an agent from its profile template +
+ * `soul:` config, folding in the SOUL.custom.md sidecar if present.
+ * The single source of truth for seed-time and `switchroom soul reset`
+ * rendering. SOUL.md.hbs consumes only `{{soul.*}}` (pinned by
+ * tests/soul-template-vars.test.ts), so the render context is `{ soul }`.
+ * Returns null if the profile ships no SOUL.md.hbs.
+ */
+export function renderSoulMd(
+  profilePath: string,
+  agentWorkspaceDir: string,
+  soul: unknown,
+): string | null {
+  const soulMdSrc = join(profilePath, "workspace", "SOUL.md.hbs");
+  if (!existsSync(soulMdSrc)) return null;
+  const rendered = renderTemplate(soulMdSrc, { soul });
+  const customSoulPath = join(agentWorkspaceDir, "SOUL.custom.md");
+  return composeWithSidecar(rendered, customSoulPath);
+}
+
+/**
  * Human-readable label for an agent + its Hindsight bank in log output.
  * When they match (default case): just the agent name ("clerk").
  * When they differ (custom memory.collection in yaml, e.g. legacy bank_id):
@@ -1210,45 +1230,36 @@ function seedWorkspaceBootstrapFiles(params: {
         const destRel = relPath.replace(/\.hbs$/, "");
         const destPath = join(agentWorkspaceDir, destRel);
         const renderFn = (): string => {
-          const rendered = renderTemplate(srcPath, params.context);
-          // Phase 2: append SOUL.custom.md sidecar if present
+          // SOUL.md goes through the shared renderSoulMd path (folds in
+          // the SOUL.custom.md sidecar at seed time). Post-seed the file
+          // is the user's; the sidecar only shapes the initial draft.
           if (destRel === "SOUL.md") {
-            const customSoulPath = join(agentWorkspaceDir, "SOUL.custom.md");
-            return composeWithSidecar(rendered, customSoulPath);
+            return (
+              renderSoulMd(
+                params.profilePath,
+                agentWorkspaceDir,
+                params.context.soul,
+              ) ?? renderTemplate(srcPath, params.context)
+            );
           }
-          return rendered;
+          return renderTemplate(srcPath, params.context);
         };
-        if (destRel === "SOUL.md") {
-          // SOUL.md is the canonical voice / persona source for the agent
-          // (its "Never" AI-tells list, Personality, Communication, Values
-          // sections — see profiles/default/workspace/SOUL.md.hbs).
-          // Template changes here MUST propagate to existing agents,
-          // for the same reason CLAUDE.md uses fingerprint-aware
-          // re-render since #1122: without it, agents scaffolded under
-          // an older template never see voice-rule updates and the
-          // fleet drifts. SOUL.custom.md sidecar (operator-owned)
-          // remains writeIfMissing and is composed in by renderFn so
-          // operator additions survive the re-render. Operator
-          // hand-edits to SOUL.md itself are backed up at
-          // `SOUL.md.before-rerender.<ts>`.
-          rerenderWithFingerprint(
-            destPath,
-            renderFn,
-            params.created,
-            params.skipped,
-            params.rewrittenWithBackup,
-          );
-        } else {
-          // Other workspace bootstrap files (IDENTITY, TOOLS, MEMORY,
-          // HEARTBEAT, USER) are user-owned scratchpads — seed once,
-          // never overwrite. The agent itself edits them at runtime.
-          writeIfMissing(
-            destPath,
-            renderFn,
-            params.created,
-            params.skipped,
-          );
-        }
+        // All workspace bootstrap files — SOUL.md (persona) included —
+        // are user-owned: seeded once from the profile template, then
+        // never overwritten by scaffold/reconcile/update. The profile
+        // SOUL.md.hbs and `soul:` config are seed-time inputs only.
+        // To re-seed from the (current) profile on demand, the operator
+        // runs `switchroom soul reset <agent>`, which backs the file up
+        // to SOUL.md.bak first. This is the deliberate inverse of
+        // CLAUDE.md, which stays switchroom-managed via
+        // rerenderWithFingerprint so machinery/template changes
+        // propagate fleet-wide.
+        writeIfMissing(
+          destPath,
+          renderFn,
+          params.created,
+          params.skipped,
+        );
       } else {
         const destPath = join(agentWorkspaceDir, relPath);
         if (!existsSync(destPath)) {
@@ -1355,8 +1366,10 @@ function lstatExists(path: string): boolean {
 
 /**
  * Initialize the workspace directory as a git repository (if git is available).
- * Creates .gitignore to exclude regenerables (SOUL.md) and ephemeral state (*.log),
- * then makes an initial commit capturing the seeded template content.
+ * Creates .gitignore to exclude ephemeral state (*.log), then makes an
+ * initial commit capturing the seeded template content. SOUL.md is
+ * user-owned and intentionally tracked so persona edits are versioned
+ * and recoverable.
  *
  * Degrades gracefully if git is not on PATH. Returns true if init succeeded.
  */
@@ -1379,10 +1392,7 @@ function initWorkspaceGitRepo(
   }
 
   // Write .gitignore before git init
-  const gitignore = `# Regenerated from switchroom.yaml on every reconcile
-SOUL.md
-
-# Ephemeral runtime state
+  const gitignore = `# Ephemeral runtime state
 *.log
 
 # OS/editor noise
@@ -2851,7 +2861,7 @@ type ReloadSemantics =
   | "restart-required";   // File changes MUST restart (MCP/settings/binary/template);
                           // agent won't pick up changes without a restart
 
-function classifyChange(
+export function classifyChange(
   path: string,
   agentDir: string,
   useHotReloadStable: boolean,
@@ -4202,23 +4212,12 @@ Don't wait for a slash command. Don't ask permission. Memory work is table stake
     initWorkspaceGitRepo(reconcileWorkspaceDir, name);
   }
 
-  // --- Phase 2: regenerate workspace/SOUL.md deterministically every reconcile ---
-  // Unlike other workspace files (user-protected via writeIfMissing), SOUL.md is
-  // the authoritative persona source derived from config. Regenerate on every
-  // reconcile so config changes propagate.
-  const soulMdSrc = join(reconcileProfilePath, "workspace", "SOUL.md.hbs");
-  const soulMdDest = join(agentDir, "workspace", "SOUL.md");
-  if (existsSync(soulMdSrc)) {
-    const before = existsSync(soulMdDest) ? readFileSync(soulMdDest, "utf-8") : "";
-    const rendered = renderTemplate(soulMdSrc, workspaceContext);
-    // Append SOUL.custom.md sidecar if present
-    const customSoulPath = join(agentDir, "workspace", "SOUL.custom.md");
-    const after = composeWithSidecar(rendered, customSoulPath);
-    if (after !== before) {
-      writeFileSync(soulMdDest, after, "utf-8");
-      changes.push(soulMdDest);
-    }
-  }
+  // SOUL.md is user-owned (seeded once by seedWorkspaceBootstrapFiles
+  // above via writeIfMissing — which also covers an agent first created
+  // on the reconcile path). Reconcile/update deliberately never
+  // regenerates it from config; `switchroom soul reset <agent>` is the
+  // explicit re-seed path. See seedWorkspaceBootstrapFiles for the
+  // ownership contract.
 
   // --- Phase 2: symlink <agentDir>/SOUL.md → workspace/SOUL.md (migration) ---
   const agentSoulPath = join(agentDir, "SOUL.md");

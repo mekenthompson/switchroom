@@ -1611,6 +1611,10 @@ function buildWorkspaceContext(args: BuildWorkspaceContextArgs): Record<string, 
     dangerousMode: agentConfig.dangerous_mode === true,
     useSwitchroomPlugin: usesSwitchroomTelegramPlugin(agentConfig),
     useHotReloadStable: agentConfig.channels?.telegram?.hotReloadStable === true,
+    // sec WS8-F1 / #1416: unconditional read-only image-baked
+    // security-hooks plugin dir. Always set — it is the unstrippable
+    // tool-safety authority, not an opt-in feature.
+    securityPluginDir: DOCKER_SECURITY_PLUGIN_PATH,
     hindsightEnabled: hindsightAutoRecallEnabled,
     hindsightBankIdQ: shellSingleQuote(hindsightBankId),
     hindsightApiBaseUrlQ: shellSingleQuote(hindsightApiBaseUrl),
@@ -1781,6 +1785,22 @@ export const DOCKER_BUNDLED_HOOKS_PATH = "/opt/switchroom/hooks";
  * scaffolded settings.json hooks block.
  */
 export const DOCKER_BIN_PATH = "/opt/switchroom/bin";
+
+/**
+ * In-image path of the minimal security-hooks plugin (sec WS8-F1 /
+ * #1416). Dockerfile.agent assembles `.claude-plugin/plugin.json` +
+ * `hooks/hooks.json` + the two load-bearing PreToolUse safety hooks
+ * (secret-guard-pretool, drive-write-pretool) here. start.sh passes
+ * this as `--plugin-dir` on every claude exec variant, unconditionally
+ * — it is THE security boundary, not optional like hindsight. Because
+ * Claude Code unions plugin-dir hooks with settings.json hooks and a
+ * plugin-dir-loaded hook cannot be suppressed by an agent rewriting
+ * its own settings.json, this read-only image copy is the unstrippable
+ * authority; the settings.json copy (still emitted) is a harmless
+ * zero-regression fallback. Never point this at the agent-writable
+ * scaffold dir.
+ */
+export const DOCKER_SECURITY_PLUGIN_PATH = "/opt/switchroom/security-plugin";
 
 /**
  * In-container path where compose bind-mounts the operator's
@@ -3522,6 +3542,10 @@ export function reconcileAgent(
       // {{#unless useHotReloadStable}} block always renders, so flipping
       // hotReloadStable on never removes the _WS_STABLE bake from start.sh.
       useHotReloadStable: agentConfig.channels?.telegram?.hotReloadStable === true,
+      // sec WS8-F1 / #1416: reconcile re-asserts the security-plugin
+      // --plugin-dir on every `switchroom apply` so the boundary
+      // self-heals if an older start.sh (without it) is on disk.
+      securityPluginDir: DOCKER_SECURITY_PLUGIN_PATH,
       hindsightEnabled: hindsightAutoRecallEnabled,
       hindsightBankIdQ: shellSingleQuote(hindsightBankId),
       hindsightApiBaseUrlQ: shellSingleQuote(hindsightApiBaseUrl),

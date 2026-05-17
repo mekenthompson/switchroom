@@ -736,13 +736,17 @@ export class HostdServer {
         Date.now() - started,
       );
     }
-    // #1401: reject NUL / newline / CR in any argv element (audit-log
-    // line injection + arg smuggling) before the call.
+    // #1401 / #1400 target 3: reject any argv element carrying a C0
+    // control byte (NUL/LF/CR + ESC and the rest of U+0000–U+001F),
+    // DEL, or exceeding the per-element size cap — audit-log line
+    // injection, ANSI-escape spoofing of the operator audit trail,
+    // and arg-vector padding, all before the call.
     if (!req.args.argv.every(isSafeExecArgvElement)) {
       return deniedResponse(
         req.request_id,
-        `agent_exec: an argv element contains a NUL or newline/CR ` +
-          `control character, which is not permitted (#1401).`,
+        `agent_exec: an argv element contains a control character ` +
+          `(C0 / DEL) or exceeds ${MAX_EXEC_ARGV_ELEMENT_BYTES} bytes, ` +
+          `which is not permitted (#1401 / #1400).`,
         Date.now() - started,
       );
     }
@@ -1105,15 +1109,35 @@ export function isAllowlistedReadOnlyArgv(argv0: string): boolean {
 }
 
 /**
- * #1401: every argv element must be free of NUL / LF / CR. Those have
- * no legitimate place in a read-only inspection command (paths, flags
- * like `-n`, and grep patterns are all unaffected) and exist only to
- * smuggle behaviour: a newline/CR enables audit-log line injection and,
- * before the `--` separator landed, docker-flag confusion. argv[0] is
- * separately allowlist-gated by isAllowlistedReadOnlyArgv.
+ * Upper bound on a single argv element. A read-only inspection
+ * command's longest legitimate element is a path or a grep pattern —
+ * 4 KiB is already absurdly generous for either. The cap stops a
+ * post-approval admin agent padding the audit row / docker arg vector
+ * with a multi-megabyte element.
+ */
+export const MAX_EXEC_ARGV_ELEMENT_BYTES = 4096;
+
+/**
+ * #1401 / #1400 target 3 — completes the WS5 per-element charclass
+ * finding. Every argv element must be free of ALL C0 control bytes
+ * (U+0000–U+001F) and DEL (U+007F), and must not exceed
+ * {@link MAX_EXEC_ARGV_ELEMENT_BYTES}.
+ *
+ * #1401 already rejected NUL/LF/CR (audit-log line injection +
+ * pre-`--` docker-flag confusion). The residual the WS5 audit flagged
+ * is the *other* C0 controls — ESC (U+001B), backspace, the SGR /
+ * cursor introducers — which have no place in a path, a `-n`-style
+ * flag, or a grep pattern, but DO let a prompt-injected admin agent
+ * smuggle ANSI escape sequences into the operator-facing
+ * `switchroom audit hostd` trail (terminal / log spoofing). argv[0]
+ * is separately allowlist-gated by isAllowlistedReadOnlyArgv; the
+ * cross-agent credential-read residual is the explicitly-accepted
+ * admin-surface trade-off whose sanctioned fix is the deferred
+ * `host_os.exec` approval-kernel scope, not this charclass.
  */
 export function isSafeExecArgvElement(s: string): boolean {
-  return !/[\u0000\n\r]/.test(s);
+  if (Buffer.byteLength(s, "utf8") > MAX_EXEC_ARGV_ELEMENT_BYTES) return false;
+  return !/[\u0000-\u001f\u007f]/.test(s);
 }
 
 /** Probe whether an agent socket exists at the canonical in-container

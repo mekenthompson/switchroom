@@ -11,7 +11,7 @@ import {
   readdirSync,
   statSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { createPublicKey, createPrivateKey } from "node:crypto";
 import { listSecrets, getStringSecret } from "../vault/vault.js";
 import { resolveAgentsDir, resolvePath } from "../config/loader.js";
@@ -1584,14 +1584,53 @@ export function printSection(title: string, results: CheckResult[]): {
 export const MFF_VAULT_KEY = "mff/agent-private-key";
 
 /**
- * Default .env path for the MFF skill credentials.
+ * Name of the first agent that enables the MFF skill, if any. Since
+ * WS6-F2 (#1390) MFF credentials live per-agent under
+ * `~/.switchroom/credentials/<agent>/my-family-finance/`, so the doctor
+ * resolves the path from config rather than the retired flat location.
  * @internal exported for testing
  */
-export function mffEnvPath(): string {
-  return resolve(
-    process.env.HOME ?? "/root",
-    ".switchroom/credentials/my-family-finance/.env",
-  );
+export function mffAgentName(config?: SwitchroomConfig): string | undefined {
+  for (const [name, ac] of Object.entries(config?.agents ?? {})) {
+    if (((ac?.skills as string[] | undefined) ?? []).includes("my-family-finance")) {
+      return name;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Resolve the MFF skill `.env` path. Per-agent since WS6-F2; falls back
+ * to the legacy flat path when no MFF agent is configured (preserves
+ * behaviour for pre-WS6-F2 installs and explicit-path test calls).
+ * @internal exported for testing
+ */
+export function mffEnvPath(config?: SwitchroomConfig): string {
+  const home = process.env.HOME ?? "/root";
+  const agent = mffAgentName(config);
+  return agent
+    ? resolve(home, ".switchroom/credentials", agent, "my-family-finance/.env")
+    : resolve(home, ".switchroom/credentials/my-family-finance/.env");
+}
+
+/**
+ * Classify the MFF env path. `agent-private` is the EXPECTED healthy
+ * post-WS6-F2 state: the file exists but is owned by the agent UID
+ * (mode 600), so the operator-run doctor cannot read it BY DESIGN —
+ * that is the security boundary working, not a failure. `absent` is a
+ * real misconfig; `readable` is a legacy-flat or test path the host
+ * can fully validate.
+ * @internal exported for testing
+ */
+export type MffEnvState = "absent" | "agent-private" | "readable";
+export function mffEnvState(envPath: string): MffEnvState {
+  if (!existsSync(envPath)) return "absent";
+  try {
+    accessSync(envPath, fsConstants.R_OK);
+    return "readable";
+  } catch {
+    return "agent-private";
+  }
 }
 
 /**
@@ -1737,12 +1776,20 @@ export function checkMffVaultKeyFormat(
 export function checkMffEnvFile(
   envPath: string = mffEnvPath(),
 ): CheckResult {
-  if (!existsSync(envPath)) {
+  const state = mffEnvState(envPath);
+  if (state === "absent") {
     return {
       name: "mff: .env present",
       status: "fail",
       detail: `${envPath} not found`,
-      fix: "Create ~/.switchroom/credentials/my-family-finance/.env with MFF_API_URL=https://...",
+      fix: "Place the MFF skill's .env in the per-agent credentials dir, e.g. `~/.switchroom/credentials/<agent>/my-family-finance/.env` (MFF_API_URL=https://...), then `switchroom update`",
+    };
+  }
+  if (state === "agent-private") {
+    return {
+      name: "mff: .env present",
+      status: "ok",
+      detail: `present, agent-private (${envPath}) — per-agent since WS6-F2; the operator-run doctor cannot read it by design`,
     };
   }
   const env = parseEnvFile(envPath);
@@ -1770,6 +1817,17 @@ export async function checkMffApiReachable(
   envPath: string = mffEnvPath(),
   timeoutMs = 5000,
 ): Promise<CheckResult> {
+  const state = mffEnvState(envPath);
+  if (state !== "readable") {
+    return {
+      name: "mff: API reachable",
+      status: "warn",
+      detail:
+        state === "agent-private"
+          ? "skipped — MFF creds are per-agent/agent-private since WS6-F2; deep probe must run in-agent"
+          : "skipped (MFF .env not found — see 'mff: .env present')",
+    };
+  }
   const env = parseEnvFile(envPath);
   const apiUrl = env.MFF_API_URL?.trim();
   if (!apiUrl) {
@@ -1827,6 +1885,17 @@ export async function checkMffAuthFlow(
   envPath: string = mffEnvPath(),
   timeoutMs = 8000,
 ): Promise<CheckResult> {
+  const state = mffEnvState(envPath);
+  if (state !== "readable") {
+    return {
+      name: "mff: auth flow",
+      status: "warn",
+      detail:
+        state === "agent-private"
+          ? "skipped — MFF creds are per-agent/agent-private since WS6-F2; deep probe must run in-agent"
+          : "skipped (MFF .env not found — see 'mff: .env present')",
+    };
+  }
   const env = parseEnvFile(envPath);
   const apiUrl = env.MFF_API_URL?.trim();
   if (!apiUrl) {
@@ -1837,8 +1906,9 @@ export async function checkMffAuthFlow(
     };
   }
 
-  // Locate claude-auth.py relative to the MFF credentials dir.
-  const credDir = resolve(process.env.HOME ?? "/root", ".switchroom/credentials/my-family-finance");
+  // Locate claude-auth.py next to the .env (per-agent dir since
+  // WS6-F2 — colocated with the skill's other credential files).
+  const credDir = dirname(envPath);
   const authScript = join(credDir, "claude-auth.py");
   if (!existsSync(authScript)) {
     return {
@@ -1937,6 +2007,17 @@ export async function checkMffCloudflareUa(
   envPath: string = mffEnvPath(),
   timeoutMs = 5000,
 ): Promise<CheckResult> {
+  const state = mffEnvState(envPath);
+  if (state !== "readable") {
+    return {
+      name: "mff: Cloudflare UA bypass",
+      status: "warn",
+      detail:
+        state === "agent-private"
+          ? "skipped — MFF creds are per-agent/agent-private since WS6-F2; deep probe must run in-agent"
+          : "skipped (MFF .env not found — see 'mff: .env present')",
+    };
+  }
   const env = parseEnvFile(envPath);
   const apiUrl = env.MFF_API_URL?.trim();
   if (!apiUrl) {
@@ -2016,7 +2097,8 @@ export async function checkMffCloudflareUa(
 export async function checkMff(
   passphrase: string | undefined,
   vaultPath: string,
-  envPath: string = mffEnvPath(),
+  config?: SwitchroomConfig,
+  envPath: string = mffEnvPath(config),
 ): Promise<CheckResult[]> {
   const results: CheckResult[] = [];
   results.push(checkMffVaultKeyPresent(passphrase, vaultPath));
@@ -2193,7 +2275,7 @@ export function registerDoctorCommand(program: Command): void {
 
         // --skill mff: run MFF probes only
         if (opts.skill === "mff") {
-          const mffResults = await checkMff(passphrase, vaultPath);
+          const mffResults = await checkMff(passphrase, vaultPath, config);
           if (opts.json) {
             console.log(
               JSON.stringify(
@@ -2236,7 +2318,7 @@ export function registerDoctorCommand(program: Command): void {
           { title: "Docker (Phase 1a)", results: runDockerSection(config) },
           { title: "Auth Broker", results: runAuthBrokerChecks(config) },
           { title: "Google Drive", results: runDriveChecks(config) },
-          { title: "MFF Skill", results: await checkMff(passphrase, vaultPath) },
+          { title: "MFF Skill", results: await checkMff(passphrase, vaultPath, config) },
         ];
 
         // Repo Hygiene (#1072): only when doctor runs from a switchroom

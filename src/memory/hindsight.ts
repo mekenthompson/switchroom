@@ -89,6 +89,33 @@ export function isStrictIsolation(
 }
 
 /**
+ * Single source of truth for "is Hindsight memory wiring active for
+ * this config" — gates MCP tool injection, auto-recall, bank
+ * creation/mission ops, and the memory system-prompt block.
+ *
+ * `SWITCHROOM_MEMORY_BACKEND=none` force-disables Hindsight regardless
+ * of `memory.backend`, matching the precedence in
+ * `src/cli/setup.ts:stepMemoryBackend`. Factored here after
+ * install-validation 2026-05-17 (R2 / prior #25) found THREE
+ * independent copies of `config.memory?.backend === "hindsight"` in
+ * scaffold.ts, only one of which honored the env override — so a
+ * `SWITCHROOM_MEMORY_BACKEND=none` install stayed clean through
+ * `setup` but re-introduced Hindsight wiring (and "Failed to create
+ * Hindsight bank" warnings) on the next `switchroom agent
+ * restart`/`reconcile`. Keep this the only place that decides.
+ *
+ * Semantics preserved from the prior inline expression: config unset
+ * or any non-"hindsight" value ⇒ false; only `backend: "hindsight"`
+ * (and env not "none") ⇒ true.
+ */
+export function isHindsightEnabled(
+  config: SwitchroomConfig | undefined,
+): boolean {
+  if (process.env.SWITCHROOM_MEMORY_BACKEND === "none") return false;
+  return config?.memory?.backend === "hindsight";
+}
+
+/**
  * Recommended default `retain_mission` for new agents.
  *
  * Sourced verbatim from upstream Hindsight's per-user-memory guide:

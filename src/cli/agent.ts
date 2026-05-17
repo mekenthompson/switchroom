@@ -6,6 +6,7 @@ import { homedir } from "node:os";
 import { getSchedulerState, formatSchedulerState } from "../agents/scheduler-state.js";
 import YAML from "yaml";
 import { resolveAgentsDir, loadConfig } from "../config/loader.js";
+import { isHindsightEnabled } from "../memory/hindsight.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { withConfigError, getConfig, getConfigPath } from "./helpers.js";
 import { scaffoldAgent, reconcileAgent, buildSettingsHooksBlock, detectHooksDrift } from "../agents/scaffold.js";
@@ -298,9 +299,9 @@ function buildStatusInputs(
 
   let hindsightApiUrl: string | null = null;
   let hindsightBankId = name;
-  if (config.memory?.backend === "hindsight") {
+  if (isHindsightEnabled(config)) {
     const baseUrl =
-      (config.memory.config?.url as string | undefined) ??
+      (config.memory?.config?.url as string | undefined) ??
       "http://localhost:8888/mcp/";
     hindsightApiUrl = baseUrl.endsWith("/mcp/")
       ? baseUrl
@@ -815,8 +816,8 @@ export function registerAgentCommand(program: Command): void {
         // the probe is skipped and the check reports "not configured".
         let hindsightApiUrl: string | null = null;
         let hindsightBankId = name;
-        if (config.memory?.backend === "hindsight") {
-          const baseUrl = (config.memory.config?.url as string | undefined)
+        if (isHindsightEnabled(config)) {
+          const baseUrl = (config.memory?.config?.url as string | undefined)
             ?? "http://localhost:8888/mcp/";
           // Normalize to end in /mcp/
           hindsightApiUrl = baseUrl.endsWith("/mcp/")
@@ -1541,8 +1542,7 @@ export function registerAgentCommand(program: Command): void {
               continue;
             }
             const agentConfig = resolveAgentConfig(config.defaults, config.profiles, agentConfigRaw);
-            const memoryBackend = config.memory?.backend;
-            const hindsightEnabled = memoryBackend === "hindsight"
+            const hindsightEnabled = isHindsightEnabled(config)
               && agentConfig.memory?.auto_recall !== false;
 
             const expected = buildSettingsHooksBlock({

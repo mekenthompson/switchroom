@@ -8,11 +8,14 @@ describe("doctor memory section — source structure", () => {
   // hindsight backend, probes the URL via MCP rather than container
   // name, and validates per-agent missions.
 
-  it("checkHindsight skips when backend is not hindsight", () => {
+  it("checkHindsight skips when hindsight is not enabled", () => {
     const fs = require("fs");
     const doctorSource = fs.readFileSync("src/cli/doctor.ts", "utf-8");
     expect(doctorSource).toContain("async function checkHindsight");
-    expect(doctorSource).toContain('if (memoryBackend !== "hindsight")');
+    // Gated via the shared isHindsightEnabled() helper (honors
+    // SWITCHROOM_MEMORY_BACKEND=none, not just config.memory.backend)
+    // — install-validation 2026-05-17 R2.
+    expect(doctorSource).toContain("if (!isHindsightEnabled(config))");
   });
 
   it("checkHindsight probes the URL via MCP initialize, not container name", () => {

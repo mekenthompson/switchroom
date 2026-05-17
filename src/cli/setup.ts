@@ -302,6 +302,13 @@ async function stepBotToken(
       ),
     );
 
+    // Distinct vault refs → resolved token, persisted after the loop.
+    // The per-agent path used to validate tokens but never write them
+    // to the vault (only the single-global path did), so a hand-written
+    // `agents.<n>.bot_token: "vault:..."` resolved to nothing at
+    // runtime (install-validation 2026-05-17).
+    const vaultWrites = new Map<string, string>();
+
     for (const name of agentNames) {
       const agentConfig = config.agents[name];
       const rawToken = agentConfig.bot_token ?? config.telegram.bot_token;
@@ -317,9 +324,24 @@ async function stepBotToken(
         const botInfo = await validateBotToken(token);
         spin.stop(chalk.green(`${STEP_DONE} ${name}: @${botInfo.username}`));
         agentBots[name] = { token, username: botInfo.username };
+        if (rawToken.startsWith("vault:")) {
+          vaultWrites.set(rawToken, token);
+        }
       } catch (err) {
         spin.stop(chalk.red(`Failed for ${name}: ${(err as Error).message}`));
         throw err;
+      }
+    }
+
+    // Persist every per-agent vault ref so the runtime can resolve it.
+    if (vaultWrites.size > 0) {
+      if (nonInteractive && !process.env.SWITCHROOM_VAULT_PASSPHRASE) {
+        throw new Error(
+          "SWITCHROOM_VAULT_PASSPHRASE must be set before running setup in non-interactive mode when config uses vault: refs.",
+        );
+      }
+      for (const [ref, tok] of vaultWrites) {
+        await storeTokenInVault(config, ref, tok);
       }
     }
 
@@ -362,7 +384,7 @@ async function stepBotToken(
         "SWITCHROOM_VAULT_PASSPHRASE must be set before running setup in non-interactive mode when config uses vault: refs.",
       );
     }
-    await storeTokenInVault(config, token);
+    await storeTokenInVault(config, config.telegram.bot_token, token);
   }
 
   process.env.TELEGRAM_BOT_TOKEN = token;
@@ -447,8 +469,20 @@ export async function resolveOrPromptToken(
   return token;
 }
 
-async function storeTokenInVault(config: SwitchroomConfig, token: string): Promise<void> {
+// `vaultRef` is the `vault:`-prefixed reference the resolved token
+// should be persisted under (e.g. "vault:telegram-coach-bot-token").
+// Previously this hardcoded the key from config.telegram.bot_token,
+// which is wrong for per-agent bot tokens — the per-agent path never
+// persisted them, so a hand-written `agents.<n>.bot_token:
+// "vault:..."` ref was validated but never written to the vault and
+// resolved to nothing at runtime (install-validation 2026-05-17).
+async function storeTokenInVault(
+  config: SwitchroomConfig,
+  vaultRef: string,
+  token: string,
+): Promise<void> {
   const vaultPath = resolvePath(config.vault?.path ?? "~/.switchroom/vault.enc");
+  const key = vaultRef.replace("vault:", "");
 
   if (!existsSync(vaultPath)) {
     console.log(chalk.gray("  Creating encrypted vault..."));
@@ -460,9 +494,8 @@ async function storeTokenInVault(config: SwitchroomConfig, token: string): Promi
     createVault(passphrase, vaultPath);
     console.log(chalk.green(`  ${STEP_DONE} Vault created at ${vaultPath}`));
 
-    const key = config.telegram.bot_token.replace("vault:", "");
     setStringSecret(passphrase, vaultPath, key, token);
-    console.log(chalk.green(`  ${STEP_DONE} Bot token stored in vault`));
+    console.log(chalk.green(`  ${STEP_DONE} Bot token stored in vault (${key})`));
   } else {
     let passphrase = process.env.SWITCHROOM_VAULT_PASSPHRASE;
     if (!passphrase) {
@@ -470,9 +503,8 @@ async function storeTokenInVault(config: SwitchroomConfig, token: string): Promi
     }
     if (passphrase) {
       try {
-        const key = config.telegram.bot_token.replace("vault:", "");
         setStringSecret(passphrase, vaultPath, key, token);
-        console.log(chalk.green(`  ${STEP_DONE} Bot token stored in vault`));
+        console.log(chalk.green(`  ${STEP_DONE} Bot token stored in vault (${key})`));
       } catch (err) {
         console.log(chalk.yellow(`  Warning: Could not store in vault: ${(err as Error).message}`));
       }

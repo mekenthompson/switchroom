@@ -186,6 +186,44 @@ export function allocateAgentUid(name: string): number {
   return AGENT_UID_MIN + (u32 % range);
 }
 
+/**
+ * sec WS6-F4 (#1419): UID collision is a HARD FAIL at compose
+ * generation, not a doctor warning.
+ *
+ * `allocateAgentUid` is a hash mod 999, so two agent names can map to
+ * the same UID. Pre-#1419 this was only an advisory `doctor` check —
+ * `apply` would silently emit a compose file where the colliding pair
+ * share a UID, collapsing per-agent file-ownership isolation (each
+ * can read/write the other's credentials, vault socket, scaffold).
+ * That's a silent isolation failure reachable with zero operator
+ * intent, so the right posture is fail-closed: refuse to generate
+ * compose until the operator renames a collider. Deterministic
+ * allocation is preserved (no name→UID persisted map, no chown-sweep
+ * migration risk); the operator picks the rename.
+ */
+export function assertNoAgentUidCollision(config: SwitchroomConfig): void {
+  const byUid = new Map<number, string[]>();
+  for (const name of Object.keys(config.agents ?? {})) {
+    const uid = allocateAgentUid(name);
+    const names = byUid.get(uid);
+    if (names) names.push(name);
+    else byUid.set(uid, [name]);
+  }
+  const collisions = [...byUid.entries()].filter(([, n]) => n.length > 1);
+  if (collisions.length === 0) return;
+  const detail = collisions
+    .map(([uid, n]) => `  UID ${uid} ← ${n.sort().join(", ")}`)
+    .join("\n");
+  throw new Error(
+    `agent UID collision — refusing to generate compose (sec WS6-F4 / #1419).\n` +
+      `These agents hash to the same container UID, which collapses their ` +
+      `file-ownership isolation (each could read the other's credentials / ` +
+      `vault socket / scaffold):\n${detail}\n` +
+      `Rename one agent in each colliding set (the UID is a deterministic ` +
+      `hash of the name) and re-run. \`switchroom doctor\` also reports this.`,
+  );
+}
+
 export interface ComposeGeneratorOptions {
   config: SwitchroomConfig;
   /** Image tag — same for every service in a release. */
@@ -640,6 +678,9 @@ function readStrippedCaps(agent: AgentConfig): string[] {
  */
 export function generateCompose(opts: ComposeGeneratorOptions): string {
   const { config } = opts;
+  // sec WS6-F4 (#1419): fail-closed before emitting anything if two
+  // agents would share a container UID.
+  assertNoAgentUidCollision(config);
   const imageTag = opts.imageTag ?? "latest";
   const warn = opts.warn ?? ((m: string) => process.stderr.write(m + "\n"));
   const buildMode = opts.buildMode ?? "pull";

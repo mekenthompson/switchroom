@@ -27,6 +27,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { loadConfig, resolvePath } from '../config/loader.js'
 import { openVault, VaultError } from '../vault/vault.js'
+import { isHindsightEnabled } from '../memory/hindsight.js'
 import type { SwitchroomConfig } from '../config/schema.js'
 
 function getVaultPath(configPath?: string): string {
@@ -408,7 +409,7 @@ export function registerVaultSweep(vault: Command, program: Command): void {
         fullConfig = undefined
       }
       const hindsightUrl = (fullConfig?.memory?.config?.url as string | undefined)
-      if (fullConfig?.memory?.backend === 'hindsight' && hindsightUrl) {
+      if (isHindsightEnabled(fullConfig) && hindsightUrl) {
         const banks = getBanksToSweep(fullConfig)
         if (banks.length === 0) {
           console.log(chalk.dim('note: no Hindsight banks configured — skipping memory sweep.'))

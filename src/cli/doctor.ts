@@ -693,8 +693,7 @@ function probeAuthBrokerSocket(
 }
 
 async function checkHindsight(config: SwitchroomConfig): Promise<CheckResult[]> {
-  const memoryBackend = config.memory?.backend;
-  if (memoryBackend !== "hindsight") {
+  if (!isHindsightEnabled(config)) {
     return [];
   }
 

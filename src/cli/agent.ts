@@ -1542,8 +1542,7 @@ export function registerAgentCommand(program: Command): void {
               continue;
             }
             const agentConfig = resolveAgentConfig(config.defaults, config.profiles, agentConfigRaw);
-            const memoryBackend = config.memory?.backend;
-            const hindsightEnabled = memoryBackend === "hindsight"
+            const hindsightEnabled = isHindsightEnabled(config)
               && agentConfig.memory?.auto_recall !== false;
 
             const expected = buildSettingsHooksBlock({

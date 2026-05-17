@@ -246,7 +246,20 @@ docker logs --tail 100 switchroom-<agent> 2>&1 | grep agent-scheduler:
 
 ### Step 2 — Show declared schedule entries
 
-From `switchroom.yaml`, the `schedule:` array under each agent specifies `cron` + `prompt` + optional `model`. Read the relevant agent block and enumerate the entries with their next-fire times.
+From `switchroom.yaml`, the `schedule:` array under each agent specifies `cron` + `prompt`. (A `model:` field may appear but is **ignored** — since the v0.8 cron-fold-in the fire runs in the agent's existing session and uses the agent's configured model, not a per-task one. Don't tell the user a per-task model is honoured.) Cron expressions are evaluated in the agent's resolved timezone (the `switchroom.timezone` / per-agent `timezone` cascade), not hard-coded UTC. Read the relevant agent block and enumerate the entries with their next-fire times in that zone.
+
+### Step 3 — A schedule change is NOT live until the agent restarts
+
+The in-container `agent-scheduler` reads its entries **once at boot**. Editing the `schedule:` array in `switchroom.yaml`, or adding/removing an entry via the agent-config `schedule add` / `schedule remove` tools, writes the change to disk but does **not** register it in the running scheduler. The same is true for `skill_install` and `.mcp.json` changes — claude loads skills and MCP servers at process start.
+
+So whenever you (or the user) change a schedule, skill, or MCP config:
+
+- The `schedule add` / `skill_install` tool result includes `restart_required: true` and a `restart_hint`. **Surface it.** Tell the user plainly that the change is on disk but won't take effect until `switchroom agent restart <name>` (or `switchroom restart <name>` for the reconcile+restart path).
+- Never report a just-added schedule or skill as already active. It is staged, not live.
+
+### Step 4 — Missed runs while the agent was offline
+
+If the user asks whether scheduled runs were missed during downtime: the scheduler replays fires missed within the last ~30 min on boot, but runs older than that window are **not** re-run (cron is not a queue). It is not silent about this — on boot it emits a one-time notice listing every schedule that had a skipped run, delivered as a normal turn and recorded in `agent-scheduler:` log lines / `/state/agent/scheduler.jsonl`. Check those to answer honestly; never claim a run happened if the skip notice says it was dropped.
 
 ---
 

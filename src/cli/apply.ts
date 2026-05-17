@@ -60,6 +60,10 @@ import { installUpdatePromptHook } from "./update-prompt-hook.js";
 import { generateCompose, allocateAgentUid } from "../agents/compose.js";
 import { resolveImageTag, resolveRelease } from "../config/release-resolve.js";
 import { detectInstallType } from "./install-detect.js";
+import {
+  resolveOperatorUid,
+  restoreOperatorOwnership,
+} from "./operator-uid.js";
 import type { SwitchroomConfig } from "../config/schema.js";
 import { captureEvent, captureException } from "../analytics/posthog.js";
 
@@ -816,18 +820,7 @@ export async function runApply(
   // or unparseable. On Windows / non-POSIX, getuid is unavailable; the
   // operator listener simply isn't bound (broker skips when env var
   // is unset).
-  const operatorUid: number | undefined = (() => {
-    const sudoUid = process.env.SUDO_UID;
-    if (sudoUid !== undefined) {
-      const parsed = parseInt(sudoUid, 10);
-      if (Number.isFinite(parsed) && parsed > 0) return parsed;
-    }
-    if (typeof process.getuid === "function") {
-      const uid = process.getuid();
-      if (uid > 0) return uid;
-    }
-    return undefined;
-  })();
+  const operatorUid: number | undefined = resolveOperatorUid();
   // Resolve the release block for this apply run. Priority:
   //   1. CLI flag override (--channel/--pin on `apply` or `update`)
   //   2. Root `release` block from switchroom.yaml
@@ -880,6 +873,23 @@ export async function runApply(
       `  (If pull returns 401, login to ghcr.io first: see docs/operators/install.md#ghcr-auth)\n`,
     ),
   );
+
+  // Prevention (#1473): a self-elevated (sudo) apply just re-rendered
+  // the vault/audit/accounts/compose artifacts AS ROOT (migrateVaultLayout
+  // et al.). Restore operator ownership so `switchroom vault …` keeps
+  // working instead of silently EACCES-ing (the broker masks it via
+  // CAP_DAC_READ_SEARCH). No-op when not elevated or the operator uid
+  // is unknown; per-agent dirs are owned by alignAgentUid and untouched.
+  if (process.geteuid?.() === 0 && operatorUid !== undefined) {
+    const restored = restoreOperatorOwnership(homedir(), operatorUid);
+    if (restored.length > 0) {
+      writeOut(
+        chalk.gray(
+          `  Restored operator ownership of ${restored.length} ~/.switchroom path(s)\n`,
+        ),
+      );
+    }
+  }
 
   writeOut(
     chalk.bold(

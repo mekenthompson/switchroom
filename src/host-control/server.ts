@@ -47,6 +47,7 @@ import {
   type HostdResponse,
   type Result,
 } from "./protocol.js";
+import { chainRow, seedChain, type ChainState } from "../util/audit-hashchain.js";
 import { socketPathToIdentity, type SocketIdentity } from "./peercred.js";
 import { redact } from "../secret-detect/redact.js";
 import { detectInstallType, type InstallType } from "../cli/install-detect.js";
@@ -249,6 +250,11 @@ export class HostdServer {
    *  into a corrupt JSONL line. Chaining the writes keeps every row
    *  whole; parseAuditLine still tolerates a torn line defensively. */
   private auditAppendChain: Promise<void> = Promise.resolve();
+  /** sec WS10-F2 / #1417: per-row tamper-evidence hash-chain position.
+   *  Seeded lazily from the existing log inside the serialized append
+   *  section (so the seed read and the first chained write can't race
+   *  the request path) and advanced only after a durable append. */
+  private auditChainState: ChainState | undefined;
   /** idempotency_key → request_id of the canonical (first) call. */
   private idempotencyKeys = new Map<string, { request_id: string; ts: number }>();
   /**
@@ -1145,14 +1151,24 @@ export class HostdServer {
    *  `auditAppendChain` so large rows can't interleave. */
   private appendAuditRow(row: Record<string, unknown>): Promise<void> {
     const path = this.auditLogPath();
-    const line = JSON.stringify(row) + "\n";
     this.auditAppendChain = this.auditAppendChain.then(async () => {
       await mkdir(dirname(path), { recursive: true }).catch(() => undefined);
-      await appendFile(path, line).catch((err) => {
+      // Seed + chain INSIDE the serialized section so seq/prev are
+      // computed against the latest durably-written row, never a stale
+      // enqueue-time snapshot. State advances only after the append
+      // resolves — a failed write can't desync the chain from disk.
+      if (this.auditChainState === undefined) {
+        this.auditChainState = seedChain(path);
+      }
+      const { line, next } = chainRow(this.auditChainState, row);
+      try {
+        await appendFile(path, line);
+        this.auditChainState = next;
+      } catch (err) {
         process.stderr.write(
           `hostd: audit append failed: ${(err as Error).message}\n`,
         );
-      });
+      }
     });
     return this.auditAppendChain;
   }

@@ -24,6 +24,7 @@ import { describe, it, expect } from "vitest";
 import {
   generateCompose,
   allocateAgentUid,
+  assertNoAgentUidCollision,
   AGENT_UID_MIN,
   AGENT_UID_MAX,
   describeAgents,
@@ -76,6 +77,48 @@ function makeConfig(
     host_control: topLevel?.host_control,
   } as unknown as SwitchroomConfig;
 }
+
+// Discover a real colliding name pair deterministically (don't
+// hard-code a brittle SHA-derived pair). 999 UID buckets → a scan of
+// a few hundred candidates always finds one (birthday paradox).
+function findCollidingPair(): [string, string] {
+  const seen = new Map<number, string>();
+  for (let i = 0; i < 20000; i++) {
+    const name = `coll-agent-${i}`;
+    const uid = allocateAgentUid(name);
+    const prev = seen.get(uid);
+    if (prev) return [prev, name];
+    seen.set(uid, name);
+  }
+  throw new Error("no collision found in 20000 candidates (impossible for 999 buckets)");
+}
+
+describe("assertNoAgentUidCollision — sec WS6-F4 (#1419)", () => {
+  it("passes for a distinct-UID fleet", () => {
+    expect(() =>
+      assertNoAgentUidCollision(makeConfig({ klanker: {}, bob: {} })),
+    ).not.toThrow();
+  });
+
+  it("HARD-FAILS (not warn) when two agents share a UID", () => {
+    const [a, b] = findCollidingPair();
+    expect(allocateAgentUid(a)).toBe(allocateAgentUid(b));
+    expect(() =>
+      assertNoAgentUidCollision(makeConfig({ [a]: {}, [b]: {} })),
+    ).toThrow(/UID collision.*WS6-F4|WS6-F4.*collision/s);
+  });
+
+  it("generateCompose refuses to emit on a collision (fail-closed)", () => {
+    const [a, b] = findCollidingPair();
+    expect(() =>
+      generateCompose({ config: makeConfig({ [a]: {}, [b]: {} }) }),
+    ).toThrow(/UID collision/);
+    // …and still emits normally for a clean fleet.
+    expect(() =>
+      generateCompose({ config: makeConfig({ klanker: {}, bob: {} }) }),
+    ).not.toThrow();
+  });
+});
 
 describe("allocateAgentUid", () => {
   it("returns UID in the reserved range", () => {
@@ -308,12 +351,16 @@ describe("generateCompose", () => {
   });
 
   it("each agent mounts ONLY its own broker socket volume", () => {
-    const out = generateCompose({ config: makeConfig({ a: {}, b: {}, c: {} }) });
+    // NB: "c" hashes to the same UID as "a" (10939) — pre-#1419 this
+    // fixture silently demonstrated the exact WS6-F4 collision; the
+    // new hard-fail guard rejects it. Use "d" (distinct UID) so the
+    // test exercises the broker-socket scoping, not the guard.
+    const out = generateCompose({ config: makeConfig({ a: {}, b: {}, d: {} }) });
     // Pull the volumes block of agent-a; it must only mention broker-a-sock.
     const aBlock = /agent-a:[\s\S]*?(?=\n  agent-|\nvolumes:)/.exec(out)?.[0] ?? "";
     expect(aBlock).toContain("broker-a-sock");
     expect(aBlock).not.toContain("broker-b-sock");
-    expect(aBlock).not.toContain("broker-c-sock");
+    expect(aBlock).not.toContain("broker-d-sock");
   });
 
   it("byte-determinism: same input → same output", () => {

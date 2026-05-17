@@ -2312,7 +2312,7 @@ export function registerDoctorCommand(program: Command): void {
           },
           { title: "Legacy State", results: checkLegacyState() },
           { title: "Vault", results: checkVault(config) },
-          { title: "Vault access (#1473)", results: runSecretAccessChecks(config) },
+          { title: "Vault access", results: runSecretAccessChecks(config) },
           { title: "Memory (Hindsight)", results: await checkHindsight(config) },
           { title: "Telegram", results: await checkTelegram(config) },
           { title: "Agents", results: checkAgents(config, configPath) },

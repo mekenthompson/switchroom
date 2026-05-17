@@ -439,17 +439,32 @@ const AGENT_CONFIG_MCP_TOOLS = [
 ];
 
 /**
- * Pre-approved MCP tool names for the `hostd` server. Bind-mounted
- * only when the agent is `admin: true` (compose.ts gates the socket
- * mount); pre-approving the wildcard for non-admin agents is harmless
- * because the daemon-side gate (src/host-control/server.ts checkGate)
- * is the security boundary, not the client-side allow list. Avoids
- * the same first-use approval wedge for agent_restart / agent_logs /
- * agent_exec / update_check / update_apply.
+ * Pre-approved hostd MCP tool names. ONLY the pure read-only verb
+ * (`update_check` — a `switchroom update --check` dry-run, no side
+ * effects) is pre-approved; pre-approving it just avoids a first-use
+ * permission wedge on a harmless query.
+ *
+ * The mutating / host-control verbs the hostd MCP server also exposes
+ * — `update_apply`, `agent_exec`, `agent_restart`, `agent_start`,
+ * `agent_stop`, `agent_logs` — are deliberately ABSENT from this list
+ * and the old blanket `mcp__hostd` / `mcp__hostd__*` wildcard is gone.
+ * A prompt-injected admin agent invoking one of them now hits the
+ * Telegram approval card (human-in-the-loop) instead of executing
+ * silently. That is the fix for apex-chain link 1 of #1400: the
+ * daemon-side checkGate still authorizes, but it is no longer the
+ * ONLY thing between an injected agent and a host-root-equivalent
+ * `update_apply`/`agent_exec`. Operator-initiated `/restart`,
+ * `/update apply`, etc. are unaffected — those dispatch through the
+ * gateway's direct hostd UDS path, not the agent's MCP tool surface.
+ *
+ * See docs/rfcs/host-control-daemon.md §5.4 and the
+ * project_hostd_admin_privilege_human_approval design call: autonomous
+ * only for self + read-only; mutating / host verbs gated by approval.
+ * Existing fleet agents that already baked in the wildcard are
+ * converged by the LEGACY_HOSTD_BLANKET_TOKENS retraction on reconcile.
  */
 const HOSTD_MCP_TOOLS = [
-  "mcp__hostd",
-  "mcp__hostd__*",
+  "mcp__hostd__update_check",
 ];
 
 /**
@@ -461,6 +476,19 @@ const HOSTD_MCP_TOOLS = [
  * these so existing agents don't keep stale entries forever.
  */
 const LEGACY_SWITCHROOM_MCP_TOKENS = ["mcp__switchroom", "mcp__switchroom__*"];
+
+/**
+ * The pre-#1400 blanket hostd grant. Earlier scaffolds pre-approved
+ * `mcp__hostd` + `mcp__hostd__*` unconditionally, so a prompt-injected
+ * admin agent could invoke the mutating host-control verbs
+ * (`update_apply` / `agent_exec` / `agent_restart` / …) with NO
+ * Telegram approval prompt — apex-chain link 1 of #1400. Reconcile
+ * actively strips these tokens so existing fleet agents converge on
+ * the narrowed read-only-only HOSTD_MCP_TOOLS set and the mutating
+ * verbs fall through to the human approval card. Mirrors the
+ * LEGACY_SWITCHROOM_MCP_TOKENS retraction pattern.
+ */
+const LEGACY_HOSTD_BLANKET_TOKENS = ["mcp__hostd", "mcp__hostd__*"];
 
 /**
  * Read-only built-in tools that are safe to pre-approve for every agent,
@@ -2052,9 +2080,14 @@ export function scaffoldAgent(
       // approve via Telegram one-tool-at-a-time. See the UAT for
       // PR #1215 (skill_list screenshot).
       settings.permissions = settings.permissions ?? {};
-      const allow: string[] = Array.isArray(settings.permissions.allow)
+      // #1400 link 1: actively retract the pre-#1400 blanket hostd
+      // grant before re-seeding the narrowed read-only-only set, so
+      // an existing agent that baked in `mcp__hostd__*` stops having
+      // the mutating verbs pre-approved.
+      const allow: string[] = (Array.isArray(settings.permissions.allow)
         ? settings.permissions.allow
-        : [];
+        : []
+      ).filter((p: string) => !LEGACY_HOSTD_BLANKET_TOKENS.includes(p));
       for (const t of [...AGENT_CONFIG_MCP_TOOLS, ...HOSTD_MCP_TOOLS]) {
         if (!allow.includes(t)) allow.push(t);
       }
@@ -3411,9 +3444,16 @@ export function reconcileAgent(
   const hindsightEnabled = memoryBackend === "hindsight";
   // #235: drop legacy mcp__switchroom__* tokens from any pre-existing
   // allowlist on every reconcile so existing agents converge on the
-  // same shape new ones get.
+  // same shape new ones get. #1400 link 1: same treatment for the
+  // pre-#1400 blanket hostd grant so a `mcp__hostd__*` left in an
+  // agent's switchroom.yaml tools.allow can't silently re-pre-approve
+  // the mutating host-control verbs past the human approval card.
   if (Array.isArray(tools.allow)) {
-    tools.allow = tools.allow.filter(p => !LEGACY_SWITCHROOM_MCP_TOKENS.includes(p));
+    tools.allow = tools.allow.filter(
+      p =>
+        !LEGACY_SWITCHROOM_MCP_TOKENS.includes(p) &&
+        !LEGACY_HOSTD_BLANKET_TOKENS.includes(p),
+    );
   }
   const desiredAllow = dedupe([
     ...baseAllow,

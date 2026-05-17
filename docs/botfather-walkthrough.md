@@ -12,19 +12,27 @@ screenshots; everything below is exactly what you type or tap.
 
 ## What you'll create
 
-Switchroom uses **one Telegram bot per agent**. For a minimal install
-you create one bot; for an admin-bot setup you create two. There's no
-separate "admin bot" concept — an admin agent is just a regular agent
-whose gateway intercepts fleet-management slash commands (the
+Switchroom uses **one Telegram bot per agent — always**. This is not
+optional: if two agents resolve to the same bot token, both long-poll
+`getUpdates` and Telegram 409-Conflicts them in a loop so neither
+replies. One agent ⇒ one BotFather bot ⇒ one token ⇒ one vault key.
+
+For a minimal install you create one bot (the `assistant` agent the
+example ships). Every additional agent you enable — including a
+separate `admin: true` agent that exposes `/agents`, `/restart`,
+`/update`, `/logs`, etc. — needs **its own** bot. There's no separate
+"admin bot" concept; an admin agent is just a regular agent whose
+gateway intercepts fleet-management slash commands (the
 [three-tier model](architecture.md) — see docs/architecture.md).
 
 | Bot | Purpose | Where the token goes |
 |---|---|---|
-| **First agent bot** | The bot you actually chat with. Required. | `switchroom setup` (interactive) or vault |
-| **Admin agent bot** (optional) | A second bot for an agent with `admin: true` — exposes `/agents`, `/restart`, `/update`, `/logs`, etc. | vault, referenced from the agent's `bot_token` |
+| **First agent bot** (`assistant`) | The bot you actually chat with. Required. | `switchroom setup` → vault key `telegram-bot-token` |
+| **Each additional agent's bot** | One per agent you uncomment in `switchroom.yaml` (incl. an `admin: true` agent). | vault key `telegram-<agent>-bot-token`, referenced by that agent's `bot_token:` |
 
-You can create more bots later (one per additional agent). The
-process is identical.
+Creating more bots later is the same process — repeat Step 2 once per
+agent, and vault each token under its own `telegram-<agent>-bot-token`
+key.
 
 ## Step 1 — Open BotFather
 
@@ -91,28 +99,34 @@ privacy mode doesn't affect DMs.
 In your switchroom host's shell:
 
 ```sh
-# First agent — interactive setup prompts for the token directly:
+# First agent (`assistant`) — interactive setup prompts for the token
+# directly and vaults it under `telegram-bot-token`:
 switchroom setup
 
-# Admin agent (if you created a second bot) — add the token to the
-# vault and reference it from the agent block in switchroom.yaml:
-switchroom vault set telegram-admin-bot-token
-# (paste the admin bot token at the prompt)
+# Every ADDITIONAL agent — vault its bot's token under that agent's
+# own key, then uncomment its block in switchroom.yaml:
+switchroom vault set telegram-<agent>-bot-token
+# e.g. telegram-coach-bot-token, telegram-admin-bot-token
+# (paste that bot's token at the prompt)
 ```
 
-Then edit `~/.switchroom/switchroom.yaml`:
+Then edit `~/.switchroom/switchroom.yaml` — uncomment the agent's
+template block (each already carries its own `bot_token`). For an
+admin agent it looks like:
 
 ```yaml
 agents:
   admin:
     topic_name: "Admin"
-    bot_token: "vault:telegram-admin-bot-token"
+    bot_token: "vault:telegram-admin-bot-token"   # its own bot
     admin: true                   # gateway intercepts admin commands
     system_prompt_append: |
       You are the fleet admin agent.
 ```
 
-Run `switchroom apply` after editing.
+Run `switchroom apply` after editing — no need to re-run
+`switchroom setup` for additional agents; `apply` reads the vaulted
+per-agent token directly.
 
 If you don't know your Telegram user ID, message `@userinfobot` in
 Telegram — it replies with your numeric ID immediately. You'll need
@@ -123,9 +137,12 @@ it during `switchroom setup` for the `allowFrom` ACL.
 For each bot, open it in Telegram (search by username, or use the
 direct link BotFather sent: `t.me/<bot_username>`) and tap **Start**.
 
-The agent bot won't reply until setup, authentication
-(`switchroom auth add me --via-claude && switchroom auth use me`), and
-`docker compose ... up -d` are done.
+The agent bot won't reply until setup, the fleet is up, and
+authentication is done. Note the order: bring the fleet up
+(`switchroom apply && docker compose … up -d`) **before**
+`switchroom auth add default --via-claude && switchroom auth use
+default` — the auth-broker that registers the account only exists
+once the fleet is up. See [install.md](install.md) Steps 5–6.
 
 ## Optional: profile picture + description
 

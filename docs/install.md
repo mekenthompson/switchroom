@@ -53,13 +53,27 @@ sudo npm install -g bun @anthropic-ai/claude-code switchroom
 
 ## Step 2 — Create your bots in BotFather
 
-Switchroom uses one Telegram bot per agent. For a minimal install you
-need **one** bot — the agent you'll talk to. If you want a separate
-"admin" bot that exposes fleet-management slash commands (`/agents`,
-`/restart`, `/update apply`, etc.), create **two** bots and flag one
-agent with `admin: true` in your `switchroom.yaml`. There's no
-separate "admin bot" concept — admin agents are regular agents whose
-gateway intercepts admin slash commands before Claude sees them.
+Switchroom uses **one Telegram bot per agent — always, no
+exceptions**. Two agents sharing a bot token both long-poll
+`getUpdates` and Telegram 409-Conflicts them in a loop, so neither
+replies. The bundled `examples/switchroom.yaml` ships **one** active
+agent (`assistant`); every additional agent is a commented-out
+template that already carries its own `bot_token` — you mint a
+separate bot for each one you enable.
+
+For a minimal install you create **one** bot — the agent you'll talk
+to. For each extra agent you later enable (including a separate
+"admin" agent that exposes `/agents`, `/restart`, `/update apply`,
+etc. via `admin: true`), create **another** bot and store its token
+in the vault under its own key:
+
+```sh
+switchroom vault set telegram-<agent>-bot-token   # one per extra agent
+```
+
+There's no separate "admin bot" concept — admin agents are regular
+agents whose gateway intercepts admin slash commands before Claude
+sees them; they still need their own bot like any other agent.
 
 See [BotFather walkthrough](botfather-walkthrough.md) for the exact
 steps. Total time: ~3 minutes per bot. Keep the HTTP API tokens in a

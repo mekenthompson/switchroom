@@ -12,10 +12,16 @@
  *   - `RUN_DOCKER_SMOKE=1` in the environment turns the suite on. In
  *     normal CI / dev `npm test` runs it skips so unit-test cycles stay
  *     fast and don't require Docker.
- *   - The harness runs the SDK transport spike first
- *     (`spikeStdioOverDockerExec`) — if the underlying transport is
- *     broken in the pinned SDK version, we fail-fast with the spike's
- *     verbatim message rather than time out trying to list tools.
+ *
+ * Fail-fast: the real MCP `connect()` is raced against a short timeout
+ * so a genuinely broken transport surfaces in ~45s instead of hanging
+ * until the 5-min test timeout. (A prior "spike" pre-flight pointed an
+ * MCP client at `docker exec … cat`; `cat` echoes the client's own
+ * `initialize` request back, the client receives a request — not a
+ * response — and returns JSON-RPC -32601, so the spike failed 100% of
+ * the time regardless of transport health and permanently blocked
+ * promote-to-dev. It was removed; the real connect below is the
+ * authoritative transport check.)
  *
  * Lifecycle:
  *   - The harness owns the container. Image tag taken from
@@ -31,12 +37,12 @@ import { execSync, spawnSync } from "node:child_process";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { validateAnthropicToolSchemas } from "./anthropic-tool-schema-validator.js";
-import { spikeStdioOverDockerExec } from "./spike-stdio-transport.js";
 
 const RUN = process.env.RUN_DOCKER_SMOKE === "1";
 const SMOKE_IMAGE =
   process.env.SMOKE_AGENT_IMAGE ?? "ghcr.io/switchroom/switchroom-agent:dev";
 const CONTAINER_NAME = `switchroom-smoke-${process.pid}`;
+const CONNECT_TIMEOUT_MS = 45_000;
 
 function dockerAvailable(): boolean {
   try {
@@ -65,10 +71,10 @@ describe.skipIf(!RUN || !dockerAvailable())("mcp tools/list smoke test", () => {
         );
         started = true;
 
-        // 2. Spike the transport BEFORE relying on it for the real call.
-        await spikeStdioOverDockerExec({ containerId: CONTAINER_NAME });
-
-        // 3. Connect for real to the agent-config MCP server.
+        // 2. Connect to the agent-config MCP server over docker exec.
+        //    Race the connect against a short timeout so a broken
+        //    transport fails fast with an actionable message instead
+        //    of hanging until the 5-min test timeout.
         const transport = new StdioClientTransport({
           command: "docker",
           args: ["exec", "-i", CONTAINER_NAME, "switchroom", "mcp", "agent-config"],
@@ -77,9 +83,27 @@ describe.skipIf(!RUN || !dockerAvailable())("mcp tools/list smoke test", () => {
           { name: "switchroom-smoke", version: "0.0.1" },
           { capabilities: {} },
         );
-        await client.connect(transport);
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const connectTimeout = new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `MCP connect did not complete within ${CONNECT_TIMEOUT_MS}ms — ` +
+                    `stdio-over-docker-exec transport may be broken in this SDK ` +
+                    `version; pin or patch before re-running smoke-test`,
+                ),
+              ),
+            CONNECT_TIMEOUT_MS,
+          );
+        });
+        try {
+          await Promise.race([client.connect(transport), connectTimeout]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
 
-        // 4. List tools and validate every schema.
+        // 3. List tools and validate every schema.
         const result = await client.listTools();
         const issues = validateAnthropicToolSchemas(result.tools);
         await client.close();

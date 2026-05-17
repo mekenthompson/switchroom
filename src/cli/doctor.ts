@@ -29,6 +29,7 @@ import { runAuthBrokerChecks } from "./doctor-auth-broker.js";
 import { runHostdChecks } from "./doctor-hostd.js";
 import { runDriveChecks } from "./doctor-drive.js";
 import { runCredentialsMigrationChecks } from "./doctor-credentials-migration.js";
+import { runSecretAccessChecks } from "./doctor-secret-access.js";
 import { runInlinedSecretChecks } from "./doctor-inlined-secrets.js";
 import { runAuditIntegrityChecks } from "./doctor-audit-integrity.js";
 
@@ -2311,6 +2312,7 @@ export function registerDoctorCommand(program: Command): void {
           },
           { title: "Legacy State", results: checkLegacyState() },
           { title: "Vault", results: checkVault(config) },
+          { title: "Vault access", results: runSecretAccessChecks(config) },
           { title: "Memory (Hindsight)", results: await checkHindsight(config) },
           { title: "Telegram", results: await checkTelegram(config) },
           { title: "Agents", results: checkAgents(config, configPath) },

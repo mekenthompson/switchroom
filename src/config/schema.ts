@@ -946,6 +946,30 @@ export const ReleaseBlock = z
     message: "release.channel and release.pin are mutually exclusive",
   });
 
+/**
+ * sec WS6-F1 (#1390) / feature #1413. Shared so it cascades through
+ * BOTH profileFields (defaults + profile levels) AND AgentSchema
+ * (per-agent) with one source of truth. Override cascade (agent →
+ * profile → defaults); unset ⇒ "host" (the pre-#1413 default).
+ */
+export const NetworkIsolationSchema = z
+  .enum(["host", "strict"])
+  .optional()
+  .describe(
+    "Container network mode (sec WS6-F1 #1390 / feature #1413). " +
+    "'host' (DEFAULT when unset): `network_mode: host` — the agent " +
+    "shares the host network stack; hindsight 127.0.0.1:18888 and " +
+    "operator-LAN devices are reachable, but there is NO network " +
+    "isolation from sibling agents or host services (the documented, " +
+    "deliberate shared-host tradeoff). 'strict': the agent joins its " +
+    "OWN dedicated docker bridge network instead — it cannot reach " +
+    "sibling agents; host services are reached via " +
+    "`host.docker.internal`. OPT-IN: validate hindsight / operator-" +
+    "LAN / cron / boot-self-test paths for your deployment before " +
+    "adopting fleet-wide (default-flip is deferred to that validation " +
+    "cycle, #1413). Cascades override (agent → profile → defaults).",
+  );
+
 const profileFields = {
   extends: z.string().optional(),
   bot_token: z.string().optional(),
@@ -1054,6 +1078,7 @@ const profileFields = {
   session: SessionSchema,
   session_continuity: SessionContinuitySchema,
   channels: ChannelsSchema,
+  network_isolation: NetworkIsolationSchema,
   dangerous_mode: z.boolean().optional(),
   settings_raw: z.record(z.string(), z.unknown()).optional(),
   claude_md_raw: z.string().optional(),
@@ -1433,6 +1458,7 @@ export const AgentSchema = z.object({
     .boolean()
     .optional()
     .describe("If true, include --dangerously-skip-permissions in start.sh"),
+  network_isolation: NetworkIsolationSchema,
   admin: z
     .boolean()
     .optional()

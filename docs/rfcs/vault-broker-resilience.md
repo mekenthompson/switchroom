@@ -36,9 +36,9 @@ surface that tells the truth.
 The broker derives a machine-bound AES key from host-mounted
 `/etc/machine-id` (HKDF-SHA256, `src/vault/auto-unlock.ts:60-190`)
 and at boot calls `_tryAutoUnlockFromMachineBoundFile`
-(`src/vault/broker/server.ts:2476-2529`), reading the blob from
+(`src/vault/broker/server.ts:2476`), reading the blob from
 `SWITCHROOM_VAULT_BROKER_AUTO_UNLOCK_PATH` (compose sets it to
-`/state/vault-auto-unlock`, `src/agents/compose.ts:817-820`). The
+`/state/vault-auto-unlock`, `src/agents/compose.ts:858`). The
 "systemd-creds" wording in `vault broker enable-auto-unlock --help`
 is **vestigial/incorrect** — the implementation uses machine-id
 crypto (`src/cli/vault-broker.ts:404-415` → `encryptCredential` →
@@ -97,11 +97,11 @@ next restart. Nothing should depend on a held long-poll surviving.
 (`:231`), pid at `~/.switchroom/vault-broker.pid` (`:39`); `status`
 talks to the legacy host socket. The **agents** talk to the
 *containerized* broker via per-agent sockets, and the broker also
-binds an operator + unlock socket (`server.ts:557-638`, `:624`)
-chowned to the operator uid (`:615`), bind-mounted to the host at
-`~/.switchroom/broker-operator/` (`compose.ts:835`). The client
-resolver already knows both shapes
-(`src/vault/broker/client.ts:48-85`).
+binds an operator + unlock socket (`server.ts:577`
+`bindOperatorListener`) chowned to the operator uid, bind-mounted to
+the host at `~/.switchroom/broker-operator/` (`compose.ts:882`). The
+client resolver already knows both shapes and runtime-detects docker
+(`src/vault/broker/client.ts:53-88`).
 
 Net: on the VM, `switchroom vault broker status` reported
 `{"running":true,"unlocked":true}` (the host daemon I had
@@ -112,9 +112,10 @@ container" (perpetuates two paths) — it is to collapse to one.
 
 ### 2.4 Dishonest observability
 
-The broker healthcheck (`src/agents/compose.ts:758-764`) is
+The broker healthcheck (`src/agents/compose.ts:800`) is
 bind-presence only (`ls /run/switchroom/broker/*/sock`) — a
-deliberate "we don't speak the app protocol here" choice (`:741-757`).
+deliberate "we don't speak the app protocol here" choice
+(`:782-799`).
 Consequence: a **locked** broker reads **healthy**. `BrokerStatus`
 already carries `unlocked` (`src/vault/broker/protocol.ts:340-346`)
 — the readiness signal exists, the healthcheck just ignores it.

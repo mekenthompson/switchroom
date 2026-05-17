@@ -169,6 +169,36 @@ describe("runSecretAccessChecks — Check B (per-agent access)", () => {
     expect(s?.detail).toContain("'bot' missing from the vault");
   });
 
+  it("OK for the canonical bot_token vault: ref with no cron schedule (no false ACL fail)", () => {
+    // Regression for the BLOCK: bot_token is resolved operator-side at
+    // scaffold time, NOT via the broker cron allowlist. An agent with
+    // no schedule[] must NOT be failed by checkAclByAgent.
+    const config = cfg({
+      tgbot: { channels: { telegram: { bot_token: "vault:tok" } } },
+    });
+    const entries: Record<string, VaultEntry> = {
+      tok: { kind: "string", value: "123:ABC" }, // exists, default (open) scope
+    };
+    const r = runSecretAccessChecks(config, deps({ openVault: () => entries }));
+    const s = get(r, "secret access: tgbot");
+    expect(s?.status).toBe("ok");
+    expect(s?.detail).toContain("all present");
+  });
+
+  it("config vault: ref is still per-key-scope checked (deny ⇒ fail)", () => {
+    const config = cfg({
+      tgbot: { channels: { telegram: { bot_token: "vault:tok" } } },
+    });
+    const entries: Record<string, VaultEntry> = {
+      tok: { kind: "string", value: "v", scope: { deny: ["tgbot"] } },
+    };
+    const r = runSecretAccessChecks(config, deps({ openVault: () => entries }));
+    const s = get(r, "secret access: tgbot");
+    expect(s?.status).toBe("fail");
+    expect(s?.detail).toContain("per-key scope denies");
+    expect(s?.detail).not.toContain("no static ACL"); // not run through checkAclByAgent
+  });
+
   it("does not false-'missing' a google:<acct> slot ref (existence skipped)", () => {
     const config = cfg({
       g: {

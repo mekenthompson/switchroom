@@ -214,11 +214,22 @@ export function runSecretAccessChecks(
       config.agents[name],
     );
 
-    const needed = new Set<string>();
+    // Provenance matters. Cron `schedule[].secrets[]` are served at
+    // runtime BY THE BROKER, so the broker's cron allowlist
+    // (checkAclByAgent) AND the per-key scope (checkEntryScope) both
+    // gate them. Plain `vault:` config refs (bot_token, env, mcp, …)
+    // are resolved operator-side at scaffold time via openVault — they
+    // do NOT pass through checkAclByAgent (applying it here would
+    // falsely FAIL the canonical `bot_token: "vault:…"` config on any
+    // agent without a cron schedule). Per-key scope still applies to
+    // them wherever the broker serves them.
+    const cronKeys = new Set<string>();
     for (const entry of (resolved as { schedule?: Array<{ secrets?: string[] }> }).schedule ?? []) {
-      for (const s of entry.secrets ?? []) needed.add(s);
+      for (const s of entry.secrets ?? []) cronKeys.add(s);
     }
-    collectVaultRefs(resolved, needed);
+    const refKeys = new Set<string>();
+    collectVaultRefs(resolved, refKeys);
+    const needed = new Set<string>([...cronKeys, ...refKeys]);
 
     if (needed.size === 0) {
       results.push({
@@ -239,11 +250,16 @@ export function runSecretAccessChecks(
         gaps.push(`'${key}' missing from the vault`);
         continue;
       }
-      const byAgent = checkAclByAgent(config, name, key);
       const byScope = checkEntryScope(entries[key]?.scope, name);
-      if (!byAgent.allow) {
-        gaps.push(`'${key}' — no static ACL grants read (${byAgent.reason})`);
-      } else if (!byScope.allow) {
+      if (cronKeys.has(key)) {
+        // broker-served cron secret → full broker predicate
+        const byAgent = checkAclByAgent(config, name, key);
+        if (!byAgent.allow) {
+          gaps.push(`'${key}' (cron) — no static ACL grants read (${byAgent.reason})`);
+          continue;
+        }
+      }
+      if (!byScope.allow) {
         gaps.push(`'${key}' — per-key scope denies read (${byScope.reason})`);
       }
     }

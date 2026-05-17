@@ -186,6 +186,26 @@ export function stripSecretValues<T>(value: T): T {
   return value;
 }
 
+/**
+ * Human-readable readback appended to every overlay write that lands
+ * on disk but is NOT live in the running agent. claude-code reads
+ * skills, `.mcp.json` and (post cron-fold-in) the in-container
+ * scheduler's entries at PROCESS START — see
+ * `lifecycle.ts:classifyChangeKind` ("settings"/"skill" are
+ * restart-required; skill hot-reload is unbuilt Phase C). Without this
+ * line a self-service `skill_install` / `schedule add` returns
+ * `{ok:true}` and the change silently does nothing until the next
+ * bounce. Same wording across skill + schedule by design (consistency
+ * principle).
+ */
+export function restartRequiredNote(agent: string): string {
+  return (
+    `Not live yet — claude loads skills, MCP servers and scheduled ` +
+    `tasks at process start. Run \`switchroom agent restart ${agent}\` ` +
+    `for this to take effect.`
+  );
+}
+
 function getAgentSlice(config: SwitchroomConfig, agent: string): unknown {
   const slice = config.agents?.[agent];
   if (!slice) {

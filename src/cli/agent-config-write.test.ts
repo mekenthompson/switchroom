@@ -32,6 +32,9 @@ describe("scheduleAdd — happy path", () => {
     expect(r.cron_hash).toBe(expected);
     expect(r.slug).toBe(`cron-${expected}`);
     expect(r.would_recreate).toBe(false);
+    expect(r.restart_required).toBe(true);
+    expect(r.restart_hint).toContain("alice");
+    expect(r.restart_hint).toMatch(/restart/i);
     expect(existsSync(r.path)).toBe(true);
     const content = readFileSync(r.path, "utf-8");
     expect(content).toContain("prompt: morning standup");
@@ -85,6 +88,9 @@ describe("scheduleRemove", () => {
     if (!add.ok) return;
     const r = scheduleRemove({ cronHash: add.cron_hash, root });
     expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.restart_required).toBe(true);
+    expect(r.restart_hint).toContain("alice");
     expect(existsSync(add.path)).toBe(false);
   });
 

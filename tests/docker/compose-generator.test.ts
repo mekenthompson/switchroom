@@ -941,6 +941,22 @@ describe("agent service env (Phase 2c F2 — IPC wiring)", () => {
     }
   });
 
+  // Claude-runtime invariants for the pinned-image, cache-engineered
+  // 24/7 fleet. DISABLE_AUTOUPDATER keeps the running `claude` binary
+  // identical to the audited/digest-pinned image (sec WS9-F4 #1418);
+  // CLAUDE_CODE_ATTRIBUTION_HEADER=0 complements the deliberate
+  // cache-stable prompt prefix (bin/timezone-hook.sh 900s bucket).
+  it("sets the pinned-fleet Claude-runtime env on each agent container", () => {
+    const out = generateCompose({
+      config: makeConfig({ alice: {}, bob: {} }),
+    });
+    for (const a of ["alice", "bob"]) {
+      const env = envBlockFor(out, a);
+      expect(env).toMatch(/DISABLE_AUTOUPDATER:\s*"1"/);
+      expect(env).toMatch(/CLAUDE_CODE_ATTRIBUTION_HEADER:\s*"0"/);
+    }
+  });
+
   it("sets TINI_KILL_PROCESS_GROUP=1 so SIGTERM reaches the gateway sidecar", () => {
     // Without this env, tini forwards SIGTERM only to its direct child
     // (tmux at PID 7); the gateway/scheduler/autoaccept sidecars share

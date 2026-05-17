@@ -123,6 +123,11 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           cache-from: type=gha,scope=base
           cache-to: type=gha,mode=max,scope=base
+          # sec WS9-F3 (#1418): signed build provenance + SBOM so an
+          # operator's `switchroom update` pull can verify the image
+          # was built by THIS pipeline from THIS source (SLSA-style).
+          provenance: mode=max
+          sbom: true
           # CACHE_BUST is paired with the `ARG CACHE_BUST` in
           # Dockerfile.base immediately before `npm install -g
           # @anthropic-ai/claude-code@latest`. `github.run_attempt`
@@ -217,6 +222,9 @@ jobs:
             BASE_IMAGE=${{ steps.tags.outputs.base }}
           cache-from: type=gha,scope=${{ matrix.image.name }}
           cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}
+          # sec WS9-F3 (#1418): provenance + SBOM on every fleet image.
+          provenance: mode=max
+          sbom: true
 
   build-hindsight:
     # Hindsight extends upstream `ghcr.io/vectorize-io/hindsight:latest`
@@ -268,3 +276,6 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           cache-from: type=gha,scope=hindsight
           cache-to: type=gha,mode=max,scope=hindsight
+          # sec WS9-F3 (#1418): provenance + SBOM on the hindsight image too.
+          provenance: mode=max
+          sbom: true

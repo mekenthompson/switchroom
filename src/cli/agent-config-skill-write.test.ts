@@ -57,6 +57,14 @@ describe("skillInstall — happy path", () => {
     expect(content).toContain("webapp-testing");
   });
 
+  it("returns a restart-required readback naming the agent", () => {
+    const r = install();
+    if (!r.ok) throw new Error(`expected ok, got ${JSON.stringify(r)}`);
+    expect(r.restart_required).toBe(true);
+    expect(r.restart_hint).toContain("test-agent");
+    expect(r.restart_hint).toMatch(/restart/i);
+  });
+
   it("uses opts.name as the slug when provided", () => {
     const r = install({ source: "bundled:pdf", name: "my-pdf-skill" });
     if (!r.ok) throw new Error(`expected ok, got ${JSON.stringify(r)}`);
@@ -162,6 +170,8 @@ describe("skillRemove", () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.slug).toBe(i.slug);
+    expect(r.restart_required).toBe(true);
+    expect(r.restart_hint).toContain("test-agent");
     const files = readdirSync(join(tmpRoot, FAKE_AGENT, "skills.d")).filter((f) => f.endsWith(".yaml"));
     expect(files).toEqual([]);
   });

@@ -149,7 +149,11 @@ Agent processes turn
 ## Naming conventions
 
 - `AGENTS.md` — operating protocol, safety rules, how to behave
-- `SOUL.md` — persona, voice, communication style
+- `SOUL.md` — persona, voice, communication style. **User-owned**:
+  seeded once, then never overwritten by `update`/`reconcile` (unlike
+  the switchroom-managed root `CLAUDE.md`). Edit it directly; re-seed
+  with `switchroom soul reset <agent>`. See
+  [configuration.md § Persona & SOUL.md ownership](./configuration.md#persona--soulmd-ownership).
 - `IDENTITY.md` — who the agent is (name, what it's not)
 - `USER.md` — who the agent talks to
 - `TOOLS.md` — host-specific paths, credentials locations, known-good

@@ -27,7 +27,7 @@ Each field type has specific merge behavior when values exist at multiple layers
 | `model` | override | Claude model (`claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5`). Haiku is the default for the handoff summarizer; agents typically use opus or sonnet. |
 | `extends` | — | Named profile to inherit from |
 | `tools.allow` / `tools.deny` | union | Tool permissions |
-| `soul` | per-field | Agent persona (name, style, boundaries) |
+| `soul` | per-field (**seed-time only**) | Agent persona (name, style, boundaries). Cascades per-field, but **only at first scaffold** — it seeds `workspace/SOUL.md`, which is then user-owned (see [Persona & SOUL.md ownership](#persona--soulmd-ownership)). Editing `soul:` later does **not** change an agent whose SOUL.md already exists. |
 | `memory` | per-field | Hindsight collection and recall settings |
 | `hooks` | per-event concat | Claude Code lifecycle hooks (SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, Stop, SessionEnd) |
 | `env` | per-key | Environment variables for start.sh |
@@ -206,6 +206,29 @@ agents:
     extends: advisor
     topic_name: "Coach"
 ```
+
+## Persona & SOUL.md ownership
+
+Switchroom splits agent customization into two files with **opposite ownership**:
+
+| File | Owner | Lifecycle |
+|------|-------|-----------|
+| `CLAUDE.md` (agent root) | **Switchroom** | Cascade-rendered from the profile; regenerated on every `apply`/`reconcile`/`update` so machinery + smart-default changes propagate fleet-wide. Hand-edits are backed up to `CLAUDE.md.before-rerender.*` and replaced. |
+| `workspace/SOUL.md` (persona) | **You** | Seeded **once** — from the setup wizard's persona prompts, or the profile's `SOUL.md.hbs` + `soul:` config when skipped. After that it is a plain user file: `update`/`reconcile` **never** overwrite it. |
+
+This is deliberate. `CLAUDE.md` is the operating manual — you want switchroom's updates to reach it. `SOUL.md` is who the agent *is* — you want your words to stick, the way they do in OpenClaw/Hermes. The `soul:` config and profile `SOUL.md.hbs` are therefore **seed-time inputs only**; changing them later does not touch an agent whose `SOUL.md` already exists.
+
+**Editing the persona.** Just edit `workspace/SOUL.md` directly (it's tracked in the workspace git repo, so your edits are versioned and recoverable). `switchroom soul path <agent>` prints the path; `switchroom soul show <agent>` prints the current content.
+
+**Re-seeding from the profile.** To discard the current persona and regenerate from the agent's *current* profile (e.g. after changing `extends:`), run:
+
+```
+switchroom soul reset <agent>
+```
+
+It backs the existing file up to `SOUL.md.bak` (or `SOUL.md.bak.<ts>` if one already exists) before writing, so a reset is always recoverable.
+
+**Migration.** Existing agents already have a rendered `SOUL.md`. The first `update` after upgrading simply stops regenerating it — your agent's current persona freezes in place as your owned file. No content is lost; the stale `SOUL.md.fingerprint` sidecar becomes vestigial and can be ignored or deleted.
 
 ## Global Skills Pool
 

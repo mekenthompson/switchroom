@@ -36,7 +36,7 @@ describe("reconcileAgent — persona (Phase 3)", () => {
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("regenerates workspace/SOUL.md when config changes", () => {
+  it("does NOT regenerate workspace/SOUL.md when config changes (user-owned, seed-once)", () => {
     const config1 = makeAgentConfig({
       soul: { name: "Coach", style: "motivational" },
     });
@@ -48,7 +48,9 @@ describe("reconcileAgent — persona (Phase 3)", () => {
     expect(soulBefore).toContain("Coach");
     expect(soulBefore).toContain("motivational");
 
-    // Change config
+    // Change persona config. SOUL.md is the user's file post-seed —
+    // reconcile must leave it byte-identical. `switchroom soul reset`
+    // is the explicit re-seed path (config is a seed-time input only).
     const config2 = makeAgentConfig({
       soul: { name: "Assistant", style: "concise, technical" },
     });
@@ -56,13 +58,12 @@ describe("reconcileAgent — persona (Phase 3)", () => {
     reconcileAgent("test-agent", config2, tmpDir, telegramConfig, switchroomConfig);
 
     const soulAfter = readFileSync(workspaceSoulPath, "utf-8");
-    expect(soulAfter).toContain("Assistant");
-    expect(soulAfter).toContain("concise, technical");
-    expect(soulAfter).not.toContain("Coach");
-    expect(soulAfter).not.toContain("motivational");
+    expect(soulAfter).toBe(soulBefore);
+    expect(soulAfter).toContain("Coach");
+    expect(soulAfter).not.toContain("concise, technical");
   });
 
-  it("appends SOUL.custom.md sidecar if present", () => {
+  it("does NOT fold a SOUL.custom.md added AFTER seed into an existing SOUL.md", () => {
     const config = makeAgentConfig({
       soul: { name: "Agent", style: "default" },
     });
@@ -70,21 +71,24 @@ describe("reconcileAgent — persona (Phase 3)", () => {
     const result = scaffoldAgent("test-agent", config, tmpDir, telegramConfig);
     const workspaceSoulPath = join(result.agentDir, "workspace", "SOUL.md");
     const customSoulPath = join(result.agentDir, "workspace", "SOUL.custom.md");
+    const soulBefore = readFileSync(workspaceSoulPath, "utf-8");
 
-    // Add custom sidecar
+    // Drop a sidecar AFTER the agent was seeded. Pre-design this was
+    // re-composed on every reconcile; under seed-once ownership the
+    // already-seeded SOUL.md is the user's and is left untouched.
+    // (A sidecar present BEFORE the first seed *is* folded in — see
+    // scaffold.soul-user-owned.test.ts.)
     writeFileSync(
       customSoulPath,
       "## Custom Section\n\nThis is my personal addition.",
       "utf-8"
     );
 
-    // Reconcile should append the custom content
     reconcileAgent("test-agent", config, tmpDir, telegramConfig, switchroomConfig);
 
     const soulMd = readFileSync(workspaceSoulPath, "utf-8");
-    expect(soulMd).toContain("---");
-    expect(soulMd).toContain("## Custom Section");
-    expect(soulMd).toContain("This is my personal addition");
+    expect(soulMd).toBe(soulBefore);
+    expect(soulMd).not.toContain("## Custom Section");
   });
 
   it("regenerates CLAUDE.md by default when template changes", () => {

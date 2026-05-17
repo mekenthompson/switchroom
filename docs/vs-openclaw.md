@@ -65,8 +65,9 @@ Substrate aside, here's what the product promises:
 1. Install Switchroom: `git clone https://github.com/switchroom/switchroom.git ~/code/switchroom && cd ~/code/switchroom && bun install && bun link`
 2. Run `switchroom setup`. The wizard handles OAuth login, Telegram bot registration, and the first agent.
 3. Translate each OpenClaw agent's config into a block under `agents:` in `switchroom.yaml`. Most settings have a direct equivalent; see [configuration.md](configuration.md).
-4. Import memory: if you stored anything in OpenClaw's file-based memory, `switchroom memory` can ingest arbitrary text into a Hindsight bank.
-5. Point your existing Telegram bot token at Switchroom (or create a new bot), and `switchroom agent start` each agent.
+4. Bring your persona: the setup wizard prompts for each agent's name/style/boundaries, or paste your OpenClaw `SOUL.md` into the seeded `workspace/SOUL.md` afterwards. Like OpenClaw, **SOUL.md is your file** — switchroom seeds it once and never overwrites it on update (the root `CLAUDE.md` operating-manual *is* switchroom-managed, so its updates still reach you). Re-seed any time with `switchroom soul reset <agent>`.
+5. Import memory: if you stored anything in OpenClaw's file-based memory, `switchroom memory` can ingest arbitrary text into a Hindsight bank.
+6. Point your existing Telegram bot token at Switchroom (or create a new bot), and `switchroom agent start` each agent.
 
 ## See also
 

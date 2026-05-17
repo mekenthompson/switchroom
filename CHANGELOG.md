@@ -6,12 +6,17 @@ Schedules the long-lived `clerk → switchroom` rename shims for removal so they
 
 ### Changes
 
+#### Features
+
+- **feat(persona):** `workspace/SOUL.md` is now **user-owned** — seeded once (from the setup wizard's new per-agent persona prompts, or the profile `SOUL.md.hbs` + `soul:` config when skipped) and then **never overwritten** by `apply`/`reconcile`/`update`. This is the deliberate inverse of the root `CLAUDE.md`, which stays switchroom-managed so machinery/template updates keep propagating fleet-wide. New `switchroom soul {path,show,reset}` verb; `soul reset <agent>` re-seeds from the agent's current profile after backing the existing file up to `SOUL.md.bak`. `soul:` config and profile `SOUL.md.hbs` are now seed-time inputs only. See [docs/configuration.md § Persona & SOUL.md ownership](docs/configuration.md#persona--soulmd-ownership).
+
 #### Deprecations
 
 - **deprecate(state):** `switchroom doctor` now WARNs (exit 0) when legacy `~/.clerk` state or the v0.6 host-side `~/.switchroom/vault-broker.sock` is present. Additionally, any CLI/agent invocation that actually reads from `~/.clerk` now emits a one-time stderr deprecation notice (doctor alone is insufficient — the silent dual-read failure mode is total state loss). These back-compat shims (`src/config/paths.ts` dual-read, the top-level `clerk:` switchroom.yaml alias, and `src/vault/broker/client.ts` `LEGACY_SOCKET_PATH`) are **REMOVED in v0.13.0**.
 
 ### Upgrade notes
 
+- **SOUL.md ownership flip:** existing agents already have a rendered `workspace/SOUL.md`. The first `update` after upgrading stops regenerating it — the agent's *current* persona freezes in place as your owned file (no content lost). The stale `SOUL.md.fingerprint` sidecar becomes vestigial and can be ignored or deleted. If you relied on `soul:` in `defaults:`/profiles propagating persona changes to running agents on reconcile, that no longer happens by design — edit `workspace/SOUL.md` directly, or run `switchroom soul reset <agent>` to re-seed from the profile.
 - If `~/.clerk` exists on a host: migrate before upgrading to v0.13.0 with `mv ~/.clerk ~/.switchroom`, and rename any top-level `clerk:` key in `switchroom.yaml` to `switchroom:`. There is no automatic migration — v0.13.0 silently treats un-migrated state as a fresh install (vault/agents/auth read as absent).
 
 ## v0.11.1 — hostd default-on + CI infra-resilience follow-ups

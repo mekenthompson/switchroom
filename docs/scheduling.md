@@ -2,7 +2,11 @@
 
 Switchroom runs scheduled tasks via an **in-container scheduler sibling** that lives inside every agent container alongside the gateway. At fire time the sibling injects a synthesized inbound turn into the agent's running session — so cron-triggered work appears in the agent's transcript and Hindsight context as ordinary turns tagged `<channel source="cron">`, not as out-of-band one-shot processes. Surviving host reboots is handled by docker's restart policy plus an at-least-once boot replay (see below).
 
-## Quick Start
+## Two ways to schedule
+
+### 1. Operator-declared (central config)
+
+Declare schedules in `switchroom.yaml`. They cascade like every other config key (see [Cascade behavior](#cascade-behavior)):
 
 ```yaml
 defaults:
@@ -13,38 +17,93 @@ defaults:
       prompt: "Weekly review: summarize this week's progress and next week's goals"
 ```
 
-Run `switchroom agent create <name>` or `switchroom agent reconcile <name>` to materialize the schedule into the agent container. The change takes effect after the next `switchroom agent restart <name>`.
+Run `switchroom agent create <name>` or `switchroom agent reconcile <name>` to materialize the schedule, then `switchroom agent restart <name>` so the in-container scheduler re-registers the new timers.
 
-## How It Works
+### 2. Conversational / per-agent overlay (no YAML edit)
+
+You don't have to hand-edit the central config. The `schedule` verb writes a per-agent **overlay** under `~/.switchroom/agents/<agent>/schedule.d/<slug>.yaml`, which is appended to the agent's resolved schedule:
+
+```bash
+# Add (defaults to $SWITCHROOM_AGENT_NAME inside a container; --agent on the host)
+switchroom schedule add \
+  --cron "0 8 * * 1-5" \
+  --prompt "Morning briefing: calendar, priorities, blockers" \
+  --name morning-briefing
+
+# Remove (by name, or by the 12-hex content hash shown in schedule.d/cron-<hash>.yaml)
+switchroom schedule remove --name morning-briefing
+switchroom schedule remove --cron-hash 1a2b3c4d5e6f
+
+# Read the agent's resolved schedule as JSON
+switchroom cron list
+```
+
+This same surface is exposed over the **agent-config MCP broker**, so an agent can manage *its own* schedule when you ask it in chat ("set up a daily 8am briefing"). Identity is pinned to `$SWITCHROOM_AGENT_NAME`; cross-agent writes are denied (exit 7). Run `switchroom schedule --help` for the full flag list.
+
+Either way, a schedule change takes effect once the in-container scheduler re-registers — on the next `switchroom agent restart <name>` (or any container restart). There is no hot-reload; the scheduler reads config at boot.
+
+## Guardrails on agent-authored entries
+
+Operator-authored entries in `switchroom.yaml` are trusted. Entries written through the `schedule add` / MCP path are gated (structured error code → exit code):
+
+| Gate | Code | Rule |
+|---|---|---|
+| Too frequent | `E_CRON_TOO_FREQUENT` (9) | minimum 5-minute interval |
+| Too many | `E_QUOTA_EXCEEDED` (9) | at most 20 entries per agent |
+| Secrets escalation | `E_OVERLAY_SECRETS_REQUIRES_APPROVAL` (9) | an overlay entry may **not** grant itself vault `secrets:` |
+| Bad input | `E_INVALID_CRON` / `E_INVALID_PROMPT` (1) | malformed cron or prompt |
+
+With `--stage-on-reject` (the MCP path uses this), a gated entry is staged under `.pending/` and surfaced to the operator via `switchroom schedule pending` instead of being rejected outright. Overlay entries can only *append*; they cannot override or replace operator-declared entries.
+
+## How it works
 
 Each agent's container runs a small `agent-scheduler` sidecar (started by `start.sh` as a sibling of the telegram-plugin gateway). The sidecar:
 
-1. Reads its own agent's `schedule:` block from `/state/config/switchroom.yaml` (the cascade-resolved file bind-mounted read-only into every container).
+1. Reads its own agent's cascade-resolved `schedule:` (central config + `schedule.d/` overlays) from `/state/config/switchroom.yaml`.
 2. Registers each `cron:` expression with `node-cron`.
-3. On fire, synthesizes an `InboundMessage` envelope tagged `meta.source="cron"`, `meta.schedule_index`, `meta.prompt_key`.
-4. Sends an `inject_inbound` IPC message to the gateway socket inside the same container; the gateway forwards the inbound to the bridge, which delivers it to the agent's running claude session.
+3. On fire, synthesizes an `InboundMessage` tagged `meta.source="cron"`, `meta.schedule_index`, `meta.prompt_key`.
+4. Sends an `inject_inbound` IPC message to the gateway socket in the same container; the gateway forwards it to the bridge, which delivers it to the agent's running claude session.
 5. Audits each fire to `/state/agent/scheduler.jsonl` (one row per fire, append-only).
 
 The scheduler itself never reads secrets — the agent resolves any vault refs the prompt needs via the broker socket once the turn starts.
 
+### Timezone
+
+Cron expressions are evaluated in the **agent's resolved timezone**, not hard-coded UTC. The container's `TZ` is set from a four-step cascade (`src/config/timezone.ts`):
+
+1. `agents.<name>.timezone` (explicit per-agent override)
+2. profile `timezone` (via `extends:`)
+3. `switchroom.timezone` (global default)
+4. server detection (`/etc/timezone` → `/etc/localtime` → `UTC` fallback)
+
+So `0 8 * * *` means 08:00 in that resolved zone. If you've set `switchroom.timezone: "Australia/Melbourne"`, the morning briefing fires at 08:00 Melbourne time. If nothing is set and the server can't be detected, the fallback is UTC — set `switchroom.timezone` explicitly if your host clock isn't where your users are. `switchroom cron list` and the agent's session-time hint both reflect the resolved zone. There is currently no per-entry timezone field.
+
 ### At-least-once replay
 
-When an agent container restarts (image pull, OOM bounce, host reboot), any cron fires that would have happened during the downtime are replayed on boot — bounded to the past 30 minutes by default (`SWITCHROOM_AGENT_SCHEDULER_REPLAY_MIN`). The scheduler reads its own JSONL audit log, finds the most-recent past minute each cron expression matched, and replays any minute that has no successful audit row within ±90 s.
+When an agent container restarts (image pull, OOM bounce, host reboot), any cron fires that would have happened during the downtime are replayed on boot — bounded to the past 30 minutes by default (`SWITCHROOM_AGENT_SCHEDULER_REPLAY_MIN`). The scheduler reads its JSONL audit log, finds the most-recent past minute each cron expression matched, and replays any minute with no successful audit row within ±90 s.
 
-This is `at-least-once`, not `exactly-once` — a fire that's started but interrupted before audit-write may replay. The window is intentionally small so a long outage doesn't resurrect yesterday's morning briefing.
+This is *at-least-once*, not *exactly-once* — a fire started but interrupted before audit-write may replay. The window is intentionally small so a long outage doesn't resurrect yesterday's morning briefing.
+
+### Skipped-run notice (downtime longer than the replay window)
+
+If the agent was offline long enough that a scheduled run fell **outside** the replay window, that run is *not* re-run (cron is not a queue). Rather than dropping it silently, on boot the scheduler sends **one summary turn** naming every schedule that had a skipped run:
+
+> [switchroom scheduler notice] While this agent was offline, the following scheduled task(s) had at least one run skipped. They were older than the 30-minute catch-up window, so they will NOT be re-run: …
+
+The agent relays this to the user in plain language. This satisfies the *survive-reboots* contract: scheduled jobs are *fired on return or explicitly skipped, never silently dropped*. The notice is de-duplicated — once delivered, a per-entry sentinel row in `scheduler.jsonl` stops it re-firing on subsequent boots. If the gateway isn't connected at boot, the notice is retried next boot rather than swallowed. The lookback ceiling for this scan is 14 days (`SWITCHROOM_AGENT_SCHEDULER_STALE_MAX_MIN`); an agent down longer than that gets one notice, not a backlog.
 
 ## Configuration
 
 | Field | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `cron` | Yes | — | Standard 5-field cron expression |
+| `cron` | Yes | — | Standard 5-field cron expression, evaluated in the agent's resolved timezone |
 | `prompt` | Yes | — | The prompt that becomes the synthesized turn's text |
-| `model` | No | inherits agent | Model for this task. Honored if you wire it through the prompt; the scheduler does not pass `--model` separately because cron now runs in the agent's existing session |
-| `secrets` | No | `[]` | Vault keys this task may read. See [configuration.md#vault-broker-linux-only](configuration.md#vault-broker-linux-only) |
+| `model` | No | — | **Deprecated / ignored.** Pre-v0.8 the singleton scheduler ran each task as an isolated `claude -p` and could set `--model` per task. Post cron-fold-in the fire runs in the agent's existing session, so it always uses the **agent's** configured model. Accepted only so old configs keep validating; set the model at the agent level. |
+| `secrets` | No | `[]` | Vault keys this task may read. Operator-config only — rejected on agent-authored overlays. See [configuration.md#vault-broker-linux-only](configuration.md#vault-broker-linux-only) |
 
-### Cron Expression Examples
+### Cron expression examples
 
-| Expression | Meaning |
+| Expression | Meaning (in the agent's resolved timezone) |
 |---|---|
 | `0 8 * * *` | Every day at 8:00 AM |
 | `0 8 * * 1-5` | Weekdays at 8:00 AM |
@@ -56,11 +115,11 @@ This is `at-least-once`, not `exactly-once` — a fire that's started but interr
 
 Because cron fires arrive as ordinary inbound turns in the running session, the agent's normal reply path runs — `mcp__switchroom-telegram__reply` (or `stream_reply`) writes to the chat the same way it does for a user-typed message. Markdown→HTML conversion, smart chunking, and sanitization are identical. If the agent decides the prompt has nothing meaningful to say, no reply is sent — a silent run is correct behaviour, not an error.
 
-This replaces the pre-v0.8 flow (singleton `switchroom-cron` container running `docker exec agent-<name> claude -p ...`), which created a fresh isolated process per fire and had no awareness of the running session.
+This replaces the pre-v0.8 flow (singleton `switchroom-cron` container running `docker exec agent-<name> claude -p ...`), which created a fresh isolated process per fire with no awareness of the running session.
 
-## Cascade Behavior
+## Cascade behavior
 
-Schedule entries are **concatenated** across cascade layers (defaults first, then profile, then agent):
+Schedule entries are **concatenated** across cascade layers (defaults first, then profile, then agent, then `schedule.d/` overlays last):
 
 ```yaml
 defaults:
@@ -83,23 +142,27 @@ Pre-v0.8, scheduled tasks ran as **isolated** one-shot `claude -p` calls — no 
 
 - The fire **does** consume context in the agent's conversation (it's just another turn).
 - The fire **sees** the agent's recent conversation history and Hindsight memories.
-- The fire **uses** the agent's configured model (`--model` is no longer per-task).
+- The fire **uses** the agent's configured model (`model:` is no longer per-task — see Configuration).
 - The fire is **rendered** in the transcript as a `<channel source="cron">` turn so the agent (and operator) can tell it apart from human messages.
 
 Trade-off: scheduled tasks now share session context (better for "remember what we discussed yesterday morning" follow-ups), at the cost of cron fires consuming token budget. For agents that need pure isolation (e.g. an audit role), a separate agent dedicated to scheduled tasks is the cleanest pattern.
 
-If the agent is down at fire time, the in-container sidecar can't deliver — the boot-time replay window catches up to 30 minutes. Anything older than that is dropped: cron is not a queue.
+If the agent is down at fire time, the in-container sidecar can't deliver — the boot-time replay window catches up to 30 minutes; anything older is explicitly reported via the [skipped-run notice](#skipped-run-notice-downtime-longer-than-the-replay-window), not silently dropped.
 
-## Managing the Scheduler
+## Managing the scheduler
 
 ```bash
-# Tail the agent's scheduler audit log (which task fired when)
+# List the agent's resolved schedule as JSON
+switchroom cron list --agent <name>
+
+# Tail the agent's scheduler audit log (which task fired when, and skip notices)
 tail -f ~/.switchroom/agents/<name>/scheduler.jsonl
 
 # Tail the agent-scheduler supervisor's stderr/stdout
 docker logs -f switchroom-<name>  # the agent-scheduler line is prefixed "agent-scheduler:"
 
-# Restart the in-container scheduler (e.g. after editing switchroom.yaml + reconciling)
+# Restart the in-container scheduler (after editing switchroom.yaml + reconciling,
+# or after a `schedule add`/`remove`)
 switchroom agent restart <name>
 
 # Disable in-agent scheduling on a single container without removing the schedule
@@ -108,11 +171,11 @@ docker compose -p switchroom \
   exec --env SWITCHROOM_INLINE_SCHEDULER=0 agent-<name> sh
 ```
 
-## Comparison with Claude Code's Native Scheduling
+## Comparison with Claude Code's native scheduling
 
 | | Switchroom (in-agent scheduler) | Claude Code CronCreate | Claude Code Desktop |
 |---|---|---|---|
-| **Survives restart** | Yes (docker `restart: unless-stopped` + at-least-once replay) | No (session-scoped) | Yes (app must be open) |
+| **Survives restart** | Yes (docker `restart: unless-stopped` + at-least-once replay + skip notice) | No (session-scoped) | Yes (app must be open) |
 | **Headless** | Yes | Yes | No (Desktop app only) |
 | **Model selection** | Inherits agent's model | Inherits session | Per-task |
 | **Context isolation** | Shares session | Shares session | Isolated |

@@ -68,8 +68,13 @@ export const ScheduleEntrySchema = z.object({
     .string()
     .optional()
     .describe(
-      "Model for this task. Defaults to claude-sonnet-4-6 (cheap, fast). " +
-      "Use claude-opus-4-7 for tasks needing complex reasoning.",
+      "DEPRECATED / IGNORED. Pre-v0.8 the singleton scheduler ran each " +
+      "task as an isolated `claude -p` and could set --model per task. " +
+      "Post cron-fold-in (v0.8) the fire is injected into the agent's " +
+      "running session, so it always uses the agent's configured model " +
+      "— this field has no effect. Accepted (optional) only so existing " +
+      "configs keep validating; set the model at the agent level instead. " +
+      "See docs/scheduling.md.",
     ),
   secrets: z
     .array(z.string().regex(/^[a-zA-Z0-9_\-/]+$/, "Secret key names must contain only alphanumeric characters, underscores, hyphens, and forward slashes"))

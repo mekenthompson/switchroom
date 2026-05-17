@@ -254,6 +254,36 @@ export function checkAclByAgent(
     return checkGoogleAccountAcl(config, agentName, googleSlot.account, key);
   }
 
+  // An agent legitimately needs to read its OWN configured bot token.
+  // The gateway resolves `agents.<name>.bot_token` (per-agent override,
+  // wins) or the global `telegram.bot_token` — see
+  // materialize-bot-token.ts:getEffectiveBotToken. That is
+  // identity-bound access to the single key the config assigns to THIS
+  // agent (path-as-identity already proved who the caller is) — NOT
+  // cross-agent secret access — so it must not be gated behind
+  // schedule[].secrets[] (which is cron-misconfiguration protection,
+  // not the auth boundary). Without this, a per-agent bot token added
+  // via the documented `switchroom vault set telegram-<agent>-bot-token`
+  // + uncomment flow is broker-ACL-denied to its own agent
+  // (install-validation 2026-05-18; #31/#1428-adjacent). The global
+  // token historically only "worked" via the <agent>/telegram/.env
+  // materialization side-channel, which never fires for a hand-added
+  // per-agent agent.
+  // Exactly mirror materialize-bot-token.ts:getEffectiveBotToken —
+  // the per-agent override is preferred only when it's a NON-EMPTY
+  // string (an empty-string `bot_token` falls back to the global,
+  // same as the gateway does), so the ACL can never deny the very
+  // key the gateway will actually try to use.
+  const agentBot = (agentConfig as { bot_token?: string }).bot_token;
+  const botRef =
+    agentBot && agentBot.length > 0 ? agentBot : config.telegram?.bot_token;
+  if (typeof botRef === "string" && botRef.startsWith("vault:")) {
+    const botKey = botRef.slice("vault:".length).split("#")[0];
+    if (botKey.length > 0 && botKey === key) {
+      return { allow: true };
+    }
+  }
+
   const schedule = agentConfig.schedule ?? [];
   if (schedule.length === 0) {
     return {

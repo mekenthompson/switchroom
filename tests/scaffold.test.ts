@@ -2508,6 +2508,51 @@ describe("scaffoldAgent with global defaults cascade", () => {
     expect(startSh).toContain("--dangerously-load-development-channels server:switchroom-telegram");
   });
 
+  // sec WS8-F1 / #1416: the image-baked security-hooks plugin must be
+  // loaded via --plugin-dir from the read-only in-image path on EVERY
+  // claude exec variant, unconditionally (not gated on hindsight or
+  // any opt-in), and never from the agent-writable scaffold dir. It's
+  // the unstrippable tool-safety authority.
+  it("start.sh loads the image-baked security plugin unconditionally (#1416)", () => {
+    const agentConfig = makeAgentConfig(); // hindsight off by default
+    const result = scaffoldAgent("secplugin-agent", agentConfig, tmpDir, telegramConfig);
+    const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
+
+    // Present on the active exec line even with hindsight disabled.
+    expect(startSh).toContain('--plugin-dir "/opt/switchroom/security-plugin"');
+    // Never the agent-writable scaffold dir for the security plugin.
+    expect(startSh).not.toContain(
+      `--plugin-dir "${result.agentDir}/.claude/plugins/security`,
+    );
+    // Boot integrity check surfaces a missing/empty image copy loudly
+    // (non-fatal — the settings.json union fallback still protects).
+    expect(startSh).toContain("sec WS8-F1 (#1416): security-hooks plugin artifact missing");
+    expect(startSh).toContain('SR_SECPLUGIN="/opt/switchroom/security-plugin"');
+    expect(startSh).toContain('"$SR_SECPLUGIN/hooks/secret-guard-pretool.mjs"');
+    expect(startSh).toContain('"$SR_SECPLUGIN/hooks/drive-write-pretool.mjs"');
+  });
+
+  it("reconcile re-asserts the security --plugin-dir so it self-heals (#1416)", () => {
+    const agentConfig = makeAgentConfig();
+    scaffoldAgent("secplugin-reconcile", agentConfig, tmpDir, telegramConfig);
+    // Simulate an older start.sh on disk that predates the security plugin.
+    const startShPath = join(tmpDir, "secplugin-reconcile", "start.sh");
+    writeFileSync(startShPath, "#!/bin/bash\nexec claude\n");
+    reconcileAgent(
+      "secplugin-reconcile",
+      agentConfig,
+      tmpDir,
+      telegramConfig,
+      {
+        switchroom: { version: 1, agents_dir: tmpDir },
+        telegram: telegramConfig,
+        agents: { "secplugin-reconcile": agentConfig },
+      } as SwitchroomConfig,
+    );
+    const startSh = readFileSync(startShPath, "utf-8");
+    expect(startSh).toContain('--plugin-dir "/opt/switchroom/security-plugin"');
+  });
+
   it("channels.telegram.plugin: 'official' keeps the upstream marketplace plugin", () => {
     const agentConfig = makeAgentConfig({
       channels: { telegram: { plugin: "official" } },
@@ -2523,6 +2568,8 @@ describe("scaffoldAgent with global defaults cascade", () => {
     expect(existsSync(join(result.agentDir, ".mcp.json"))).toBe(false);
     const startSh = readFileSync(join(result.agentDir, "start.sh"), "utf-8");
     expect(startSh).toContain("--channels plugin:telegram@claude-plugins-official");
+    // #1416: the security plugin-dir is on the official variant too.
+    expect(startSh).toContain('--plugin-dir "/opt/switchroom/security-plugin"');
   });
 
   it("channels.telegram.format and rate_limit_ms become env vars in start.sh", () => {

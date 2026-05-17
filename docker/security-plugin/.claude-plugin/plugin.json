@@ -1,0 +1,11 @@
+{
+  "name": "switchroom-security",
+  "description": "Switchroom's image-baked, agent-unstrippable security hooks: PreToolUse secret-exfil guard and Drive-write approval gate. Loaded from a read-only in-image path via --plugin-dir so a prompt-injected agent cannot disable tool safety by rewriting its own settings.json (sec WS8-F1 / #1416). Unions with the settings.json copy; this copy is the authority.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Ken Thompson",
+    "email": "me@kenthompson.com.au"
+  },
+  "homepage": "https://github.com/mekenthompson/switchroom",
+  "repository": "https://github.com/mekenthompson/switchroom"
+}

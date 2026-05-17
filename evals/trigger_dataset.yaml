@@ -255,3 +255,26 @@ trigger_evals:
     expected_skill: "switchroom-manage"
     expected_not_skills: ["switchroom-cli", "switchroom-architecture"]
     tags: ["routing", "manage", "vault"]
+
+  # ── schedule/skill liveness + missed runs → cli ───────────────────────────────
+  # "Is my config change live?" / "did runs get skipped?" are CLI
+  # operational questions (scheduler + restart), NOT status snapshots
+  # and NOT agent lifecycle management.
+
+  - id: "t-cli-sched-live-001"
+    query: "I edited the schedule in switchroom.yaml — is the new cron live yet?"
+    expected_skill: "switchroom-cli"
+    expected_not_skills: ["switchroom-status", "switchroom-manage"]
+    tags: ["routing", "cli", "schedule", "restart-required"]
+
+  - id: "t-cli-sched-missed-001"
+    query: "Did the assistant agent skip any scheduled runs while it was down?"
+    expected_skill: "switchroom-cli"
+    expected_not_skills: ["switchroom-status", "switchroom-health"]
+    tags: ["routing", "cli", "schedule", "skip-notice"]
+
+  - id: "t-cli-skill-restart-001"
+    query: "I installed a new skill on my agent — do I need to restart for it to work?"
+    expected_skill: "switchroom-cli"
+    expected_not_skills: ["switchroom-manage", "switchroom-install"]
+    tags: ["routing", "cli", "skill-install", "restart-required"]

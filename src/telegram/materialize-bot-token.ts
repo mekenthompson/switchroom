@@ -158,7 +158,7 @@ export async function materializeBotToken(opts: MaterializeOpts = {}): Promise<s
 
   if (!brokerResult.ok && brokerResult.reason === "locked") {
     throw new BotTokenMaterializeError(
-      "Bot token is a vault reference but vault is locked. Run: switchroom vault unlock",
+      "Bot token is a vault reference but the vault is locked. Run `switchroom vault broker unlock` (or set SWITCHROOM_VAULT_PASSPHRASE / enable auto-unlock).",
       "locked",
     );
   }
@@ -194,7 +194,7 @@ export async function materializeBotToken(opts: MaterializeOpts = {}): Promise<s
   // container itself is down and needs to be brought up first.
   const unlockHint = isDockerRuntime()
     ? "Bring up the project (docker compose -p switchroom up -d), then `switchroom vault broker unlock` (or `docker exec -it switchroom-vault-broker switchroom vault broker unlock`), or set SWITCHROOM_VAULT_PASSPHRASE."
-    : "Start the broker (switchroom vault unlock) or set SWITCHROOM_VAULT_PASSPHRASE.";
+    : "Start + unlock the broker (`switchroom vault broker unlock`) or set SWITCHROOM_VAULT_PASSPHRASE.";
   throw new BotTokenMaterializeError(
     `Bot token is a vault reference (${configured}) but vault broker is unreachable and no SWITCHROOM_VAULT_PASSPHRASE is available for direct decrypt. ` +
     unlockHint,

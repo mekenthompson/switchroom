@@ -1365,6 +1365,29 @@ function emitAgentService(
     // restart via the /state/agent bind mount.
     PIP_BREAK_SYSTEM_PACKAGES: "1",
     PIP_USER: "1",
+    // ── Claude-runtime invariants for a pinned-image, cache-engineered
+    //    24/7 fleet (these are fleet-wide truths, not per-agent knobs) ──
+    //
+    // DISABLE_AUTOUPDATER: the `claude` binary is delivered by the
+    // agent image, which is rebuilt/rolled forward deliberately via
+    // `switchroom update` (and, for the base, digest-pinned — sec
+    // WS9-F4 #1418). An in-container autoupdater silently mutating
+    // `claude` underneath a pinned image defeats that pin and the
+    // docker-first immutable-image model: the running binary would no
+    // longer match the audited/built image. Disabling it is a
+    // correctness/supply-chain fix that also removes the periodic
+    // update-check network traffic from every agent.
+    DISABLE_AUTOUPDATER: "1",
+    // CLAUDE_CODE_ATTRIBUTION_HEADER=0: documented to omit the
+    // attribution block, which improves prompt-cache hit rate.
+    // Switchroom already invests heavily and deliberately in a
+    // cache-stable prompt prefix (e.g. bin/timezone-hook.sh rounds the
+    // per-turn timestamp to a 900s bucket "so Anthropic's
+    // content-addressed cache isn't invalidated every turn"); a
+    // volatile attribution header works directly against that existing
+    // design. Unknown/renamed env vars are ignored by the runtime, so
+    // this is at worst a no-op — never a regression.
+    CLAUDE_CODE_ATTRIBUTION_HEADER: "0",
     SWITCHROOM_AGENT_NAME: a.name,
     // Belt-and-braces in-container marker for the agent-config CLI's
     // isContainerContext() probe (the primary signal is /.dockerenv,

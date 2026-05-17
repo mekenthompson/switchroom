@@ -496,6 +496,17 @@ describe("ACL: an agent may read its OWN configured bot_token (install-validatio
     expect(checkAclByAgent(config, "coach", "telegram-admin-bot-token").allow).toBe(false);
   });
 
+  it("empty-string per-agent bot_token falls back to the global key (matches getEffectiveBotToken)", () => {
+    const config = cfg(
+      { admin: { topic_name: "Admin", bot_token: "", admin: true } },
+      "vault:telegram-bot-token",
+    );
+    // The gateway's getEffectiveBotToken treats "" as unset → uses the
+    // global; the ACL must allow exactly that key (never deny the key
+    // the gateway will actually request).
+    expect(checkAclByAgent(config, "admin", "telegram-bot-token").allow).toBe(true);
+  });
+
   it("does not open a hole: a literal (non-vault:) bot_token grants nothing; unrelated keys still gated", () => {
     const config = cfg(
       { admin: { topic_name: "Admin", bot_token: "123:literaltoken", admin: true } },

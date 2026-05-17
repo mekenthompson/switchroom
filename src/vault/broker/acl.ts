@@ -269,9 +269,14 @@ export function checkAclByAgent(
   // token historically only "worked" via the <agent>/telegram/.env
   // materialization side-channel, which never fires for a hand-added
   // per-agent agent.
+  // Exactly mirror materialize-bot-token.ts:getEffectiveBotToken —
+  // the per-agent override is preferred only when it's a NON-EMPTY
+  // string (an empty-string `bot_token` falls back to the global,
+  // same as the gateway does), so the ACL can never deny the very
+  // key the gateway will actually try to use.
+  const agentBot = (agentConfig as { bot_token?: string }).bot_token;
   const botRef =
-    (agentConfig as { bot_token?: string }).bot_token ??
-    config.telegram?.bot_token;
+    agentBot && agentBot.length > 0 ? agentBot : config.telegram?.bot_token;
   if (typeof botRef === "string" && botRef.startsWith("vault:")) {
     const botKey = botRef.slice("vault:".length).split("#")[0];
     if (botKey.length > 0 && botKey === key) {

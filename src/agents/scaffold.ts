@@ -1437,7 +1437,16 @@ export function installHindsightPlugin(
 ): HindsightPluginInstall | null {
   if (!switchroomConfig) return null;
   const memory = switchroomConfig.memory;
-  if (memory?.backend !== "hindsight") return null;
+  // Same SWITCHROOM_MEMORY_BACKEND=none precedence as every other
+  // hindsight gate — this runs unconditionally on scaffold AND
+  // reconcile/restart, so a config-only check would re-copy the
+  // hindsight plugin tree (re-activating its memory hooks) on a
+  // `none` install (install-validation 2026-05-17, R2 review round 3).
+  if (!isHindsightEnabled(switchroomConfig)) return null;
+  // isHindsightEnabled true ⇒ memory.backend === "hindsight" ⇒ memory
+  // is defined. Explicit narrowing for the type-checker (the old
+  // `memory?.backend !== "hindsight"` gate used to provide it).
+  if (!memory) return null;
 
   const agentMemory = switchroomConfig.agents[agentName]?.memory;
   if (agentMemory?.auto_recall === false) return null;

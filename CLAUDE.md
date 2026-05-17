@@ -313,15 +313,42 @@ globally. During local work on src/, prefer `bun run dev` over rebuilding.
 
 ## CI
 
-**GitHub Actions is primary and gating.** `main` is branch-protected
-with 15 required GHA checks: `lint`, `bun-test`, `unittest`, `vitest
-(1..4)`, `e2e`, `build-base`, `build-hindsight`, and `build-dependents
-(×5)` (agent, broker, kernel, auth-broker, hostd). A PR cannot merge
-to `main` until all 15 are green — including for repo admins (admin
-bypass is off; `enforce_admins` will be flipped on if we ever need to
-self-discipline harder). Auto-merge is enabled repo-wide, so a PR
-with `--auto` enabled will merge itself the moment the last required
-check turns green.
+**GitHub Actions is primary and gating.** `main` is protected by a
+**repository Ruleset** (`main branch protection`, id `16470166`) —
+not classic branch-protection. It enforces **10 required GHA checks**:
+`lint`, `bun-test`, `vitest`, `build-base`, `build-hindsight`, and
+`build-dependents (×5)` (agent, broker, kernel, auth-broker, hostd),
+plus `non_fast_forward` + deletion protection. (`lint`/`bun-test`/
+`vitest` are the always-running *sentinel* contexts that aggregate
+the path-gated shards — see #1343 and the sentinel pattern in
+`.github/workflows/ci-*.yml`; the old `unittest`/`vitest (1..4)`/`e2e`
+names are retired.) A PR cannot merge to `main` until all 10 are
+green.
+
+**Governance posture (sec WS9-F2 / R7, set 2026-05-17 — deliberate,
+do not "re-harden" without the owner revisiting):**
+- **Admin-bypass is genuinely locked** — the ruleset's `bypass_actors`
+  is empty (it previously granted the Admin role `bypass_mode:
+  always`, which contradicted this doc's prior "admin bypass is off"
+  claim). Repo admins (and anything with admin access) go through the
+  10 checks like everyone else; there is no force-merge escape — the
+  CI recovery lever is `workflow_dispatch` re-trigger, not bypass.
+- **No required human PR review, by design.** switchroom is operated
+  via autonomous agents that open PRs and auto-merge on green; a
+  required-review rule on this solo-owner repo would deadlock that
+  model. The load-bearing supply-chain hole (a PR skipping the test
+  gates via path-filter blind spots) is closed *in the checks
+  themselves* (#1405 / sec WS9-F1), so required review would be
+  defense-in-depth, not the essential control — and is intentionally
+  omitted.
+- **`strict` (require-branch-up-to-date) is intentionally OFF** (sec
+  WS9-F5, accepted residual): enabling it would stall the autonomous
+  auto-merge flow; merge-skew risk is accepted given the now-
+  comprehensive required checks.
+
+Auto-merge is enabled repo-wide, so a PR with `--auto` enabled
+merges itself the moment the last required check turns green (this is
+the intended operating model — see above).
 
 When checking PR state, `gh pr checks <n>` is the source of truth.
 Look at:
@@ -339,11 +366,15 @@ scripts (`docker-snapshot-gate.sh`, `annotate-evals.sh`,
 `publish-badges.sh`) moved to `scripts/ci/` and the GHA workflows
 were updated to reference the new paths.
 
-Required-check tuning (`gh api -X PUT
-repos/switchroom/switchroom/branches/main/protection/required_status_checks`)
-needs a follow-up PR if a new workflow lands that should gate merges —
-GHA workflows added after the protection was configured do NOT
-auto-add themselves to the required list.
+Required-check tuning is a **Ruleset** edit, not classic protection:
+`gh api repos/switchroom/switchroom/rulesets/16470166` to read, then
+`gh api --method PUT repos/switchroom/switchroom/rulesets/16470166
+--input <body>` with the `required_status_checks` rule's contexts
+updated (preserve the other rules + `bypass_actors: []` + `enforcement:
+active`). A new workflow that should gate merges is NOT auto-added —
+it needs an explicit ruleset update. (The old
+`branches/main/protection/...` classic-protection API path no longer
+governs this repo.)
 
 ## Conventions
 

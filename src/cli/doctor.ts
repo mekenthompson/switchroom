@@ -28,6 +28,7 @@ import { isDockerMode, runDockerChecks } from "./doctor-docker.js";
 import { runAuthBrokerChecks } from "./doctor-auth-broker.js";
 import { runDriveChecks } from "./doctor-drive.js";
 import { runCredentialsMigrationChecks } from "./doctor-credentials-migration.js";
+import { runInlinedSecretChecks } from "./doctor-inlined-secrets.js";
 
 /**
  * Result of a single doctor check.
@@ -2220,6 +2221,10 @@ export function registerDoctorCommand(program: Command): void {
           { title: "Skills Prerequisites", results: checkSkillsPrerequisites() },
           { title: "Manifest Drift", results: await checkManifestDrift() },
           { title: "Configuration", results: checkConfig(config, configPath) },
+          {
+            title: "Config secrets (WS6-F3)",
+            results: runInlinedSecretChecks(config, { configPath }),
+          },
           { title: "Legacy State", results: checkLegacyState() },
           { title: "Vault", results: checkVault(config) },
           { title: "Memory (Hindsight)", results: await checkHindsight(config) },

@@ -198,15 +198,19 @@ evals:
   - id: "schedule-007"
     question: "I just added a cron entry to my agent's schedule. Is it running now?"
     primary_skill: "switchroom-cli"
-    # Positive terms only appear in a correct restart-aware answer
-    # (bare "restart" was dropped — it matches "no restart needed" too).
+    # NOTE: the grader (run_quality.py:check_assertions) does
+    # pattern.split("|") then re.search per fragment with NO try/except,
+    # so a "(a|b)" group splits into invalid regex fragments and throws.
+    # Convention here is FLAT top-level `|` only — never `|` inside `()`.
+    # Positive terms occur only in a correct restart-aware answer (bare
+    # "restart" dropped — it matches "no restart needed" too).
     expected_contains:
-      - "not (yet )?live|won'?t take effect|will not take effect|takes? effect (only )?(on|after|once|when) .*restart|switchroom (agent )?restart|(needs?|requires?|need) (a )?restart"
-    # Phrases that only occur in a WRONG (claims-live) answer. Avoid bare
-    # "running now"/"live now" — they substring-match the correct
-    # negation "not running now" and would false-fail.
+      - "not yet live|not live|won'?t take effect|will not take effect|takes effect after .*restart|takes effect once .*restart|take effect after .*restart|switchroom restart|switchroom agent restart|needs a restart|need a restart|requires a restart|must restart|until you restart|until the agent restarts|after a restart|after the restart"
+    # WRONG (claims-live) phrases. Deliberately no bare "running now"/
+    # "live now" — they substring-match the correct negation "not
+    # running now" and would false-fail.
     expected_not_contains:
-      - "no restart (is )?(needed|required)|does ?n'?t (need|require) (a )?restart|picks? (it|the change|the entry)? ?up automatically|already (active|live|scheduled and running)"
+      - "no restart needed|no restart is needed|no restart required|no restart is required|does not need a restart|doesn't need a restart|does not require a restart|doesn't require a restart|picks it up automatically|picks the change up automatically|already active|already live|already scheduled and running|works right away"
     tags: ["schedule", "restart-required"]
 
   - id: "schedule-008"
@@ -221,10 +225,12 @@ evals:
   - id: "schedule-009"
     question: "Install the pdf skill onto the assistant agent — will it work right away?"
     primary_skill: "switchroom-cli"
+    # Flat top-level `|` only — see schedule-007 note on the grader's
+    # split("|") behaviour.
     expected_contains:
-      - "not (yet )?live|won'?t take effect|will not take effect|not .* until .*restart|switchroom (agent )?restart|(needs?|requires?|need) (a )?restart|after (a |the )?restart"
+      - "not right away|not yet live|not live|won'?t take effect|will not take effect|takes effect after .*restart|after a restart|after the restart|until you restart|until the agent restarts|switchroom restart|switchroom agent restart|needs a restart|need a restart|need to restart|requires a restart|must restart"
     expected_not_contains:
-      - "works right away|immediately (available|active|usable)|ready to use (now|right away)|no restart (is )?(needed|required)|does ?n'?t (need|require) (a )?restart|already (active|loaded|available)"
+      - "works right away|immediately available|immediately active|immediately usable|ready to use now|ready to use right away|no restart needed|no restart is needed|no restart required|does not need a restart|doesn't need a restart|already active|already loaded|already available"
     tags: ["schedule", "restart-required", "skill-install"]
 
   # ── switchroom-restart ─────────────────────────────────────────────────────────────

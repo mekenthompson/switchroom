@@ -1428,7 +1428,7 @@ export function checkAgents(config: SwitchroomConfig, configPath: string): Check
           detail: auth?.pendingAuth
             ? "pending (auth flow in progress)"
             : "not authenticated",
-          fix: `Run \`switchroom auth add <label> --from-oauth\` then \`switchroom auth use <label>\` (RFC H — see docs/auth.md)`,
+          fix: `Run \`switchroom auth add <label> --via-claude\` then \`switchroom auth use <label>\` (RFC H — see docs/auth.md)`,
         });
       }
     } else {
@@ -1490,7 +1490,7 @@ export function checkAgents(config: SwitchroomConfig, configPath: string): Check
             quotaOut > 0
               ? `Quota-exhausted account(s) will auto-recover when the window resets; broker auto-rotates per \`auth.fallback_order\` (see \`switchroom auth show\`).`
               : expired > 0
-                ? `Expired account(s) — add a fresh one via \`switchroom auth add <label> --from-oauth\` and \`switchroom auth use <label>\` (RFC H).`
+                ? `Expired account(s) — add a fresh one via \`switchroom auth add <label> --via-claude\` and \`switchroom auth use <label>\` (RFC H).`
                 : undefined,
         });
       }

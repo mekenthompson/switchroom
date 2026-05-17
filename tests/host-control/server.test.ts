@@ -862,8 +862,52 @@ describe("hostd server — Phase 2 fleet mutations + lock", () => {
       },
     );
     expect(resp.result).toBe("denied");
-    expect(resp.error).toMatch(/NUL or newline\/CR/);
+    expect(resp.error).toMatch(/control character/);
     expect(resp.error).toMatch(/#1401/);
+  });
+
+  // #1400 target 3 — completes the WS5 per-element charclass finding:
+  // #1401 only blocked NUL/LF/CR. ESC (U+001B) and the other C0
+  // controls let a (now approval-gated, but still prompt-injectable)
+  // admin agent smuggle ANSI escape sequences into the operator-facing
+  // `switchroom audit hostd` trail. They must be rejected too.
+  it("agent_exec: argv element with ESC / other C0 control is denied (#1400 target 3)", async () => {
+    const sock = server.getBoundPaths().find((p) => p.endsWith("/klanker/sock"))!;
+    const resp = await hostdRequest(
+      { socketPath: sock },
+      {
+        v: 1,
+        op: "agent_exec",
+        request_id: "exec-esc-1",
+        // ESC + an SGR sequence. No NUL/LF/CR, so #1401
+        // alone would have passed it. ESC byte built at
+        // runtime so no source-level escape mangling can
+        // weaken the test.
+        args: {
+          name: "bob",
+          argv: ["grep", `${String.fromCharCode(27)}[31mpwned`, "/x"],
+        },
+      },
+    );
+    expect(resp.result).toBe("denied");
+    expect(resp.error).toMatch(/control character/);
+    expect(resp.error).toMatch(/#1400/);
+  });
+
+  it("agent_exec: an over-long argv element is denied (#1400 target 3)", async () => {
+    const sock = server.getBoundPaths().find((p) => p.endsWith("/klanker/sock"))!;
+    const resp = await hostdRequest(
+      { socketPath: sock },
+      {
+        v: 1,
+        op: "agent_exec",
+        request_id: "exec-long-1",
+        // 4097 bytes — one past MAX_EXEC_ARGV_ELEMENT_BYTES (4096).
+        args: { name: "bob", argv: ["cat", "/".padEnd(4097, "a")] },
+      },
+    );
+    expect(resp.result).toBe("denied");
+    expect(resp.error).toMatch(/exceeds 4096 bytes/);
   });
 
   it("agent_exec: non-allowlisted argv[0] is denied with a clear pointer to the deferred scope", async () => {

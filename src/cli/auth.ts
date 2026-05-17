@@ -102,12 +102,29 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
       | undefined;
     try {
       parsed = JSON.parse(readFileSync(credsPath, "utf-8"));
-    } catch {
-      findings.push({
-        code: "credentials_malformed",
-        severity: "error",
-        summary: "credentials file corrupted — send /auth in this chat to reset",
-      });
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code === "EACCES" || code === "EPERM") {
+        // The auth-broker writes .credentials.json owned by the
+        // per-agent UID, mode 0600. When diagnoseAuthState runs as
+        // the operator (not the agent) the read is denied — that is
+        // expected and is NOT corruption; the agent process itself
+        // can read it. Misreporting EACCES as "malformed" sent
+        // operators into a needless re-auth (install-validation
+        // 2026-05-17, R9).
+        findings.push({
+          code: "credentials_unreadable",
+          severity: "warn",
+          summary:
+            "credentials present but owned by the agent UID (mode 0600) — not readable by the operator. The agent can read it; this is not corruption.",
+        });
+      } else {
+        findings.push({
+          code: "credentials_malformed",
+          severity: "error",
+          summary: "credentials file corrupted — send /auth in this chat to reset",
+        });
+      }
     }
     if (parsed) {
       const oauth = parsed.claudeAiOauth;
@@ -160,7 +177,10 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
   }
 
   const recommendation: string[] = [];
-  if (severity !== "ok") {
+  const onlyUnreadable =
+    findings.length > 0 &&
+    findings.every((f) => f.code === "credentials_unreadable");
+  if (severity !== "ok" && !onlyUnreadable) {
     if (findings.some((f) => f.code === "credentials_missing" && f.severity === "error")) {
       recommendation.push("This agent has never been authenticated. Start the OAuth flow:");
     } else if (findings.some((f) => f.code === "token_expired")) {
@@ -171,8 +191,18 @@ export function diagnoseAuthState(claudeConfigDir: string): AuthDiagnosis {
       recommendation.push("Recommended: refresh credentials so the access token can be renewed:");
     }
     recommendation.push("");
-    recommendation.push("  switchroom auth add default --from-oauth");
+    // --via-claude mints the broad scope claude `server:` mode needs
+    // (org:create_api_key user:profile user:inference
+    // user:sessions:claude_code user:mcp_servers user:file_upload).
+    // --from-oauth mints scope=user:inference only — Claude refuses
+    // it on boot, so recommending it here just reproduces the
+    // failure (install-validation 2026-05-17, R4/R8).
+    recommendation.push("  switchroom auth add default --via-claude");
     recommendation.push("");
+  } else if (onlyUnreadable) {
+    recommendation.push(
+      "No action needed. .credentials.json is present and agent-owned; run the check inside the agent container if you need a definitive read.",
+    );
   }
 
   return { severity, findings, recommendation };

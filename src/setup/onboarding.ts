@@ -346,8 +346,18 @@ export function ensureMcpServersTrusted(
 }
 
 /**
- * Create a minimal .claude config.json when no existing Claude installation
- * is available. The agent will need to complete onboarding via `switchroom agent attach`.
+ * Create a minimal .claude config.json when no existing Claude
+ * installation is available.
+ *
+ * `hasCompletedOnboarding` MUST be true. In the v0.7+ Docker model
+ * the auth-broker provides credentials and autoaccept-poll dispatches
+ * the remaining first-run prompts (theme, dev-channels, MCP trust).
+ * There is no human at `switchroom agent attach` to drive Claude's
+ * interactive onboarding wizard — and autoaccept deliberately does
+ * not auto-answer the wizard's "Select login method" step. Shipping
+ * `false` here wedges every fresh-install agent at that screen
+ * forever even though the broker has already logged it in. This
+ * matches `src/agents/scaffold.ts`'s writer (`true`, numStartups 1).
  */
 export function createMinimalClaudeConfig(agentDir: string): void {
   const claudeDir = join(agentDir, ".claude");
@@ -356,15 +366,12 @@ export function createMinimalClaudeConfig(agentDir: string): void {
   const configPath = join(claudeDir, ".claude.json");
   if (!existsSync(configPath)) {
     const minimal = {
-      hasCompletedOnboarding: false,
-      numStartups: 0,
+      hasCompletedOnboarding: true,
+      numStartups: 1,
     };
     writeFileSync(configPath, JSON.stringify(minimal, null, 2) + "\n", {
       encoding: "utf-8",
       mode: 0o600,
     });
-    console.warn(
-      `  WARNING: Created minimal config for ${agentDir}. Complete onboarding via \`switchroom agent attach\`.`
-    );
   }
 }

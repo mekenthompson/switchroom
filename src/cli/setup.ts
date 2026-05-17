@@ -959,7 +959,7 @@ async function stepScaffoldAgents(
       await ensureAuthActiveDefault(switchroomConfigPath);
       console.log(
         chalk.gray(
-          "  Set auth.active: default — run `switchroom auth add default --from-oauth` to log in",
+          "  Set auth.active: default — run `switchroom auth add default --via-claude` to log in",
         ),
       );
     } catch (err) {

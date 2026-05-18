@@ -4504,6 +4504,44 @@ async function executeVaultRequestAccess(args: Record<string, unknown>): Promise
 
   const agentSlug = process.env.SWITCHROOM_AGENT_NAME || 'agent'
 
+  // Fix B (#1487 follow-up): if this agent's STANDING ACL already
+  // covers the key, do NOT render a card or mint a grant. Minting
+  // writes a `.vault-token` that — pre-#1487 — *shadowed* the standing
+  // ACL (the exact gymbro trap) and is simply redundant post-#1487.
+  // Determine coverage AUTHORITATIVELY by probing the broker AS THIS
+  // AGENT (no-token list over the per-agent socket — path-as-identity;
+  // the gateway runs in the agent's container so the broker attributes
+  // it to this agent). NOT a gateway-side config read: the gateway can
+  // see newer config than the broker has loaded, so a config-derived
+  // "covered" could be wrong where the broker still denies. `list`
+  // returns only ACL-visible key NAMES — never secret values. Read
+  // scope only: schedule.secrets[] confers read, not write.
+  if (scopeRaw === 'read') {
+    try {
+      const visible = await listViaBroker()
+      if (visible !== null && visible.includes(key)) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text:
+                `vault_request_access: '${key}' is ALREADY covered by ${agentSlug}'s ` +
+                `standing ACL (schedule.secrets[]). No approval card or grant is needed — ` +
+                `read it directly: \`switchroom vault get ${key}\`. Do NOT request a grant ` +
+                `for this key (a minted token would shadow the standing ACL). If a read ` +
+                `still returns VAULT-BROKER-DENIED, the broker likely needs a restart to ` +
+                `pick up a recent config change — tell the operator; don't re-request.`,
+            },
+          ],
+        }
+      }
+    } catch {
+      // Probe failed (broker unreachable / transient): fall through to
+      // the normal card flow. Fail-open is correct here — a redundant
+      // card is harmless; suppressing a needed card is not.
+    }
+  }
+
   const stageId = randomBytes(4).toString('hex')
   const pending: PendingVaultRequestAccess = {
     agent: agentSlug,
@@ -9552,6 +9590,40 @@ async function performVaultAccessApproval(
     attestation.kind === 'passphrase'
       ? { passphrase: attestation.passphrase }
       : { attest_via_posture: true as const }
+
+  // Fix B (#1487 follow-up), operator-tap guard. Defense-in-depth for a
+  // card staged before the key became standing-ACL-covered (config edit
+  // / #1487 deploy / drift): if the agent's standing ACL ALREADY covers
+  // this read key, do NOT mint — minting writes a `.vault-token` that
+  // shadows the standing ACL and is redundant. Authoritative broker
+  // probe AS THIS AGENT (no-token list over the per-agent socket — same
+  // rationale as executeVaultRequestAccess; never a gateway-side config
+  // read). Read scope only. Fail-open on probe error (mint as before).
+  if (pending.scope === 'read') {
+    try {
+      const visible = await listViaBroker()
+      if (visible !== null && visible.includes(pending.key)) {
+        pendingVaultRequestAccesses.delete(stageId)
+        if (pending.card_message_id != null) {
+          await ctx.api
+            .editMessageText(
+              pending.chat_id,
+              pending.card_message_id,
+              `ℹ️ <b>${escapeHtmlForTg(pending.agent)}</b> already has standing-ACL access to ` +
+              `<code>${escapeHtmlForTg(pending.key)}</code> (schedule.secrets[]). ` +
+              `<b>No grant minted</b> — a token would shadow the standing ACL. ` +
+              `The agent can read it directly.`,
+              { parse_mode: 'HTML', reply_markup: { inline_keyboard: [] } },
+            )
+            .catch(() => {})
+        }
+        return
+      }
+    } catch {
+      // Probe failed: fall through and mint as before (fail-open).
+    }
+  }
+
   // #1051: union the new key with the agent's existing active grant
   // before minting. Without this, each fresh Approve OVERWRITES the
   // agent's `.vault-token` file with a single-key grant — the

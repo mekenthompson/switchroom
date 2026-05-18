@@ -9,7 +9,14 @@
  *   1. opts.socket      — explicit caller override
  *   2. SWITCHROOM_VAULT_BROKER_SOCK env — set by compose into agents
  *   3. opts.vaultBrokerSocket — config-derived path
- *   4. ~/.switchroom/vault-broker.sock — legacy default
+ *   4. defaultBrokerSocketPath() — RUNTIME-AWARE default (RFC J):
+ *      operator socket if present / docker mode → broker-operator/sock;
+ *      else the legacy ~/.switchroom/vault-broker.sock (v0.6 systemd).
+ *      Step 4 is NOT a fixed path — asserting an absolute legacy path
+ *      here was environment-sensitive (it fails on any box where the
+ *      operator socket exists or docker runtime is detected) and
+ *      encoded pre-RFC-J behaviour. We pin DELEGATION to that single
+ *      source of truth instead.
  *
  * Pre-fix the CLI (`src/cli/vault.ts`, `vault-broker.ts`,
  * `vault-doctor.ts`, `vault-grant.ts`, `vault-auto-unlock.ts`) all
@@ -28,12 +35,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { resolveBrokerSocketPath } from "./client.js";
+import { resolveBrokerSocketPath, defaultBrokerSocketPath } from "./client.js";
 
 const ENV_KEY = "SWITCHROOM_VAULT_BROKER_SOCK";
-const LEGACY_DEFAULT = join(homedir(), ".switchroom", "vault-broker.sock");
 
 describe("resolveBrokerSocketPath", () => {
   let savedEnv: string | undefined;
@@ -74,9 +78,16 @@ describe("resolveBrokerSocketPath", () => {
     expect(result).toBe("/from-config");
   });
 
-  it("falls back to ~/.switchroom/vault-broker.sock when nothing else is set", () => {
+  it("delegates to the runtime-aware default when no override/env/config is set", () => {
+    // Step 4 is NOT a fixed legacy path — it's defaultBrokerSocketPath()
+    // (operator-socket-if-present / docker → broker-operator/sock; else
+    // legacy). Asserting an absolute path here was environment-sensitive
+    // and reded `vitest` on any box where the operator socket exists.
+    // Pin the actual contract: the no-opts/no-env branch delegates to
+    // that single source of truth (client.ts: `return
+    // defaultBrokerSocketPath()`), which is deterministic per-env.
     const result = resolveBrokerSocketPath();
-    expect(result).toBe(LEGACY_DEFAULT);
+    expect(result).toBe(defaultBrokerSocketPath());
   });
 
   it("treats empty SWITCHROOM_VAULT_BROKER_SOCK env as unset", () => {

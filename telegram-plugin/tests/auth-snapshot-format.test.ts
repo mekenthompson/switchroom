@@ -146,7 +146,7 @@ describe('renderAuthSnapshotFormat2', () => {
       }),
     }),
     snap({
-      label: 'me@kenthompson.com.au',
+      label: 'bob@example.com',
       isActive: false,
       quota: quota({
         fiveHourUtilizationPct: 0,
@@ -181,13 +181,13 @@ describe('renderAuthSnapshotFormat2', () => {
 
   it('marks the active account with ●', () => {
     const out = renderAuthSnapshotFormat2(fixtureSnaps, { now: NOW, tz: 'UTC' });
-    expect(out).toMatch(/●\s*<code>you@gmail\.com<\/code>/);
+    expect(out).toMatch(/●\s*<code>you@example\.com<\/code>/);
   });
 
   it('shows "back …" for blocked accounts with binding-window word', () => {
     const out = renderAuthSnapshotFormat2(fixtureSnaps, { now: NOW, tz: 'UTC' });
-    // me@kenthompson is blocked on 7d, recovers Sun
-    expect(out).toMatch(/me@kenthompson\.com\.au[\s\S]*back .* 7-day cap/);
+    // bob@example is blocked on 7d, recovers Sun
+    expect(out).toMatch(/bob@example\.com[\s\S]*back .* 7-day cap/);
   });
 
   it('puts the imminent window first on healthy/throttling rows', () => {
@@ -245,7 +245,7 @@ describe('renderFallbackAnnouncement', () => {
     representativeClaim: 'five_hour',
   });
 
-  const PIXSOUL_HEALTHY = quota({
+  const YOU_HEALTHY = quota({
     fiveHourUtilizationPct: 8,
     sevenDayUtilizationPct: 20,
     fiveHourResetAt: new Date('2026-05-15T01:00:00Z'),
@@ -257,7 +257,7 @@ describe('renderFallbackAnnouncement', () => {
       oldLabel: 'ken@x',
       oldQuota: KEN_5H_BLOWN,
       newLabel: 'you@x',
-      newQuota: PIXSOUL_HEALTHY,
+      newQuota: YOU_HEALTHY,
       triggerAgent: 'carrie',
       now: NOW,
       tz: 'UTC',
@@ -273,7 +273,7 @@ describe('renderFallbackAnnouncement', () => {
         representativeClaim: 'seven_day',
       }),
       newLabel: 'you@x',
-      newQuota: PIXSOUL_HEALTHY,
+      newQuota: YOU_HEALTHY,
       triggerAgent: 'clerk',
       now: NOW,
       tz: 'UTC',
@@ -286,7 +286,7 @@ describe('renderFallbackAnnouncement', () => {
       oldLabel: 'ken@x',
       oldQuota: KEN_5H_BLOWN,
       newLabel: 'you@x',
-      newQuota: PIXSOUL_HEALTHY,
+      newQuota: YOU_HEALTHY,
       triggerAgent: 'carrie',
       now: NOW,
       tz: 'UTC',
@@ -300,7 +300,7 @@ describe('renderFallbackAnnouncement', () => {
       oldLabel: 'ken@x',
       oldQuota: KEN_5H_BLOWN,
       newLabel: 'you@x',
-      newQuota: PIXSOUL_HEALTHY,
+      newQuota: YOU_HEALTHY,
       triggerAgent: 'carrie',
       now: NOW,
       tz: 'UTC',

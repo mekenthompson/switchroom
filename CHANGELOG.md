@@ -313,15 +313,15 @@ agents:
   ziggy:
     auth_label: "you@example.com"
     auth:
-      accounts: [me@kenthompson.com.au, you@example.com]
+      accounts: [bob@example.com, you@example.com]
 
 # AFTER (one fleet active + per-agent override edge case)
 auth:
-  active: me@kenthompson.com.au
-  fallback_order: [me@kenthompson.com.au, you@example.com]
+  active: bob@example.com
+  fallback_order: [bob@example.com, you@example.com]
   consumers:
     - name: hindsight
-      account: me@kenthompson.com.au
+      account: bob@example.com
       uid: 11000
 
 agents:

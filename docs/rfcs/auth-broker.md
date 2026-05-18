@@ -356,15 +356,15 @@ agents:
 
 # AFTER (this RFC) ───────────────────────────────────────────────
 auth:
-  active: me@kenthompson.com.au           # fleet-wide active
+  active: bob@example.com           # fleet-wide active
   fallback_order:                          # cycle order for `auth rotate`
-    - me@kenthompson.com.au
+    - bob@example.com
     - you@example.com
     - alice@example.com
   admin_agents: [clerk]                    # optional — admin verbs allowed
   consumers:                               # optional — non-agent peers (hindsight, etc.)
     - name: hindsight
-      account: me@kenthompson.com.au       # consumer's pinned active account
+      account: bob@example.com       # consumer's pinned active account
       uid: 11000                           # optional; broker chowns socket to this UID
       # `mark-exhausted` from this consumer only affects this account.
       # `get-credentials` always returns this account's creds.
@@ -421,23 +421,23 @@ client.ts`). No file writes from the CLI for per-agent state.
 ```
 $ switchroom auth show
 ACCOUNT                           STATUS       EXPIRES   QUOTA-RESET
-● me@kenthompson.com.au           active       355d 23h  —
+● bob@example.com           active       355d 23h  —
 ✓ you@example.com               available    353d 23h  —
 ! alice@example.com     exhausted    356d 0h   1h 22m
 
 AGENT       ACTIVE                   SOURCE
-clerk       me@kenthompson.com.au    fleet-active (admin)
-ziggy       me@kenthompson.com.au    fleet-active
+clerk       bob@example.com    fleet-active (admin)
+ziggy       bob@example.com    fleet-active
 klanker     alice@example…    override
 
 CONSUMER    ACTIVE                   STATUS
-hindsight   me@kenthompson.com.au    socket bound (last seen 12s ago)
+hindsight   bob@example.com    socket bound (last seen 12s ago)
 ```
 
 ```
 $ switchroom auth show ziggy
 ziggy
-  Active account: me@kenthompson.com.au (fleet-active)
+  Active account: bob@example.com (fleet-active)
   Token expires:  355d 23h (refreshes at 60 min remaining)
   Last refresh:   2026-05-14 13:54:02
   Mirror sha:     ab12cd…  (matches broker index)
@@ -502,7 +502,7 @@ outside the agent fleet. The pattern:
    auth:
      consumers:
        - name: hindsight
-         account: me@kenthompson.com.au
+         account: bob@example.com
    ```
    On next `apply`, broker binds a socket at
    `/run/switchroom/auth-broker/hindsight/sock`, chowned to the

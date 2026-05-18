@@ -110,7 +110,7 @@ describe("shouldEmitGdriveMcp — broker-ACL contract", () => {
     // Schema lowercases+trims both the per-agent account and the
     // google_accounts keys; the predicate must agree post-normalization.
     expect(
-      shouldEmitGdriveMcp("carrie", "  Pixsoul@Gmail.com  ", {
+      shouldEmitGdriveMcp("carrie", "  You@Example.com  ", {
         "you@example.com": { enabled_for: ["carrie"] },
       }),
     ).toBe(true);

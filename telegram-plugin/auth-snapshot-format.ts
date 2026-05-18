@@ -389,12 +389,12 @@ export interface FallbackAnnouncementInput {
 /**
  * Render the causal-shape fallback announcement.
  *
- *   ✓ Switched fleet · 5-hour limit on ken
+ *   ✓ Switched fleet · 5-hour limit on alice
  *
  *   alice@example → you@example.com
  *   Triggered by: agent carrie
  *
- *   ken recovers Fri 3:50 PM (in 4h 56m)
+ *   alice recovers Fri 3:50 PM (in 4h 56m)
  *   you now: 8% of 5h · 20% of 7d (plenty of headroom)
  *
  * Falls back to a different shape when no eligible target was found

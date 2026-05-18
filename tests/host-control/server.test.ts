@@ -975,3 +975,81 @@ describe("hostd server — Phase 2 fleet mutations + lock", () => {
     expect(peragent.result).toBe("completed");
   });
 });
+
+describe("hostd server — apply-asset preflight (klanker incident)", () => {
+  async function freshServer(applyAssetsRoot: string): Promise<HostdServer> {
+    if (server) await server.stop();
+    server = new HostdServer({
+      homeDir: tmp,
+      agentUids: { klanker: 10001, bob: 10002 },
+      config: { agents: { klanker: { admin: true }, bob: {} } },
+      switchroomBin: stubBin,
+      auditLogPath: join(tmp, "audit.log"),
+      allowNonLinux: true,
+      applyAssetsRoot,
+    });
+    await server.start();
+    return server;
+  }
+  const adminSock = () =>
+    server.getBoundPaths().find((p) => p.endsWith("/klanker/sock"))!;
+
+  it("update_apply: REFUSES (denied, nothing spawned) when apply assets are missing", async () => {
+    const bare = join(tmp, "assets-missing"); // no profiles/ or vendor/
+    mkdirSync(bare, { recursive: true });
+    await freshServer(bare);
+    const resp = await hostdRequest(
+      { socketPath: adminSock() },
+      { v: 1, op: "update_apply", request_id: "pf-ua", args: {} },
+    );
+    expect(resp.result).toBe("denied");
+    expect(resp.error).toMatch(/missing apply-time assets/);
+    expect(resp.error).toContain(join(bare, "profiles"));
+    expect(resp.error).toMatch(/Nothing was pulled or changed/);
+    expect(resp.error).toMatch(/switchroom update/);
+    // Denied ⇒ spawnFleetMutation never ran: no status entry exists.
+    const poll = await hostdRequest(
+      { socketPath: adminSock() },
+      { v: 1, op: "get_status", request_id: "pf-poll", args: { target_request_id: "pf-ua" } },
+    );
+    expect(poll.result).not.toBe("started");
+  });
+
+  it("apply: also refused when assets missing (shared preflight)", async () => {
+    const bare = join(tmp, "assets-missing-2");
+    mkdirSync(bare, { recursive: true });
+    await freshServer(bare);
+    const resp = await hostdRequest(
+      { socketPath: adminSock() },
+      { v: 1, op: "apply", request_id: "pf-ap", args: {} },
+    );
+    expect(resp.result).toBe("denied");
+    expect(resp.error).toMatch(/missing apply-time assets/);
+  });
+
+  it("update_apply: PROCEEDS when profiles/default + vendor/hindsight-memory are present", async () => {
+    const ok = join(tmp, "assets-ok");
+    mkdirSync(join(ok, "profiles", "default"), { recursive: true });
+    mkdirSync(join(ok, "vendor", "hindsight-memory"), { recursive: true });
+    await freshServer(ok);
+    const resp = await hostdRequest(
+      { socketPath: adminSock() },
+      { v: 1, op: "update_apply", request_id: "pf-ok", args: {} },
+    );
+    // Preflight passes → proceeds to spawn the stub → "started".
+    expect(resp.result).toBe("started");
+  });
+
+  it("partial assets (profiles present, vendor missing) still refuses, naming the gap", async () => {
+    const partial = join(tmp, "assets-partial");
+    mkdirSync(join(partial, "profiles", "default"), { recursive: true });
+    await freshServer(partial);
+    const resp = await hostdRequest(
+      { socketPath: adminSock() },
+      { v: 1, op: "update_apply", request_id: "pf-partial", args: {} },
+    );
+    expect(resp.result).toBe("denied");
+    expect(resp.error).toContain(join(partial, "vendor", "hindsight-memory"));
+    expect(resp.error).not.toContain(join(partial, "profiles") + ",");
+  });
+});

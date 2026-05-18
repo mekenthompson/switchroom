@@ -373,9 +373,15 @@ export function skillCreate(
           "",
           { flag: "wx", mode: 0o600 },
         );
-      } catch {
-        // best-effort: even if marker write fails, the skill exists.
-        // Surfacing this as a hard error would leave an orphan dir.
+      } catch (markerErr) {
+        // Transactional: a global skill without a marker is unowned
+        // and locks out the original author on next edit. Roll back
+        // the rename so the author can retry rather than orphaning.
+        try { rmSync(destDir, { recursive: true, force: true }); } catch { /* */ }
+        return authorErr(
+          "E_SKILL_INVALID_PATH",
+          `created skill but failed to write authorship marker; rolled back. retry: ${(markerErr as Error).message}`,
+        );
       }
     }
   } catch (e) {

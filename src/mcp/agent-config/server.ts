@@ -537,7 +537,7 @@ export function dispatchTool(
         "skill", "edit",
         "--name", a.name,
         "--file", a.file,
-        "--version", a.version,
+        "--expect-version", a.version,
         "--from-stdin",
       ];
       if (a.agent) base.push("--agent", a.agent);

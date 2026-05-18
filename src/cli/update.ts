@@ -26,8 +26,11 @@
  * Flags:
  *   --check          dry-run; print the steps that would run, exit 0.
  *   --skip-images    skip step 1 (offline mode).
- *   --rebuild        run step 2 (source-checkout users; auto-skipped
- *                    when not in a git repo).
+ *   --rebuild        run step 2. Source-checkout / maintainer only —
+ *                    HARD-REFUSED (exit 2) on a published install,
+ *                    which is told to use `npm i -g switchroom@latest
+ *                    && switchroom update` instead. Refusal is a
+ *                    preflight: nothing runs before it fires.
  *
  * Legacy `--phase=post-build` is still accepted as a no-op so any
  * in-flight v0.6 → v0.7 self-reexec path doesn't crash mid-flight.
@@ -55,6 +58,9 @@ interface UpdateOptions {
   force?: boolean;
   /** Compose-file override for tests. */
   composePath?: string;
+  /** Test seam — override the running-script path used by the
+   *  `--rebuild` source-checkout guard (default: process.argv[1]). */
+  scriptPath?: string;
   /** stdout/stderr writers for tests. */
   stdout?: (s: string) => void;
   stderr?: (s: string) => void;
@@ -114,6 +120,34 @@ export function isGitCheckout(scriptPath: string): boolean {
 }
 
 /**
+ * `--rebuild` (git pull + bun install + npm run build) is a
+ * **source-checkout / maintainer-only** operation. On a published
+ * install (npm-global, /usr/local/bin, any non-checkout) building
+ * from source is meaningless AND silently drifts the host off the
+ * reviewed, CI-published release — the exact failure mode the
+ * published-artifact model exists to prevent.
+ *
+ * Returns `null` when `--rebuild` is legitimate (running from a git
+ * checkout), or the operator-facing refusal message otherwise.
+ * Exported so the preflight, the in-step defence-in-depth, and unit
+ * tests all share one source of truth.
+ */
+export function rebuildRefusalMessage(scriptPath: string): string | null {
+  if (isGitCheckout(scriptPath)) return null;
+  return (
+    `--rebuild builds the CLI from a git checkout, but switchroom is ` +
+    `running from "${scriptPath}" — a published install (no .git ` +
+    `ancestor). Rebuilding from source here would drift this host off ` +
+    `the reviewed, CI-published release. Use the published path:\n` +
+    `\n` +
+    `  npm i -g switchroom@latest && switchroom update\n` +
+    `\n` +
+    `(\`--rebuild\` is for switchroom maintainers iterating on a source ` +
+    `checkout — not for published installs.)`
+  );
+}
+
+/**
  * Build the ordered list of update steps. Pure function — no side
  * effects. The action handler iterates this list and either prints
  * (--check) or executes (default).
@@ -121,7 +155,7 @@ export function isGitCheckout(scriptPath: string): boolean {
 export function planUpdate(opts: UpdateOptions): UpdateStep[] {
   const composePath = opts.composePath ?? DEFAULT_COMPOSE_PATH;
   const runner = opts.runner ?? defaultRunner;
-  const scriptPath = process.argv[1] ?? "";
+  const scriptPath = opts.scriptPath ?? process.argv[1] ?? "";
   const steps: UpdateStep[] = [];
 
   // When --channel / --pin is set, the resolved image tag in compose
@@ -169,23 +203,21 @@ export function planUpdate(opts: UpdateOptions): UpdateStep[] {
     },
   });
 
-  // Source-checkout step. Only added when --rebuild is explicit. If
-  // the user passed --rebuild but the CLI isn't running from a git
-  // checkout, the runUpdate dispatcher will fail loudly — the explicit
-  // flag is treated as a hard intent, not a hint we can quietly drop
-  // (#923 reviewer feedback).
+  // Source-checkout step. Only added when --rebuild is explicit.
+  // `runUpdate` preflights `rebuildRefusalMessage` and hard-refuses
+  // BEFORE any step runs on a published install (so a fat-fingered
+  // `--rebuild` on a consumer host can't half-apply then drift to
+  // unreviewed source). The in-step check below is defence-in-depth
+  // for callers that drive `planUpdate` directly (e.g. unit tests),
+  // sharing the same single-source-of-truth message.
   if (opts.rebuild) {
     steps.push({
       name: "rebuild-source",
       description: "git pull upstream main + bun install + npm run build",
       run: () => {
-        if (!isGitCheckout(scriptPath)) {
-          throw new Error(
-            `--rebuild requires a git checkout, but the CLI is running ` +
-            `from ${scriptPath} which has no .git ancestor (looks like ` +
-            `an installed binary). Drop --rebuild or invoke from a ` +
-            `source checkout.`,
-          );
+        const refusal = rebuildRefusalMessage(scriptPath);
+        if (refusal) {
+          throw new Error(refusal);
         }
         // CWD matters: git/bun/npm run from process.cwd(). Operator
         // is expected to invoke `update --rebuild` from inside the
@@ -761,6 +793,20 @@ async function runUpdate(opts: UpdateOptions): Promise<number> {
     return 2;
   }
 
+  // Preflight: --rebuild is source-checkout-only. Refuse BEFORE any
+  // step (or even the --check plan) on a published install — fail
+  // fast with the published-path remediation rather than letting
+  // pull-images run and then dying mid-pipeline.
+  if (opts.rebuild) {
+    const refusal = rebuildRefusalMessage(
+      opts.scriptPath ?? process.argv[1] ?? "",
+    );
+    if (refusal) {
+      stderr(chalk.red(refusal + "\n"));
+      return 2;
+    }
+  }
+
   const steps = planUpdate(opts);
 
   if (opts.check) {
@@ -804,7 +850,7 @@ export function registerUpdateCommand(program: Command): void {
     .option("--skip-images", "Skip the docker image pull (offline mode).")
     .option(
       "--rebuild",
-      "Source-checkout users: also git pull + bun install + npm run build before applying. Auto-skipped when the CLI is an installed binary.",
+      "Source-checkout / maintainer only: git pull + bun install + npm run build before applying. REFUSED on a published install — use `npm i -g switchroom@latest && switchroom update` there.",
     )
     .option(
       "--status",

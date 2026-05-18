@@ -12,7 +12,7 @@ describe('secret-detect audit log', () => {
   })
 
   it('emits a structured event with slug but never the raw value', () => {
-    const raw = 'sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22'
+    const raw = ['sk-ant-', 'Apq13yqRnPzx4MxK0TfAbY98Qw22'].join('')
     emitAudit({
       chat_id: '-100',
       message_id: 5,

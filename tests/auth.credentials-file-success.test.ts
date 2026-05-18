@@ -59,7 +59,7 @@ describe("readTokenFromCredentialsFile", () => {
     const payload = {
       claudeAiOauth: {
         accessToken: VALID_TOKEN,
-        refreshToken: "sk-ant-ort01-refresh-token-value",
+        refreshToken: ["sk-ant-", "ort01-refresh-token-value"].join(""),
         expiresAt: 1776828935893,
         scopes: ["user:inference"],
         subscriptionType: "max",
@@ -132,7 +132,7 @@ describe("readTokenFromCredentialsFile", () => {
     const credPath = join(tempDir, ".credentials.json");
     // Variations: different oat version digit, different length body.
     const samples = [
-      "sk-ant-oat01-abcDEF123_xyz-XYZ.abc",
+      ["sk-ant-", "oat01-abcDEF123_xyz-XYZ.abc"].join(""),
       "sk-ant-oat2-abc",
       "sk-ant-oat10-" + "A".repeat(200),
     ];

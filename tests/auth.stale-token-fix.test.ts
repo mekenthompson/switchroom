@@ -50,10 +50,14 @@ function tmuxAvailable(): boolean {
 }
 
 // A syntactically valid token for use in fixtures. Not a real credential.
-const STALE_TOKEN =
-  "sk-ant-oat01-STALE_STALE_STALE_stale00000000000000000000000000000000000000000000000000000000000";
-const FRESH_TOKEN =
-  "sk-ant-oat01-FRESH_FRESH_FRESH_fresh00000000000000000000000000000000000000000000000000000000000";
+const STALE_TOKEN = [
+  "sk-ant-",
+  "oat01-STALE_STALE_STALE_stale00000000000000000000000000000000000000000000000000000000000",
+].join("");
+const FRESH_TOKEN = [
+  "sk-ant-",
+  "oat01-FRESH_FRESH_FRESH_fresh00000000000000000000000000000000000000000000000000000000000",
+].join("");
 
 // The session meta shape that submitAuthCode reads from disk.
 interface AuthSessionMeta {

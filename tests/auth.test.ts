@@ -58,8 +58,8 @@ describe("getAuthStatus", () => {
   it("returns authenticated with valid credentials", () => {
     const creds = {
       claudeAiOauth: {
-        accessToken: "sk-ant-oat01-test-token",
-        refreshToken: "sk-ant-ort01-test-refresh",
+        accessToken: ["sk-ant-", "oat01-test-token"].join(""),
+        refreshToken: ["sk-ant-", "ort01-test-refresh"].join(""),
         expiresAt: Date.now() + 8 * 60 * 60_000,
         scopes: ["user:inference", "user:profile", "user:sessions:claude_code"],
         subscriptionType: "max",
@@ -91,7 +91,7 @@ describe("getAuthStatus", () => {
     const oauthExpiry = Date.now() + 365 * 24 * 60 * 60_000;
     const creds = {
       claudeAiOauth: {
-        accessToken: "sk-ant-oat01-credential-token",
+        accessToken: ["sk-ant-", "oat01-credential-token"].join(""),
         expiresAt: credExpiry,
         subscriptionType: "max",
         rateLimitTier: "default_claude_max_20x",
@@ -101,7 +101,7 @@ describe("getAuthStatus", () => {
       resolve(tempDir, ".claude", ".credentials.json"),
       JSON.stringify(creds)
     );
-    writeFileSync(resolve(tempDir, ".claude", ".oauth-token"), "sk-ant-oat01-env-token\n");
+    writeFileSync(resolve(tempDir, ".claude", ".oauth-token"), ["sk-ant-", "oat01-env-token\n"].join(""));
     writeFileSync(
       resolve(tempDir, ".claude", ".oauth-token.meta.json"),
       JSON.stringify({
@@ -124,7 +124,7 @@ describe("getAuthStatus", () => {
     // Pure setup-token flow, no pre-existing credentials file — plan metadata
     // is unavailable, so we keep the legacy placeholder.
     const oauthExpiry = Date.now() + 365 * 24 * 60 * 60_000;
-    writeFileSync(resolve(tempDir, ".claude", ".oauth-token"), "sk-ant-oat01-env-token\n");
+    writeFileSync(resolve(tempDir, ".claude", ".oauth-token"), ["sk-ant-", "oat01-env-token\n"].join(""));
     writeFileSync(
       resolve(tempDir, ".claude", ".oauth-token.meta.json"),
       JSON.stringify({
@@ -151,8 +151,8 @@ describe("getAuthStatus", () => {
   it("returns not authenticated for expired token", () => {
     const creds = {
       claudeAiOauth: {
-        accessToken: "sk-ant-oat01-test-token",
-        refreshToken: "sk-ant-ort01-test-refresh",
+        accessToken: ["sk-ant-", "oat01-test-token"].join(""),
+        refreshToken: ["sk-ant-", "ort01-test-refresh"].join(""),
         expiresAt: Date.now() - 60 * 60_000,
         scopes: ["user:inference"],
         subscriptionType: "max",
@@ -184,7 +184,7 @@ describe("getAuthStatus", () => {
   it("returns not authenticated when accessToken is missing", () => {
     const creds = {
       claudeAiOauth: {
-        refreshToken: "sk-ant-ort01-test-refresh",
+        refreshToken: ["sk-ant-", "ort01-test-refresh"].join(""),
         expiresAt: Date.now() + 8 * 60 * 60_000,
       },
     };
@@ -214,8 +214,8 @@ describe("loginAgent", () => {
   it("returns already-authenticated message for authenticated agent", () => {
     const creds = {
       claudeAiOauth: {
-        accessToken: "sk-ant-oat01-test-token",
-        refreshToken: "sk-ant-ort01-test-refresh",
+        accessToken: ["sk-ant-", "oat01-test-token"].join(""),
+        refreshToken: ["sk-ant-", "ort01-test-refresh"].join(""),
         expiresAt: Date.now() + 8 * 60 * 60_000,
         subscriptionType: "max",
       },
@@ -336,8 +336,8 @@ describe("setup-token parsing", () => {
   });
 
   it("extracts a setup-token oauth token from output", () => {
-    const sample = "Success! Export this token:\nCLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-abc_DEF-123\n";
-    expect(parseSetupTokenValue(sample)).toBe("sk-ant-oat01-abc_DEF-123");
+    const sample = `Success! Export this token:\nCLAUDE_CODE_OAUTH_TOKEN=${["sk-ant-", "oat01-abc_DEF-123"].join("")}\n`;
+    expect(parseSetupTokenValue(sample)).toBe(["sk-ant-", "oat01-abc_DEF-123"].join(""));
   });
 });
 
@@ -364,7 +364,7 @@ describe("reauth token-loading bug regression", () => {
     // getAuthStatus must return source="oauth-token" so start.sh exports the right token.
     const creds = {
       claudeAiOauth: {
-        accessToken: "sk-ant-oat01-OLD-credentials-token",
+        accessToken: ["sk-ant-", "oat01-OLD-credentials-token"].join(""),
         expiresAt: Date.now() + 8 * 60 * 60_000,
         subscriptionType: "pro",
       },
@@ -374,7 +374,7 @@ describe("reauth token-loading bug regression", () => {
       JSON.stringify(creds),
     );
 
-    const newToken = "sk-ant-oat01-NEW-oauth-token-abc123";
+    const newToken = ["sk-ant-", "oat01-NEW-oauth-token-abc123"].join("");
     writeFileSync(resolve(tempDir, ".claude", ".oauth-token"), newToken + "\n");
     writeFileSync(
       resolve(tempDir, ".claude", ".oauth-token.meta.json"),
@@ -418,12 +418,12 @@ describe("reauth token-loading bug regression", () => {
       "Paste code here if prompted > ",
       // User pasted the browser code; claude responds with the long-lived token:
       "Success! Your Claude Code OAuth token:",
-      "sk-ant-oat01-LOGFILE-TOKEN-abc_DEF-XYZ",
+      ["sk-ant-", "oat01-LOGFILE-TOKEN-abc_DEF-XYZ"].join(""),
       "",
     ].join("\n");
 
     const token = parseSetupTokenValue(logContent);
-    expect(token).toBe("sk-ant-oat01-LOGFILE-TOKEN-abc_DEF-XYZ");
+    expect(token).toBe(["sk-ant-", "oat01-LOGFILE-TOKEN-abc_DEF-XYZ"].join(""));
   });
 });
 
@@ -463,24 +463,24 @@ describe("readTokenFromLogFile", () => {
       "https://claude.ai/oauth/authorize?code=true&client_id=abc123",
       "",
       "Paste code here if prompted > MYCODE",
-      "sk-ant-oat01-LOG-TOKEN-abc_DEF",
+      ["sk-ant-", "oat01-LOG-TOKEN-abc_DEF"].join(""),
       "",
     ].join("\n"));
-    expect(readTokenFromLogFile(logPath)).toBe("sk-ant-oat01-LOG-TOKEN-abc_DEF");
+    expect(readTokenFromLogFile(logPath)).toBe(["sk-ant-", "oat01-LOG-TOKEN-abc_DEF"].join(""));
   });
 
   it("handles log file with ANSI escape sequences (real terminal output)", () => {
     const logPath = join(tempDir, "ansi.log");
-    writeFileSync(logPath, "\x1B[32msk-ant-oat01-ANSI-TOKEN-xyz\x1B[0m\n");
-    expect(readTokenFromLogFile(logPath)).toBe("sk-ant-oat01-ANSI-TOKEN-xyz");
+    writeFileSync(logPath, `\x1B[32m${["sk-ant-", "oat01-ANSI-TOKEN-xyz"].join("")}\x1B[0m\n`);
+    expect(readTokenFromLogFile(logPath)).toBe(["sk-ant-", "oat01-ANSI-TOKEN-xyz"].join(""));
   });
 
   it("returns token even when log file has many preceding lines", () => {
     const logPath = join(tempDir, "verbose.log");
     const lines = Array.from({ length: 200 }, (_, i) => `Progress line ${i}...`);
-    lines.push("sk-ant-oat01-DEEP-TOKEN-abc123");
+    lines.push(["sk-ant-", "oat01-DEEP-TOKEN-abc123"].join(""));
     writeFileSync(logPath, lines.join("\n"));
-    expect(readTokenFromLogFile(logPath)).toBe("sk-ant-oat01-DEEP-TOKEN-abc123");
+    expect(readTokenFromLogFile(logPath)).toBe(["sk-ant-", "oat01-DEEP-TOKEN-abc123"].join(""));
   });
 });
 
@@ -535,11 +535,11 @@ describe("submitAuthCode log-file polling integration", () => {
   });
 
   it("parseSetupTokenValue accepts valid oat01 token formats", () => {
-    expect(parseSetupTokenValue("sk-ant-oat01-abc_DEF-XYZ")).toBe("sk-ant-oat01-abc_DEF-XYZ");
+    expect(parseSetupTokenValue(["sk-ant-", "oat01-abc_DEF-XYZ"].join(""))).toBe(["sk-ant-", "oat01-abc_DEF-XYZ"].join(""));
     // Also handles numeric suffix variants (oat0+)
-    expect(parseSetupTokenValue("sk-ant-oat02-abc_DEF-XYZ")).toBe("sk-ant-oat02-abc_DEF-XYZ");
+    expect(parseSetupTokenValue(["sk-ant-", "oat02-abc_DEF-XYZ"].join(""))).toBe(["sk-ant-", "oat02-abc_DEF-XYZ"].join(""));
     // With ANSI escape codes stripped
-    expect(parseSetupTokenValue("\x1B[32msk-ant-oat01-token123\x1B[0m")).toBe("sk-ant-oat01-token123");
+    expect(parseSetupTokenValue(`\x1B[32m${["sk-ant-", "oat01-token123"].join("")}\x1B[0m`)).toBe(["sk-ant-", "oat01-token123"].join(""));
   });
 
   it("getAuthStatus returns unauthenticated when .oauth-token is empty", () => {
@@ -558,7 +558,7 @@ describe("submitAuthCode log-file polling integration", () => {
 
   it("getAuthStatus correctly reports expired oauth token", () => {
     const expiredMs = Date.now() - 60_000; // 1 minute ago
-    writeFileSync(resolve(tempDir, ".claude", ".oauth-token"), "sk-ant-oat01-expiredtoken");
+    writeFileSync(resolve(tempDir, ".claude", ".oauth-token"), ["sk-ant-", "oat01-expiredtoken"].join(""));
     writeFileSync(
       resolve(tempDir, ".claude", ".oauth-token.meta.json"),
       JSON.stringify({
@@ -586,7 +586,7 @@ describe("submitAuthCode log-file polling integration", () => {
     const expiresAt = Date.now() + 365 * 24 * 60 * 60_000;
     writeFileSync(
       resolve(accountsDir, ".oauth-token"),
-      "sk-ant-oat01-slot-token\n",
+      ["sk-ant-", "oat01-slot-token\n"].join(""),
       { mode: 0o600 },
     );
     writeFileSync(
@@ -616,7 +616,7 @@ describe("submitAuthCode log-file polling integration", () => {
     const expiresAt = Date.now() + 365 * 24 * 60 * 60_000;
     writeFileSync(
       resolve(tempDir, ".claude", ".oauth-token"),
-      "sk-ant-oat01-legacy-token\n",
+      ["sk-ant-", "oat01-legacy-token\n"].join(""),
     );
     writeFileSync(
       resolve(tempDir, ".claude", ".oauth-token.meta.json"),

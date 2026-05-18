@@ -730,7 +730,7 @@ interface AuthorCliOpts {
   file?: string;
   content?: string;
   fromStdin?: boolean;
-  version?: string;
+  expectVersion?: string;
   scope?: string;
 }
 
@@ -812,7 +812,12 @@ export function registerAgentConfigSkillAuthorCommands(program: Command): void {
     )
     .requiredOption("--name <slug>", "Skill slug")
     .requiredOption("--file <relpath>", "File within the skill (e.g. SKILL.md)")
-    .requiredOption("--version <token>", "Version token from skillRead")
+    .requiredOption(
+      "--expect-version <token>",
+      "Optimistic-concurrency token from skillRead. NOT --version: that " +
+      "long flag is owned by the root program's version printer and would " +
+      "shadow this option (see #1492).",
+    )
     .option("--content <string>", "New file content (or use --from-stdin)")
     .option("--from-stdin", "Read raw content from stdin", false)
     .option("--agent <name>", "Target agent (defaults to $SWITCHROOM_AGENT_NAME)")
@@ -832,7 +837,7 @@ export function registerAgentConfigSkillAuthorCommands(program: Command): void {
         name: opts.name,
         file: opts.file!,
         content,
-        version: opts.version!,
+        version: opts.expectVersion!,
         scope: sp as SkillScope,
       });
       if (!r.ok) fail(r, resolvedAgent, "skill.edit",

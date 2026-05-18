@@ -91,6 +91,76 @@ describe("agent-config MCP server — PR A author tools", () => {
     }
   });
 
+  it("E2E #1492: skill_edit round-trips via the real CLI (not shadowed by --version)", () => {
+    // Regression for #1492. The MCP server shells out with the
+    // optimistic-concurrency token; if that CLI flag is `--version`
+    // the root program's version printer eats it, emits `0.x.y` on
+    // stdout, exits 0 — and the MCP server's JSON.parse blows up with
+    // "Unable to parse JSON string" while nothing lands on disk. This
+    // drives the real create→read→edit→read loop so the collision
+    // can never silently come back. (The skill_create E2E above did
+    // NOT cover edit, which is why #1491 shipped green.)
+    const which = spawnSync("which", ["bun"], { encoding: "utf-8" });
+    if (which.status !== 0) return;
+    const cliEntry = join(process.cwd(), "bin", "switchroom.ts");
+    if (!existsSync(cliEntry)) return;
+    const tmp = mkdtempSync(join(tmpdir(), "skill-edit-e2e-"));
+    try {
+      const env = {
+        ...process.env,
+        HOME: tmp,
+        SWITCHROOM_AGENT_NAME: "alice",
+      } as NodeJS.ProcessEnv;
+      const create = spawnSync(
+        "bun",
+        [cliEntry, "skill", "create", "--name", "ed", "--from-stdin"],
+        {
+          encoding: "utf-8",
+          env,
+          input: JSON.stringify({
+            "SKILL.md": `---\nname: ed\ndescription: edit roundtrip\n---\n# v1\n`,
+          }),
+          timeout: 30000,
+        },
+      );
+      expect(create.status, `create: ${create.stderr}`).toBe(0);
+      const v1 = JSON.parse(
+        spawnSync("bun", [cliEntry, "skill", "read", "--name", "ed"], {
+          encoding: "utf-8",
+          env,
+          timeout: 30000,
+        }).stdout.trim(),
+      ).version as string;
+
+      const edit = spawnSync(
+        "bun",
+        [
+          cliEntry, "skill", "edit",
+          "--name", "ed",
+          "--file", "scripts/run.py",
+          "--expect-version", v1,
+          "--from-stdin",
+        ],
+        { encoding: "utf-8", env, input: `print("hi")\n`, timeout: 30000 },
+      );
+      expect(edit.status, `edit: ${edit.stderr}`).toBe(0);
+      // The actual #1492 assertion: stdout is parseable JSON, NOT the
+      // CLI version string. JSON.parse("0.11.1") throws exactly the
+      // reported error.
+      const parsed = JSON.parse(edit.stdout.trim());
+      expect(parsed.ok).toBe(true);
+      expect(parsed.file).toBe("scripts/run.py");
+      const written = join(
+        tmp, ".switchroom", "agents", "alice", ".claude",
+        "skills", "ed", "scripts", "run.py",
+      );
+      expect(existsSync(written)).toBe(true);
+      expect(readFileSync(written, "utf-8")).toContain('print("hi")');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("S2: spawnSyncWithStdin uses a 30s timeout", () => {
     // Sanity-check that the helper actually executes; with a no-op
     // command we should get a quick exit. The real assertion is the

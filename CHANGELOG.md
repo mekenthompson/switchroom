@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.12.2 — published-install guardrail for `update --rebuild`
+
+`switchroom update --rebuild` (git pull + build from source) is a source-checkout / maintainer-only operation. On a published install (npm-global / GHCR-image host) it is now **hard-refused fail-fast**: a preflight in `runUpdate` refuses *before any step runs* (and before the `--check` plan) with exit 2 and the correct remediation — `npm i -g switchroom@latest && switchroom update`. Previously it died mid-pipeline (after `pull-images`) with advice ("invoke from a source checkout") that's wrong for a consumer host. Source checkouts — including git worktrees — are byte-unchanged; this only makes a published host structurally un-driftable off the reviewed, CI-published release via that flag.
+
+### Changes
+
+#### Fixes
+
+- **fix(update):** `--rebuild` hard-refuses on a published install (fail-fast preflight, exit 2, nothing runs) with the published-path remediation; shared `rebuildRefusalMessage()` is the single source of truth (preflight + in-step defence-in-depth); header/option help corrected (it claimed "auto-skipped"; it refuses). Maintainer source-checkout behaviour unchanged. (#1506)
+
 ## v0.12.1 — Claude-native skill authoring; doctor/vault-broker hardening
 
 Headline: skill authoring is now **Claude-native and gated by review, not by tooling**. An agent creates a skill for itself the same way anyone uses Claude — it writes files into its own `$CLAUDE_CONFIG_DIR/skills/<slug>/` (persistent, reconcile-safe, discovered next session), guided by the bundled `skill-creator` skill and a non-blocking validator hook. There is **no** skill-authoring/publish tool, CLI, or broker write path. Sharing a skill with the rest of the fleet is a **reviewed pull request** (it becomes a bundled-default, opt-out per agent, or a `skills:`-cascade entry from `switchroom.skills_dir`), distributed by the normal reconcile path — never a runtime action. Also: more honest `doctor` visibility and several vault-broker ACL correctness fixes.

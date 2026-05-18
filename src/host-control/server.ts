@@ -34,7 +34,7 @@ import {
   renameSync,
   mkdirSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
   decodeRequest,
@@ -81,6 +81,15 @@ export interface ServerOptions {
   auditLogPath?: string;
   /** Allow non-Linux dev mode (skips chown). */
   allowNonLinux?: boolean;
+  /**
+   * Root the apply-asset preflight resolves package-relative apply
+   * assets against (`<root>/profiles`, `<root>/vendor/hindsight-
+   * memory`). Default: two dirs up from this module — for the bundled
+   * daemon (`/opt/switchroom/dist/host-control/main.js`) that is
+   * `/opt/switchroom`, exactly where Dockerfile.hostd bakes them and
+   * the same root the CLI bundle resolves to. Test seam only.
+   */
+  applyAssetsRoot?: string;
   /**
    * Filesystem root the daemon uses to read host-side artifacts (e.g.
    * the install-type cache at `<bindRoot>/.switchroom/install-type.json`).
@@ -699,6 +708,51 @@ export class HostdServer {
    * `denied` with the in-flight request_id so the caller can poll
    * `get_status` instead of racing.
    */
+  /**
+   * Apply-asset preflight. `apply` / `update_apply` shell out to the
+   * bundled `switchroom` CLI, which resolves profiles + the vendored
+   * hindsight plugin RELATIVE TO ITSELF (no path arg):
+   *   profiles.ts:  resolve(import.meta.dirname,"../../profiles")
+   *   scaffold.ts:  resolve(import.meta.dirname,"../../vendor/hindsight-memory")
+   * If the hostd image was built without those (the klanker incident),
+   * `update_apply` pulls images then dies at apply-config, stranding
+   * the fleet on the old image. We refuse BEFORE anything is pulled
+   * or changed — same fail-fast principle as the `--rebuild` guard.
+   * Future-proofs the per-asset fragility: any new package-relative
+   * apply asset added here can't silently strand a fleet again.
+   */
+  private missingApplyAssets(): string[] {
+    const root =
+      this.opts.applyAssetsRoot ?? resolve(import.meta.dirname, "../..");
+    return [
+      join(root, "profiles"),
+      join(root, "profiles", "default"),
+      join(root, "vendor", "hindsight-memory"),
+    ].filter((p) => !existsSync(p));
+  }
+
+  /** Operator-facing refusal if apply assets are missing, else null.
+   *  Shared by handleUpdateApply + handleApply. */
+  private applyAssetPreflight(
+    request_id: string,
+    started: number,
+  ): HostdResponse | null {
+    const missing = this.missingApplyAssets();
+    if (missing.length === 0) return null;
+    return deniedResponse(
+      request_id,
+      `refused: this switchroom-hostd image is missing apply-time ` +
+        `assets [${missing.join(", ")}]. hostd's in-container ` +
+        `\`switchroom apply\` cannot scaffold agents without them and ` +
+        `would pull images then strand the fleet on the old image ` +
+        `(the klanker incident). Nothing was pulled or changed. Fix: ` +
+        `rebuild/refresh the hostd image — \`switchroom update\` ` +
+        `(refreshes hostd) or \`switchroom hostd install\` on the ` +
+        `host; meanwhile run \`switchroom update\` host-side.`,
+      Date.now() - started,
+    );
+  }
+
   private handleUpdateApply(
     req: Extract<HostdRequest, { op: "update_apply" }>,
     caller: SocketIdentity,
@@ -706,6 +760,9 @@ export class HostdServer {
   ): HostdResponse {
     const denied = this.checkFleetMutationLock(req.op, req.request_id, started);
     if (denied) return denied;
+
+    const assetDenied = this.applyAssetPreflight(req.request_id, started);
+    if (assetDenied) return assetDenied;
 
     // Mutual exclusion of channel vs pin. Schema accepts both optional;
     // server-side enforcement here keeps the contract honest at the
@@ -784,6 +841,9 @@ export class HostdServer {
   ): HostdResponse {
     const denied = this.checkFleetMutationLock(req.op, req.request_id, started);
     if (denied) return denied;
+
+    const assetDenied = this.applyAssetPreflight(req.request_id, started);
+    if (assetDenied) return assetDenied;
 
     const args = ["apply", "--non-interactive"];
     const entry: StatusEntry = {

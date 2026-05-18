@@ -76,6 +76,28 @@ RUN install -d -m 0755 /host-home /host-home/.switchroom
 COPY dist/cli/switchroom.js /opt/switchroom/dist/cli/switchroom.js
 COPY dist/host-control/main.js /opt/switchroom/dist/host-control/main.js
 
+# Apply-time assets the bundled CLI resolves RELATIVE TO ITSELF.
+# `switchroom apply` (reached here via the `apply` / `update_apply`
+# verbs) does NOT take a profiles/vendor path — it hardcodes them
+# relative to the CLI module:
+#   src/agents/profiles.ts:  resolve(import.meta.dirname,"../../profiles")
+#   src/agents/scaffold.ts:  resolve(import.meta.dirname,"../../vendor/hindsight-memory")
+# The CLI bundle lives at /opt/switchroom/dist/cli/switchroom.js, so
+# those resolve to /opt/switchroom/profiles and
+# /opt/switchroom/vendor/hindsight-memory. Without these, hostd's
+# update_apply pulls images then dies at apply-config with
+# "Profile not found: default (searched /opt/switchroom/profiles)",
+# stranding the fleet on the old image (the klanker incident).
+# Agent images intentionally do NOT bake these (agents never run
+# apply — their start.sh is rendered host-side); hostd is the ONE
+# container that runs apply, so it alone needs the apply asset tree.
+# Keep this in sync with every package-relative
+# resolve(import.meta.dirname,"../../<asset>") on the apply path
+# (the Part-2 preflight in src/host-control/server.ts hard-fails
+# fast if any are missing rather than stranding a fleet).
+COPY profiles/ /opt/switchroom/profiles/
+COPY vendor/hindsight-memory/ /opt/switchroom/vendor/hindsight-memory/
+
 # Tiny wrapper so `switchroom <verb>` invocations from hostd resolve
 # to the bundled CLI. Uses `bun` (not `node`) because the CLI bundle
 # imports bun-specific modules (bun:sqlite, bun:test, etc. — produced

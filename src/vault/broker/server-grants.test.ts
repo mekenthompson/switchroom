@@ -355,12 +355,16 @@ describe("VaultBroker: token-based get access (issue #225)", () => {
     expect(grantGet).toBeUndefined();
   });
 
-  it("get with expired token: returns denied:grant-expired", async () => {
-    // Mint a grant with ttl_seconds=-1 (already expired)
-    // We can't pass negative ttl to mintGrant directly, so we mint and then
-    // manipulate the DB to back-date the expires_at.
+  // Behaviour change (read-path unusable-token fall-through): an EXPIRED
+  // token is no longer hard-denied on `get`/`list` — like the in-prod
+  // `put` precedent, it falls through to path-as-identity so an agent
+  // with a standing schedule.secrets[] grant is still served. In this
+  // harness no agent identity is parsed from the /tmp socket, so the
+  // fall-through lands on the path-as-identity DENIED — but the denial
+  // reason is NO LONGER "grant-expired" (proving fall-through, not a
+  // token hard-deny).
+  it("get with expired token: falls through to path-as-identity (not denied:grant-expired)", async () => {
     const { token, id } = await mintGrant(grantsDb, "myagent", ["foo"], 3600);
-    // Set expires_at to the past
     const past = Math.floor(Date.now() / 1000) - 100;
     grantsDb.run("UPDATE vault_grants SET expires_at = ? WHERE id = ?", [past, id]);
 
@@ -368,19 +372,21 @@ describe("VaultBroker: token-based get access (issue #225)", () => {
     expect(resp.ok).toBe(false);
     if (!resp.ok) {
       expect(resp.code).toBe("DENIED");
-      expect(resp.msg).toContain("grant-expired");
+      expect(resp.msg).not.toContain("grant-expired"); // fell through
     }
   });
 
-  it("get with key-not-in-allowlist: returns denied:grant-key-not-allowed", async () => {
-    // Grant only allows "baz", but we request "foo"
+  it("get with key-not-in-allowlist: falls through to path-as-identity (not denied:grant-key-not-allowed)", async () => {
+    // Grant only allows "baz", but we request "foo". The token is valid
+    // but grants nothing for "foo" → unusable for this key → fall through
+    // (an agent with schedule.secrets[] for "foo" should still be served).
     const { token } = await mintGrant(grantsDb, "myagent", ["baz"], null);
 
     const resp = await rpc(socketPath, { v: 1, op: "get", key: "foo", token });
     expect(resp.ok).toBe(false);
     if (!resp.ok) {
       expect(resp.code).toBe("DENIED");
-      expect(resp.msg).toContain("grant-key-not-allowed");
+      expect(resp.msg).not.toContain("grant-key-not-allowed"); // fell through
     }
   });
 

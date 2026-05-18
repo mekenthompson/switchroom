@@ -42,9 +42,7 @@ describe("TOOLS export", () => {
       "schedule_remove",
       "skill_install",   // #1163 Phase 2
       "skill_list",
-      "skill_publish",   // Phase 2a — privileged global promote
       "skill_remove",    // #1163 Phase 2
-      "skill_unpublish", // Phase 2a — privileged global remove
     ]);
   });
 

@@ -1602,22 +1602,6 @@ function emitAgentService(
         `      - ${homePrefix}/.switchroom/hostd/${a.name}:/run/switchroom/hostd/${a.name}`,
       );
     }
-    // Global-scope skill publishing. Admin agents get a writable bind
-    // of the operator's skills_dir at the in-container path
-    // /skills-rw. The agent-config `skill_publish` / `skill_unpublish`
-    // tools resolve against this mount. Non-admin
-    // agents never get it — global authoring is admin-only by
-    // construction (no env, no opt-in, no schema field). The agent
-    // self-serve guard ALSO refuses scope:"global" for non-admin
-    // (defence in depth) and refuses when /skills-rw is missing for
-    // any reason. existsSync-guarded: docker compose up hard-fails on
-    // a missing :rw source (same pattern as the :ro skills mount
-    // below).
-    if (existsSync(`${hostHomeForChecks}/.switchroom/skills`)) {
-      lines.push(
-        `      - ${homePrefix}/.switchroom/skills:/skills-rw:rw`,
-      );
-    }
   }
   // Operator-declared extra bind-mounts (#1164). ADMIN-ONLY: emitting
   // anything for a non-admin agent is a hard error — bind_mounts is the

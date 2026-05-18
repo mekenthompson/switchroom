@@ -1,7 +1,18 @@
 # RFC: Native-by-default skill authoring
 
-Status: Draft v3 — reviewed twice (independent fresh-process), second
-verdict APPROVE; decision-ready for Phase 1
+> **SUPERSEDED IN PART (post-implementation).** Phase 1 (native
+> agent-scope authoring + the non-blocking validator hook) and Phase 3
+> (deleting the deprecated create/edit/read/delete shim) shipped and
+> stand. **Phase 2a's runtime `skill_publish`/`skill_unpublish` path
+> was removed** — fleet-wide sharing is a reviewed pull request
+> (bundled-default opt-out / `skills:` cascade), not a runtime broker
+> write, because PR review is the stronger and simpler gate for code
+> every agent runs. The `--adopt` idea (§3.5/§7) was dropped for the
+> same reason. Current behaviour: `docs/skills.md`. This RFC is kept
+> as the design record of how we got here.
+
+Status: Implemented (Phase 1 + 3); Phase 2a/`--adopt` superseded by
+review-via-PR — see banner above
 Author: Ken (via Claude pair-design)
 Date: 2026-05-18
 Relates: #1490 (PR A), #1491 (PR B), #1492/#1494 (the `--version`

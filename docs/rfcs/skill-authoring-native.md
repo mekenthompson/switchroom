@@ -1,11 +1,25 @@
 # RFC: Native-by-default skill authoring
 
-Status: Draft v1
+Status: Draft v2 (post first review — citation/cron-deny/atomicity
+precision fixes)
 Author: Ken (via Claude pair-design)
 Date: 2026-05-18
 Relates: #1490 (PR A), #1491 (PR B), #1492/#1494 (the `--version`
 collision that motivated this), #1163 (skill install/remove —
 orthogonal, see §3.4)
+
+> **v2 changelog (independent review + code-validation pass):**
+> §2.2 persistence citation corrected to the same-path mount and
+> *why* it (not the `/state/*` mount) is load-bearing; §3.3 stops
+> claiming cron-deny is "kept" — it is **inert in production today**
+> and is now an explicit non-goal with a stated accepted residual;
+> §3.2 promotes `skill_publish` marker-write atomicity into a stated
+> contract with the crash-after-copy self-lockout named; §3.3/§3.5
+> correct the `--adopt` reconcile-trigger claim (the cron reconcile
+> bridge excludes skills; `--adopt` only edits the cascade layer and
+> rides the *existing* reconcile path); §4 Phase-1 deprecation text
+> now points explicitly at the native path; §7 Q3 → resolved as
+> decision D1 (routes through approval-kernel).
 
 ## 1. Summary
 
@@ -53,10 +67,15 @@ those is surface area that does not exist in the native model.
 
 Verified wiring (file:line):
 
-- **Persistent.** `~/.switchroom/agents/<name>` is a host bind mount
-  (`src/agents/compose.ts:1658`, and the same path mirrored at
-  `:1661`). Writes survive `switchroom agent restart` / compose
-  recreate.
+- **Persistent.** The load-bearing mount is the **same-path** bind
+  `~/.switchroom/agents/<name>:~/.switchroom/agents/<name>`
+  (`src/agents/compose.ts:1661`) — *not* the `:/state/agent` mount at
+  `:1658`. This matters: `start.sh.hbs:173` sets
+  `CLAUDE_CONFIG_DIR={{agentDir}}/.claude` where `{{agentDir}}` is the
+  *host* path `~/.switchroom/agents/<name>` (`scaffold.ts` resolves it
+  from the agents state dir), so the path Claude actually writes to is
+  the host path, made identical inside the container by the same-path
+  mount. Writes survive `switchroom agent restart` / compose recreate.
 - **Reconcile-safe.** `syncGlobalSkills` only ever removes symlinks it
   owns (targets inside the skills pool); a real, agent-authored
   directory is explicitly left untouched
@@ -64,7 +83,8 @@ Verified wiring (file:line):
 - **Auto-discovered.** Claude scans `$CLAUDE_CONFIG_DIR/skills/`;
   `CLAUDE_CONFIG_DIR=<agentDir>/.claude`
   (`profiles/_base/start.sh.hbs:173`) — exactly where agent-scope
-  skills resolve (`src/cli/skill-common.ts:179,185,192`).
+  skills resolve (`src/cli/skill-common.ts:189`, the
+  `join(base, ".claude", "skills")`).
 - **Writable.** It is the agent's own scaffold dir, owned by the
   per-agent container UID.
 
@@ -160,10 +180,11 @@ already iterated in its own scope; publish promotes the result.
 | **Keep** | The broker, reached by **one** verb (`skill_publish`/`unpublish`) | kept, narrowed |
 | | Authorship marker (`authorshipMarkerName`/`hasAuthorshipMarker`, `.authored-by-<agent>`, `E_SKILL_OPERATOR_OWNED`) | kept — still the operator-curated immutability guard |
 | | Validators (`validateSkillName/RelPath/SkillMd`, `safeWriteFile`, size/file caps) | kept, refactored into a shared lib used by the validator hook + `skill_publish` (no longer a CLI entrypoint) |
-| | Identity-pin + cron-deny | kept, but enforced **only on `skill_publish`** (the sole privileged path) |
+| | Identity-pin | kept, enforced **only on `skill_publish`** (the sole privileged path) — an agent writing into its own UID-owned dir natively cannot impersonate a peer, so the pin is only meaningful for the cross-boundary write |
+| | Cron-deny | **dropped as a non-goal — see §3.5.** It is *inert in production today*: `isCronTurn()` reads `SWITCHROOM_TURN_SOURCE` (`src/cli/skill-common.ts:208`) which **has no production setter** (only `*.test.ts` set it; the doc-comment claim that "the gateway sets it per turn" is unimplemented). The RFC will not claim to preserve a control that does not function. |
 | | `skills:` union cascade (`src/config/merge.ts:551`), `syncGlobalSkills`, `reconcileDefaultSkills`, `_bundled` pool | kept, unchanged — the consistent extension shape |
 | **New** | `skill_publish` / `skill_unpublish` MCP tools + `switchroom skill publish\|unpublish` CLI (broker path only) | new |
-| | `skill_publish --adopt <defaults\|profile:X\|agent:Y>` — also edits the `skills:` layer + triggers reconcile | new (collapses the 3-step fleet-adoption into 1) |
+| | `skill_publish --adopt <defaults\|profile:X\|agent:Y>` — also edits the named `skills:` cascade layer | new (collapses *declare* into the publish call; **materialisation still rides the existing reconcile path**, not a new in-broker reconcile — see §3.5) |
 | | Non-blocking **validator hook** (`PreToolUse` on Write/Edit under `$CLAUDE_CONFIG_DIR/skills/`) — lints frontmatter/size/path, **warns, does not block** | new |
 | | `skill-creator/SKILL.md` addendum: canonical destination is `$CLAUDE_CONFIG_DIR/skills/<slug>/`, live next turn | new (few lines) |
 
@@ -175,16 +196,80 @@ list — a config edit materialised by reconcile, not authoring. They
 stay as-is. (They are a candidate for a later "this is just a
 `skills:` cascade edit" simplification, but not in this RFC.)
 
+### 3.5 Publish contract & accepted residuals
+
+**`skill_publish` atomicity (stated requirement, not an open
+question).** Publish MUST be ordered: (1) copy the agent's
+already-iterated skill dir into a temp dir under the pool root,
+(2) `fsync`, (3) write `.authored-by-<agent>` *inside the temp dir*,
+(4) atomic-rename the temp dir into `~/.switchroom/skills/<slug>/`.
+The marker is stamped **before** the rename so the published dir is
+never observable without its marker. Rationale — the failure mode this
+prevents: if publish copied the dir but crashed before stamping the
+marker, the next `skill_publish`/`skill_unpublish` would see an
+unmarked dir, classify it operator-owned (`E_SKILL_OPERATOR_OWNED`),
+and the authoring admin agent could no longer manage *its own* just-
+published skill (a self-inflicted lockout). `skill_unpublish` is the
+symmetric atomic remove and MUST refuse when the
+`.authored-by-<agent>` marker is absent (same guard the deleted
+`skill_delete scope:global` enforced).
+
+**`--adopt` materialisation rides the existing reconcile path — by
+design.** Validation found the cron reconcile bridge
+(`src/cli/reconcile-bridge.ts`) is *cron-only*; skill changes are not
+in its change set, and agent containers have no docker socket. So
+`--adopt` deliberately does **not** synthesise a new in-broker skill-
+reconcile. It only edits the named `skills:` cascade layer (the same
+declarative edit `skill_install` makes to its overlay). Symlink
+materialisation happens on the **next ordinary reconcile** —
+`switchroom apply` / a hostd-mediated `agent restart` — exactly the
+declare-then-reconcile gate this RFC already defends as the
+opt-in safety boundary (§5, alternative 3). This is *more* consistent
+(Principle 3), not a limitation: `--adopt` removes the "remember to
+also edit `skills:`" step; it does not and should not bypass
+reconcile. `skill_unpublish --adopt <layer>` MUST remove the matching
+`skills:` entry it added, otherwise the next reconcile emits a
+permanent "skill not found in pool" config lint
+(`scaffold.ts:825-828`).
+
+**Accepted residual — agent-scope authoring has no turn-source
+guard.** With cron-deny inert (§3.3) and the validator hook
+non-blocking (§7 Q1), a natively authored agent-scope skill is
+subject to no hard gate regardless of turn source. This is a
+**deliberate accepted residual**, documented here in the same spirit
+as switchroom's other stated residuals (e.g. the `strict`-off CI
+posture in `CLAUDE.md`): the blast radius is the **authoring agent's
+own UID-owned, per-agent directory** — it cannot reach a peer or the
+global pool without the privileged, admin-gated, marker-guarded
+`skill_publish`. A prompt-injected turn could rewrite that agent's own
+skills, which is strictly bounded by the agent's existing trust
+domain. If a real turn-source guard is later wanted, wiring a
+production `SWITCHROOM_TURN_SOURCE` (or a hook-readable cron signal)
+is a *separate* prerequisite deliverable — this RFC does not
+pretend the current code provides it.
+
 ## 4. Migration / phasing
 
 Three PRs, each through the standard reviewer → auto-merge flow.
 
 - **Phase 1 — native agent scope (low risk, immediate UX win).**
   Document the canonical writable destination in
-  `skill-creator/SKILL.md`; add the non-blocking validator hook; mark
-  the four agent-scope tools **deprecated** in their MCP descriptions
-  (still functional). No deletions yet. Ships the entire agent-scope
-  benefit with zero capability loss.
+  `skill-creator/SKILL.md` (and that the skill is live on the *next*
+  turn, not mid-turn — §7 Q3); replace its actively-wrong "direct
+  writes may fail due to permissions — stage in `/tmp/` first"
+  guidance (`SKILL.md:460-461`), which is false for the agent-scope
+  case. Add the non-blocking validator hook. Mark the four
+  agent-scope tools **deprecated** — and the deprecation string in
+  each MCP tool description MUST point explicitly at the native path
+  (*"deprecated: author into `$CLAUDE_CONFIG_DIR/skills/<slug>/`
+  directly with Write/Edit; this tool is removed in Phase 3"*) so the
+  still-live tools and the new skill-creator guidance do not give
+  conflicting instructions during the Phase 1→3 overlap. Note the
+  overlap hazard: the legacy `skill_create` path errors
+  `E_SKILL_ALREADY_EXISTS` (exit 13) on a slug a native write already
+  created — the deprecation text must say "if this errors, the skill
+  already exists; just edit the files directly." No deletions yet.
+  Ships the entire agent-scope benefit with zero capability loss.
 - **Phase 2 — collapse global.** Ship `skill_publish`/`skill_unpublish`
   + `--adopt`. Migrate global authoring off `create/edit/delete`.
   Remove `--scope` from the deprecated tools (agent-only now).
@@ -250,32 +335,46 @@ the extend-without-forking JTBD, and passes all three principle checks
 *after* the redesign — which is exactly why it is a redesign and not a
 patch.
 
-## 7. Open questions
+## 7. Decisions & open questions
+
+**Decided (were "open" in v1; resolved after review):**
+
+- **D1 — `--adopt profile:X` / `--adopt agent:Y` route through the
+  approval-kernel.** Not "tentative." Editing another agent's or a
+  profile's `skills:` layer is a cross-agent-blast-radius write;
+  consistency with the documented "admin privilege kept, gated by
+  human approval for cross-agent blast radius" posture (hostd/kernel)
+  requires it. `--adopt defaults:` is fleet-wide and likewise gated.
+  An admin agent adopting into *its own* `skills:` is self-scope and
+  needs only the existing admin gate. This is a Phase-2 design
+  constraint, not a discovery.
+- **D2 — `skill_publish` marker-write atomicity** is a stated contract
+  (§3.5), not an open question: copy → fsync → stamp marker →
+  atomic-rename; crash-after-copy self-lockout named.
+- **D3 — `skill_unpublish --adopt <layer>`** must remove the matching
+  `skills:` entry it added (§3.5), else a permanent post-reconcile
+  config lint.
+
+**Genuinely open (non-blocking for Phase 1):**
 
 1. **Validator hook: warn vs. block?** Lean **warn** — native Claude
    doesn't block skill writes, and Principle 3's "let the model
-   communicate" sub-principle argues against a hard gate. Hard cap
-   only the one thing with a real blast radius (total skill bytes), as
-   a hook-level reject with a clear message.
+   communicate" sub-principle argues against a hard gate. Hard-cap
+   only the one thing with real blast radius (total skill bytes), as a
+   hook-level reject with a clear message. *Note the interaction:*
+   with cron-deny inert (§3.3) and the hook non-blocking, agent-scope
+   authoring has no hard turn-source gate — that is the deliberate
+   accepted residual stated in §3.5, not an oversight.
 2. **`skill_publish` dry-run/diff.** Probably yes — mirror
    `switchroom update --check`: `skill_publish --check` prints what
    would change in the pool (new/overwrite, marker state) without
    writing. Consistency with the existing `--check` idiom.
-3. **`--adopt agent:Y` is a cross-agent config edit.** Should it go
-   through the approval-kernel like other cross-agent/admin ops, or is
-   admin-gating on `skill_publish` sufficient? Tentative: align with
-   the hostd/kernel "admin privilege kept, gated by human approval for
-   cross-agent blast radius" posture.
-4. **Discovery latency.** A natively authored skill is live on the
+3. **Discovery latency.** A natively authored skill is live on the
    *next* turn (Claude scans at session boot), not mid-turn. Same is
    true today via the CLI. Acceptable, but the skill-creator addendum
-   must say so explicitly so the agent doesn't report success then act
-   confused when it can't invoke the skill in the same turn.
-5. **`skill_unpublish` and the marker.** Unpublish must refuse when
-   the `.authored-by-<agent>` marker is absent (operator-curated /
-   peer-authored) — same guard as the old `skill_delete scope:global`.
-   Confirm no path lets `--adopt`'s reconcile resurrect a just-
-   unpublished skill from a stale `skills:` entry.
+   MUST say so explicitly (folded into the Phase 1 deliverable, §4)
+   so the agent doesn't report success then act confused when it
+   can't invoke the skill in the same turn.
 
 ## 8. Verdict / next steps
 

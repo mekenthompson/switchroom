@@ -1,7 +1,7 @@
 # RFC: Native-by-default skill authoring
 
-Status: Draft v2 (post first review — citation/cron-deny/atomicity
-precision fixes)
+Status: Draft v3 — reviewed twice (independent fresh-process), second
+verdict APPROVE; decision-ready for Phase 1
 Author: Ken (via Claude pair-design)
 Date: 2026-05-18
 Relates: #1490 (PR A), #1491 (PR B), #1492/#1494 (the `--version`
@@ -13,7 +13,7 @@ orthogonal, see §3.4)
 > *why* it (not the `/state/*` mount) is load-bearing; §3.3 stops
 > claiming cron-deny is "kept" — it is **inert in production today**
 > and is now an explicit non-goal with a stated accepted residual;
-> §3.2 promotes `skill_publish` marker-write atomicity into a stated
+> §3.5 promotes `skill_publish` marker-write atomicity into a stated
 > contract with the crash-after-copy self-lockout named; §3.3/§3.5
 > correct the `--adopt` reconcile-trigger claim (the cron reconcile
 > bridge excludes skills; `--adopt` only edits the cascade layer and
@@ -62,6 +62,14 @@ shim in front of what is, for agent scope, a plain file write into the
 agent's own writable directory.** Argv parsing, stdout discipline,
 JSON round-tripping, version tokens, `--scope` plumbing — every one of
 those is surface area that does not exist in the native model.
+
+> **Note — #1492 is already patched in-band.** #1494 renamed the
+> colliding CLI flag `--version` → `--expect-version` (the
+> agent-facing MCP `version` arg unchanged) and added an E2E
+> regression. That is the *tactical* stop-gap so the surface works
+> until Phase 3 deletes it; this RFC is the *structural* fix. The two
+> don't conflict — Phase 3 removes the flag (and the whole shim)
+> entirely, retiring the patched code along with the bug class.
 
 ### 2.2 Agent scope needs none of it
 
@@ -201,10 +209,13 @@ stay as-is. (They are a candidate for a later "this is just a
 **`skill_publish` atomicity (stated requirement, not an open
 question).** Publish MUST be ordered: (1) copy the agent's
 already-iterated skill dir into a temp dir under the pool root,
-(2) `fsync`, (3) write `.authored-by-<agent>` *inside the temp dir*,
-(4) atomic-rename the temp dir into `~/.switchroom/skills/<slug>/`.
+(2) `fsync` the copied files, (3) write `.authored-by-<agent>`
+*inside the temp dir*, (4) `fsync` the marker and the temp dir,
+(5) atomic-rename the temp dir into `~/.switchroom/skills/<slug>/`.
 The marker is stamped **before** the rename so the published dir is
-never observable without its marker. Rationale — the failure mode this
+never observable without its marker; the step-(4) fsync (marker +
+temp-dir dirent) before the rename is the Phase-2 implementation
+detail that makes "stamped before observable" durable across a crash. Rationale — the failure mode this
 prevents: if publish copied the dir but crashed before stamping the
 marker, the next `skill_publish`/`skill_unpublish` would see an
 unmarked dir, classify it operator-owned (`E_SKILL_OPERATOR_OWNED`),
@@ -381,5 +392,5 @@ patch.
 Recommend proceeding with **Phase 1 now** (native agent scope: doc +
 hook + deprecation flag) — it is low-risk, additive, reversible, and
 delivers the whole agent-scope UX win immediately. Phases 2–3 follow
-as separate PRs once the `skill_publish` contract in §3.2 and open
+as separate PRs once the `skill_publish` contract in §3.5 and open
 questions 2–3 are nailed down.

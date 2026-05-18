@@ -274,6 +274,14 @@ export const TOOLS = [
   {
     name: "skill_create",
     description:
+      "DEPRECATED for scope=agent — do not use for your own skills. " +
+      "Author directly into `$CLAUDE_CONFIG_DIR/skills/<slug>/` with " +
+      "Write/Edit: that dir is writable, persistent across restarts, " +
+      "and Claude discovers the skill on your next turn. This tool is " +
+      "being removed (RFC native-by-default skill authoring). If it " +
+      "returns E_SKILL_ALREADY_EXISTS, the skill already exists — just " +
+      "edit the files directly. Still REQUIRED for scope=global (admin " +
+      "agents publishing fleet-wide skills). — " +
       "Create an agent-scope skill (scope=agent) at " +
       "`~/.switchroom/agents/<agent>/.claude/skills/<slug>/`. Atomic " +
       "temp-dir → rename — refuses if the target slug dir already " +
@@ -320,6 +328,12 @@ export const TOOLS = [
   {
     name: "skill_edit",
     description:
+      "DEPRECATED for scope=agent — do not use for your own skills. " +
+      "Edit the file directly with Write/Edit at " +
+      "`$CLAUDE_CONFIG_DIR/skills/<slug>/<file>` (writable, persistent, " +
+      "live next turn); no version token needed. This tool is being " +
+      "removed (RFC native-by-default skill authoring). Still REQUIRED " +
+      "for scope=global (admin). — " +
       "Edit a single file within an existing agent-scope skill " +
       "(scope=agent). Atomic single-file write. Requires `version` (an " +
       "opaque token returned by `skill_read`) for optimistic " +
@@ -362,6 +376,11 @@ export const TOOLS = [
   {
     name: "skill_read",
     description:
+      "DEPRECATED for scope=agent — just Read the files at " +
+      "`$CLAUDE_CONFIG_DIR/skills/<slug>/` directly (and `ls` the dir " +
+      "for the tree). This tool is being removed (RFC native-by-default " +
+      "skill authoring). Still useful for scope=global (admin) " +
+      "inspection. — " +
       "Read a file from an agent-scope skill, OR (when `file` is " +
       "omitted) return the skill's file tree plus its SKILL.md " +
       "frontmatter. Always returns a `version` token suitable for a " +
@@ -388,6 +407,10 @@ export const TOOLS = [
   {
     name: "skill_delete",
     description:
+      "DEPRECATED for scope=agent — delete the skill dir directly " +
+      "(`rm -rf $CLAUDE_CONFIG_DIR/skills/<slug>/` via Bash). This tool " +
+      "is being removed (RFC native-by-default skill authoring). Still " +
+      "REQUIRED for scope=global (admin; marker-gated). — " +
       "Delete an agent-scope skill dir (scope=agent). Refuses if the " +
       "path is a symlink (that's a bundled-skill install — use " +
       "`skill_remove` instead). Refused from cron-fired turns. Error " +

@@ -140,6 +140,15 @@ RUN chmod 0755 /opt/switchroom/autoaccept-poll.js
 COPY dist/cli/drive-write-pretool.mjs /opt/switchroom/hooks/drive-write-pretool.mjs
 RUN chmod 0755 /opt/switchroom/hooks/drive-write-pretool.mjs
 
+# Advisory skill-shape linter (RFC native-by-default skill authoring,
+# Phase 1). Non-blocking — nudges the model toward a well-formed skill
+# when it writes under .claude/skills/; only the per-skill byte cap is
+# a hard stop. Deliberately NOT in the security-plugin: it's a quality
+# nudge, not a load-bearing safety control, and an agent linting its
+# own writable skills dir is within its own trust domain.
+COPY dist/cli/skill-validate-pretool.mjs /opt/switchroom/hooks/skill-validate-pretool.mjs
+RUN chmod 0755 /opt/switchroom/hooks/skill-validate-pretool.mjs
+
 # Image-baked security-hooks plugin (sec WS8-F1 / #1416). A separate,
 # minimal --plugin-dir holding ONLY the load-bearing PreToolUse safety
 # hooks (secret-exfil guard + Drive-write approval gate). Loaded from

@@ -3132,6 +3132,28 @@ export function buildSettingsHooksBlock(p: HooksBlockParams): Record<string, unk
           ],
         },
         {
+          // RFC native-by-default skill authoring, Phase 1 — advisory
+          // skill-shape linter. Scoped to file-write tools; the hook
+          // itself no-ops unless the target path is under
+          // `.claude/skills/`. Non-blocking (returns additionalContext)
+          // except the per-skill byte cap, the only hard stop.
+          //
+          // DOCKER_BUNDLED_HOOKS_PATH (not DOCKER_HOOKS_PATH): bundled
+          // via scripts/build.mjs from src/cli/skill-validate-pretool.ts
+          // because it imports the shared validators in skill-common.ts.
+          matcher: "^(Write|Edit|MultiEdit)$",
+          hooks: [
+            {
+              type: "command",
+              command: wrap(
+                "hook:skill-validate-pretool",
+                `node "${join(DOCKER_BUNDLED_HOOKS_PATH, "skill-validate-pretool.mjs")}"`,
+              ),
+              timeout: 10,
+            },
+          ],
+        },
+        {
           // Catch-all PreToolUse: deterministic tool-call labels (#783).
           // Hook always exits 0; never emits stdout JSON; writes one line
           // to $TELEGRAM_STATE_DIR/tool-labels-${session_id}.jsonl.

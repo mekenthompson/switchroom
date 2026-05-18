@@ -437,6 +437,65 @@ export const TOOLS = [
       },
     },
   },
+  {
+    name: "skill_publish",
+    description:
+      "Promote one of YOUR OWN agent-scope skills (authored natively " +
+      "under `$CLAUDE_CONFIG_DIR/skills/<slug>/`) into the operator's " +
+      "global pool so other agents can be granted it. Admin agents " +
+      "only. Replace-by-publish of the whole skill directory — no " +
+      "per-file edit, no version token: you iterate in your own scope, " +
+      "then publish the finished result. The source is hard-validated " +
+      "(SKILL.md frontmatter with name == slug, path allowlist, 2 MiB " +
+      "/ 50-file caps) — a malformed skill is refused, not promoted. " +
+      "Marker-gated: if a global skill already exists at this slug it " +
+      "is overwritten ONLY if it carries your `.authored-by-<agent>` " +
+      "marker; operator-curated (no marker) or peer-authored skills " +
+      "are immutable. Atomic (stage → marker → rename), so a crash " +
+      "never leaves a markerless half-published dir. Publishing does " +
+      "NOT make the skill active for any agent — an operator/admin " +
+      "must still add the slug to the relevant `skills:` cascade layer " +
+      "(the `--adopt` convenience is a separate follow-up). Error " +
+      "codes: E_SKILL_NOT_FOUND (no such agent-scope skill), " +
+      "E_SKILL_INVALID_NAME, E_SKILL_INVALID_PATH, " +
+      "E_SKILL_INVALID_FRONTMATTER, E_SKILL_BUNDLE_TOO_LARGE, " +
+      "E_SKILL_SCOPE_DENIED (not admin), E_SKILL_OPERATOR_OWNED " +
+      "(exit 18 — slug owned by operator/peer), " +
+      "E_SKILL_GLOBAL_MOUNT_UNCONFIGURED (exit 17 — /skills-rw absent), " +
+      "E_AGENT_PIN_REQUIRED.",
+    inputSchema: {
+      type: "object" as const,
+      required: ["name"],
+      properties: {
+        name: { type: "string", pattern: "^[a-z0-9][a-z0-9_-]{0,62}$" },
+        agent: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "skill_unpublish",
+    description:
+      "Remove a skill YOU published from the operator's global pool " +
+      "(admin only). Marker-gated: refuses operator-curated or " +
+      "peer-authored skills (only the agent whose " +
+      "`.authored-by-<agent>` marker is present may unpublish). Does " +
+      "not touch any `skills:` cascade entry — if the slug was adopted " +
+      "into a layer, an operator must remove it there too (the next " +
+      "reconcile will otherwise log a benign 'skill not found in " +
+      "pool'). Error codes: E_SKILL_NOT_FOUND, E_SKILL_INVALID_NAME, " +
+      "E_SKILL_INVALID_PATH, E_SKILL_SCOPE_DENIED (not admin), " +
+      "E_SKILL_OPERATOR_OWNED (exit 18), " +
+      "E_SKILL_GLOBAL_MOUNT_UNCONFIGURED (exit 17), " +
+      "E_AGENT_PIN_REQUIRED.",
+    inputSchema: {
+      type: "object" as const,
+      required: ["name"],
+      properties: {
+        name: { type: "string", pattern: "^[a-z0-9][a-z0-9_-]{0,62}$" },
+        agent: { type: "string" },
+      },
+    },
+  },
 ];
 
 export function dispatchTool(
@@ -594,6 +653,24 @@ export function dispatchTool(
       const base = ["skill", "delete", "--name", a.name];
       if (a.agent) base.push("--agent", a.agent);
       if (a.scope) base.push("--scope", a.scope as string);
+      cliArgs = base;
+      parseMode = "json";
+      break;
+    }
+    case "skill_publish": {
+      const a = args as ToolArgs;
+      if (!a.name) return errorText("skill_publish: name is required");
+      const base = ["skill", "publish", "--name", a.name];
+      if (a.agent) base.push("--agent", a.agent);
+      cliArgs = base;
+      parseMode = "json";
+      break;
+    }
+    case "skill_unpublish": {
+      const a = args as ToolArgs;
+      if (!a.name) return errorText("skill_unpublish: name is required");
+      const base = ["skill", "unpublish", "--name", a.name];
+      if (a.agent) base.push("--agent", a.agent);
       cliArgs = base;
       parseMode = "json";
       break;

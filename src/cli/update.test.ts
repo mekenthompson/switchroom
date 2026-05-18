@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { planUpdate, runUpdate, isGitCheckout } from "./update.js";
+import { planUpdate, runUpdate, isGitCheckout, rebuildRefusalMessage } from "./update.js";
 
 function fakeRunner() {
   const calls: Array<{ cmd: string; args: string[] }> = [];
@@ -118,6 +118,117 @@ describe("planUpdate", () => {
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
+  });
+
+  describe("--rebuild guardrail (published-install refusal)", () => {
+    it("rebuildRefusalMessage: null inside a git checkout, message otherwise", () => {
+      const tmp = mkdtempSync(join(tmpdir(), "update-guard-"));
+      try {
+        // No .git anywhere up the chain → published install → refuse.
+        const noGit = join(tmp, "lib", "node_modules", "switchroom", "x.js");
+        const msg = rebuildRefusalMessage(noGit);
+        expect(msg).not.toBeNull();
+        expect(msg!).toContain("npm i -g switchroom@latest && switchroom update");
+        expect(msg!).toMatch(/published install/);
+
+        // .git ancestor present → real source checkout → allowed.
+        mkdirSync(join(tmp, ".git"), { recursive: true });
+        const inCheckout = join(tmp, "dist", "cli", "switchroom.js");
+        expect(rebuildRefusalMessage(inCheckout)).toBeNull();
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("runUpdate hard-refuses --rebuild on a published install (exit 2, nothing runs)", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "update-guard-run-"));
+      try {
+        const composePath = join(tmp, "docker-compose.yml");
+        writeFileSync(composePath, "services: {}\n");
+        const out: string[] = [];
+        const err: string[] = [];
+        const runner = fakeRunner();
+        const code = await runUpdate({
+          rebuild: true,
+          scriptPath: join(tmp, "node_modules", "switchroom", "cli.js"), // no .git
+          composePath,
+          stdout: (s) => out.push(s),
+          stderr: (s) => err.push(s),
+          runner: runner.fn,
+        });
+        expect(code).toBe(2);
+        expect(runner.calls).toHaveLength(0); // preflight: nothing executed
+        expect(err.join("")).toContain("npm i -g switchroom@latest");
+        expect(err.join("")).toMatch(/published install/);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("the refusal fires even under --check (no plan printed)", async () => {
+      const tmp = mkdtempSync(join(tmpdir(), "update-guard-check-"));
+      try {
+        const composePath = join(tmp, "docker-compose.yml");
+        writeFileSync(composePath, "services: {}\n");
+        const out: string[] = [];
+        const err: string[] = [];
+        const code = await runUpdate({
+          check: true,
+          rebuild: true,
+          scriptPath: join(tmp, "bin", "switchroom"), // no .git
+          composePath,
+          stdout: (s) => out.push(s),
+          stderr: (s) => err.push(s),
+          runner: fakeRunner().fn,
+        });
+        expect(code).toBe(2);
+        expect(out.join("")).not.toMatch(/dry-run/);
+        expect(err.join("")).toContain("switchroom update");
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("in-step defence-in-depth: planUpdate's rebuild-source.run() throws on a published install", () => {
+      const tmp = mkdtempSync(join(tmpdir(), "update-guard-step-"));
+      try {
+        const composePath = join(tmp, "docker-compose.yml");
+        writeFileSync(composePath, "services: {}\n");
+        const steps = planUpdate({
+          composePath,
+          rebuild: true,
+          hostControlEnabled: false,
+          scriptPath: join(tmp, "node_modules", "switchroom", "cli.js"),
+        });
+        const rebuild = steps.find((s) => s.name === "rebuild-source")!;
+        expect(rebuild).toBeDefined();
+        expect(() => rebuild.run()).toThrow(/npm i -g switchroom@latest/);
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+
+    it("does NOT refuse when running from a real source checkout", () => {
+      const tmp = mkdtempSync(join(tmpdir(), "update-guard-ok-"));
+      try {
+        mkdirSync(join(tmp, ".git"), { recursive: true });
+        const scriptPath = join(tmp, "dist", "cli", "switchroom.js");
+        expect(rebuildRefusalMessage(scriptPath)).toBeNull();
+        const composePath = join(tmp, "docker-compose.yml");
+        writeFileSync(composePath, "services: {}\n");
+        const steps = planUpdate({
+          composePath,
+          rebuild: true,
+          hostControlEnabled: false,
+          scriptPath,
+        });
+        // rebuild-source present and its guard does not throw.
+        const rebuild = steps.find((s) => s.name === "rebuild-source")!;
+        expect(rebuild).toBeDefined();
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
   });
 
   // refresh-hostd: PR ε — closes the gap that hostd lives in a separate
@@ -503,7 +614,10 @@ describe("--rebuild against a non-checkout install fails loudly (#923 reviewer)"
         const rebuild = steps.find((s) => s.name === "rebuild-source");
         expect(rebuild).toBeDefined();
         expect(rebuild?.skipReason).toBeUndefined(); // not silently skipped
-        expect(() => rebuild!.run()).toThrow(/--rebuild requires a git checkout/);
+        // Message was upgraded to point at the published path (the
+        // preflight in runUpdate now refuses before this even runs;
+        // this remains as in-step defence-in-depth).
+        expect(() => rebuild!.run()).toThrow(/npm i -g switchroom@latest/);
       } finally {
         process.argv[1] = origArgv1;
       }

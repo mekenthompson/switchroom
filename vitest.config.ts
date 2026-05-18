@@ -90,6 +90,9 @@ export default defineConfig({
       "**/src/watchdog/state.test.ts",
       "**/src/watchdog/policy.test.ts",
       "**/src/vault/broker/server-grants.test.ts",
+      // Read-path unusable-token fall-through suite (#1487) — bun:sqlite,
+      // run via test:bun (same as the sibling server-grants suites).
+      "**/src/vault/broker/server-token-fallthrough.test.ts",
       // Write-grant suites (issue #969 P1b) also use bun:sqlite — run via test:bun.
       "**/src/vault/write-grants.test.ts",
       "**/src/vault/broker/server-write-grants.test.ts",

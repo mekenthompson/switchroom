@@ -496,9 +496,9 @@ broker, no packaging:
   restart`). Just `Write`/`Edit` the files there directly. Do **not**
   stage in `/tmp/` and do **not** copy anything afterwards — the
   native filesystem write *is* the supported path. (There is no
-  `skill_create`/`edit`/`read`/`delete` tool; authoring is plain file
-  writes. To share a finished skill with the rest of the fleet, an
-  admin agent uses `skill_publish`.)
+  skill authoring tool of any kind; authoring is plain file writes.
+  Sharing a skill with the rest of the fleet is **not** a runtime
+  action — it is a reviewed pull request; see the last bullet.)
 - **It goes live on your *next* turn, not this one.** Claude discovers
   skills when a session starts. After you write the files, tell the
   user the skill is created and will be active on the next message —
@@ -516,11 +516,17 @@ broker, no packaging:
   (1–1024 chars) that says when the skill should trigger. Supporting
   files follow the allowlist: `README.md`, `scripts/*.{sh,py}`,
   `assets/*`, `reference/*.md` (max depth 3).
-- **Fleet / global skills are a different, privileged path.** Making a
-  skill available to *other* agents (not just you) is operator/admin
-  territory and is intentionally not a plain write — leave that to the
-  operator unless you are an admin agent explicitly asked to publish
-  one.
+- **Fleet / global skills go through review, not a command.** Making a
+  skill available to *other* agents is a deliberate operator decision,
+  not a runtime write. The path is: open a pull request adding the
+  skill to switchroom's reviewed skill set (the canonical repo's
+  `skills/` for general skills, or the operator's private
+  `switchroom.skills_dir` repo for operator-specific ones); once merged
+  it ships as a bundled default (opt-out per agent via
+  `bundled_skills`) or via the `skills:` cascade. You can *propose* a
+  fleet skill by opening that PR; a human approves it. There is no
+  `skill_publish` and nothing an agent runs makes a skill fleet-wide on
+  its own.
 
 ## Reference files
 

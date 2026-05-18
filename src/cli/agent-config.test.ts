@@ -296,23 +296,17 @@ describe("registered commands", () => {
     expect(parsed.bundled_skills).toEqual({ "skill-creator": true });
   });
 
-  it("skill list editable_scopes is ['agent','global'] for admin agents", async () => {
-    // PR B: admin agents may author into global scope; the list verb
-    // surfaces that capability so callers can branch on it without a
-    // separate config_get round-trip. `a` is admin: true in this fixture.
-    process.env.SWITCHROOM_AGENT_NAME = "a";
+  it("skill list no longer advertises editable_scopes (no runtime authoring)", async () => {
+    // There is no global-scope authoring path anymore — sharing a
+    // skill fleet-wide is a reviewed PR, not a runtime capability — so
+    // `skill list` must not surface an `editable_scopes` field.
+    process.env.SWITCHROOM_AGENT_NAME = "a"; // admin: true in this fixture
     const program = buildProgram();
     await program.parseAsync(["node", "switchroom", "skill", "list"]);
     const parsed = JSON.parse(stdout.trim());
-    expect(parsed.editable_scopes).toEqual(["agent", "global"]);
-  });
-
-  it("skill list editable_scopes is ['agent'] for non-admin agents", async () => {
-    process.env.SWITCHROOM_AGENT_NAME = "b";
-    const program = buildProgram();
-    await program.parseAsync(["node", "switchroom", "skill", "list"]);
-    const parsed = JSON.parse(stdout.trim());
-    expect(parsed.editable_scopes).toEqual(["agent"]);
+    expect(parsed.editable_scopes).toBeUndefined();
+    expect(parsed).toHaveProperty("skills");
+    expect(parsed).toHaveProperty("bundled_skills");
   });
 
   it("peers list excludes the caller and includes name + purpose + admin for every other agent", async () => {

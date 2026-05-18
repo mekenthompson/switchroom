@@ -1,34 +1,24 @@
 /**
- * Shared helpers for skill self-service (install/remove + author).
+ * Shared skill-shape validators.
  *
- * PR A of the agent-skill-authoring feature: extracted from
- * `agent-config-skill-write.ts` so the new authoring CLI
- * (`agent-config-skill-author.ts`) can share validators, error codes,
- * audit append, and the per-agent skill-dir resolution without
- * copy-paste drift.
+ * Skill authoring is Claude-native — agents just write files into
+ * `$CLAUDE_CONFIG_DIR/skills/<slug>/` (no broker, no CLI). These pure
+ * validators are the single source of truth for "is this a well-formed
+ * skill", consumed by the non-blocking PreToolUse linter
+ * (`skill-validate-pretool.ts`):
+ *   - `validateSkillName`  — slug pattern.
+ *   - `validateRelPath`    — path allowlist (SKILL.md, README.md,
+ *     scripts/*.{sh,py}, assets/*, reference/*.md; max depth 3).
+ *   - `validateSkillMd`    — SKILL.md frontmatter (name == slug,
+ *     description 1..MAX_DESCRIPTION_LEN).
+ *   - `MAX_SKILL_BYTES`    — per-skill aggregate cap (the one hard cap).
  *
- * Scope of authoring rails (this PR):
- *   - Agent-scope ONLY. Global scope ("/usr/share/.../skills" or the
- *     bundled-pool) is a PR-B concern.
- *   - Per-file 256 KiB cap, per-skill 2 MiB cap, max 50 files per skill.
- *   - Path allowlist: SKILL.md, scripts/*.{sh,py}, assets/*,
- *     README.md, reference/*.md. Max depth 3.
- *   - Symlink TOCTOU: refuse anything whose realpath escapes the
- *     skill's scope root. New files opened O_EXCL ("wx").
+ * Sharing a skill fleet-wide is NOT a runtime path: it is a reviewed
+ * PR that lands the skill as a bundled default (opt-out per agent via
+ * `bundled_skills`) or a `skills:`-cascade entry sourced from the
+ * operator's `switchroom.skills_dir`. See docs/skills.md.
  */
 
-import { homedir } from "node:os";
-import { join, resolve, sep, dirname } from "node:path";
-import {
-  existsSync,
-  openSync,
-  writeSync,
-  closeSync,
-  realpathSync,
-  statSync,
-  lstatSync,
-  readdirSync,
-} from "node:fs";
 import { parse as parseYaml } from "yaml";
 
 /** Per-agent skill cap (matches install cap). Not enforced in PR A. */
@@ -92,48 +82,6 @@ export function authorExitCodeFor(code: SkillAuthorErrorCode): number {
   }
 }
 
-// ─── PR B: global-scope authoring (admin agents only) ────────────────
-
-/** In-container path where the host's `skills_dir` is bind-mounted
- *  `:rw` for admin agents. PR B (#TBD). Non-admin agents do NOT get
- *  this mount; the dispatcher refuses with E_SKILL_SCOPE_DENIED before
- *  we ever resolve a path against /skills-rw.
- *
- *  Tests may override this via `SWITCHROOM_SKILLS_RW_ROOT` env var so
- *  fixtures can point at a temp dir without needing a real mount. */
-export const DEFAULT_GLOBAL_SCOPE_ROOT = "/skills-rw";
-
-export function resolveGlobalScopeRoot(
-  env: NodeJS.ProcessEnv = process.env,
-): string {
-  return env.SWITCHROOM_SKILLS_RW_ROOT ?? DEFAULT_GLOBAL_SCOPE_ROOT;
-}
-
-export function globalScopeSkillsRoot(root?: string): string {
-  return root ?? resolveGlobalScopeRoot();
-}
-
-export function globalScopeSkillDir(slug: string, root?: string): string {
-  return join(globalScopeSkillsRoot(root), slug);
-}
-
-/** Marker filename written into a global-scope skill dir on create
- *  to record the agent that authored it. Operator-curated skills have
- *  no marker, so they're immune from agent edits/deletes. */
-export function authorshipMarkerName(agent: string): string {
-  return `.authored-by-${agent}`;
-}
-
-/** Check whether `skillDir` carries an authorship marker for `agent`.
- *  Returns true ONLY if the exact `.authored-by-<agent>` file is
- *  present. A marker for a different agent (or no marker at all)
- *  returns false. */
-export function hasAuthorshipMarker(
-  skillDir: string,
-  agent: string,
-): boolean {
-  return existsSync(join(skillDir, authorshipMarkerName(agent)));
-}
 
 export function authorErr(
   code: SkillAuthorErrorCode,
@@ -146,42 +94,6 @@ export function authorErr(
 export function validateSkillName(name: unknown): name is string {
   return typeof name === "string" && /^[a-z0-9][a-z0-9_-]{0,62}$/i.test(name);
 }
-
-/** Lowercase + dash-collapse a free-form string into a slug.
- *
- *  Defensive only — the broker still validates the result with
- *  `validateSkillName`. */
-export function slugify(input: string): string {
-  return input
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 63);
-}
-
-/** Resolve the on-disk root for an agent-scope skill.
- *
- *  Layout: `~/.switchroom/agents/<agent>/.claude/skills/<slug>/`.
- *  This is the same dir that `reconcile-default-skills.ts` materializes
- *  symlinks into for bundled defaults. The reconciler explicitly leaves
- *  non-symlink directories alone, so agent-authored real dirs coexist
- *  with bundled-symlink siblings.
- */
-export function agentScopeSkillsRoot(agent: string, root?: string): string {
-  const base = root
-    ? resolve(root, agent)
-    : resolve(homedir(), ".switchroom", "agents", agent);
-  return join(base, ".claude", "skills");
-}
-
-export function agentScopeSkillDir(
-  agent: string,
-  slug: string,
-  root?: string,
-): string {
-  return join(agentScopeSkillsRoot(agent, root), slug);
-}
-
 
 /** Validate a skill-relative path.
  *
@@ -313,210 +225,4 @@ export function validateSkillMd(
   return { ok: true, frontmatter: fm };
 }
 
-/**
- * Atomically write `content` to `absPath`, guaranteed to stay under
- * `scopeRoot`. Defends against symlink TOCTOU two ways:
- *   - On create (`mode: "create"`), opens with O_EXCL ("wx") so an
- *     attacker can't have pre-planted a symlink at the target path.
- *   - On edit (`mode: "overwrite"`), realpaths the existing file and
- *     refuses if it escapes `scopeRoot`. Also refuses if the existing
- *     path is a symlink (we never follow a symlink to write).
- *
- *  Caller is responsible for `validateRelPath` and aggregate size
- *  checks. Caller must also ensure `absPath`'s parent dir exists.
- */
-export function safeWriteFile(
-  absPath: string,
-  scopeRoot: string,
-  content: string | Buffer,
-  mode: "create" | "overwrite" = "create",
-): void | SkillAuthorError {
-  const buf = Buffer.isBuffer(content) ? content : Buffer.from(content, "utf-8");
-  if (buf.byteLength > MAX_FILE_BYTES) {
-    return authorErr(
-      "E_SKILL_FILE_TOO_LARGE",
-      `${absPath} exceeds per-file cap ${MAX_FILE_BYTES} bytes (got ${buf.byteLength})`,
-    );
-  }
-  // Defensive: realpath the scope root once; all writes must resolve
-  // under it. (scopeRoot itself may not yet exist on first-create — in
-  // that case we fall back to the unresolved string and trust the
-  // caller created it.)
-  let rootReal: string;
-  try {
-    rootReal = realpathSync(scopeRoot);
-  } catch {
-    rootReal = scopeRoot;
-  }
-
-  if (mode === "overwrite") {
-    // The file should already exist. Realpath it and verify the
-    // resolved path is still inside scopeRoot.
-    let real: string;
-    try {
-      const st = lstatSync(absPath);
-      if (st.isSymbolicLink()) {
-        return authorErr(
-          "E_SKILL_INVALID_PATH",
-          `refuse to follow symlink at ${absPath}`,
-        );
-      }
-      real = realpathSync(absPath);
-    } catch {
-      return authorErr("E_SKILL_NOT_FOUND", `${absPath} does not exist`);
-    }
-    if (real !== absPath && !real.startsWith(rootReal + sep)) {
-      return authorErr(
-        "E_SKILL_INVALID_PATH",
-        `${absPath} resolves outside scope root`,
-      );
-    }
-    if (!real.startsWith(rootReal + sep) && real !== rootReal) {
-      return authorErr(
-        "E_SKILL_INVALID_PATH",
-        `${absPath} resolves outside scope root`,
-      );
-    }
-  }
-
-  // Also verify the parent dir realpath stays inside scopeRoot — the
-  // create path can't rely on file existence yet.
-  const parent = dirname(absPath);
-  let parentReal: string;
-  try {
-    parentReal = realpathSync(parent);
-  } catch {
-    parentReal = parent;
-  }
-  if (parentReal !== rootReal && !parentReal.startsWith(rootReal + sep)) {
-    return authorErr(
-      "E_SKILL_INVALID_PATH",
-      `parent dir ${parent} resolves outside scope root`,
-    );
-  }
-
-  // Per-component symlink walk from scopeRoot → parent(absPath).
-  // realpathSync() collapses the chain but doesn't tell us whether any
-  // intermediate dir is itself a symlink — and Node doesn't expose
-  // openat(2)/O_NOFOLLOW per-segment from JS. Walking with lstatSync
-  // catches the "swap a parent dir for a symlink to /tmp" attack.
-  //
-  // Best-effort caveat: this is racy against an attacker swapping a
-  // parent inode between the walk and the openSync() below (true
-  // TOCTOU window). The tighter invariant that closes that gap: the
-  // temp file is opened with O_EXCL ("wx") in `parent` and immediately
-  // renameSync()'d onto `absPath` in the SAME parent. If the parent
-  // inode is swapped post-walk, either (a) open and rename both
-  // resolve against the kernel's current dirent for `parent` (so the
-  // swap is the attacker's problem — the data lands wherever the new
-  // parent points, but the caller never sees a success path that
-  // promises otherwise), or (b) open fails. Crucially we never follow
-  // a stale realpath result after walking.
-  // Walk the UNRESOLVED `parent` path (not parentReal, which already
-  // followed every symlink): start at scopeRoot and lstat each
-  // intermediate component.
-  if (parent === scopeRoot || parent.startsWith(scopeRoot + sep)) {
-    const relFromRoot = parent === scopeRoot
-      ? ""
-      : parent.slice(scopeRoot.length + 1);
-    if (relFromRoot.length > 0) {
-      const segs = relFromRoot.split(sep);
-      let cur = scopeRoot;
-      for (const seg of segs) {
-        cur = join(cur, seg);
-        try {
-          const st = lstatSync(cur);
-          if (st.isSymbolicLink()) {
-            return authorErr(
-              "E_SKILL_INVALID_PATH",
-              `refuse to write under symlinked parent component: ${cur}`,
-            );
-          }
-        } catch {
-          // Missing intermediate dir is a caller bug, but defer the
-          // failure to openSync below for a clearer error.
-        }
-      }
-    }
-  }
-
-  // Atomic write via O_EXCL temp + rename for both modes.
-  const tmp = `${absPath}.tmp.${process.pid}.${Date.now()}`;
-  let fd: number;
-  try {
-    fd = openSync(tmp, "wx", 0o600);
-  } catch (e) {
-    return authorErr(
-      "E_SKILL_INVALID_PATH",
-      `failed to open temp ${tmp}: ${(e as Error).message}`,
-    );
-  }
-  try {
-    writeSync(fd, buf);
-  } finally {
-    try { closeSync(fd); } catch { /* ignore */ }
-  }
-  // For create mode, target must not exist (O_EXCL semantics).
-  if (mode === "create" && existsSync(absPath)) {
-    try {
-      // Clean up the staged temp.
-      const { unlinkSync } = require("node:fs") as typeof import("node:fs");
-      unlinkSync(tmp);
-    } catch { /* ignore */ }
-    return authorErr(
-      "E_SKILL_ALREADY_EXISTS",
-      `${absPath} already exists`,
-    );
-  }
-  const { renameSync } = require("node:fs") as typeof import("node:fs");
-  renameSync(tmp, absPath);
-}
-
-/** Compute a "version token" for a skill dir — the dir's mtime in ms.
- *  Bumps on any file rename/create/delete inside the dir (POSIX
- *  semantics). Used as the optimistic-concurrency token for edit. */
-export function skillVersionToken(skillDir: string): string {
-  const st = statSync(skillDir);
-  return String(st.mtimeMs);
-}
-
-/** Recursively enumerate files under `dir`, returning paths relative
- *  to it. Used by `skillPublish` to enumerate the source tree and by
- *  aggregate-size enforcement. */
-export function listSkillFiles(dir: string): string[] {
-  const out: string[] = [];
-  function walk(sub: string, rel: string) {
-    const entries = readdirSync(sub, { withFileTypes: true });
-    for (const e of entries) {
-      const childAbs = join(sub, e.name);
-      const childRel = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) {
-        walk(childAbs, childRel);
-      } else if (e.isFile()) {
-        out.push(childRel);
-      }
-      // Symlinks are intentionally skipped — the author surface never
-      // emits them, and listing them would be misleading.
-    }
-  }
-  walk(dir, "");
-  return out;
-}
-
-/** Aggregate byte count of all files in `dir`. */
-export function totalSkillBytes(dir: string): number {
-  let total = 0;
-  for (const rel of listSkillFiles(dir)) {
-    try {
-      total += statSync(join(dir, rel)).size;
-    } catch { /* ignore */ }
-  }
-  return total;
-}
-
-/** Re-export the existing audit-append helper at a stable shared path so
- *  the new author CLI doesn't have to import from `agent-config.ts`
- *  directly (and so a future refactor can swap the backend in one
- *  place). */
-export { appendAudit } from "./agent-config.js";
 

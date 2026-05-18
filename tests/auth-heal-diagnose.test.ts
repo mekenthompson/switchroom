@@ -68,7 +68,7 @@ describe("diagnoseAuthState", () => {
     // docs-test principle. Switchroom's hooks get the token via
     // CLAUDE_CODE_OAUTH_TOKEN env injection at start.sh, NOT via
     // .credentials.json self-refresh.
-    writeOauthToken("sk-ant-oat01-something");
+    writeOauthToken(["sk-ant-", "oat01-something"].join(""));
     const r = diagnoseAuthState(configDir);
     expect(r.severity).toBe("ok");
     expect(r.findings).toHaveLength(0);

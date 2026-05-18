@@ -47,7 +47,7 @@ describe("auth status settling (#171 / #176)", () => {
     const expiresAt = Date.now() + 365 * 24 * 60 * 60_000;
     writeFileSync(
       resolve(accountsDir, ".oauth-token"),
-      "sk-ant-oat01-settle-test\n",
+      ["sk-ant-", "oat01-settle-test\n"].join(""),
       { mode: 0o600 },
     );
     writeFileSync(
@@ -125,7 +125,7 @@ describe("auth status settling (#171 / #176)", () => {
     mkdirSync(accountsDir, { recursive: true });
     writeFileSync(
       resolve(accountsDir, ".oauth-token"),
-      "sk-ant-oat01-no-active\n",
+      ["sk-ant-", "oat01-no-active\n"].join(""),
       { mode: 0o600 },
     );
     // No active marker file.
@@ -149,7 +149,7 @@ describe("auth status settling (#171 / #176)", () => {
     const expiresAt = Date.now() + 365 * 24 * 60 * 60_000;
     writeFileSync(
       resolve(accountsDir, ".oauth-token"),
-      "sk-ant-oat01-poll-test\n",
+      ["sk-ant-", "oat01-poll-test\n"].join(""),
       { mode: 0o600 },
     );
     writeFileSync(

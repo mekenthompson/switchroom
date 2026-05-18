@@ -71,6 +71,17 @@ const RULES = [
   { id: 'real Telegram id (user)', re: new RegExp('\\b' + '82487' + '03757\\b') },
   { id: 'real Telegram id (alt)', re: new RegExp('\\b' + '82881' + '44562\\b') },
   { id: 'real Telegram id (group)', re: new RegExp('\\b' + '38527' + '47971\\b') },
+  // Contiguous Anthropic-token-shaped literal. Real tokens were never
+  // committed; this enforces the CLAUDE.md "Secrets in tests" rule —
+  // token-shaped fixtures must be runtime-assembled, never a contiguous
+  // source literal (also avoids GitHub Push Protection trips). The
+  // {12,}-char body means bare `sk-ant-` prefixes, `.join()`-split
+  // fragments, and regex char-classes do NOT match — only a real
+  // glued token literal does.
+  {
+    id: 'contiguous Anthropic token literal (sk' + '-ant-…)',
+    re: new RegExp('sk' + '-ant-' + '[A-Za-z0-9_-]{12,}'),
+  },
 ]
 
 const BINARY_EXT =

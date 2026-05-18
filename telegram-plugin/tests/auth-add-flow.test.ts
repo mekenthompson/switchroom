@@ -127,7 +127,7 @@ function fakeClaudeBinary(opts: {
     const creds = {
       claudeAiOauth: {
         accessToken: ${JSON.stringify(token)},
-        refreshToken: 'sk-ant-ort01-test-refresh',
+        refreshToken: ${JSON.stringify(['sk-ant-', 'ort01-test-refresh'].join(''))},
         expiresAt: Date.now() + 8 * 3600_000,
         scopes: ['user:inference'],
         subscriptionType: 'max',

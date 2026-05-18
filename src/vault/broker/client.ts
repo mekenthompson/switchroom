@@ -95,7 +95,7 @@ const OPERATOR_SOCKET_PATH = join(homedir(), ".switchroom", "broker-operator", "
  * regardless of whether this shell happens to have SWITCHROOM_RUNTIME
  * set. Check that first.
  */
-function defaultBrokerSocketPath(): string {
+export function defaultBrokerSocketPath(): string {
   // 1. Operator socket present → a dockerized broker is serving it
   //    (deployment truth; works from host shells too).
   if (fs.existsSync(OPERATOR_SOCKET_PATH)) return OPERATOR_SOCKET_PATH;

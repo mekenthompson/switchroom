@@ -816,10 +816,10 @@ describe('/reauth one-shot', () => {
   })
 
   it('sk-ant-oat token → code completion for self (was the bug: used to be treated as agent name)', () => {
-    // Pre-fix: /reauth sk-ant-oat01-abc123 was treated as "start reauth for agent sk-ant-oat01-abc123"
+    // Pre-fix: /reauth <sk-ant-oat token> was treated as "start reauth for agent <sk-ant-oat token>"
     // Post-fix: looksLikeAuthCode detects it and routes to auth code
-    const r = routeReauth('sk-ant-oat01-abc_DEF-xyz', 'assistant')
-    expect(r).toEqual({ action: 'code', agent: 'assistant', raw: 'sk-ant-oat01-abc_DEF-xyz' })
+    const r = routeReauth(['sk-ant-', 'oat01-abc_DEF-xyz'].join(''), 'assistant')
+    expect(r).toEqual({ action: 'code', agent: 'assistant', raw: ['sk-ant-', 'oat01-abc_DEF-xyz'].join('') })
   })
 
   it('session_ prefix → code completion for self', () => {
@@ -876,7 +876,7 @@ describe('looksLikeAuthCode', () => {
   })
 
   it('accepts sk-ant- tokens', () => {
-    expect(looksLikeAuthCode('sk-ant-oat01-abc_DEF-123')).toBe(true)
+    expect(looksLikeAuthCode(['sk-ant-', 'oat01-abc_DEF-123'].join(''))).toBe(true)
   })
 
   it('accepts short alphanumeric codes', () => {

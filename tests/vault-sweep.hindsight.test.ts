@@ -7,6 +7,9 @@ import {
 } from '../src/cli/vault-sweep.js'
 import type { SwitchroomConfig } from '../src/config/schema.js'
 
+// Token assembled at runtime — see CLAUDE.md "Secrets in tests".
+const SK = ['sk-ant-', 'abcdefghijklmnopqrstuvwxy'].join('')
+
 /** Build a fake client backed by an in-memory memory list. */
 function makeFakeClient(initial: HindsightMemory[]): {
   client: HindsightMcpClient
@@ -32,12 +35,12 @@ describe('sweepHindsightBank', () => {
       { id: 'm1', text: 'Innocent note, no secrets here.' },
       {
         id: 'm2',
-        text: 'accidentally pasted: sk-ant-abcdefghijklmnopqrstuvwxy — oops',
+        text: `accidentally pasted: ${SK} — oops`,
       },
       { id: 'm3', text: 'another unrelated memory' },
     ]
     const vaultValues = [
-      { key: 'ANTHROPIC_API_KEY', value: 'sk-ant-abcdefghijklmnopqrstuvwxy' },
+      { key: 'ANTHROPIC_API_KEY', value: SK },
       { key: 'UNUSED', value: 'not-in-any-memory' },
     ]
     const { client, deleted } = makeFakeClient(memories)
@@ -72,11 +75,11 @@ describe('sweepHindsightBank', () => {
 
   it('does not delete on dry-run, but still reports matches', async () => {
     const memories: HindsightMemory[] = [
-      { id: 'm1', text: 'before sk-ant-abcdefghijklmnopqrstuvwxy after' },
-      { id: 'm2', text: 'another leak: sk-ant-abcdefghijklmnopqrstuvwxy' },
+      { id: 'm1', text: `before ${SK} after` },
+      { id: 'm2', text: `another leak: ${SK}` },
       { id: 'm3', text: 'clean' },
     ]
-    const vaultValues = [{ key: 'K', value: 'sk-ant-abcdefghijklmnopqrstuvwxy' }]
+    const vaultValues = [{ key: 'K', value: SK }]
     const { client, deleted } = makeFakeClient(memories)
     const deleteSpy = vi.spyOn(client, 'deleteMemory')
     const report = await sweepHindsightBank(client, 'bank-a', vaultValues, {
@@ -104,11 +107,11 @@ describe('sweepHindsightBank', () => {
   it('paginates through multiple pages', async () => {
     const big: HindsightMemory[] = []
     for (let i = 0; i < 250; i++) {
-      big.push({ id: `m${i}`, text: i === 42 ? 'leak: sk-ant-abcdefghijklmnopqrstuvwxy' : 'clean' })
+      big.push({ id: `m${i}`, text: i === 42 ? `leak: ${SK}` : 'clean' })
     }
     const { client, deleted } = makeFakeClient(big)
     const listSpy = vi.spyOn(client, 'listMemories')
-    const vaultValues = [{ key: 'K', value: 'sk-ant-abcdefghijklmnopqrstuvwxy' }]
+    const vaultValues = [{ key: 'K', value: SK }]
     const report = await sweepHindsightBank(client, 'bank-a', vaultValues, {
       dryRun: false,
       pageSize: 100,

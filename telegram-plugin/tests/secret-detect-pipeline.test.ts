@@ -27,7 +27,8 @@ describe('pipeline.runPipeline', () => {
 
   it('stores a high-confidence hit and rewrites the prompt', () => {
     const { write, list, store } = mkFakeVault()
-    const text = 'hey here is my key: sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22 thanks'
+    const tok = ['sk-ant-', 'Apq13yqRnPzx4MxK0TfAbY98Qw22'].join('')
+    const text = `hey here is my key: ${tok} thanks`
     const res = runPipeline({
       chat_id: '-100',
       message_id: 5,
@@ -38,9 +39,9 @@ describe('pipeline.runPipeline', () => {
     })
     expect(res.stored).toHaveLength(1)
     expect(res.rewritten_text).toContain('[secret stored as vault:')
-    expect(res.rewritten_text).not.toContain('sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22')
+    expect(res.rewritten_text).not.toContain(tok)
     // The raw secret made it to the vault under the generated slug.
-    expect([...store.values()]).toContain('sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22')
+    expect([...store.values()]).toContain(tok)
     // Audit emitted once with action=stored.
     const storedLogs = captured.filter((l) => l.includes('"action":"stored"'))
     expect(storedLogs).toHaveLength(1)
@@ -71,7 +72,7 @@ describe('pipeline.runPipeline', () => {
 
   it('treats suppressed high-confidence hits as ambiguous', () => {
     const { write, list, store } = mkFakeVault()
-    const text = 'test sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22'
+    const text = `test ${['sk-ant-', 'Apq13yqRnPzx4MxK0TfAbY98Qw22'].join('')}`
     const res = runPipeline({
       chat_id: 'c',
       message_id: 1,
@@ -89,7 +90,7 @@ describe('pipeline.runPipeline', () => {
     const { write, list, store } = mkFakeVault()
     store.set('anthropic_api_key_20260423', 'preexisting')
     const text =
-      'first: sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22 second: sk-ant-BqZ13yqRnPzx4MxK0TfAbY98Qw22'
+      `first: ${['sk-ant-', 'Apq13yqRnPzx4MxK0TfAbY98Qw22'].join('')} second: ${['sk-ant-', 'BqZ13yqRnPzx4MxK0TfAbY98Qw22'].join('')}`
     const res = runPipeline({
       chat_id: 'c',
       message_id: 2,
@@ -111,7 +112,7 @@ describe('pipeline.runPipeline', () => {
     const res = runPipeline({
       chat_id: 'c',
       message_id: 3,
-      text: 'key is sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22',
+      text: `key is ${['sk-ant-', 'Apq13yqRnPzx4MxK0TfAbY98Qw22'].join('')}`,
       passphrase: 'pw',
       vaultWrite: failingWrite,
       vaultList: list,

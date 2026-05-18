@@ -155,8 +155,9 @@ describe('sanitiseToolArg', () => {
     expect(sanitiseToolArg('Write', { file_path: '/tmp/out.json' })).toBe('out.json')
   })
   it('redacts bearer-token-like strings in Bash commands', () => {
-    const out = sanitiseToolArg('Bash', { command: 'curl -H "Authorization: Bearer sk-ant-1234567890abcdef" https://x' })
-    expect(out).not.toContain('sk-ant-1234567890abcdef')
+    const tok = ['sk-ant-', '1234567890abcdef'].join('')
+    const out = sanitiseToolArg('Bash', { command: `curl -H "Authorization: Bearer ${tok}" https://x` })
+    expect(out).not.toContain(tok)
     expect(out.toLowerCase()).toContain('redacted')
   })
   it('returns empty string when no recognisable arg', () => {

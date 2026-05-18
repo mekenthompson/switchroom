@@ -9,7 +9,7 @@ import { rewritePrompt } from '../secret-detect/rewrite.js'
 
 describe('mask.maskToken', () => {
   it('reveals first 6 + last 4 when length ≥ 18', () => {
-    const tok = 'sk-ant-abc123XYZdefGHI456789'
+    const tok = ['sk-ant-', 'abc123XYZdefGHI456789'].join('')
     expect(maskToken(tok)).toBe(`${tok.slice(0, 6)}...${tok.slice(-4)}`)
   })
   it('returns *** for short inputs', () => {
@@ -96,7 +96,7 @@ describe('chunker.chunk', () => {
 
 describe('suppressor.isSuppressed', () => {
   it('demotes hits near test/mock/example/fixture/dummy', () => {
-    const text = 'test: sk-ant-abc123defgh456789'
+    const text = `test: ${['sk-ant-', 'abc123defgh456789'].join('')}`
     const start = text.indexOf('sk-ant-')
     const end = text.length
     expect(isSuppressed(text, start, end)).toBe(true)
@@ -104,13 +104,13 @@ describe('suppressor.isSuppressed', () => {
   it('ignores markers more than 40 chars away', () => {
     // 80 chars of filler between "test" and the secret
     const filler = ' '.repeat(80)
-    const text = `test${filler}sk-ant-abc123defgh456789`
+    const text = `test${filler}${['sk-ant-', 'abc123defgh456789'].join('')}`
     const start = text.indexOf('sk-ant-')
     const end = text.length
     expect(isSuppressed(text, start, end)).toBe(false)
   })
   it('whole-word only — "tested" does not trigger', () => {
-    const text = 'untested sk-ant-abc123defgh456789'
+    const text = `untested ${['sk-ant-', 'abc123defgh456789'].join('')}`
     const start = text.indexOf('sk-ant-')
     const end = text.length
     expect(isSuppressed(text, start, end)).toBe(false)
@@ -150,7 +150,7 @@ describe('rewrite.rewritePrompt', () => {
     expect(out).toContain('[secret stored as vault:TOKEN]')
   })
   it('preserves non-secret substrings verbatim', () => {
-    const text = 'please stash api key ANTHROPIC_API_KEY=sk-ant-ABCDEFGHIJKLMNOP now'
+    const text = `please stash api key ANTHROPIC_API_KEY=${['sk-ant-', 'ABCDEFGHIJKLMNOP'].join('')} now`
     const detections = detectSecrets(text)
     expect(detections.length).toBeGreaterThan(0)
     const targets = detections.map((d) => ({ detection: d, actual_slug: 'ANTHROPIC_API_KEY' }))
@@ -161,7 +161,7 @@ describe('rewrite.rewritePrompt', () => {
 
 describe('detectSecrets — end-to-end', () => {
   it('finds an anthropic key', () => {
-    const text = 'here you go: sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22'
+    const text = `here you go: ${['sk-ant-', 'Apq13yqRnPzx4MxK0TfAbY98Qw22'].join('')}`
     const d = detectSecrets(text)
     expect(d).toHaveLength(1)
     expect(d[0]!.rule_id).toBe('anthropic_api_key')
@@ -175,7 +175,7 @@ describe('detectSecrets — end-to-end', () => {
     expect(d.some((h) => h.rule_id === 'github_pat_classic')).toBe(true)
   })
   it('captures only the value for KEY=VALUE patterns', () => {
-    const text = 'ANTHROPIC_API_KEY=sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22'
+    const text = `ANTHROPIC_API_KEY=${['sk-ant-', 'Apq13yqRnPzx4MxK0TfAbY98Qw22'].join('')}`
     const d = detectSecrets(text)
     const envHit = d.find((h) => h.rule_id === 'env_key_value' || h.rule_id === 'anthropic_api_key')
     expect(envHit).toBeDefined()
@@ -183,7 +183,7 @@ describe('detectSecrets — end-to-end', () => {
     expect(envHit!.matched_text.startsWith('sk-ant-')).toBe(true)
   })
   it('flags suppressed on nearby "test"', () => {
-    const text = 'test token: sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22'
+    const text = `test token: ${['sk-ant-', 'Apq13yqRnPzx4MxK0TfAbY98Qw22'].join('')}`
     const d = detectSecrets(text)
     expect(d.length).toBeGreaterThan(0)
     expect(d[0]!.suppressed).toBe(true)

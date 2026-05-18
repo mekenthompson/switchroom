@@ -20,12 +20,13 @@ import type { VaultWriteFn, VaultListFn } from '../secret-detect/vault-write.js'
  * this without breaking a test.
  */
 describe('suppressor: never silent-allows on structured matches', () => {
+  const tok = ['sk-ant-', 'Apq13yqRnPzx4MxK0TfAbY98Qw22'].join('')
   const phrasings = [
-    'this is a test, here is sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22',
-    'mock token: sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22',
-    'example: sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22',
-    'dummy sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22',
-    'fixture sk-ant-Apq13yqRnPzx4MxK0TfAbY98Qw22',
+    `this is a test, here is ${tok}`,
+    `mock token: ${tok}`,
+    `example: ${tok}`,
+    `dummy ${tok}`,
+    `fixture ${tok}`,
   ]
 
   for (const text of phrasings) {

@@ -1,0 +1,124 @@
+#!/usr/bin/env node
+/**
+ * Regression gate: block re-introduction of operator PII scrubbed in
+ * PR #1486 (fix(privacy): scrub operator PII from tracked tree).
+ *
+ * Why this script exists:
+ *
+ * The repo is public + canonical. A full audit found personal emails,
+ * real Telegram chat IDs, and a real Tailscale host embedded across
+ * source/tests/docs/CHANGELOG (115+ occurrences). They were replaced
+ * with the repo's placeholder conventions. Nothing structurally stops
+ * an agent from pasting a real address/ID back into a fixture — this
+ * gate does, in the always-running `lint` sentinel (a required check),
+ * so it cannot merge to `main`.
+ *
+ * The rule:
+ *
+ *   No tracked file may contain the scrubbed operator identifiers.
+ *   The ONE sanctioned exception is the maintainer-contact email in
+ *   the three plugin manifests (legitimate, intentional).
+ *
+ * Patterns are assembled at runtime from fragments so this file itself
+ * never contains a contiguous PII literal (same discipline as the
+ * token-fixture rule in CLAUDE.md → "Secrets in tests"), which keeps
+ * the gate from flagging itself and avoids GitHub Push Protection.
+ *
+ * Run: `npm run lint:no-pii` (also part of `npm run lint`).
+ */
+
+import { execSync } from 'node:child_process'
+import { readFileSync } from 'node:fs'
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const repoRoot = resolve(__dirname, '..')
+
+// This script's own repo-relative path — never scan it (it documents
+// the fragments it forbids).
+const SELF = 'scripts/check-no-pii-secrets.mjs'
+
+// NUL sentinel for the binary sniff, built without embedding a control
+// byte in this source file.
+const NUL = String.fromCharCode(0)
+
+// The three plugin manifests legitimately carry the maintainer-contact
+// email and are the ONLY place the kenthompson.com.au domain is allowed.
+const MAINTAINER_EMAIL_ALLOW = new Set([
+  '.claude-plugin/marketplace.json',
+  'docker/security-plugin/.claude-plugin/plugin.json',
+  'telegram-plugin/.claude-plugin/plugin.json',
+])
+
+// Patterns assembled from fragments. `id` is for the message; `re` is
+// the matcher; `allowIn` (optional) is a Set of repo-relative paths
+// where this specific pattern is sanctioned.
+const RULES = [
+  { id: 'personal handle "pix' + 'soul"', re: new RegExp('pix' + 'soul', 'i') },
+  {
+    id: 'personal email domain ' + 'kenthompson' + '.com.au',
+    re: new RegExp('kenthompson' + '\\.com\\.au', 'i'),
+    allowIn: MAINTAINER_EMAIL_ALLOW,
+  },
+  { id: 'shorthand account token "me' + '@kt"', re: new RegExp('\\bme' + '@kt\\b', 'i') },
+  {
+    id: 'shorthand/real outlook account',
+    re: new RegExp('ken' + '\\.thompson@outlook' + '|' + '\\bken' + '-outlook\\b', 'i'),
+  },
+  { id: 'operator home path', re: new RegExp('/home/' + 'kenthompson') },
+  { id: 'real Tailscale tailnet id', re: new RegExp('tail' + 'd78f7', 'i') },
+  { id: 'real Telegram id (user)', re: new RegExp('\\b' + '82487' + '03757\\b') },
+  { id: 'real Telegram id (alt)', re: new RegExp('\\b' + '82881' + '44562\\b') },
+  { id: 'real Telegram id (group)', re: new RegExp('\\b' + '38527' + '47971\\b') },
+]
+
+const BINARY_EXT =
+  /\.(png|jpe?g|gif|ico|webp|pdf|bin|woff2?|ttf|eot|zip|gz|tgz|tar|mp4|mov|sqlite|wasm)$/i
+
+function listTrackedFiles() {
+  const out = execSync('git ls-files', { cwd: repoRoot, encoding: 'utf-8' })
+  return out
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+}
+
+const offenders = []
+for (const relPath of listTrackedFiles()) {
+  if (relPath === SELF) continue
+  if (BINARY_EXT.test(relPath)) continue
+  let src
+  try {
+    src = readFileSync(resolve(repoRoot, relPath), 'utf-8')
+  } catch {
+    continue
+  }
+  if (src.indexOf(NUL) !== -1) continue // binary sniff
+  const lines = src.split('\n')
+  for (const rule of RULES) {
+    if (rule.allowIn && rule.allowIn.has(relPath)) continue
+    for (let i = 0; i < lines.length; i++) {
+      if (rule.re.test(lines[i])) {
+        offenders.push({ file: relPath, line: i + 1, rule: rule.id })
+      }
+    }
+  }
+}
+
+if (offenders.length > 0) {
+  console.error(
+    'check-no-pii-secrets: scrubbed operator PII re-introduced (see PR #1486). Remove it / use the placeholder conventions (you@example.com, alice@/bob@example.com, synthetic 12345 / -1001234567890, example-host.tailnet.ts.net, ~ for home paths):\n',
+  )
+  for (const o of offenders) {
+    console.error(`  ${o.file}:${o.line}  — ${o.rule}`)
+  }
+  console.error(
+    '\nIf a hit is a legitimate maintainer-contact manifest, add it to MAINTAINER_EMAIL_ALLOW in scripts/check-no-pii-secrets.mjs (do NOT broaden the patterns).',
+  )
+  process.exit(1)
+}
+
+console.log(
+  `check-no-pii-secrets: clean (${listTrackedFiles().length} tracked files scanned)`,
+)

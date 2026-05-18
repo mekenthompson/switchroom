@@ -18,6 +18,12 @@ dist/
 # RFC G Phase 5 — operator-host MCP credentials (refresh tokens land here)
 /examples/personal-google-workspace-mcp/credentials/
 
+# Root MCP config is host-specific (operator's local MCP endpoints) and is
+# exactly where MCP credentials/headers accumulate — never commit it. The
+# tracked `.mcp.json.example` documents the safe shape. Anchored so it does
+# not match `.mcp.json.example` or per-agent `**/.mcp.json` scaffolds.
+/.mcp.json
+
 # OpenClaw export bundle — contains real secrets, never commit
 /switchroom-export/
 /clerk-export/
@@ -26,8 +32,13 @@ dist/
 # Personal notes, drafts, and host-specific scratch work
 /private/
 
-# Claude Code local settings (per-user tool allowlist, etc)
-.claude/settings.local.json
+# Claude Code per-user state (tool allowlist, scheduled-task lock, agent
+# worktrees). Nothing under .claude/ is tracked — the project ships Claude
+# config via profiles/_base/settings.json.hbs and the tracked commands/ +
+# .claude-plugin/ dirs. Previously this lived only in .git/info/exclude
+# (local, not shared across clones); tracking it here makes it consistent
+# for every checkout. Trailing slash → does not match .claude-plugin/.
+/.claude/
 
 # OS
 .DS_Store

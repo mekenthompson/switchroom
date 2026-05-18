@@ -37,6 +37,20 @@ RUN install -d -m 0755 /run/switchroom/broker
 # broker has no native deps so no in-image npm install is required.
 COPY dist/vault/broker/server.js /opt/switchroom/dist/vault/broker/server.js
 
+# Bake the switchroom CLI onto PATH so the documented in-container
+# recovery — `docker exec -it switchroom-vault-broker switchroom vault
+# broker unlock` (referenced by src/telegram/materialize-bot-token.ts
+# and docs/vault.md) — actually works. Without this the broker image
+# had no `switchroom` binary, so that fallback exited 127 and the only
+# operator unlock path in the docker model was the host CLI
+# (RFC J Phase 3b / install-validation 2026-05-17 finding #32).
+# Mirrors docker/Dockerfile.agent:164-166 exactly; the bundle's
+# `#!/usr/bin/env bun` shebang resolves against the bun already in the
+# base image (the broker CMD itself runs bun).
+COPY dist/cli/switchroom.js /opt/switchroom/switchroom.js
+RUN chmod 0755 /opt/switchroom/switchroom.js \
+ && ln -s /opt/switchroom/switchroom.js /usr/local/bin/switchroom
+
 USER 0:0
 
 ENTRYPOINT ["/usr/bin/tini", "--"]

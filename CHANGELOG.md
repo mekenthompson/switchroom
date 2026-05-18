@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.12.3 — fix: the v0.12.2 `--rebuild` guard never fired on nvm/npm-global
+
+v0.12.2's `--rebuild` published-install guardrail was ineffective on the exact install model it protects. It detected "source checkout" as *any* `.git` within 10 parent directories — but **nvm is itself a git clone** (`~/.nvm/.git` exists) and an npm-global install lives under `~/.nvm/…`, so the guard saw a `.git` ancestor and **allowed** `--rebuild` on a published host (a dotfiles `$HOME` git repo defeats it the same way). The guard now requires a directory that has **both** a `.git` (dir *or* file — git worktrees still count) **and** a `package.json` whose `name` is `switchroom`, at the same level — so nvm/dotfiles `.git` dirs and installed package dirs both correctly refuse, while real checkouts and worktrees are still allowed. Anyone on v0.12.2 should upgrade: until 0.12.3, `update --rebuild` on a published host silently drifts it off the released artifacts instead of refusing.
+
+### Changes
+
+#### Fixes
+
+- **fix(update):** `--rebuild` guard requires an actual switchroom source checkout (`.git` + switchroom `package.json` at the same dir), not any `.git` ancestor — closes the v0.12.2 defect where nvm's own `~/.nvm/.git` (and dotfiles `$HOME/.git`) made every npm-global install look like a checkout and the guard never fired. New `runningFromSwitchroomCheckout()`; `isGitCheckout` retained (unused by the guard) so nothing else regresses; refusal message corrected. Verified live on a published host. (#1508)
+
 ## v0.12.2 — published-install guardrail for `update --rebuild`
 
 `switchroom update --rebuild` (git pull + build from source) is a source-checkout / maintainer-only operation. On a published install (npm-global / GHCR-image host) it is now **hard-refused fail-fast**: a preflight in `runUpdate` refuses *before any step runs* (and before the `--check` plan) with exit 2 and the correct remediation — `npm i -g switchroom@latest && switchroom update`. Previously it died mid-pipeline (after `pull-images`) with advice ("invoke from a source checkout") that's wrong for a consumer host. Source checkouts — including git worktrees — are byte-unchanged; this only makes a published host structurally un-driftable off the reviewed, CI-published release via that flag.

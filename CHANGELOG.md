@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.12.1 — Claude-native skill authoring; doctor/vault-broker hardening
+
+Headline: skill authoring is now **Claude-native and gated by review, not by tooling**. An agent creates a skill for itself the same way anyone uses Claude — it writes files into its own `$CLAUDE_CONFIG_DIR/skills/<slug>/` (persistent, reconcile-safe, discovered next session), guided by the bundled `skill-creator` skill and a non-blocking validator hook. There is **no** skill-authoring/publish tool, CLI, or broker write path. Sharing a skill with the rest of the fleet is a **reviewed pull request** (it becomes a bundled-default, opt-out per agent, or a `skills:`-cascade entry from `switchroom.skills_dir`), distributed by the normal reconcile path — never a runtime action. Also: more honest `doctor` visibility and several vault-broker ACL correctness fixes.
+
+### Changes
+
+#### Features
+
+- **feat(skill-author):** native-by-default skill authoring. Agent-scope skills are authored with plain `Write`/`Edit` into `$CLAUDE_CONFIG_DIR/skills/<slug>/`; a non-blocking `PreToolUse` linter nudges toward a well-formed skill (the only hard stop is the 2 MiB per-skill cap). The deprecated `skill_create/edit/read/delete` MCP + CLI shim was **removed** (closing the `--version`-shadowing bug class, #1492). An interim runtime `skill_publish`/`skill_unpublish` path was added and then **removed** in favour of review-via-PR — net: no privileged runtime authoring or publish path exists. Fleet-wide sharing = a reviewed PR (bundled-default opt-out via `bundled_skills`, or `skills:` cascade). See [docs/skills.md](docs/skills.md); design record in [docs/rfcs/skill-authoring-native.md](docs/rfcs/skill-authoring-native.md). (#1490–#1502)
+- **feat(doctor):** hostd visibility + image-drift WARN (#1471); vault operator-lockout + per-agent secret-access ACL surfacing (#1473).
+- **feat(compose):** pin the Claude runtime version for the immutable 24/7 fleet — perf + correctness.
+
+#### Fixes
+
+- **fix(vault-broker):** fall through to the standing ACL when a presented token is unusable (`get`/`list`); an agent may read its OWN configured `bot_token`; generous `unlock` timeout — no false "Timeout" on a slow decrypt (RFC J Phase 4b).
+- **fix(gateway):** `vault_request_access` short-circuits when a standing ACL already covers the key.
+- **fix(apply):** restore operator ownership of `~/.switchroom` after a self-elevated apply (#1473).
+- **fix(docker):** bake the switchroom CLI into the broker image — RFC J Phase 3b (#1485).
+- **fix(auth):** remaining user-facing `--from-oauth` → `--via-claude` (doctor + setup).
+- **fix(boot-probes):** `/status` lists every skill bucketed by source (#1467).
+- **fix(doctor):** MFF probes are per-agent + WS6-F2 agent-private aware.
+- **fix(privacy):** scrub operator PII from the tracked tree; extend the PII regression gate (incl. an `sk-ant` rule).
+- **fix(ci):** drop the broken docker-smoke spike that permanently failed promote-to-dev.
+
+#### Internal
+
+- **chore(deps):** GitHub Actions bumps — checkout, setup-node, setup-python, paths-filter, docker/build-push-action.
+- **docs(readme):** align with the v0.12.0 architecture + command surface.
+
 ## v0.12.0 — user-owned SOUL.md + broker healthcheck honesty + legacy-state deprecations
 
 Headline: agent persona (`workspace/SOUL.md`) becomes a user-owned, seed-once file — switchroom seeds it once and never overwrites it again, matching the OpenClaw/Hermes "my persona sticks" expectation while the machinery (`CLAUDE.md`) keeps propagating fleet-wide. Also: the vault-broker healthcheck now reports honestly (a locked/never-unlocked broker reads unhealthy instead of false-healthy), the operator unlock hint is corrected, and the long-lived `clerk → switchroom` rename shims are scheduled for removal. No automatic state migration is performed.

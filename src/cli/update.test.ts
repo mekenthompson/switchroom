@@ -121,20 +121,59 @@ describe("planUpdate", () => {
   });
 
   describe("--rebuild guardrail (published-install refusal)", () => {
-    it("rebuildRefusalMessage: null inside a git checkout, message otherwise", () => {
+    it("rebuildRefusalMessage: allow ONLY a real switchroom checkout", () => {
       const tmp = mkdtempSync(join(tmpdir(), "update-guard-"));
       try {
-        // No .git anywhere up the chain → published install → refuse.
+        // (a) No .git anywhere up the chain → published install → refuse.
         const noGit = join(tmp, "lib", "node_modules", "switchroom", "x.js");
         const msg = rebuildRefusalMessage(noGit);
         expect(msg).not.toBeNull();
         expect(msg!).toContain("npm i -g switchroom@latest && switchroom update");
-        expect(msg!).toMatch(/published install/);
 
-        // .git ancestor present → real source checkout → allowed.
-        mkdirSync(join(tmp, ".git"), { recursive: true });
-        const inCheckout = join(tmp, "dist", "cli", "switchroom.js");
+        // (b) REGRESSION for the v0.12.2 defect: a .git ancestor that
+        // is NOT a switchroom checkout (e.g. ~/.nvm is a git clone, or
+        // a dotfiles $HOME). An npm-global install lives under such a
+        // path. MUST still refuse — a bare ".git ancestor" check did
+        // not, so the guard never fired on the very host it protects.
+        const nvmLike = join(tmp, ".nvm");
+        mkdirSync(join(nvmLike, ".git"), { recursive: true }); // nvm's own repo, no switchroom pkg
+        const installed = join(
+          nvmLike, "versions", "node", "vX", "lib",
+          "node_modules", "switchroom", "dist", "cli", "switchroom.js",
+        );
+        mkdirSync(join(nvmLike, "versions", "node", "vX", "lib",
+          "node_modules", "switchroom"), { recursive: true });
+        // even with switchroom's own package.json present (no .git there):
+        writeFileSync(
+          join(nvmLike, "versions", "node", "vX", "lib", "node_modules",
+            "switchroom", "package.json"),
+          JSON.stringify({ name: "switchroom", version: "0.0.0" }),
+        );
+        expect(rebuildRefusalMessage(installed)).not.toBeNull();
+
+        // (c) Real switchroom checkout: .git AND switchroom package.json
+        // at the SAME dir → allowed.
+        const repo = join(tmp, "repo");
+        mkdirSync(join(repo, ".git"), { recursive: true });
+        writeFileSync(
+          join(repo, "package.json"),
+          JSON.stringify({ name: "switchroom", version: "0.0.0" }),
+        );
+        const inCheckout = join(repo, "dist", "cli", "switchroom.js");
         expect(rebuildRefusalMessage(inCheckout)).toBeNull();
+
+        // (d) git worktree of switchroom: .git is a FILE (gitlink),
+        // package.json still name=switchroom → allowed.
+        const wt = join(tmp, "wt");
+        mkdirSync(wt, { recursive: true });
+        writeFileSync(join(wt, ".git"), "gitdir: /somewhere/.git/worktrees/wt\n");
+        writeFileSync(
+          join(wt, "package.json"),
+          JSON.stringify({ name: "switchroom", version: "0.0.0" }),
+        );
+        expect(
+          rebuildRefusalMessage(join(wt, "dist", "cli", "switchroom.js")),
+        ).toBeNull();
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
@@ -212,6 +251,10 @@ describe("planUpdate", () => {
       const tmp = mkdtempSync(join(tmpdir(), "update-guard-ok-"));
       try {
         mkdirSync(join(tmp, ".git"), { recursive: true });
+        writeFileSync(
+          join(tmp, "package.json"),
+          JSON.stringify({ name: "switchroom", version: "0.0.0" }),
+        );
         const scriptPath = join(tmp, "dist", "cli", "switchroom.js");
         expect(rebuildRefusalMessage(scriptPath)).toBeNull();
         const composePath = join(tmp, "docker-compose.yml");

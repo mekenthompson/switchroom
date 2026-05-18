@@ -120,6 +120,44 @@ export function isGitCheckout(scriptPath: string): boolean {
 }
 
 /**
+ * True iff `scriptPath` runs from inside an actual **switchroom source
+ * checkout** — a directory that has BOTH a `.git` (dir *or* file, so
+ * git worktrees count) AND a `package.json` whose `name` is
+ * `"switchroom"`, at the same level.
+ *
+ * Why not "any `.git` ancestor" (the old `isGitCheckout`): an
+ * npm-global install commonly sits under `~/.nvm/...`, and **nvm
+ * itself is a git clone** (`~/.nvm/.git` exists). A dotfiles `$HOME`
+ * is often a git repo too. A bare `.git`-ancestor walk therefore
+ * reports *every* nvm/npm-global install as a "checkout" so the
+ * `--rebuild` guard never fired on the exact host it must protect
+ * (this is the v0.12.2 defect). Requiring the switchroom
+ * `package.json` at the *same* dir as the `.git` eliminates those
+ * false positives: nvm/dotfiles `.git` dirs have no switchroom
+ * package.json; an installed package dir has the package.json but no
+ * `.git`.
+ */
+export function runningFromSwitchroomCheckout(scriptPath: string): boolean {
+  let dir = dirname(scriptPath);
+  for (let i = 0; i < 12; i++) {
+    if (existsSync(join(dir, ".git"))) {
+      try {
+        const pkg = JSON.parse(
+          readFileSync(join(dir, "package.json"), "utf-8"),
+        ) as { name?: string };
+        if (pkg.name === "switchroom") return true;
+      } catch {
+        /* no / invalid package.json at this .git level — keep walking */
+      }
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return false;
+}
+
+/**
  * `--rebuild` (git pull + bun install + npm run build) is a
  * **source-checkout / maintainer-only** operation. On a published
  * install (npm-global, /usr/local/bin, any non-checkout) building
@@ -127,18 +165,19 @@ export function isGitCheckout(scriptPath: string): boolean {
  * reviewed, CI-published release — the exact failure mode the
  * published-artifact model exists to prevent.
  *
- * Returns `null` when `--rebuild` is legitimate (running from a git
- * checkout), or the operator-facing refusal message otherwise.
- * Exported so the preflight, the in-step defence-in-depth, and unit
- * tests all share one source of truth.
+ * Returns `null` when `--rebuild` is legitimate (running from a real
+ * switchroom source checkout), or the operator-facing refusal message
+ * otherwise. Exported so the preflight, the in-step defence-in-depth,
+ * and unit tests all share one source of truth.
  */
 export function rebuildRefusalMessage(scriptPath: string): string | null {
-  if (isGitCheckout(scriptPath)) return null;
+  if (runningFromSwitchroomCheckout(scriptPath)) return null;
   return (
     `--rebuild builds the CLI from a git checkout, but switchroom is ` +
-    `running from "${scriptPath}" — a published install (no .git ` +
-    `ancestor). Rebuilding from source here would drift this host off ` +
-    `the reviewed, CI-published release. Use the published path:\n` +
+    `running from "${scriptPath}" — not a switchroom source checkout ` +
+    `(this is a published / installed copy). Rebuilding from source ` +
+    `here would drift this host off the reviewed, CI-published ` +
+    `release. Use the published path:\n` +
     `\n` +
     `  npm i -g switchroom@latest && switchroom update\n` +
     `\n` +

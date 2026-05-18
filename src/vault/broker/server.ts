@@ -857,53 +857,62 @@ export class VaultBroker {
         const sentinelKey = Object.keys(this.secrets)[0] ?? "__list_check__";
         const tokenCheck = await validateGrant(this.grantsDb, req.token, sentinelKey);
 
-        // If the token is invalid/expired/revoked, deny
-        if (!tokenCheck.ok && tokenCheck.reason !== "grant-key-not-allowed") {
+        // Only an explicitly REVOKED token hard-denies (deliberate
+        // operator kill-switch — don't mask it by switching auth paths).
+        if (!tokenCheck.ok && tokenCheck.reason === "grant-revoked") {
           this.auditLogger.write({
             ts: new Date().toISOString(),
             op: "list",
             caller: auditCaller,
             pid: auditPid,
             cgroup: auditCgroup,
-            result: `denied:${tokenCheck.reason}`,
+            result: `denied:grant-revoked`,
             method: "grant",
             grant_id: grantId,
           });
-          socket.write(encodeResponse(errorResponse("DENIED", tokenCheck.reason)));
+          socket.write(encodeResponse(errorResponse("DENIED", "grant-revoked")));
           return;
         }
 
-        // Token is valid (ok or key-not-allowed means auth is fine).
-        // Get the key_allow list from the grant row.
-        const grantRow = tokenCheck.ok
-          ? tokenCheck.grant
-          : this.grantsDb
-              .query<{ key_allow: string }, [string]>(
-                "SELECT key_allow FROM vault_grants WHERE id = ?",
-              )
-              .get(grantId ?? "");
+        if (tokenCheck.ok || tokenCheck.reason === "grant-key-not-allowed") {
+          // Token authenticates (ok, or key-not-allowed → token itself is
+          // valid). Return only the keys the grant's key_allow covers.
+          const grantRow = tokenCheck.ok
+            ? tokenCheck.grant
+            : this.grantsDb
+                .query<{ key_allow: string }, [string]>(
+                  "SELECT key_allow FROM vault_grants WHERE id = ?",
+                )
+                .get(grantId ?? "");
 
-        const allowedKeys: string[] = grantRow
-          ? (typeof (grantRow as { key_allow: string[] | string }).key_allow === "string"
-              ? JSON.parse((grantRow as { key_allow: string }).key_allow)
-              : (grantRow as { key_allow: string[] }).key_allow)
-          : [];
+          const allowedKeys: string[] = grantRow
+            ? (typeof (grantRow as { key_allow: string[] | string }).key_allow === "string"
+                ? JSON.parse((grantRow as { key_allow: string }).key_allow)
+                : (grantRow as { key_allow: string[] }).key_allow)
+            : [];
 
-        // Filter to keys that exist in the vault AND are allowed by the grant
-        const visibleKeys = allowedKeys.filter((k) => k in this.secrets!);
+          // Filter to keys that exist in the vault AND are allowed by the grant
+          const visibleKeys = allowedKeys.filter((k) => k in this.secrets!);
 
-        this.auditLogger.write({
-          ts: new Date().toISOString(),
-          op: "list",
-          caller: auditCaller,
-          pid: auditPid,
-          cgroup: auditCgroup,
-          result: `allowed:${visibleKeys.length}`,
-          method: "grant",
-          grant_id: grantId,
-        });
-        socket.write(encodeResponse({ ok: true, keys: visibleKeys }));
-        return;
+          this.auditLogger.write({
+            ts: new Date().toISOString(),
+            op: "list",
+            caller: auditCaller,
+            pid: auditPid,
+            cgroup: auditCgroup,
+            result: `allowed:${visibleKeys.length}`,
+            method: "grant",
+            grant_id: grantId,
+          });
+          socket.write(encodeResponse({ ok: true, keys: visibleKeys }));
+          return;
+        }
+
+        // grant-invalid / grant-expired (not revoked, not a usable token):
+        // fall through to the no-token peercred/ACL list path below —
+        // behave exactly as if no token were presented. No audit here
+        // (#B1): the no-token path writes the single terminal row, so the
+        // request still yields exactly one audit entry (#1433 hash-chain).
       }
 
       // ── Peercred path (no token) ────────────────────────────────────────
@@ -1055,11 +1064,14 @@ export class VaultBroker {
           });
           socket.write(encodeResponse(entryResponse(entry)));
           return;
-        } else {
-          // Token present but invalid — extract grant_id for audit (ID portion only)
+        } else if (grantResult.reason === "grant-revoked") {
+          // Token recognised but explicitly REVOKED — hard-deny. Revocation
+          // is a deliberate operator kill-switch; falling through to the
+          // standing per-agent-socket ACL would mask that signal. (Mirrors
+          // the put path's grant-revoked branch.) Only `grant-revoked`
+          // hard-denies on the READ path — see the fall-through note below.
           const dotIdx = req.token.indexOf(".");
           const grantId = dotIdx !== -1 ? req.token.slice(0, dotIdx) : undefined;
-          const denyReason = grantResult.reason; // e.g. "grant-expired"
           this.auditLogger.write({
             ts: new Date().toISOString(),
             op: "get",
@@ -1067,15 +1079,25 @@ export class VaultBroker {
             caller: auditCaller,
             pid: auditPid,
             cgroup: auditCgroup,
-            result: `denied:${denyReason}`,
+            result: `denied:grant-revoked`,
             method: "grant",
             grant_id: grantId,
           });
           socket.write(
-            encodeResponse(errorResponse("DENIED", denyReason)),
+            encodeResponse(errorResponse("DENIED", "grant-revoked")),
           );
           return;
         }
+        // grant-invalid / grant-expired / grant-key-not-allowed: the
+        // presented token grants nothing usable. Deliberately DO NOT audit
+        // or return here — fall through to the standing-ACL path below so
+        // an agent that ALSO has a schedule.secrets[] grant for this key is
+        // still served (an unusable token must never be MORE restrictive
+        // than presenting no token). Not auditing here is load-bearing:
+        // the no-token ACL path writes the single terminal row, so the
+        // request still produces exactly one audit entry (preserves the
+        // #1433 hash-chain). Mirrors the put precedent at the
+        // validateGrantForWrite branch.
       }
 
       // ── ACL path (no token) ─────────────────────────────────────────────

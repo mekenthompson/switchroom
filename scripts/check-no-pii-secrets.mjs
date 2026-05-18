@@ -44,7 +44,7 @@ const SELF = 'scripts/check-no-pii-secrets.mjs'
 const NUL = String.fromCharCode(0)
 
 // The three plugin manifests legitimately carry the maintainer-contact
-// email and are the ONLY place the kenthompson.com.au domain is allowed.
+// email and are the ONLY place that email's domain is allowed.
 const MAINTAINER_EMAIL_ALLOW = new Set([
   '.claude-plugin/marketplace.json',
   'docker/security-plugin/.claude-plugin/plugin.json',

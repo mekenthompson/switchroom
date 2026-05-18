@@ -21,7 +21,7 @@ describe("agent-config MCP server — Phase 2a publish tools", () => {
         expect.arrayContaining(["name", "agent"]),
       );
       // Publish is inherently agent→global; there is deliberately no
-      // scope selector (unlike the deprecated skill_create/edit/delete).
+      // scope selector.
       expect(t.inputSchema.properties).not.toHaveProperty("scope");
     }
   });
@@ -35,10 +35,11 @@ describe("agent-config MCP server — Phase 2a publish tools", () => {
     );
   });
 
-  it("appear after skill_delete (ordering kept stable)", () => {
+  it("ordering is stable (publish before unpublish, after skill_list)", () => {
     const names = TOOLS.map((t) => t.name);
-    const del = names.indexOf("skill_delete");
-    expect(names.indexOf("skill_publish")).toBeGreaterThan(del);
+    expect(names.indexOf("skill_publish")).toBeGreaterThan(
+      names.indexOf("skill_list"),
+    );
     expect(names.indexOf("skill_unpublish")).toBeGreaterThan(
       names.indexOf("skill_publish"),
     );

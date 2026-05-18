@@ -1602,10 +1602,10 @@ function emitAgentService(
         `      - ${homePrefix}/.switchroom/hostd/${a.name}:/run/switchroom/hostd/${a.name}`,
       );
     }
-    // PR B (#TBD) global-scope skill authoring. Admin agents get a
-    // writable bind of the operator's skills_dir at the in-container
-    // path /skills-rw. The agent-config `skill_create/edit/delete`
-    // tools with scope:"global" resolve against this mount. Non-admin
+    // Global-scope skill publishing. Admin agents get a writable bind
+    // of the operator's skills_dir at the in-container path
+    // /skills-rw. The agent-config `skill_publish` / `skill_unpublish`
+    // tools resolve against this mount. Non-admin
     // agents never get it — global authoring is admin-only by
     // construction (no env, no opt-in, no schema field). The agent
     // self-serve guard ALSO refuses scope:"global" for non-admin

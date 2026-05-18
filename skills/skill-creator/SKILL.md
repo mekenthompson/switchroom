@@ -494,11 +494,11 @@ broker, no packaging:
   `SKILL.md` at its root. This directory is **writable by you** and
   **persistent** (it survives restarts and `switchroom agent
   restart`). Just `Write`/`Edit` the files there directly. Do **not**
-  stage in `/tmp/`, do **not** copy anything afterwards, and do
-  **not** use the `skill_create` / `skill_edit` / `skill_read` /
-  `skill_delete` MCP tools — those are deprecated for agent scope and
-  are being removed; the native filesystem write is the supported
-  path.
+  stage in `/tmp/` and do **not** copy anything afterwards — the
+  native filesystem write *is* the supported path. (There is no
+  `skill_create`/`edit`/`read`/`delete` tool; authoring is plain file
+  writes. To share a finished skill with the rest of the fleet, an
+  admin agent uses `skill_publish`.)
 - **It goes live on your *next* turn, not this one.** Claude discovers
   skills when a session starts. After you write the files, tell the
   user the skill is created and will be active on the next message —

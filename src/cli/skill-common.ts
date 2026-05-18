@@ -14,14 +14,7 @@
  *   - Path allowlist: SKILL.md, scripts/*.{sh,py}, assets/*,
  *     README.md, reference/*.md. Max depth 3.
  *   - Symlink TOCTOU: refuse anything whose realpath escapes the
- *     skill's scope root. New files opened O_EXCL ("wx"); edits
- *     resolve-then-check.
- *   - Cron-source denial: any author CLI call from a cron-triggered
- *     turn is rejected with E_SKILL_AUTHOR_REQUIRES_INTERACTIVE.
- *     Detection: `SWITCHROOM_TURN_SOURCE=cron` env var (the gateway
- *     pins this when a cron-fired prompt enters the agent).
- *
- * No quota enforcement in PR A per Ken.
+ *     skill's scope root. New files opened O_EXCL ("wx").
  */
 
 import { homedir } from "node:os";
@@ -66,8 +59,6 @@ export type SkillAuthorErrorCode =
   | "E_SKILL_FILE_TOO_LARGE"
   | "E_SKILL_BUNDLE_TOO_LARGE"
   | "E_SKILL_ALREADY_EXISTS"
-  | "E_SKILL_VERSION_STALE"
-  | "E_SKILL_AUTHOR_REQUIRES_INTERACTIVE"
   | "E_SKILL_NOT_FOUND"
   | "E_AGENT_PIN_REQUIRED"
   | "E_SKILL_OPERATOR_OWNED"
@@ -82,10 +73,6 @@ export interface SkillAuthorError {
 
 export function authorExitCodeFor(code: SkillAuthorErrorCode): number {
   switch (code) {
-    case "E_SKILL_AUTHOR_REQUIRES_INTERACTIVE":
-      return 11;
-    case "E_SKILL_VERSION_STALE":
-      return 12;
     case "E_SKILL_ALREADY_EXISTS":
       return 13;
     case "E_SKILL_NOT_FOUND":
@@ -197,16 +184,6 @@ export function agentScopeSkillDir(
   return join(agentScopeSkillsRoot(agent, root), slug);
 }
 
-/** Detect whether the current turn was fired by cron.
- *
- *  The gateway sets `SWITCHROOM_TURN_SOURCE` per turn; cron-fired turns
- *  get `cron`. Authoring from cron is a footgun (the operator isn't
- *  watching to catch a hostile prompt-injection-driven rewrite of the
- *  agent's own skills) so we hard-deny.
- */
-export function isCronTurn(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.SWITCHROOM_TURN_SOURCE === "cron";
-}
 
 /** Validate a skill-relative path.
  *
@@ -506,8 +483,8 @@ export function skillVersionToken(skillDir: string): string {
 }
 
 /** Recursively enumerate files under `dir`, returning paths relative
- *  to it. Used by `skillRead({file: undefined})` to enumerate the
- *  tree and by aggregate-size enforcement. */
+ *  to it. Used by `skillPublish` to enumerate the source tree and by
+ *  aggregate-size enforcement. */
 export function listSkillFiles(dir: string): string[] {
   const out: string[] = [];
   function walk(sub: string, rel: string) {
@@ -545,35 +522,3 @@ export function totalSkillBytes(dir: string): number {
  *  place). */
 export { appendAudit } from "./agent-config.js";
 
-/** Read a SKILL.md file from disk and return its frontmatter, or null
- *  if it doesn't exist / can't be parsed. Used by `skillRead` for the
- *  no-`file` summary mode. */
-export function readSkillFrontmatter(
-  skillDir: string,
-): Record<string, unknown> | null {
-  const p = join(skillDir, "SKILL.md");
-  if (!existsSync(p)) return null;
-  try {
-    const content = readFileSync(p, "utf-8");
-    if (!content.startsWith("---\n") && !content.startsWith("---\r\n")) {
-      return null;
-    }
-    const rest = content.slice(content.indexOf("\n") + 1);
-    const endIdx = rest.indexOf("\n---");
-    if (endIdx < 0) return null;
-    const fm = parseYaml(rest.slice(0, endIdx));
-    return fm && typeof fm === "object" && !Array.isArray(fm)
-      ? (fm as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Ensure `~/.switchroom/agents/<agent>/.claude/skills/` exists.
- *  Used by `skillCreate`. */
-export function ensureSkillsRoot(agent: string, root?: string): string {
-  const dir = agentScopeSkillsRoot(agent, root);
-  mkdirSync(dir, { recursive: true });
-  return dir;
-}

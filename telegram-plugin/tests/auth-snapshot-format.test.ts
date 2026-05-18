@@ -135,7 +135,7 @@ describe('renderAuthSnapshotFormat2', () => {
   // fixture. If the formatter changes shape, update these expectations.
   const fixtureSnaps: AccountSnapshot[] = [
     snap({
-      label: 'ken.thompson@outlook.com.au',
+      label: 'alice@example.com',
       isActive: false,
       quota: quota({
         fiveHourUtilizationPct: 0,
@@ -146,7 +146,7 @@ describe('renderAuthSnapshotFormat2', () => {
       }),
     }),
     snap({
-      label: 'me@kenthompson.com.au',
+      label: 'bob@example.com',
       isActive: false,
       quota: quota({
         fiveHourUtilizationPct: 0,
@@ -157,7 +157,7 @@ describe('renderAuthSnapshotFormat2', () => {
       }),
     }),
     snap({
-      label: 'pixsoul@gmail.com',
+      label: 'you@example.com',
       isActive: true,
       quota: quota({
         fiveHourUtilizationPct: 8,
@@ -181,18 +181,18 @@ describe('renderAuthSnapshotFormat2', () => {
 
   it('marks the active account with ●', () => {
     const out = renderAuthSnapshotFormat2(fixtureSnaps, { now: NOW, tz: 'UTC' });
-    expect(out).toMatch(/●\s*<code>pixsoul@gmail\.com<\/code>/);
+    expect(out).toMatch(/●\s*<code>you@example\.com<\/code>/);
   });
 
   it('shows "back …" for blocked accounts with binding-window word', () => {
     const out = renderAuthSnapshotFormat2(fixtureSnaps, { now: NOW, tz: 'UTC' });
-    // me@kenthompson is blocked on 7d, recovers Sun
-    expect(out).toMatch(/me@kenthompson\.com\.au[\s\S]*back .* 7-day cap/);
+    // bob@example is blocked on 7d, recovers Sun
+    expect(out).toMatch(/bob@example\.com[\s\S]*back .* 7-day cap/);
   });
 
   it('puts the imminent window first on healthy/throttling rows', () => {
     const out = renderAuthSnapshotFormat2(fixtureSnaps, { now: NOW, tz: 'UTC' });
-    // pixsoul: 5h reset is in 7m, 7d reset is in 2d. 5h should come first.
+    // you: 5h reset is in 7m, 7d reset is in 2d. 5h should come first.
     const pixRow = out.split('\n').find((l) => l.includes('5h refills') && l.includes('7d resets'));
     expect(pixRow).toBeDefined();
     expect(pixRow!.indexOf('5h refills')).toBeLessThan(pixRow!.indexOf('7d resets'));
@@ -245,7 +245,7 @@ describe('renderFallbackAnnouncement', () => {
     representativeClaim: 'five_hour',
   });
 
-  const PIXSOUL_HEALTHY = quota({
+  const YOU_HEALTHY = quota({
     fiveHourUtilizationPct: 8,
     sevenDayUtilizationPct: 20,
     fiveHourResetAt: new Date('2026-05-15T01:00:00Z'),
@@ -256,8 +256,8 @@ describe('renderFallbackAnnouncement', () => {
     const out5 = renderFallbackAnnouncement({
       oldLabel: 'ken@x',
       oldQuota: KEN_5H_BLOWN,
-      newLabel: 'pixsoul@x',
-      newQuota: PIXSOUL_HEALTHY,
+      newLabel: 'you@x',
+      newQuota: YOU_HEALTHY,
       triggerAgent: 'carrie',
       now: NOW,
       tz: 'UTC',
@@ -272,8 +272,8 @@ describe('renderFallbackAnnouncement', () => {
         sevenDayResetAt: new Date('2026-05-17T10:00:00Z'),
         representativeClaim: 'seven_day',
       }),
-      newLabel: 'pixsoul@x',
-      newQuota: PIXSOUL_HEALTHY,
+      newLabel: 'you@x',
+      newQuota: YOU_HEALTHY,
       triggerAgent: 'clerk',
       now: NOW,
       tz: 'UTC',
@@ -285,8 +285,8 @@ describe('renderFallbackAnnouncement', () => {
     const out = renderFallbackAnnouncement({
       oldLabel: 'ken@x',
       oldQuota: KEN_5H_BLOWN,
-      newLabel: 'pixsoul@x',
-      newQuota: PIXSOUL_HEALTHY,
+      newLabel: 'you@x',
+      newQuota: YOU_HEALTHY,
       triggerAgent: 'carrie',
       now: NOW,
       tz: 'UTC',
@@ -299,8 +299,8 @@ describe('renderFallbackAnnouncement', () => {
     const happy = renderFallbackAnnouncement({
       oldLabel: 'ken@x',
       oldQuota: KEN_5H_BLOWN,
-      newLabel: 'pixsoul@x',
-      newQuota: PIXSOUL_HEALTHY,
+      newLabel: 'you@x',
+      newQuota: YOU_HEALTHY,
       triggerAgent: 'carrie',
       now: NOW,
       tz: 'UTC',
@@ -310,7 +310,7 @@ describe('renderFallbackAnnouncement', () => {
     const tight = renderFallbackAnnouncement({
       oldLabel: 'ken@x',
       oldQuota: KEN_5H_BLOWN,
-      newLabel: 'pixsoul@x',
+      newLabel: 'you@x',
       newQuota: quota({ fiveHourUtilizationPct: 85 }),
       triggerAgent: 'carrie',
       now: NOW,

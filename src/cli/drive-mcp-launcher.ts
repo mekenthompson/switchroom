@@ -23,8 +23,8 @@
  *     `--single-user`).
  *
  * The filename is the account email run through Python
- * `urllib.parse.quote(email, safe="@._-")` — for `pixsoul@gmail.com`
- * the file is literally `pixsoul@gmail.com.json`.
+ * `urllib.parse.quote(email, safe="@._-")` — for `you@example.com`
+ * the file is literally `you@example.com.json`.
  *
  * ## Credential sourcing (fail loud — never spawn with no/stale creds)
  *
@@ -69,8 +69,8 @@ import { GOOGLE_WORKSPACE_MCP_PINNED_SHA } from "../memory/scaffold-integration.
  * uppercase `%XX` over the UTF-8 bytes. Space → `%20` (NOT `+` —
  * `quote`, not `quote_plus`).
  *
- * For `pixsoul@gmail.com` nothing needs escaping, so the result is
- * `pixsoul@gmail.com` and the file is `pixsoul@gmail.com.json`.
+ * For `you@example.com` nothing needs escaping, so the result is
+ * `you@example.com` and the file is `you@example.com.json`.
  */
 export function encodeCredentialsFilename(email: string): string {
   const SAFE = new Set<string>([

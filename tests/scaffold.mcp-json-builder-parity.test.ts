@@ -52,7 +52,7 @@ describe("scaffoldAgent vs reconcileAgent: .mcp.json builder parity (H2)", () =>
 
   it("emits a byte-identical .mcp.json from scaffold and from reconcile", () => {
     const name = "parity-agent";
-    const account = "pixsoul@gmail.com";
+    const account = "you@example.com";
     const agentConfig = makeAgentConfig({
       google_workspace: { account },
     } as Partial<AgentConfig>);

@@ -310,17 +310,17 @@ describe("DriveConfigSchema (top-level drive: block)", () => {
     const result = DriveConfigSchema.parse({
       google_client_id: "raw-id",
       google_client_secret: "raw-secret",
-      approvers: [8248703757],
+      approvers: [12345],
     });
     expect(result?.google_client_id).toBe("raw-id");
-    expect(result?.approvers).toEqual([8248703757]);
+    expect(result?.approvers).toEqual([12345]);
   });
 
   it("accepts vault: refs for client id/secret", () => {
     const result = DriveConfigSchema.parse({
       google_client_id: "vault:google-oauth-client-id",
       google_client_secret: "vault:google-oauth-client-secret",
-      approvers: [8248703757],
+      approvers: [12345],
     });
     expect(result?.google_client_id).toBe("vault:google-oauth-client-id");
     expect(result?.google_client_secret).toBe("vault:google-oauth-client-secret");
@@ -330,9 +330,9 @@ describe("DriveConfigSchema (top-level drive: block)", () => {
     const result = DriveConfigSchema.parse({
       google_client_id: "id",
       google_client_secret: "secret",
-      approvers: ["8248703757", "111"],
+      approvers: ["12345", "111"],
     });
-    expect(result?.approvers).toEqual(["8248703757", "111"]);
+    expect(result?.approvers).toEqual(["12345", "111"]);
   });
 
   it("rejects non-numeric string approver", () => {
@@ -378,7 +378,7 @@ describe("DriveConfigSchema (top-level drive: block)", () => {
       drive: {
         google_client_id: "vault:google-oauth-client-id",
         google_client_secret: "vault:google-oauth-client-secret",
-        approvers: [8248703757],
+        approvers: [12345],
       },
       agents: {},
     });

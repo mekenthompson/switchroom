@@ -350,21 +350,21 @@ flip so operators don't trip over "I owned this file yesterday."
 # BEFORE (current state) ─────────────────────────────────────────
 agents:
   ziggy:
-    auth_label: "pixsoul@gmail.com"      # cosmetic, often stale
+    auth_label: "you@example.com"      # cosmetic, often stale
     auth:
-      accounts: [me@kt, pixsoul, ken-outlook]   # primary + fallbacks per agent
+      accounts: [bob, you, alice]   # primary + fallbacks per agent
 
 # AFTER (this RFC) ───────────────────────────────────────────────
 auth:
-  active: me@kenthompson.com.au           # fleet-wide active
+  active: bob@example.com           # fleet-wide active
   fallback_order:                          # cycle order for `auth rotate`
-    - me@kenthompson.com.au
-    - pixsoul@gmail.com
-    - ken.thompson@outlook.com.au
+    - bob@example.com
+    - you@example.com
+    - alice@example.com
   admin_agents: [clerk]                    # optional — admin verbs allowed
   consumers:                               # optional — non-agent peers (hindsight, etc.)
     - name: hindsight
-      account: me@kenthompson.com.au       # consumer's pinned active account
+      account: bob@example.com       # consumer's pinned active account
       uid: 11000                           # optional; broker chowns socket to this UID
       # `mark-exhausted` from this consumer only affects this account.
       # `get-credentials` always returns this account's creds.
@@ -373,7 +373,7 @@ agents:
   ziggy: {}                                # default: uses fleet active
   klanker:
     auth:
-      override: ken.thompson@outlook.com.au   # opt-out (edge case)
+      override: alice@example.com   # opt-out (edge case)
 ```
 
 `auth_label:` is deleted from the schema. `auth.accounts: [...]` is
@@ -421,23 +421,23 @@ client.ts`). No file writes from the CLI for per-agent state.
 ```
 $ switchroom auth show
 ACCOUNT                           STATUS       EXPIRES   QUOTA-RESET
-● me@kenthompson.com.au           active       355d 23h  —
-✓ pixsoul@gmail.com               available    353d 23h  —
-! ken.thompson@outlook.com.au     exhausted    356d 0h   1h 22m
+● bob@example.com           active       355d 23h  —
+✓ you@example.com               available    353d 23h  —
+! alice@example.com     exhausted    356d 0h   1h 22m
 
 AGENT       ACTIVE                   SOURCE
-clerk       me@kenthompson.com.au    fleet-active (admin)
-ziggy       me@kenthompson.com.au    fleet-active
-klanker     ken.thompson@outlook…    override
+clerk       bob@example.com    fleet-active (admin)
+ziggy       bob@example.com    fleet-active
+klanker     alice@example…    override
 
 CONSUMER    ACTIVE                   STATUS
-hindsight   me@kenthompson.com.au    socket bound (last seen 12s ago)
+hindsight   bob@example.com    socket bound (last seen 12s ago)
 ```
 
 ```
 $ switchroom auth show ziggy
 ziggy
-  Active account: me@kenthompson.com.au (fleet-active)
+  Active account: bob@example.com (fleet-active)
   Token expires:  355d 23h (refreshes at 60 min remaining)
   Last refresh:   2026-05-14 13:54:02
   Mirror sha:     ab12cd…  (matches broker index)
@@ -476,7 +476,7 @@ Per-account, the broker owns:
 2. **Quota state.** Per-account in `state/auth-broker/quota.json`:
 
    ```jsonc
-   { "pixsoul@gmail.com": { "exhausted_until": 1809484700000 } }
+   { "you@example.com": { "exhausted_until": 1809484700000 } }
    ```
 
    On `mark-exhausted` (called by an agent that got 429), the broker
@@ -502,7 +502,7 @@ outside the agent fleet. The pattern:
    auth:
      consumers:
        - name: hindsight
-         account: me@kenthompson.com.au
+         account: bob@example.com
    ```
    On next `apply`, broker binds a socket at
    `/run/switchroom/auth-broker/hindsight/sock`, chowned to the

@@ -986,10 +986,10 @@ Not skills — these are Handlebars system-prompt fragments rendered into every 
 
 | File | Purpose |
 |---|---|
-| `/home/kenthompson/code/switchroom-skill-coverage/profiles/_shared/agent-self-service.md.hbs` | Tells the agent it has an `agent-config` MCP and should proactively use it for cron/config edits instead of asking the user to hand-edit `switchroom.yaml`. |
-| `/home/kenthompson/code/switchroom-skill-coverage/profiles/_shared/telegram-style.md.hbs` | Telegram interaction style — soft-commit pacing, `reply` / `stream_reply` discipline, "every turn must end with a reply" contract. |
-| `/home/kenthompson/code/switchroom-skill-coverage/profiles/_shared/vault-protocol.md.hbs` | Vault interaction protocol — managed section autoreconciled by `switchroom apply`; hand-edits warned-against. |
-| `/home/kenthompson/code/switchroom-skill-coverage/profiles/coding/CLAUDE.md.hbs` | Profile context for a coding-agent persona — header + channel/topic block + SOUL.md cross-reference. |
-| `/home/kenthompson/code/switchroom-skill-coverage/profiles/default/CLAUDE.md.hbs` | Profile context for the generic default persona — same shape as coding/EA/health-coach, just no role suffix. |
-| `/home/kenthompson/code/switchroom-skill-coverage/profiles/executive-assistant/CLAUDE.md.hbs` | Profile context for the executive-assistant persona — header + channel block + SOUL.md cross-reference. |
-| `/home/kenthompson/code/switchroom-skill-coverage/profiles/health-coach/CLAUDE.md.hbs` | Profile context for the health-and-fitness-coach persona — header + channel block + SOUL.md cross-reference. |
+| `~/code/switchroom-skill-coverage/profiles/_shared/agent-self-service.md.hbs` | Tells the agent it has an `agent-config` MCP and should proactively use it for cron/config edits instead of asking the user to hand-edit `switchroom.yaml`. |
+| `~/code/switchroom-skill-coverage/profiles/_shared/telegram-style.md.hbs` | Telegram interaction style — soft-commit pacing, `reply` / `stream_reply` discipline, "every turn must end with a reply" contract. |
+| `~/code/switchroom-skill-coverage/profiles/_shared/vault-protocol.md.hbs` | Vault interaction protocol — managed section autoreconciled by `switchroom apply`; hand-edits warned-against. |
+| `~/code/switchroom-skill-coverage/profiles/coding/CLAUDE.md.hbs` | Profile context for a coding-agent persona — header + channel/topic block + SOUL.md cross-reference. |
+| `~/code/switchroom-skill-coverage/profiles/default/CLAUDE.md.hbs` | Profile context for the generic default persona — same shape as coding/EA/health-coach, just no role suffix. |
+| `~/code/switchroom-skill-coverage/profiles/executive-assistant/CLAUDE.md.hbs` | Profile context for the executive-assistant persona — header + channel block + SOUL.md cross-reference. |
+| `~/code/switchroom-skill-coverage/profiles/health-coach/CLAUDE.md.hbs` | Profile context for the health-and-fitness-coach persona — header + channel block + SOUL.md cross-reference. |

@@ -2,8 +2,8 @@
  * Unit tests for access-validator.ts — validateStringArray.
  *
  * This function guards access.json fields at load time. The motivating bug:
- * a hand-edit that drops quotes around IDs (`[8248703757]` instead of
- * `["8248703757"]`) produces a valid JSON number array. Array.includes() uses
+ * a hand-edit that drops quotes around IDs (`[12345]` instead of
+ * `["12345"]`) produces a valid JSON number array. Array.includes() uses
  * strict equality, so number entries never match the string comparison in the
  * gate — every DM is silently dropped.
  *
@@ -27,7 +27,7 @@ describe('validateStringArray', () => {
   // ─── Happy path ────────────────────────────────────────────────────────────
 
   it('returns the array unchanged for a valid string array', () => {
-    expect(validateStringArray('allowFrom', ['8248703757', '9999'])).toEqual(['8248703757', '9999'])
+    expect(validateStringArray('allowFrom', ['12345', '9999'])).toEqual(['12345', '9999'])
     expect(stderrSpy).not.toHaveBeenCalled()
   })
 
@@ -49,21 +49,21 @@ describe('validateStringArray', () => {
   // ─── Bug reproduction: number array ────────────────────────────────────────
 
   it('rejects a number array (the hand-edit bug) and returns []', () => {
-    // This is the exact bug: [8248703757] parses as a number, not a string.
-    // Array.includes("8248703757") === false for a number entry — silently drops DMs.
-    const result = validateStringArray('allowFrom', [8248703757])
+    // This is the exact bug: [12345] parses as a number, not a string.
+    // Array.includes("12345") === false for a number entry — silently drops DMs.
+    const result = validateStringArray('allowFrom', [12345])
     expect(result).toEqual([])
     expect(stderrSpy).toHaveBeenCalled()
     const msg = String(stderrSpy.mock.calls[0][0])
     expect(msg).toContain('allowFrom')
     expect(msg).toContain('non-string entries')
-    expect(msg).toContain('8248703757')
+    expect(msg).toContain('12345')
   })
 
   // ─── Mixed array ──────────────────────────────────────────────────────────
 
   it('rejects a mixed array (some strings, some numbers) and returns []', () => {
-    const result = validateStringArray('allowFrom', ['8248703757', 9999])
+    const result = validateStringArray('allowFrom', ['12345', 9999])
     expect(result).toEqual([])
     expect(stderrSpy).toHaveBeenCalled()
     const msg = String(stderrSpy.mock.calls[0][0])

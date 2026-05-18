@@ -1713,33 +1713,33 @@ describe("AuthBroker — historical-bug regressions (2026-05-14 fanout incident)
     // `agent.auth.override ?? auth.active` and writes EXACTLY THAT.
     // Iteration order doesn't exist as a concept.
     //
-    // Setup: three accounts, ken < me < pixsoul (the exact alphabetic
-    // order that caused the original incident — pixsoul sorted last).
-    // Two agents, one on fleet active (= "ken"), one with override = "me".
+    // Setup: three accounts, alice < bob < you (the exact alphabetic
+    // order that caused the original incident — you sorted last).
+    // Two agents, one on fleet active (= "alice"), one with override = "bob".
     // Run a full refresh tick. Verify each agent's mirror is its own
-    // declared account, not pixsoul's.
+    // declared account, not you's.
     const h = makeHarness();
     const config = makeConfig(h, {
-      active: "ken.thompson@outlook.com.au",
+      active: "alice@example.com",
       fallback_order: [
-        "ken.thompson@outlook.com.au",
-        "me@kenthompson.com.au",
-        "pixsoul@gmail.com",
+        "alice@example.com",
+        "bob@example.com",
+        "you@example.com",
       ],
       agents: {
-        ziggy: {}, // inherits fleet active = ken
-        lawgpt: { auth: { override: "me@kenthompson.com.au" } },
+        ziggy: {}, // inherits fleet active = alice
+        lawgpt: { auth: { override: "bob@example.com" } },
       },
     });
     // Seed all three accounts with near-expiry creds so the tick attempts
     // a refresh against each. The exact alphabetic ordering of the labels
-    // is what triggered the original last-write-wins. With pixsoul iterating
-    // last, the pre-broker code would have ended with pixsoul's creds in
-    // every agent. The broker MUST write ken to ziggy and me to lawgpt.
+    // is what triggered the original last-write-wins. With you iterating
+    // last, the pre-broker code would have ended with you's creds in
+    // every agent. The broker MUST write alice to ziggy and bob to lawgpt.
     const nearExpiry = Date.now() + 30 * 60 * 1000; // 30 min — under threshold
-    seedAccount(h, "ken.thompson@outlook.com.au", { expiresAt: nearExpiry });
-    seedAccount(h, "me@kenthompson.com.au", { expiresAt: nearExpiry });
-    seedAccount(h, "pixsoul@gmail.com", { expiresAt: nearExpiry });
+    seedAccount(h, "alice@example.com", { expiresAt: nearExpiry });
+    seedAccount(h, "bob@example.com", { expiresAt: nearExpiry });
+    seedAccount(h, "you@example.com", { expiresAt: nearExpiry });
     mkdirSync(join(h.agentsDir, "ziggy"), { recursive: true });
     mkdirSync(join(h.agentsDir, "lawgpt"), { recursive: true });
     // Stub fetcher that returns predictable per-label access tokens. The
@@ -1783,15 +1783,15 @@ describe("AuthBroker — historical-bug regressions (2026-05-14 fanout incident)
       "utf-8",
     );
 
-    // ziggy should have ken's refreshed token (fleet active).
-    expect(ziggyMirror).toContain("at-refreshed-ken.thompson@outlook.com.au");
-    expect(ziggyMirror).not.toContain("at-refreshed-pixsoul@gmail.com");
-    expect(ziggyMirror).not.toContain("at-refreshed-me@kenthompson.com.au");
+    // ziggy should have alice's refreshed token (fleet active).
+    expect(ziggyMirror).toContain("at-refreshed-alice@example.com");
+    expect(ziggyMirror).not.toContain("at-refreshed-you@example.com");
+    expect(ziggyMirror).not.toContain("at-refreshed-bob@example.com");
 
-    // lawgpt should have me's refreshed token (override).
-    expect(lawgptMirror).toContain("at-refreshed-me@kenthompson.com.au");
-    expect(lawgptMirror).not.toContain("at-refreshed-pixsoul@gmail.com");
-    expect(lawgptMirror).not.toContain("at-refreshed-ken.thompson@outlook.com.au");
+    // lawgpt should have bob's refreshed token (override).
+    expect(lawgptMirror).toContain("at-refreshed-bob@example.com");
+    expect(lawgptMirror).not.toContain("at-refreshed-you@example.com");
+    expect(lawgptMirror).not.toContain("at-refreshed-alice@example.com");
 
     broker.stop();
   });

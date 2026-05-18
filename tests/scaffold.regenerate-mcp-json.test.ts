@@ -138,10 +138,10 @@ describe("scaffoldAgent: gdrive lands in .mcp.json (not just settings)", () => {
   it("broker-authorized agent → .mcp.json contains the gdrive entry", () => {
     const name = "carrie";
     const agentConfig = makeAgentConfig({
-      google_workspace: { account: "pixsoul@gmail.com" },
+      google_workspace: { account: "you@example.com" },
     } as Partial<AgentConfig>);
     const sc = cfg(name, agentConfig, {
-      "pixsoul@gmail.com": { enabled_for: ["carrie"] },
+      "you@example.com": { enabled_for: ["carrie"] },
     });
 
     const res = scaffoldAgent(name, agentConfig, tmpDir, telegramConfig, sc);
@@ -155,10 +155,10 @@ describe("scaffoldAgent: gdrive lands in .mcp.json (not just settings)", () => {
   it("agent NOT in enabled_for → .mcp.json has NO gdrive entry", () => {
     const name = "carrie";
     const agentConfig = makeAgentConfig({
-      google_workspace: { account: "pixsoul@gmail.com" },
+      google_workspace: { account: "you@example.com" },
     } as Partial<AgentConfig>);
     const sc = cfg(name, agentConfig, {
-      "pixsoul@gmail.com": { enabled_for: ["someone-else"] },
+      "you@example.com": { enabled_for: ["someone-else"] },
     });
 
     const res = scaffoldAgent(name, agentConfig, tmpDir, telegramConfig, sc);
@@ -172,7 +172,7 @@ describe("scaffoldAgent: gdrive lands in .mcp.json (not just settings)", () => {
     const name = "carrie";
     const agentConfig = makeAgentConfig();
     const sc = cfg(name, agentConfig, {
-      "pixsoul@gmail.com": { enabled_for: ["carrie"] },
+      "you@example.com": { enabled_for: ["carrie"] },
     });
 
     const res = scaffoldAgent(name, agentConfig, tmpDir, telegramConfig, sc);

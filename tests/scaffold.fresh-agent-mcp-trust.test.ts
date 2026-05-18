@@ -68,7 +68,7 @@ describe("scaffoldAgent: net-new agent trusts .mcp.json servers (C1)", () => {
 
   it("adds gdrive to enabledMcpjsonServers on first scaffold (no prior .claude.json)", () => {
     const name = "fresh-drive-agent";
-    const account = "pixsoul@gmail.com";
+    const account = "you@example.com";
     const agentConfig = makeAgentConfig({
       google_workspace: { account },
     } as Partial<AgentConfig>);

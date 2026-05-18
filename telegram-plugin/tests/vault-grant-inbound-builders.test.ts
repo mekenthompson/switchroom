@@ -25,7 +25,7 @@ const CTX_READ: VaultGrantInboundContext = {
   agent: 'gymbro',
   key: 'fatsecret/credentials',
   scope: 'read',
-  chat_id: '8248703757',
+  chat_id: '12345',
   ttl_seconds: 30 * 86400,
 }
 
@@ -42,11 +42,11 @@ describe('buildVaultGrantApprovedInbound', () => {
       ctx: CTX_READ,
       grantId: 'vg_a1b2c3',
       stageId: 'stage-001',
-      operatorId: '8248703757',
+      operatorId: '12345',
       nowMs: FIXED_NOW,
     })
     expect(msg.type).toBe('inbound')
-    expect(msg.chatId).toBe('8248703757')
+    expect(msg.chatId).toBe('12345')
     expect(msg.user).toBe('vault-broker')
     expect(msg.userId).toBe(0)
     expect(msg.ts).toBe(FIXED_NOW)
@@ -71,7 +71,7 @@ describe('buildVaultGrantApprovedInbound', () => {
       ctx: CTX_READ,
       grantId: 'vg_a1b2c3',
       stageId: 'stage-001',
-      operatorId: '8248703757',
+      operatorId: '12345',
     })
     expect(msg.meta).toEqual({
       source: 'vault_grant_approved',
@@ -80,7 +80,7 @@ describe('buildVaultGrantApprovedInbound', () => {
       scope: 'read',
       grant_id: 'vg_a1b2c3',
       stage_id: 'stage-001',
-      operator_id: '8248703757',
+      operator_id: '12345',
     })
   })
 
@@ -151,7 +151,7 @@ describe('buildVaultGrantDeniedInbound', () => {
     const msg = buildVaultGrantDeniedInbound({
       ctx: CTX_READ,
       stageId: 'stage-001',
-      operatorId: '8248703757',
+      operatorId: '12345',
     })
     expect(msg.meta).toEqual({
       source: 'vault_grant_denied',
@@ -159,7 +159,7 @@ describe('buildVaultGrantDeniedInbound', () => {
       key: 'fatsecret/credentials',
       scope: 'read',
       stage_id: 'stage-001',
-      operator_id: '8248703757',
+      operator_id: '12345',
     })
     expect((msg.meta as { grant_id?: string }).grant_id).toBeUndefined()
   })
@@ -189,7 +189,7 @@ describe('buildVaultGrantDeniedInbound', () => {
     expect(denied.type).toBe('inbound')
     expect(denied.user).toBe('vault-broker')
     expect(denied.userId).toBe(0)
-    expect(denied.chatId).toBe('8248703757')
+    expect(denied.chatId).toBe('12345')
     expect(denied.ts).toBe(FIXED_NOW)
     expect(denied.messageId).toBe(FIXED_NOW)
   })

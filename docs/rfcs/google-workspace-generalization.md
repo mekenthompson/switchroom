@@ -73,26 +73,26 @@ gated by the approval kernel under its own identity.
 End-to-end flow from the operator's terminal:
 
 ```
-$ switchroom auth google account add pixsoul@gmail.com
-🔐 Adding Google account pixsoul@gmail.com
+$ switchroom auth google account add you@example.com
+🔐 Adding Google account you@example.com
    On any device with a browser, visit:
        https://www.google.com/device
    And enter this code: WDJB-MJHT
    ...
-   ✅ Account pixsoul@gmail.com added to vault.
-   Enable on agents: switchroom auth google enable pixsoul@gmail.com <agents...>
+   ✅ Account you@example.com added to vault.
+   Enable on agents: switchroom auth google enable you@example.com <agents...>
 
-$ switchroom auth google enable pixsoul@gmail.com klanker gymbro
-   ✅ klanker, gymbro now have access via pixsoul@gmail.com.
+$ switchroom auth google enable you@example.com klanker gymbro
+   ✅ klanker, gymbro now have access via you@example.com.
    No re-consent needed — both agents share the account's refresh token.
 
 $ switchroom auth google list
 ACCOUNT                AGENTS                TIER    LAST USED
-pixsoul@gmail.com      klanker, gymbro       core    2 min ago
+you@example.com      klanker, gymbro       core    2 min ago
 work@bigcorp.com       coderev               extended  yesterday
 
-$ switchroom auth google share pixsoul@gmail.com --from-agent klanker --to-agent executive
-   ✅ executive now has access via pixsoul@gmail.com (copied from klanker).
+$ switchroom auth google share you@example.com --from-agent klanker --to-agent executive
+   ✅ executive now has access via you@example.com (copied from klanker).
 ```
 
 (The shape mirrors `switchroom auth account add | enable | share | list | account remove` for Anthropic accounts. Google is the second vendor under `auth`; future vendors — Notion, Slack — follow the same `auth <vendor> ...` pattern.)
@@ -101,7 +101,7 @@ End-to-end flow from a Telegram thread (uses RFC E §4.3 deep links + RFC D head
 
 ```
 User → klanker:  "Pull the Q3 doc from /Work and add a hiring section."
-klanker:         🔐 needs Drive access via pixsoul@gmail.com
+klanker:         🔐 needs Drive access via you@example.com
                  [ ✅ Allow this folder ]  [ 🚫 Deny ]
 User:            [taps Allow]
 klanker:         ...proceeds via approval kernel + RFC E suggesting writes
@@ -167,16 +167,16 @@ The shipped `drive:` block (RFC D #768) gets generalized:
 google_workspace:
   # default for every agent unless overridden
   tier: core              # core | extended | complete
-  default_account: pixsoul@gmail.com
+  default_account: you@example.com
 
 agents:
   klanker:
     google_workspace:
-      account: pixsoul@gmail.com
+      account: you@example.com
       tier: core           # 16 tools: Drive + Docs + Sheets + Calendar
   gymbro:
     google_workspace:
-      account: pixsoul@gmail.com
+      account: you@example.com
       tier: core
       exclude: [calendar]   # 13 tools — gymbro doesn't need Calendar
   executive:
@@ -260,7 +260,7 @@ gates which agents can read which account's token:
 
 ```yaml
 google_accounts:
-  pixsoul@gmail.com:
+  you@example.com:
     enabled_for: [klanker, gymbro]
   work@bigcorp.com:
     enabled_for: [executive]
@@ -375,7 +375,7 @@ verb is a thin client.
 that account, per the JTBD's "no orphaned tokens left behind"
 check.
 
-**`enable` / `disable` are plural** — `enable pixsoul@gmail.com
+**`enable` / `disable` are plural** — `enable you@example.com
 klanker gymbro coderev` is one call writing one ACL update + one
 audit row, not three.
 
@@ -452,7 +452,7 @@ Slack, etc.) follow the same shape under `examples/personal-*-mcp/`.
 ## 5. Out of scope
 
 - **Multi-Google-account-per-agent** — each agent connects to one
-  account at a time. If an agent needs both `pixsoul@gmail.com` and
+  account at a time. If an agent needs both `you@example.com` and
   `work@bigcorp.com`, that's a future spec. Ad-hoc workaround:
   spin up a second agent on the second account. **This is
   acknowledged as the most likely follow-up RFC** — operators who
@@ -488,7 +488,7 @@ Per `reference/principles.md`:
 
 ### 6.1 Docs test — *"Can someone use this without opening `docs/`?"*
 
-- ✅ `switchroom auth google account add pixsoul@gmail.com` prints
+- ✅ `switchroom auth google account add you@example.com` prints
   the OAuth URL inline + says "tap to consent." No prerequisite
   reading. Wizard alias `auth google connect klanker` works the
   same way for the first-run path.
@@ -766,7 +766,7 @@ not a config-flag wiring exercise.)
   against the cached `google:<acct>:scopes` slot; warns operator
   inline if the upgrade requires re-consent: *"klanker's tier
   bumped to extended — needs Slides scope. Run `auth google
-  account remove pixsoul@gmail.com` + `account add` to re-consent,
+  account remove you@example.com` + `account add` to re-consent,
   or exclude Slides tools."*
 
 - **Setup wizard prompt fatigue.** If we add too many "optional

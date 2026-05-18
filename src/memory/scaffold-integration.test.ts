@@ -70,8 +70,8 @@ describe("shouldEmitGdriveMcp — broker-ACL contract", () => {
 
   it("emits when account set AND agent in enabled_for[] (broker would return creds)", () => {
     expect(
-      shouldEmitGdriveMcp("carrie", "pixsoul@gmail.com", {
-        "pixsoul@gmail.com": { enabled_for: ["clerk", "carrie"] },
+      shouldEmitGdriveMcp("carrie", "you@example.com", {
+        "you@example.com": { enabled_for: ["clerk", "carrie"] },
       }),
     ).toBe(true);
   });
@@ -79,14 +79,14 @@ describe("shouldEmitGdriveMcp — broker-ACL contract", () => {
   it("does NOT emit when agent has no google_workspace.account (broker → ACCOUNT_NOT_FOUND)", () => {
     expect(
       shouldEmitGdriveMcp("carrie", undefined, {
-        "pixsoul@gmail.com": { enabled_for: ["carrie"] },
+        "you@example.com": { enabled_for: ["carrie"] },
       }),
     ).toBe(false);
   });
 
   it("does NOT emit when the referenced account isn't in google_accounts", () => {
     expect(
-      shouldEmitGdriveMcp("carrie", "pixsoul@gmail.com", {
+      shouldEmitGdriveMcp("carrie", "you@example.com", {
         "other@gmail.com": { enabled_for: ["carrie"] },
       }),
     ).toBe(false);
@@ -94,15 +94,15 @@ describe("shouldEmitGdriveMcp — broker-ACL contract", () => {
 
   it("does NOT emit when agent NOT in enabled_for[] (broker → FORBIDDEN)", () => {
     expect(
-      shouldEmitGdriveMcp("carrie", "pixsoul@gmail.com", {
-        "pixsoul@gmail.com": { enabled_for: ["clerk"] },
+      shouldEmitGdriveMcp("carrie", "you@example.com", {
+        "you@example.com": { enabled_for: ["clerk"] },
       }),
     ).toBe(false);
   });
 
   it("does NOT emit when google_accounts is entirely absent", () => {
     expect(
-      shouldEmitGdriveMcp("carrie", "pixsoul@gmail.com", undefined),
+      shouldEmitGdriveMcp("carrie", "you@example.com", undefined),
     ).toBe(false);
   });
 
@@ -110,8 +110,8 @@ describe("shouldEmitGdriveMcp — broker-ACL contract", () => {
     // Schema lowercases+trims both the per-agent account and the
     // google_accounts keys; the predicate must agree post-normalization.
     expect(
-      shouldEmitGdriveMcp("carrie", "  Pixsoul@Gmail.com  ", {
-        "pixsoul@gmail.com": { enabled_for: ["carrie"] },
+      shouldEmitGdriveMcp("carrie", "  You@Example.com  ", {
+        "you@example.com": { enabled_for: ["carrie"] },
       }),
     ).toBe(true);
   });
@@ -119,7 +119,7 @@ describe("shouldEmitGdriveMcp — broker-ACL contract", () => {
   it("treats an empty-string account as not configured", () => {
     expect(
       shouldEmitGdriveMcp("carrie", "   ", {
-        "pixsoul@gmail.com": { enabled_for: ["carrie"] },
+        "you@example.com": { enabled_for: ["carrie"] },
       }),
     ).toBe(false);
   });

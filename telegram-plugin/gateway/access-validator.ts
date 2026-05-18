@@ -2,7 +2,7 @@
  * Validates fields loaded from access.json, failing loudly on type mismatches.
  *
  * JSON has no type system — a hand-edit that drops quotes around IDs
- * (e.g. `[8248703757]` instead of `["8248703757"]`) parses without error
+ * (e.g. `[12345]` instead of `["12345"]`) parses without error
  * but produces a number array. The gate compares with strict equality via
  * Array.includes(), so number entries silently drop every matching DM.
  *

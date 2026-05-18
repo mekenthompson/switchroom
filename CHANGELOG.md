@@ -311,17 +311,17 @@ Big release. RFC H operationalises `reference/share-auth-across-the-fleet.md`: t
 # BEFORE (per-agent auth.accounts arrays)
 agents:
   ziggy:
-    auth_label: "pixsoul@gmail.com"
+    auth_label: "you@example.com"
     auth:
-      accounts: [me@kenthompson.com.au, pixsoul@gmail.com]
+      accounts: [bob@example.com, you@example.com]
 
 # AFTER (one fleet active + per-agent override edge case)
 auth:
-  active: me@kenthompson.com.au
-  fallback_order: [me@kenthompson.com.au, pixsoul@gmail.com]
+  active: bob@example.com
+  fallback_order: [bob@example.com, you@example.com]
   consumers:
     - name: hindsight
-      account: me@kenthompson.com.au
+      account: bob@example.com
       uid: 11000
 
 agents:
@@ -330,7 +330,7 @@ agents:
     admin: true                            # gates /agents, /restart, AND admin /auth verbs
   klanker:
     auth:
-      override: pixsoul@gmail.com          # edge case only
+      override: you@example.com          # edge case only
 ```
 
 `switchroom apply` runs an in-place schema upgrade with a `switchroom.yaml.pre-auth-broker` backup. Divergent fleets emit a loud warning explaining both the ordering loss and the tail-account loss (the new schema can't represent per-agent fallback preferences).
@@ -2134,7 +2134,7 @@ should install v0.6.14.
 
 - **Auth card v3b (#699)** — Telegram `/auth` answers three operator
   questions in one glance:
-  - Which account is driving traffic right now? `▶ pixsoul@gmail.com`
+  - Which account is driving traffic right now? `▶ you@example.com`
     + inline mini-bars (`5h ██░░░░ 47%  ·  7d ░░░░░░ 12%`).
   - Which accounts are failover targets? Indented under
     `Fallback ↓:`, in YAML-list order (the actual failover order,
@@ -2212,7 +2212,7 @@ should install v0.6.14.
 
 - **Account labels accept `@` and `+`** (#694) — operators can now
   label Anthropic accounts by the email they signed up with, e.g.
-  `pixsoul@gmail.com`, `ken+work@example.com`. Regex expanded from
+  `you@example.com`, `ken+work@example.com`. Regex expanded from
   `[A-Za-z0-9._-]+` to `[A-Za-z0-9._@+-]+` (max 64 chars) in all
   three places that must stay in sync — CLI canonical
   (`account-store.ts:LABEL_RE`), Telegram verb parser

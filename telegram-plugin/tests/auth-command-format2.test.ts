@@ -45,14 +45,14 @@ function qOk(part: Partial<QuotaUtilization>): QuotaResult {
 const NOW_MS = new Date('2026-05-15T00:53:00Z').getTime();
 
 const FIXTURE_STATE: ListStateData = {
-  active: 'pixsoul@x',
-  fallback_order: ['ken@x', 'me@x', 'pixsoul@x'],
+  active: 'you@x',
+  fallback_order: ['ken@x', 'me@x', 'you@x'],
   accounts: [
     { label: 'ken@x', exhausted: false },
     { label: 'me@x', exhausted: false },
-    { label: 'pixsoul@x', exhausted: false },
+    { label: 'you@x', exhausted: false },
   ],
-  agents: [{ name: 'carrie', account: 'pixsoul@x', override: null }],
+  agents: [{ name: 'carrie', account: 'you@x', override: null }],
   consumers: [],
 };
 

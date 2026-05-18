@@ -375,7 +375,7 @@ describe("isOriginAllowed — localhost-only bind (default)", () => {
   it("allows the tailnet Origin when the request is Tailscale-identified", () => {
     expect(
       isOriginAllowed(
-        makeRequest("https://pixsoul-ubuntu.taild78f7.ts.net:8081"),
+        makeRequest("https://example-host.tailnet.ts.net:8081"),
         port,
         localhostOnly,
         /* tailscaleIdentified */ true,

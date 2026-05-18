@@ -267,6 +267,16 @@ describe("skillUnpublish", () => {
     expect(existsSync(dest)).toBe(true);
   });
 
+  it("refuses to unpublish a peer-authored skill", () => {
+    const dest = join(globalRoot, "demo");
+    mkdirSync(dest, { recursive: true });
+    writeFileSync(join(dest, "SKILL.md"), "---\nname: demo\ndescription: p\n---\n");
+    writeFileSync(join(dest, ".authored-by-bob"), "");
+    const r = skillUnpublish({ name: "demo", globalRoot, isAdmin: ADMIN });
+    expect("ok" in r && r.ok === false && r.code).toBe("E_SKILL_OPERATOR_OWNED");
+    expect(existsSync(dest)).toBe(true);
+  });
+
   it("E_SKILL_NOT_FOUND for a slug not in the pool", () => {
     const r = skillUnpublish({ name: "ghost", globalRoot, isAdmin: ADMIN });
     expect("ok" in r && r.ok === false && r.code).toBe("E_SKILL_NOT_FOUND");

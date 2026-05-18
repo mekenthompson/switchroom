@@ -148,6 +148,23 @@ if (hookEscape.changed) {
   console.log(`[build] ASCII-escaped ${hookEscape.nonAsciiCount} non-ASCII code units in dist/cli/drive-write-pretool.mjs`);
 }
 
+// Bundle the skill-validate-pretool hook — RFC native-by-default skill
+// authoring, Phase 1. Same pattern: standalone .mjs the agent container
+// runs via node. It imports the shared validators from src/cli/
+// skill-common.ts (which pulls in `yaml` + agent-config), none of which
+// resolve inside the agent image — so bundle to one self-contained file.
+console.log("[build] bundling src/cli/skill-validate-pretool.ts -> dist/cli/skill-validate-pretool.mjs");
+execSync(
+  `bun build ${JSON.stringify(resolve(root, "src/cli/skill-validate-pretool.ts"))} --outfile ${JSON.stringify(resolve(outDir, "skill-validate-pretool.mjs"))} --target node`,
+  { stdio: "inherit", cwd: root }
+);
+const skillHookOutFile = resolve(outDir, "skill-validate-pretool.mjs");
+chmodSync(skillHookOutFile, 0o755);
+const skillHookEscape = escapeBundleNonAscii(skillHookOutFile);
+if (skillHookEscape.changed) {
+  console.log(`[build] ASCII-escaped ${skillHookEscape.nonAsciiCount} non-ASCII code units in dist/cli/skill-validate-pretool.mjs`);
+}
+
 // Bundle the autoaccept-poll entrypoint. The agent unit's ExecStartPost
 // invokes this in the background to dispatch first-run TUI prompts via
 // `tmux capture-pane` + `tmux send-keys`. Must ship in dist/ because

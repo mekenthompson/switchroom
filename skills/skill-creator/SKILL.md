@@ -460,6 +460,12 @@ In Claude.ai, the core workflow is the same (draft → test → review → impro
 - **Copy to a writeable location before editing.** The installed skill path may be read-only. Copy to `/tmp/skill-name/`, edit there, and package from the copy.
 - **If packaging manually, stage in `/tmp/` first**, then copy to the output directory -- direct writes may fail due to permissions.
 
+> The two bullets above are the *generic / packaging* case (read-only
+> installed skills, producing a `.skill` file for download). If you are
+> running inside a **switchroom agent**, your own skills live in a
+> writable, persistent directory — do **not** stage in `/tmp/`; author
+> in place. See "Switchroom agent instructions" below.
+
 ---
 
 ## Cowork-Specific Instructions
@@ -475,6 +481,46 @@ If you're in Cowork, the main things to know are:
 - **Updating an existing skill**: The user might be asking you to update an existing skill, not create a new one. Follow the update guidance in the claude.ai section above.
 
 ---
+
+## Switchroom agent instructions
+
+If you are running as a switchroom agent (you have a
+`$CLAUDE_CONFIG_DIR` and talk to a user over Telegram), authoring a
+skill for *yourself* is a plain filesystem write — no special tool, no
+broker, no packaging:
+
+- **Where skills live.** Your own (agent-scope) skills go in
+  `$CLAUDE_CONFIG_DIR/skills/<slug>/` — one directory per skill, with
+  `SKILL.md` at its root. This directory is **writable by you** and
+  **persistent** (it survives restarts and `switchroom agent
+  restart`). Just `Write`/`Edit` the files there directly. Do **not**
+  stage in `/tmp/`, do **not** copy anything afterwards, and do
+  **not** use the `skill_create` / `skill_edit` / `skill_read` /
+  `skill_delete` MCP tools — those are deprecated for agent scope and
+  are being removed; the native filesystem write is the supported
+  path.
+- **It goes live on your *next* turn, not this one.** Claude discovers
+  skills when a session starts. After you write the files, tell the
+  user the skill is created and will be active on the next message —
+  then stop. Don't write the skill and immediately try to invoke it in
+  the same turn; it won't be loaded yet. (If you need it active
+  immediately, the user can `switchroom agent restart <you>`.)
+- **A linter will nudge you, not block you.** A non-blocking
+  PreToolUse hook checks the skill shape (slug, path allowlist,
+  SKILL.md frontmatter) and returns advisory feedback if something is
+  off — the write still goes through. The only hard limit is the
+  per-skill byte cap (2 MiB); a write over that is rejected, so split
+  large assets out.
+- **Skill shape.** `SKILL.md` must start with YAML frontmatter:
+  `name:` equal to the `<slug>` directory name, and a `description:`
+  (1–1024 chars) that says when the skill should trigger. Supporting
+  files follow the allowlist: `README.md`, `scripts/*.{sh,py}`,
+  `assets/*`, `reference/*.md` (max depth 3).
+- **Fleet / global skills are a different, privileged path.** Making a
+  skill available to *other* agents (not just you) is operator/admin
+  territory and is intentionally not a plain write — leave that to the
+  operator unless you are an admin agent explicitly asked to publish
+  one.
 
 ## Reference files
 

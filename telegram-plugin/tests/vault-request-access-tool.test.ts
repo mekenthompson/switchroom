@@ -112,3 +112,54 @@ describe('vault_request_access (#1012)', () => {
     expect(handlerBlock).toMatch(/allowFrom\.includes/)
   })
 })
+
+/**
+ * Fix B (#1487 follow-up): vault_request_access must NOT card/mint when
+ * the agent's STANDING ACL already covers the key — and must decide
+ * that by probing the BROKER as the agent (no-token listViaBroker over
+ * the per-agent socket — path-as-identity), never a gateway-side
+ * config/checkAclByAgent read (the gateway can see newer config than
+ * the broker has loaded → "covered here, denied there"). Read scope
+ * only; fail-open on probe error. Source-pattern assertions matching
+ * this file's established style (the flow has Telegram + module-state
+ * side effects that aren't behaviourally unit-testable here).
+ */
+describe('Fix B: vault_request_access standing-ACL-aware (#1487 follow-up)', () => {
+  const execBlock =
+    gatewaySrc.split('async function executeVaultRequestAccess')[1]?.split('\nasync function ')[0] ?? ''
+  const approveBlock =
+    gatewaySrc.split('async function performVaultAccessApproval')[1]?.split('\nasync function ')[0] ?? ''
+
+  it('request path: read-scope broker-probe short-circuits BEFORE the card is staged/sent', () => {
+    expect(execBlock).toContain('listViaBroker(')
+    expect(execBlock).toMatch(/scopeRaw === 'read'/)
+    const probeIdx = execBlock.indexOf('listViaBroker(')
+    const stageIdx = execBlock.indexOf('pendingVaultRequestAccesses.set(stageId')
+    expect(probeIdx).toBeGreaterThan(-1)
+    expect(stageIdx).toBeGreaterThan(-1)
+    expect(probeIdx).toBeLessThan(stageIdx)
+    expect(execBlock).toMatch(/ALREADY covered[\s\S]*?return\s*{/)
+  })
+
+  it('request path: decides via the BROKER, not a gateway-side config/ACL read (B2 — no config drift)', () => {
+    expect(execBlock).not.toContain('checkAclByAgent(')
+    expect(execBlock).not.toContain('loadSwitchroomConfig(')
+  })
+
+  it('operator-approve path: parallel guard short-circuits BEFORE mintGrantViaBroker', () => {
+    expect(approveBlock).toContain('listViaBroker(')
+    expect(approveBlock).toMatch(/pending\.scope === 'read'/)
+    const probeIdx = approveBlock.indexOf('listViaBroker(')
+    const mintIdx = approveBlock.indexOf('mintGrantViaBroker(mintArgs)')
+    expect(probeIdx).toBeGreaterThan(-1)
+    expect(mintIdx).toBeGreaterThan(-1)
+    expect(probeIdx).toBeLessThan(mintIdx)
+    expect(approveBlock).toMatch(/listViaBroker\([\s\S]*?pendingVaultRequestAccesses\.delete\(stageId\)[\s\S]*?return/)
+    expect(approveBlock).not.toContain('checkAclByAgent(')
+  })
+
+  it('both guards are fail-open (probe error → normal card/mint flow)', () => {
+    expect(execBlock).toMatch(/try\s*{[\s\S]*?listViaBroker\([\s\S]*?}\s*catch/)
+    expect(approveBlock).toMatch(/try\s*{[\s\S]*?listViaBroker\([\s\S]*?}\s*catch/)
+  })
+})

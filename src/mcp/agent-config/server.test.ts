@@ -2,7 +2,7 @@
  * Tests for the agent-config MCP shim.
  *
  * Covers:
- *   - `TOOLS` exports exactly the four documented tools with sane shape.
+ *   - `TOOLS` exports exactly the documented tool surface with sane shape.
  *   - `dispatchTool` happy path: stdout parsed as JSON / JSONL and returned.
  *   - `dispatchTool` failure path: non-zero CLI exit surfaces as isError.
  *   - Unknown tool name returns an error result.

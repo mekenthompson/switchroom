@@ -21,12 +21,10 @@ import { homedir } from "node:os";
 import { join, resolve, sep, dirname } from "node:path";
 import {
   existsSync,
-  mkdirSync,
   openSync,
   writeSync,
   closeSync,
   realpathSync,
-  readFileSync,
   statSync,
   lstatSync,
   readdirSync,

@@ -152,7 +152,13 @@ ALLOWLIST=(
   # (the flagged callsite moved 10270 -> 10302). End extended with
   # headroom; the inserted code uses switchroomReply (wrapped), so the
   # slightly-wider span introduces no un-allowlisted raw call.
-  "telegram-plugin/gateway/gateway.ts:9340-10340:vault grant wizard ctx.api.editMessageText already has .catch swallow"
+  # Re-bumped 2026-05-18 for Fix B (#1497): the standing-ACL broker
+  # short-circuit in executeVaultRequestAccess + performVaultAccessApproval
+  # added ~60 lines above the wizard, drifting grantWizardStep3/Confirm's
+  # editMessageText to 10358/10382 (past 10340). New ceiling stops before
+  # executeGrantWizard (10408); inserted code uses listViaBroker (not a
+  # raw bot.api call), so the wider span adds no un-allowlisted call.
+  "telegram-plugin/gateway/gateway.ts:9340-10400:vault grant wizard ctx.api.editMessageText already has .catch swallow"
 
   # boot-card.ts and issues-card.ts: these MODULES receive a bot adapter
   # via DI. The gateway wires those adapters through robustApiCall (see

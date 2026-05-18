@@ -309,9 +309,9 @@ describe("Driver.observeReactions", () => {
     // expectReaction would time out on the very first emoji.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    const iter = driver.observeReactions(8288144562, { messageId: 67050 })[Symbol.asyncIterator]();
+    const iter = driver.observeReactions(67890, { messageId: 67050 })[Symbol.asyncIterator]();
     mockClient.onRawUpdate.emit(rxUpdate({
-      peerUserId: 8288144562,
+      peerUserId: 67890,
       msgId: 67050,
       emojis: ["👀"],
     }));
@@ -330,12 +330,12 @@ describe("Driver.observeReactions", () => {
     // call pattern: setMessageReaction REPLACES, doesn't add.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    const iter = driver.observeReactions(8288144562, { messageId: 67050 })[Symbol.asyncIterator]();
+    const iter = driver.observeReactions(67890, { messageId: 67050 })[Symbol.asyncIterator]();
     mockClient.onRawUpdate.emit(rxUpdate({
-      peerUserId: 8288144562, msgId: 67050, emojis: ["👀"],
+      peerUserId: 67890, msgId: 67050, emojis: ["👀"],
     }));
     mockClient.onRawUpdate.emit(rxUpdate({
-      peerUserId: 8288144562, msgId: 67050, emojis: ["👍"],
+      peerUserId: 67890, msgId: 67050, emojis: ["👍"],
     }));
     // Order: +👀, then on the replace event +👍 + -👀 (order of those
     // last two doesn't matter, but both must come through).
@@ -360,10 +360,10 @@ describe("Driver.observeReactions", () => {
     // queue and likely matching unrelated emoji shapes by accident.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    const iter = driver.observeReactions(8288144562, { messageId: 67050 })[Symbol.asyncIterator]();
+    const iter = driver.observeReactions(67890, { messageId: 67050 })[Symbol.asyncIterator]();
     mockClient.onRawUpdate.emit(rxUpdate({ peerUserId: 99, msgId: 67050, emojis: ["💩"] }));
-    mockClient.onRawUpdate.emit(rxUpdate({ peerUserId: 8288144562, msgId: 1, emojis: ["💩"] }));
-    mockClient.onRawUpdate.emit(rxUpdate({ peerUserId: 8288144562, msgId: 67050, emojis: ["👀"] }));
+    mockClient.onRawUpdate.emit(rxUpdate({ peerUserId: 67890, msgId: 1, emojis: ["💩"] }));
+    mockClient.onRawUpdate.emit(rxUpdate({ peerUserId: 67890, msgId: 67050, emojis: ["👀"] }));
     const first = await iter.next();
     const r = first.value as { emoji: string };
     expect(r.emoji).toBe("👀");
@@ -377,11 +377,11 @@ describe("Driver.observeReactions", () => {
     // expectReaction's exact-match.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    const iter = driver.observeReactions(8288144562, { messageId: 67050 })[Symbol.asyncIterator]();
+    const iter = driver.observeReactions(67890, { messageId: 67050 })[Symbol.asyncIterator]();
     mockClient.onRawUpdate.emit({
       update: {
         _: "updateMessageReactions",
-        peer: { _: "peerUser", userId: 8288144562 },
+        peer: { _: "peerUser", userId: 67890 },
         msgId: 67050,
         reactions: {
           results: [
@@ -406,7 +406,7 @@ describe("Driver.observeReactions", () => {
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
     expect(mockClient.onRawUpdate.size).toBe(0);
-    const iter = driver.observeReactions(8288144562)[Symbol.asyncIterator]();
+    const iter = driver.observeReactions(67890)[Symbol.asyncIterator]();
     expect(mockClient.onRawUpdate.size).toBe(1);
     await iter.return?.();
     expect(mockClient.onRawUpdate.size).toBe(0);
@@ -441,17 +441,17 @@ describe("Driver.observeReactions", () => {
   it("accepts peerChannel (supergroup) updates with the marked -100... chatId", async () => {
     // fails when: peer normalization regresses past the unified
     // getMarkedPeerId call — supergroup scenarios that pass the
-    // canonical -1003852747971 chat_id would silently see zero
+    // canonical -1001234567890 chat_id would silently see zero
     // reactions because the filter would reject peerChannel
     // updates outright.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    // -1e12 - 3852747971 === -1003852747971 (matches Bot API form
-    // of channel_id 3852747971).
-    const chatId = -1003852747971;
+    // -1e12 - 1234567890 === -1001234567890 (matches Bot API form
+    // of channel_id 1234567890).
+    const chatId = -1001234567890;
     const iter = driver.observeReactions(chatId, { messageId: 5 })[Symbol.asyncIterator]();
     mockClient.onRawUpdate.emit(rxUpdatePeerChannel({
-      channelId: 3852747971,
+      channelId: 1234567890,
       msgId: 5,
       emojis: ["👀"],
     }));
@@ -470,13 +470,13 @@ describe("Driver.observeReactions", () => {
     // emoji shapes from unrelated topics.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    const chatId = -1003852747971;
+    const chatId = -1001234567890;
     const iter = driver.observeReactions(chatId, { messageId: 5, threadId: 100 })[Symbol.asyncIterator]();
     mockClient.onRawUpdate.emit(rxUpdatePeerChannel({
-      channelId: 3852747971, msgId: 5, topMsgId: 200, emojis: ["💩"],
+      channelId: 1234567890, msgId: 5, topMsgId: 200, emojis: ["💩"],
     }));
     mockClient.onRawUpdate.emit(rxUpdatePeerChannel({
-      channelId: 3852747971, msgId: 5, topMsgId: 100, emojis: ["👀"],
+      channelId: 1234567890, msgId: 5, topMsgId: 100, emojis: ["👀"],
     }));
     const first = await iter.next();
     const r = first.value as { emoji: string };
@@ -490,7 +490,7 @@ describe("Driver.observeReactions", () => {
     // types over time) would tear down the listener mid-scenario.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    const iter = driver.observeReactions(8288144562, { messageId: 5 })[Symbol.asyncIterator]();
+    const iter = driver.observeReactions(67890, { messageId: 5 })[Symbol.asyncIterator]();
     // Garbage peer — must not throw.
     mockClient.onRawUpdate.emit({
       update: {
@@ -504,7 +504,7 @@ describe("Driver.observeReactions", () => {
     mockClient.onRawUpdate.emit({
       update: {
         _: "updateMessageReactions",
-        peer: { _: "peerUser", userId: 8288144562 },
+        peer: { _: "peerUser", userId: 67890 },
         msgId: 5,
         reactions: { results: [{ reaction: { _: "reactionEmoji", emoticon: "👍" } }] },
       },
@@ -537,10 +537,10 @@ describe("Driver.observePins (peer types)", () => {
     // would never trigger expectPinnedCard.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    const chatId = -1003852747971;
+    const chatId = -1001234567890;
     const iter = driver.observePins(chatId)[Symbol.asyncIterator]();
     mockClient.onRawUpdate.emit(pinUpdatePeerChannel({
-      channelId: 3852747971,
+      channelId: 1234567890,
       msgIds: [42],
     }));
     const first = await iter.next();
@@ -596,9 +596,9 @@ describe("Driver.observePins", () => {
     // scenarios that pin > 1 message per turn.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    const iter = driver.observePins(8288144562)[Symbol.asyncIterator]();
+    const iter = driver.observePins(67890)[Symbol.asyncIterator]();
     mockClient.onRawUpdate.emit(pinUpdate({
-      peerUserId: 8288144562,
+      peerUserId: 67890,
       msgIds: [101, 102],
       pinned: true,
     }));
@@ -616,10 +616,10 @@ describe("Driver.observePins", () => {
     // pin update reads as an unpin and expectPinnedCard skips it.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    const iter = driver.observePins(8288144562)[Symbol.asyncIterator]();
-    mockClient.onRawUpdate.emit(pinUpdate({ peerUserId: 8288144562, msgIds: [101] }));
+    const iter = driver.observePins(67890)[Symbol.asyncIterator]();
+    mockClient.onRawUpdate.emit(pinUpdate({ peerUserId: 67890, msgIds: [101] }));
     mockClient.onRawUpdate.emit(pinUpdate({
-      peerUserId: 8288144562,
+      peerUserId: 67890,
       msgIds: [101],
       pinned: false,
     }));
@@ -636,9 +636,9 @@ describe("Driver.observePins", () => {
     // observer with unrelated pin events.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    const iter = driver.observePins(8288144562)[Symbol.asyncIterator]();
+    const iter = driver.observePins(67890)[Symbol.asyncIterator]();
     mockClient.onRawUpdate.emit(pinUpdate({ peerUserId: 99, msgIds: [999] }));
-    mockClient.onRawUpdate.emit(pinUpdate({ peerUserId: 8288144562, msgIds: [101] }));
+    mockClient.onRawUpdate.emit(pinUpdate({ peerUserId: 67890, msgIds: [101] }));
     const first = await iter.next();
     expect((first.value as { messageId: number }).messageId).toBe(101);
     await iter.return?.();
@@ -650,7 +650,7 @@ describe("Driver.observePins", () => {
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
     expect(mockClient.onRawUpdate.size).toBe(0);
-    const iter = driver.observePins(8288144562)[Symbol.asyncIterator]();
+    const iter = driver.observePins(67890)[Symbol.asyncIterator]();
     expect(mockClient.onRawUpdate.size).toBe(1);
     await iter.return?.();
     expect(mockClient.onRawUpdate.size).toBe(0);
@@ -669,13 +669,13 @@ describe("Driver.getMessage", () => {
         id: 42,
         text: "✅ Done",
         date: new Date("2026-05-11T04:30:00Z"),
-        chat: { id: 8288144562 },
-        sender: { id: 8288144562, type: "user", isBot: true },
+        chat: { id: 67890 },
+        sender: { id: 67890, type: "user", isBot: true },
         replyToMessage: undefined,
       } as never,
     ]);
-    const msg = await driver.getMessage(8288144562, 42);
-    expect(mockClient.getMessages).toHaveBeenCalledWith(8288144562, [42]);
+    const msg = await driver.getMessage(67890, 42);
+    expect(mockClient.getMessages).toHaveBeenCalledWith(67890, [42]);
     expect(msg).not.toBeNull();
     expect(msg?.messageId).toBe(42);
     expect(msg?.text).toBe("✅ Done");
@@ -690,7 +690,7 @@ describe("Driver.getMessage", () => {
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
     mockClient.getMessages.mockResolvedValueOnce([null]);
-    const msg = await driver.getMessage(8288144562, 999);
+    const msg = await driver.getMessage(67890, 999);
     expect(msg).toBeNull();
   });
 });
@@ -705,14 +705,14 @@ describe("Driver.sendVoice", () => {
     // instead, which the bot's voice_in skill ignores.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    const sent = await driver.sendVoice(8288144562, "/tmp/silence.opus");
+    const sent = await driver.sendVoice(67890, "/tmp/silence.opus");
     expect(mockClient.sendMedia).toHaveBeenCalledTimes(1);
     const [chatId, media, params] = mockClient.sendMedia.mock.calls[0] as [
       number,
       { __type: string; file: string },
       unknown,
     ];
-    expect(chatId).toBe(8288144562);
+    expect(chatId).toBe(67890);
     expect(media.__type).toBe("InputMediaVoice");
     expect(media.file).toBe("/tmp/silence.opus");
     expect(params).toBeUndefined();
@@ -727,7 +727,7 @@ describe("Driver.sendVoice", () => {
     // unrelated chats.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    await driver.sendVoice(-1003852747971, "/tmp/silence.opus", {
+    await driver.sendVoice(-1001234567890, "/tmp/silence.opus", {
       messageThreadId: 200,
     });
     const [, , params] = mockClient.sendMedia.mock.calls[0] as [
@@ -755,8 +755,8 @@ describe("Driver.getKeyboard", () => {
       id: 42,
       text: "Approve grant?",
       date: new Date(),
-      chat: { id: 8288144562 },
-      sender: { id: 8288144562, type: "user", isBot: true },
+      chat: { id: 67890 },
+      sender: { id: 67890, type: "user", isBot: true },
       markup: {
         type: "inline",
         buttons: buttons.map((row) =>
@@ -789,7 +789,7 @@ describe("Driver.getKeyboard", () => {
         ],
       ]) as never,
     ]);
-    const kb = await driver.getKeyboard(8288144562, 42);
+    const kb = await driver.getKeyboard(67890, 42);
     expect(kb).not.toBeNull();
     expect(kb).toHaveLength(1);
     expect(kb![0]).toHaveLength(2);
@@ -815,7 +815,7 @@ describe("Driver.getKeyboard", () => {
         [{ _: "keyboardButtonUrl", text: "Open dashboard", url: "https://example.com" }],
       ]) as never,
     ]);
-    const kb = await driver.getKeyboard(8288144562, 42);
+    const kb = await driver.getKeyboard(67890, 42);
     expect(kb![0]![0]).toEqual({
       text: "Open dashboard",
       url: "https://example.com",
@@ -833,7 +833,7 @@ describe("Driver.getKeyboard", () => {
     mockClient.getMessages.mockResolvedValueOnce([
       { id: 42, text: "no buttons", date: new Date(), chat: { id: 1 }, sender: { id: 1, type: "user", isBot: true }, markup: null } as never,
     ]);
-    expect(await driver.getKeyboard(8288144562, 42)).toBeNull();
+    expect(await driver.getKeyboard(67890, 42)).toBeNull();
 
     mockClient.getMessages.mockResolvedValueOnce([
       {
@@ -842,7 +842,7 @@ describe("Driver.getKeyboard", () => {
         markup: { type: "force_reply" },
       } as never,
     ]);
-    expect(await driver.getKeyboard(8288144562, 42)).toBeNull();
+    expect(await driver.getKeyboard(67890, 42)).toBeNull();
   });
 
   it("returns null when the message has been deleted", async () => {
@@ -852,7 +852,7 @@ describe("Driver.getKeyboard", () => {
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
     mockClient.getMessages.mockResolvedValueOnce([null]);
-    expect(await driver.getKeyboard(8288144562, 42)).toBeNull();
+    expect(await driver.getKeyboard(67890, 42)).toBeNull();
   });
 });
 
@@ -866,9 +866,9 @@ describe("Driver.pressButton", () => {
     // symmetry with how `getKeyboard` returns it.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await driver.connect();
-    await driver.pressButton(8288144562, 42, "allow:gymbro:fatsecret");
+    await driver.pressButton(67890, 42, "allow:gymbro:fatsecret");
     expect(mockClient.getCallbackAnswer).toHaveBeenCalledWith({
-      chatId: 8288144562,
+      chatId: 67890,
       message: 42,
       data: "allow:gymbro:fatsecret",
     });
@@ -880,7 +880,7 @@ describe("Driver.pressButton", () => {
     // connect.
     const driver = new Driver({ apiId: 1, apiHash: "h", session: "S" });
     await expect(
-      driver.pressButton(8288144562, 42, "x"),
+      driver.pressButton(67890, 42, "x"),
     ).rejects.toThrow(/call connect/);
   });
 });

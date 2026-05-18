@@ -32,7 +32,7 @@ agents:
   ziggy:
     topic_name: ziggy
     auth:
-      accounts: [me@kt]
+      accounts: [bob]
 `;
     expect(isLegacyAuthSchema(yaml)).toBe(true);
   });
@@ -42,7 +42,7 @@ agents:
 agents:
   ziggy:
     topic_name: ziggy
-    auth_label: me@kt
+    auth_label: bob
 `;
     expect(isLegacyAuthSchema(yaml)).toBe(true);
   });
@@ -50,7 +50,7 @@ agents:
   it("returns false when neither legacy field is present", () => {
     const yaml = `
 auth:
-  active: me@kt
+  active: bob
 agents:
   ziggy:
     topic_name: ziggy
@@ -66,14 +66,14 @@ agents:
   ziggy:
     topic_name: ziggy
     auth:
-      accounts: [me@kt]
+      accounts: [bob]
 `;
     const { yaml: out, report } = migrateAuthSchema(yaml, { now: FIXED_DATE });
     expect(report.migrated).toBe(true);
-    expect(report.active).toBe("me@kt");
+    expect(report.active).toBe("bob");
     expect(report.divergent).toBe(false);
     expect(report.overriddenAgents).toEqual([]);
-    expect(out).toMatch(/^auth:\n\s+active:\s+me@kt/m);
+    expect(out).toMatch(/^auth:\n\s+active:\s+bob/m);
     // Single-account fleet: no fallback_order emitted.
     expect(out).not.toMatch(/fallback_order:/);
     // Per-agent auth.accounts gone; agent block now empty under auth: or
@@ -89,24 +89,24 @@ agents:
   ziggy:
     topic_name: ziggy
     auth:
-      accounts: [me@kt, pixsoul]
+      accounts: [bob, you]
   clerk:
     topic_name: clerk
     auth:
-      accounts: [me@kt, ken-outlook]
+      accounts: [bob, alice]
 `;
     const { yaml: out, report } = migrateAuthSchema(yaml, { now: FIXED_DATE });
     expect(report.migrated).toBe(true);
-    expect(report.active).toBe("me@kt");
+    expect(report.active).toBe("bob");
     expect(report.divergent).toBe(false);
-    expect(report.fallbackOrder).toEqual(["me@kt", "pixsoul", "ken-outlook"]);
+    expect(report.fallbackOrder).toEqual(["bob", "you", "alice"]);
     expect(report.overriddenAgents).toEqual([]);
 
-    expect(out).toMatch(/^auth:\n\s+active:\s+me@kt/m);
+    expect(out).toMatch(/^auth:\n\s+active:\s+bob/m);
     expect(out).toMatch(/fallback_order:/);
-    expect(out).toMatch(/-\s+me@kt/);
-    expect(out).toMatch(/-\s+pixsoul/);
-    expect(out).toMatch(/-\s+ken-outlook/);
+    expect(out).toMatch(/-\s+bob/);
+    expect(out).toMatch(/-\s+you/);
+    expect(out).toMatch(/-\s+alice/);
     expect(out).not.toMatch(/auth:\n\s+accounts:/);
   });
 });
@@ -118,15 +118,15 @@ agents:
   ziggy:
     topic_name: ziggy
     auth:
-      accounts: [me@kt, pixsoul]
+      accounts: [bob, you]
   clerk:
     topic_name: clerk
     auth:
-      accounts: [me@kt]
+      accounts: [bob]
   klanker:
     topic_name: klanker
     auth:
-      accounts: [ken-outlook, me@kt]
+      accounts: [alice, bob]
 `;
     const warnings: string[] = [];
     const { yaml: out, report } = migrateAuthSchema(yaml, {
@@ -135,9 +135,9 @@ agents:
     });
     expect(report.migrated).toBe(true);
     expect(report.divergent).toBe(true);
-    // me@kt is primary twice, ken-outlook once → me@kt wins.
-    expect(report.active).toBe("me@kt");
-    expect(report.fallbackOrder).toEqual(["me@kt", "pixsoul", "ken-outlook"]);
+    // bob is primary twice, alice once → bob wins.
+    expect(report.active).toBe("bob");
+    expect(report.fallbackOrder).toEqual(["bob", "you", "alice"]);
     expect(report.overriddenAgents).toEqual(["klanker"]);
 
     // Warning surfaced and mentions BOTH ordering loss AND tail loss.
@@ -148,8 +148,8 @@ agents:
     expect(combined).toMatch(/divergent/i);
 
     // Output shape: fleet active + fallback_order, klanker has override.
-    expect(out).toMatch(/^auth:\n\s+active:\s+me@kt/m);
-    expect(out).toMatch(/klanker:\n\s+topic_name:\s+klanker\n\s+auth:\n\s+override:\s+ken-outlook/);
+    expect(out).toMatch(/^auth:\n\s+active:\s+bob/m);
+    expect(out).toMatch(/klanker:\n\s+topic_name:\s+klanker\n\s+auth:\n\s+override:\s+alice/);
     // ziggy and clerk should NOT carry an override (their primary == active).
     const ziggyBlock = out.split(/^\s+ziggy:/m)[1]?.split(/^\s+[a-z]+:$/m)[0] ?? "";
     expect(ziggyBlock).not.toMatch(/override:/);
@@ -161,16 +161,16 @@ agents:
   ziggy:
     topic_name: ziggy
     auth:
-      accounts: [me@kt]
+      accounts: [bob]
   clerk:
     topic_name: clerk
     auth:
-      accounts: [pixsoul]
+      accounts: [you]
 `;
     const { report } = migrateAuthSchema(yaml, { now: FIXED_DATE });
     expect(report.divergent).toBe(true);
-    // Both 1-1 → first-seen wins (me@kt).
-    expect(report.active).toBe("me@kt");
+    // Both 1-1 → first-seen wins (bob).
+    expect(report.active).toBe("bob");
   });
 });
 
@@ -180,7 +180,7 @@ describe("migrate-schema — auth_label-only fleets", () => {
 agents:
   ziggy:
     topic_name: ziggy
-    auth_label: me@kt
+    auth_label: bob
 `;
     const { yaml: out, report } = migrateAuthSchema(yaml, { now: FIXED_DATE });
     expect(report.migrated).toBe(true);
@@ -193,17 +193,17 @@ describe("migrate-schema — idempotency", () => {
   it("returns migrated:false on already-migrated YAML", () => {
     const yaml = `
 auth:
-  active: me@kt
+  active: bob
   fallback_order:
-    - me@kt
-    - pixsoul
+    - bob
+    - you
 agents:
   ziggy:
     topic_name: ziggy
   clerk:
     topic_name: clerk
     auth:
-      override: pixsoul
+      override: you
 `;
     const { yaml: out, report } = migrateAuthSchema(yaml, { now: FIXED_DATE });
     expect(report.migrated).toBe(false);
@@ -221,7 +221,7 @@ agents:
   ziggy:
     topic_name: ziggy
     auth:
-      accounts: [me@kt]
+      accounts: [bob]
 `;
     writeFileSync(cfg, before, "utf-8");
     const report = migrateAuthSchemaFile(cfg, { now: FIXED_DATE });
@@ -230,7 +230,7 @@ agents:
     expect(existsSync(report.backupPath!)).toBe(true);
     expect(readFileSync(report.backupPath!, "utf-8")).toBe(before);
     const after = readFileSync(cfg, "utf-8");
-    expect(after).toMatch(/active:\s+me@kt/);
+    expect(after).toMatch(/active:\s+bob/);
     expect(after).not.toMatch(/accounts:\s*\[/);
   });
 
@@ -242,7 +242,7 @@ agents:
   ziggy:
     topic_name: ziggy
     auth:
-      accounts: [me@kt]
+      accounts: [bob]
 `;
     writeFileSync(cfg, original, "utf-8");
     migrateAuthSchemaFile(cfg, { now: FIXED_DATE });
@@ -260,7 +260,7 @@ agents:
     const cfg = join(dir, "switchroom.yaml");
     const newshape = `
 auth:
-  active: me@kt
+  active: bob
 agents:
   ziggy:
     topic_name: ziggy

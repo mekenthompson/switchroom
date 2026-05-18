@@ -36,14 +36,14 @@ function agent(partial: Partial<AgentConfig>): AgentConfig {
 }
 
 const ENABLED = cfg({
-  "pixsoul@gmail.com": { enabled_for: ["clerk", "carrie"] },
+  "you@example.com": { enabled_for: ["clerk", "carrie"] },
 });
 
 describe("resolveGdriveMcpEntry — emits when broker-authorized", () => {
   it("emits the launcher entry when account set AND agent in enabled_for[]", () => {
     const entry = resolveGdriveMcpEntry(
       "carrie",
-      agent({ google_workspace: { account: "pixsoul@gmail.com" } }),
+      agent({ google_workspace: { account: "you@example.com" } }),
       ENABLED,
     );
     expect(entry).not.toBeNull();
@@ -56,10 +56,10 @@ describe("resolveGdriveMcpEntry — emits when broker-authorized", () => {
     const entry = resolveGdriveMcpEntry(
       "carrie",
       agent({
-        google_workspace: { account: "pixsoul@gmail.com", tier: "core" },
+        google_workspace: { account: "you@example.com", tier: "core" },
       }),
       cfg(
-        { "pixsoul@gmail.com": { enabled_for: ["carrie"] } },
+        { "you@example.com": { enabled_for: ["carrie"] } },
         { tier: "extended" } as SwitchroomConfig["google_workspace"],
       ),
     );
@@ -72,9 +72,9 @@ describe("resolveGdriveMcpEntry — emits when broker-authorized", () => {
   it("falls back to the top-level tier when the agent has none", () => {
     const entry = resolveGdriveMcpEntry(
       "carrie",
-      agent({ google_workspace: { account: "pixsoul@gmail.com" } }),
+      agent({ google_workspace: { account: "you@example.com" } }),
       cfg(
-        { "pixsoul@gmail.com": { enabled_for: ["carrie"] } },
+        { "you@example.com": { enabled_for: ["carrie"] } },
         { tier: "extended" } as SwitchroomConfig["google_workspace"],
       ),
     );
@@ -89,7 +89,7 @@ describe("resolveGdriveMcpEntry — emits when broker-authorized", () => {
   it("emits the full sanitized-env block with agentName threaded", () => {
     const entry = resolveGdriveMcpEntry(
       "carrie",
-      agent({ google_workspace: { account: "pixsoul@gmail.com" } }),
+      agent({ google_workspace: { account: "you@example.com" } }),
       ENABLED,
     );
     expect(entry?.value.env).toEqual({
@@ -105,7 +105,7 @@ describe("resolveGdriveMcpEntry — emits when broker-authorized", () => {
   it("threads a different agent name through SWITCHROOM_AGENT_NAME", () => {
     const entry = resolveGdriveMcpEntry(
       "clerk",
-      agent({ google_workspace: { account: "pixsoul@gmail.com" } }),
+      agent({ google_workspace: { account: "you@example.com" } }),
       ENABLED,
     );
     expect(entry?.value.env?.SWITCHROOM_AGENT_NAME).toBe("clerk");
@@ -125,7 +125,7 @@ describe("resolveGdriveMcpEntry — does NOT emit", () => {
     expect(
       resolveGdriveMcpEntry(
         "gymbro",
-        agent({ google_workspace: { account: "pixsoul@gmail.com" } }),
+        agent({ google_workspace: { account: "you@example.com" } }),
         ENABLED,
       ),
     ).toBeNull();
@@ -146,7 +146,7 @@ describe("resolveGdriveMcpEntry — does NOT emit", () => {
       resolveGdriveMcpEntry(
         "carrie",
         agent({
-          google_workspace: { account: "pixsoul@gmail.com" },
+          google_workspace: { account: "you@example.com" },
           mcp_servers: { gdrive: false },
         }),
         ENABLED,
@@ -158,7 +158,7 @@ describe("resolveGdriveMcpEntry — does NOT emit", () => {
     expect(
       resolveGdriveMcpEntry(
         "carrie",
-        agent({ google_workspace: { account: "pixsoul@gmail.com" } }),
+        agent({ google_workspace: { account: "you@example.com" } }),
         cfg(undefined),
       ),
     ).toBeNull();

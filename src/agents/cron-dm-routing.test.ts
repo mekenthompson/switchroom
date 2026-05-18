@@ -14,8 +14,8 @@ import { buildCronScript } from "./scaffold.js";
 const AGENT_DIR = "/home/test/.switchroom/agents/sample";
 const PROMPT = "Send a morning briefing.";
 const MODEL = "claude-sonnet-4-6";
-const FORUM_CHAT_ID = "-1003852747971";
-const USER_DM_ID = "8248703757";
+const FORUM_CHAT_ID = "-1001234567890";
+const USER_DM_ID = "12345";
 
 function resolveCronChatId(userId: string | undefined, forumChatId: string): string {
   // Mirror of the rule used by scaffoldAgent + reconcileAgent.

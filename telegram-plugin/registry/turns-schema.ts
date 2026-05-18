@@ -12,7 +12,7 @@
  * Schema (one table):
  *
  *   turns
- *     turn_key              TEXT PK           -- e.g. "8248703757:11"
+ *     turn_key              TEXT PK           -- e.g. "12345:11"
  *     chat_id               TEXT NOT NULL
  *     thread_id             TEXT              -- nullable: forum topics only
  *     started_at            INTEGER NOT NULL  -- unix ms

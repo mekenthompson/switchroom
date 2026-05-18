@@ -178,7 +178,7 @@ const HEALTH_TITLE: Record<AccountHealth, string> = {
 /**
  * One-line per-account summary inside its health group.
  *
- *   pixsoul@gmail.com  ● 8% / 20%
+ *   you@example.com  ● 8% / 20%
  *     5h refills 11:00 AM (in 6m)  ·  7d resets Sun 11:00 AM
  *
  * Two lines actually: the label/percent line and a sub-line with the
@@ -389,13 +389,13 @@ export interface FallbackAnnouncementInput {
 /**
  * Render the causal-shape fallback announcement.
  *
- *   ✓ Switched fleet · 5-hour limit on ken
+ *   ✓ Switched fleet · 5-hour limit on alice
  *
- *   ken.thompson@outlook → pixsoul@gmail.com
+ *   alice@example → you@example.com
  *   Triggered by: agent carrie
  *
- *   ken recovers Fri 3:50 PM (in 4h 56m)
- *   pixsoul now: 8% of 5h · 20% of 7d (plenty of headroom)
+ *   alice recovers Fri 3:50 PM (in 4h 56m)
+ *   you now: 8% of 5h · 20% of 7d (plenty of headroom)
  *
  * Falls back to a different shape when no eligible target was found
  * (`newLabel === null`) — see "all-blocked" branch.

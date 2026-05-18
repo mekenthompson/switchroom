@@ -32,8 +32,8 @@ from lib.gateway_ipc import (  # noqa: E402
 
 class ExtractChatIdTests(unittest.TestCase):
     def test_double_quoted_attribute(self):
-        prompt = '<channel source="switchroom-telegram" chat_id="8248703757" thread_id="-">\nhi\n</channel>'
-        self.assertEqual(extract_chat_id_from_prompt(prompt), "8248703757")
+        prompt = '<channel source="switchroom-telegram" chat_id="12345" thread_id="-">\nhi\n</channel>'
+        self.assertEqual(extract_chat_id_from_prompt(prompt), "12345")
 
     def test_single_quoted_attribute(self):
         prompt = "<channel source='switchroom-telegram' chat_id='12345' user_id='99'>\nhi\n</channel>"
@@ -155,7 +155,7 @@ class UpdatePlaceholderHappyPathTests(unittest.TestCase):
             ready.wait(timeout=1.0)
 
             ok = update_placeholder(
-                "8248703757",
+                "12345",
                 "📚 recalling memories…",
                 socket_path=sock_path,
             )
@@ -167,7 +167,7 @@ class UpdatePlaceholderHappyPathTests(unittest.TestCase):
             self.assertTrue(line.endswith("\n"))
             payload = json.loads(line)
             self.assertEqual(payload["type"], "update_placeholder")
-            self.assertEqual(payload["chatId"], "8248703757")
+            self.assertEqual(payload["chatId"], "12345")
             self.assertEqual(payload["text"], "📚 recalling memories…")
 
 

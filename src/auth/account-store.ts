@@ -44,7 +44,7 @@ import { join, resolve } from "node:path";
 const LABEL_MAX = 64;
 // Account labels accept email-friendly characters so operators can
 // label accounts by the Anthropic email they signed up with — e.g.
-// `pixsoul@gmail.com`, `ken+work@example.com`. The character set is
+// `you@example.com`, `ken+work@example.com`. The character set is
 // the existing slug set (`A-Z a-z 0-9 . _ -`) plus `@` (email
 // separator) and `+` (gmail-style tag separator). We deliberately do
 // NOT allow:
@@ -167,7 +167,7 @@ export function validateAccountLabel(label: string): void {
     throw new Error(
       "Account label must match [A-Za-z0-9._@+-]+ (letters, digits, dot, " +
         "underscore, dash, @, +). The @ and + chars let you label accounts " +
-        "by Anthropic email — e.g. 'pixsoul@gmail.com', 'ken+work@example.com'.",
+        "by Anthropic email — e.g. 'you@example.com', 'ken+work@example.com'.",
     );
   }
 }

@@ -14,7 +14,7 @@
  *      stream_reply lands as a SECOND message with the same content
  *      (raw markdown, since reply tools don't always render HTML).
  *
- * Smoking-gun evidence: klanker chat 8248703757, msgs 5025 + 5027,
+ * Smoking-gun evidence: klanker chat 12345, msgs 5025 + 5027,
  * 11s apart. msg=5025 had `<b>...</b>` (turn-flush + markdownToHtml).
  * msg=5027 had `**...**` (the raw markdown reply tool's payload).
  * Same content, different formatting, two messages.

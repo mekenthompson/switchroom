@@ -29,7 +29,7 @@ bun run tests/skill-coverage/cli.ts my-agent --regen-corpus
 
 # Live run against a real agent (requires gateway socket + agent cwd)
 bun run tests/skill-coverage/cli.ts my-agent \
-  --agent-cwd=/home/kenthompson/.switchroom/agents/my-agent \
+  --agent-cwd=~/.switchroom/agents/my-agent \
   --gateway-socket=/run/switchroom/agents/my-agent/gateway.sock \
   --go
 ```

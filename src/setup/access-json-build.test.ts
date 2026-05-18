@@ -19,8 +19,8 @@ function parse(s: string): {
 
 describe("buildAccessJson — userId coercion (#1001)", () => {
   it("string userId lands as a quoted string in allowFrom", () => {
-    const j = parse(buildAccessJson("8248703757", "-100123", undefined));
-    expect(j.allowFrom).toEqual(["8248703757"]);
+    const j = parse(buildAccessJson("12345", "-100123", undefined));
+    expect(j.allowFrom).toEqual(["12345"]);
     expect(typeof (j.allowFrom as unknown[])[0]).toBe("string");
   });
 
@@ -28,8 +28,8 @@ describe("buildAccessJson — userId coercion (#1001)", () => {
     // Defensive coercion: the type says `string` but TS can't enforce at
     // runtime, and the gateway rejects unquoted JSON numbers as
     // 'non-string entries'.
-    const j = parse(buildAccessJson(8248703757 as unknown as string, "-100123", undefined));
-    expect(j.allowFrom).toEqual(["8248703757"]);
+    const j = parse(buildAccessJson(12345 as unknown as string, "-100123", undefined));
+    expect(j.allowFrom).toEqual(["12345"]);
     expect(typeof (j.allowFrom as unknown[])[0]).toBe("string");
   });
 });

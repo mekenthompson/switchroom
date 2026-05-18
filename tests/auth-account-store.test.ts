@@ -48,7 +48,7 @@ describe("validateAccountLabel", () => {
   it("accepts email-shaped labels (@ + . _ - allowed)", () => {
     // The headline reason for allowing @: operators want to label
     // accounts by the Anthropic email they signed up with.
-    expect(() => validateAccountLabel("pixsoul@gmail.com")).not.toThrow();
+    expect(() => validateAccountLabel("you@example.com")).not.toThrow();
     expect(() => validateAccountLabel("ken+work@example.com")).not.toThrow();
     expect(() => validateAccountLabel("a@b")).not.toThrow();
     expect(() => validateAccountLabel("user.name+tag@subdomain.example.co")).not.toThrow();

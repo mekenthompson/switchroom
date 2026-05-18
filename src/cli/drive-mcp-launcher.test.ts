@@ -100,9 +100,9 @@ describe("buildSeedCredentials — exact upstream shape", () => {
 });
 
 describe("encodeCredentialsFilename — Python quote(email, safe=\"@._-\")", () => {
-  it("leaves pixsoul@gmail.com untouched → pixsoul@gmail.com.json", () => {
-    expect(encodeCredentialsFilename("pixsoul@gmail.com")).toBe(
-      "pixsoul@gmail.com.json",
+  it("leaves you@example.com untouched → you@example.com.json", () => {
+    expect(encodeCredentialsFilename("you@example.com")).toBe(
+      "you@example.com.json",
     );
   });
 
@@ -209,7 +209,7 @@ describe("buildChildEnv — strips --single-user-incompatible knobs", () => {
         WORKSPACE_MCP_SERVICE_ACCOUNT_FILE: "/sa2.json",
       },
       "/state/agent/google-workspace-mcp/credentials",
-      "pixsoul@gmail.com",
+      "you@example.com",
     );
     expect(env.WORKSPACE_MCP_CREDENTIALS_DIR).toBe(
       "/state/agent/google-workspace-mcp/credentials",
@@ -227,22 +227,22 @@ describe("buildChildEnv — strips --single-user-incompatible knobs", () => {
     // seed when the agent's per-call user_google_email doesn't match;
     // USER_GOOGLE_EMAIL makes core.server treat this address as THE
     // single user. MUST equal the value writeSeedFile used.
-    const env = buildChildEnv({}, "/tmp/c", "pixsoul@gmail.com");
-    expect(env.USER_GOOGLE_EMAIL).toBe("pixsoul@gmail.com");
+    const env = buildChildEnv({}, "/tmp/c", "you@example.com");
+    expect(env.USER_GOOGLE_EMAIL).toBe("you@example.com");
   });
 
   it("overrides any inherited USER_GOOGLE_EMAIL with the seeded account", () => {
     const env = buildChildEnv(
       { USER_GOOGLE_EMAIL: "stale@example.com" },
       "/tmp/c",
-      "pixsoul@gmail.com",
+      "you@example.com",
     );
-    expect(env.USER_GOOGLE_EMAIL).toBe("pixsoul@gmail.com");
+    expect(env.USER_GOOGLE_EMAIL).toBe("you@example.com");
   });
 
   it("does not mutate the passed-in base env object", () => {
     const base = { MCP_ENABLE_OAUTH21: "1" };
-    buildChildEnv(base, "/tmp/c", "pixsoul@gmail.com");
+    buildChildEnv(base, "/tmp/c", "you@example.com");
     expect(base.MCP_ENABLE_OAUTH21).toBe("1");
   });
 });

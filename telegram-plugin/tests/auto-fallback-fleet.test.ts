@@ -44,7 +44,7 @@ describe('runFleetAutoFallback', () => {
       fanned: ['alice', 'bob'],
     }));
     const out = await runFleetAutoFallback({
-      state: state('ken@x', ['ken@x', 'me@x', 'pixsoul@x']),
+      state: state('ken@x', ['ken@x', 'me@x', 'you@x']),
       quotas: [
         // ken: just blew 5h
         qOk({
@@ -58,7 +58,7 @@ describe('runFleetAutoFallback', () => {
           sevenDayResetAt: new Date('2026-05-17T10:00:00Z'),
           representativeClaim: 'seven_day',
         }),
-        // pixsoul: healthy 5h/7d
+        // you: healthy 5h/7d
         qOk({ fiveHourUtilizationPct: 8, sevenDayUtilizationPct: 20 }),
       ],
       setActive,
@@ -69,10 +69,10 @@ describe('runFleetAutoFallback', () => {
 
     expect(out.kind).toBe('switched');
     expect(setActive).toHaveBeenCalledTimes(1);
-    expect(setActive).toHaveBeenCalledWith('pixsoul@x');
+    expect(setActive).toHaveBeenCalledWith('you@x');
     if (out.kind === 'switched') {
       expect(out.oldLabel).toBe('ken@x');
-      expect(out.newLabel).toBe('pixsoul@x');
+      expect(out.newLabel).toBe('you@x');
       expect(out.announcement).toContain('5-hour limit on ken@x');
       expect(out.announcement).toContain('Triggered by: agent <b>carrie</b>');
       expect(out.announcement).toContain('plenty of headroom');
@@ -112,7 +112,7 @@ describe('runFleetAutoFallback', () => {
   it('idempotency: skips swap when active probes healthy (stale event)', async () => {
     const setActive = vi.fn();
     const out = await runFleetAutoFallback({
-      state: state('ken@x', ['ken@x', 'pixsoul@x']),
+      state: state('ken@x', ['ken@x', 'you@x']),
       quotas: [
         qOk({ fiveHourUtilizationPct: 5, sevenDayUtilizationPct: 10 }),
         qOk({ fiveHourUtilizationPct: 5, sevenDayUtilizationPct: 10 }),
@@ -147,14 +147,14 @@ describe('runFleetAutoFallback', () => {
   it('falls back to a throttling alternative when no healthy one exists', async () => {
     const setActive = vi.fn(async (label: string) => ({ active: label, fanned: [] }));
     const out = await runFleetAutoFallback({
-      state: state('ken@x', ['ken@x', 'pixsoul@x']),
+      state: state('ken@x', ['ken@x', 'you@x']),
       quotas: [
         qOk({
           fiveHourUtilizationPct: 100,
           fiveHourResetAt: new Date('2026-05-15T05:50:00Z'),
           representativeClaim: 'five_hour',
         }),
-        // pixsoul throttling at 85% but not blocked
+        // you throttling at 85% but not blocked
         qOk({ fiveHourUtilizationPct: 85, sevenDayUtilizationPct: 20 }),
       ],
       setActive,
@@ -164,7 +164,7 @@ describe('runFleetAutoFallback', () => {
     });
 
     expect(out.kind).toBe('switched');
-    expect(setActive).toHaveBeenCalledWith('pixsoul@x');
+    expect(setActive).toHaveBeenCalledWith('you@x');
     if (out.kind === 'switched') {
       expect(out.announcement).toContain('near limit — watch this');
     }
@@ -173,7 +173,7 @@ describe('runFleetAutoFallback', () => {
   it('skips unknown-health (probe failed) when picking a target', async () => {
     const setActive = vi.fn(async (label: string) => ({ active: label, fanned: [] }));
     const out = await runFleetAutoFallback({
-      state: state('ken@x', ['ken@x', 'broken@x', 'pixsoul@x']),
+      state: state('ken@x', ['ken@x', 'broken@x', 'you@x']),
       quotas: [
         qOk({ fiveHourUtilizationPct: 100, fiveHourResetAt: new Date('2026-05-15T05:50:00Z') }),
         { ok: false, reason: 'HTTP 401' },
@@ -186,7 +186,7 @@ describe('runFleetAutoFallback', () => {
     });
 
     expect(out.kind).toBe('switched');
-    expect(setActive).toHaveBeenCalledWith('pixsoul@x');
+    expect(setActive).toHaveBeenCalledWith('you@x');
   });
 });
 

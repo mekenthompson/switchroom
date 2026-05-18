@@ -10,7 +10,7 @@ describe('shouldAppendTelegramProgressGuidance', () => {
     expect(
       shouldAppendTelegramProgressGuidance({
         telegramEnabled: true,
-        defaultChatId: '8248703757',
+        defaultChatId: '12345',
       }),
     ).toBe(true)
   })
@@ -19,7 +19,7 @@ describe('shouldAppendTelegramProgressGuidance', () => {
     expect(
       shouldAppendTelegramProgressGuidance({
         telegramEnabled: false,
-        defaultChatId: '8248703757',
+        defaultChatId: '12345',
       }),
     ).toBe(false)
   })
@@ -97,12 +97,12 @@ describe('applyTelegramProgressGuidance', () => {
     const body = 'You are the worker sub-agent.'
     const out = applyTelegramProgressGuidance(body, {
       telegramEnabled: true,
-      defaultChatId: '8248703757',
+      defaultChatId: '12345',
     })
     expect(out.startsWith(body)).toBe(true)
     expect(out.length).toBeGreaterThan(body.length)
     expect(out).toContain('mcp__switchroom-telegram__progress_update')
-    expect(out).toContain('8248703757')
+    expect(out).toContain('12345')
   })
 
   it('preserves the original body verbatim as a prefix of the appended output', () => {

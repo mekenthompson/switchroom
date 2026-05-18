@@ -165,4 +165,79 @@ describe("skill-validate-pretool hook", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).toBe("");
   });
+
+  it("MultiEdit on a skill path with no content fails open", () => {
+    if (!bunOk) return;
+    const r = run({
+      tool_name: "MultiEdit",
+      tool_input: {
+        file_path: join(skillsRoot, "demo", "SKILL.md"),
+        edits: [{ old_string: "a", new_string: "b" }],
+      },
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe("");
+  });
+
+  it("byte-cap projection: add-to-existing blocks, shrink-overwrite allows", () => {
+    if (!bunOk) return;
+    // Seed a skill that already holds ~1.6 MiB.
+    const bigDir = join(skillsRoot, "big");
+    mkdirSync(join(bigDir, "reference"), { recursive: true });
+    writeFileSync(
+      join(bigDir, "SKILL.md"),
+      "---\nname: big\ndescription: big skill\n---\n",
+    );
+    const existing = join(bigDir, "reference", "existing.md");
+    writeFileSync(existing, "y".repeat(1.6 * 1024 * 1024));
+
+    // Adding a new ~0.6 MiB file pushes the total past 2 MiB → block,
+    // even though the new file alone is well under the cap (proves the
+    // projection sums the existing dir, not just the new content).
+    const add = run({
+      tool_name: "Write",
+      tool_input: {
+        file_path: join(bigDir, "reference", "more.md"),
+        content: "z".repeat(0.6 * 1024 * 1024),
+      },
+    });
+    const addOut = JSON.parse(add.stdout);
+    expect(addOut.decision).toBe("block");
+    expect(addOut.reason).toMatch(/per-skill cap/);
+
+    // Overwriting the existing 1.6 MiB file with tiny content nets the
+    // skill far below the cap → allowed (proves it subtracts the
+    // target file's current size before adding the new content).
+    const shrink = run({
+      tool_name: "Write",
+      tool_input: { file_path: existing, content: "small" },
+    });
+    expect(shrink.status).toBe(0);
+    expect(shrink.stdout).toBe("");
+  });
+
+  it("a path containing .claude/skills/ twice never wrong-blocks", () => {
+    if (!bunOk) return;
+    // Pathological: first occurrence wins → slug "docs". Worst case is
+    // a spurious advisory nudge; it must never block and the write
+    // must proceed (no decision:block).
+    const r = run({
+      tool_name: "Write",
+      tool_input: {
+        file_path: join(
+          skillsRoot,
+          "docs",
+          ".claude",
+          "skills",
+          "demo",
+          "SKILL.md",
+        ),
+        content: "---\nname: demo\ndescription: d\n---\n",
+      },
+    });
+    expect(r.status).toBe(0);
+    if (r.stdout) {
+      expect(JSON.parse(r.stdout).decision).toBeUndefined();
+    }
+  });
 });

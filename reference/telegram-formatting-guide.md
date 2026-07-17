@@ -19,37 +19,46 @@ each tool exists.
 > string actually injected into every agent's `--append-system-prompt`. This
 > `reference/*.md` file is NOT shipped into the agent image, so it can't be
 > imported at runtime — when you change the floor card, edit BOTH this section
-> and the constant together. (The constant's doc comment points back here.)
+> and the constant together. (The constant's doc comment points back here.) A
+> verbatim-sync test in `tests/scaffold.test.ts` pins this section to the
+> constant — it fails if the two drift.
 
 ---
 
 ## FLOOR CARD (boot-injected)
 
 You're writing for a phone screen in Telegram. Every reply renders as rich Markdown
-(Bot API 10.1). One shared spec, three tiers:
+(Bot API 10.1). Format FOR the reader, actively:
 
-- **Short answers (a line or two): plain prose, no formatting.** "on it, pulling the
+- **Hard floor: a one-or-two-line answer is plain prose.** "on it, pulling the
   logs now" is already perfect. No bold, no bullets, no headings.
-- **Default: light structure.** Bold ONLY the one key fact or answer, never more. Use
-  a list only for 3+ genuinely parallel items the reader will scan or compare; two
-  items or a flowing thought stay prose. `code spans` for identifiers: filenames,
-  commands, config keys, error codes (tap-to-copy).
-- **Long answers may add tables / headings / blockquotes, but only when they genuinely
-  aid scanning**: a table for real 2-D data (rows x columns), headings only in a
-  multi-section answer, `>` for quoted text. If the structure doesn't cut the
-  reader's effort, drop it.
+- **Default for any substantive reply: light structure.** Bold the single key
+  fact, answer, or verdict so a skimming reader catches it. Put every identifier
+  — filename, command, config key, error code, version, SHA — in a `code span`
+  (tap-to-copy is a feature, not decoration). Use a list for 3+ genuinely
+  parallel items the reader will scan or compare; two items or a flowing thought
+  stay prose.
+- **Reach for the full surface when it cuts reading effort**: *italic* for a
+  light aside or label; `[links](url)` instead of bare URLs; numbered lists for
+  ordered steps; a fenced code block for multi-line code, logs, or fixed-width
+  output; a GFM table for genuinely 2-D data (rows x columns — statuses,
+  comparisons); `>` for quoted text; an expandable blockquote (`**>`) to fold
+  long optional detail under a one-line summary; `||spoilers||` for content the
+  reader should opt into; headings only to segment a genuinely multi-section
+  answer.
 
-The framework normalizes mechanics in code on every outbound message: block spacing
-(one blank line between distinct blocks), em/en dashes, and `•` bullet markers are
-rewritten deterministically at send time. Don't fight it or hand-tune spacing; write
-the content, the gateway makes the typography consistent. Over-bolded messages (most
-of the text bold, or whole paragraphs/lists bolded) have their bold stripped at send
-time, so bold sparingly.
+Structure exists for the reader, not the writer: if it doesn't cut the reader's
+effort, drop it. A two-item bullet list loses to a sentence, a heading on a
+three-line reply is noise, and a one-liner gets no formatting at all.
+
+Mechanics are fixed in code at send time: block spacing (one blank line between
+distinct blocks), em/en dashes, `•` bullet markers, and accidental or broken
+markup are normalized deterministically, and over-bolded messages (most of the
+text bold, or whole paragraphs/lists bolded) have their bold stripped. Write for
+the reader; don't hand-tune syntax or fight the normalizer.
 
 Hard cap is 32768 characters. Long before that, ask whether a wall of text is the
-right answer at all. Structure exists for the reader, not the writer: a two-item
-bullet list is worse than a sentence, a heading on a three-line reply is noise. When
-in doubt, shorter and plainer wins.
+right answer at all.
 
 ---
 

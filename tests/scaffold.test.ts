@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readlinkSync, lstatSync, readdirSync, cpSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
-import { scaffoldAgent, reconcileAgent, installHindsightPlugin, installSwitchroomSkills, renderFleetInvariants } from "../src/agents/scaffold.js";
+import { scaffoldAgent, reconcileAgent, installHindsightPlugin, installSwitchroomSkills, renderFleetInvariants, TELEGRAM_FORMATTING_FLOOR_CARD } from "../src/agents/scaffold.js";
 import { createVault, setStringSecret } from "../src/vault/vault.js";
 import { renderTemplate, renderProfileClaudeTemplate } from "../src/agents/profiles.js";
 import { cronScriptFilename, cronUnitName } from "../src/agents/cron-unit-name.js";
@@ -3234,6 +3234,13 @@ describe("scaffoldAgent with global defaults cascade", () => {
     expect(startSh).toContain("## Formatting for Telegram");
     expect(startSh).toContain("Hard cap is 32768 characters.");
     expect(startSh).toContain("Every reply renders as rich Markdown");
+    // Raised-baseline guidance (the rewrite): the active-formatting default,
+    // the tap-to-copy rule, and the full-surface teaching all reach the prompt.
+    expect(startSh).toContain("Format FOR the reader, actively");
+    expect(startSh).toContain("tap-to-copy is a feature, not decoration");
+    expect(startSh).toContain("Reach for the full surface when it cuts reading effort");
+    // The hard floor survives the rewrite.
+    expect(startSh).toContain("Hard floor: a one-or-two-line answer is plain prose.");
     // It rides the same --append-system-prompt var the operator passthrough uses.
     expect(startSh).toContain('--append-system-prompt "$APPEND_PROMPT"');
   });
@@ -3280,11 +3287,61 @@ describe("scaffoldAgent with global defaults cascade", () => {
     );
     expect(startSh).toContain("## Formatting for Telegram");
     expect(startSh).toContain("Hard cap is 32768 characters.");
+    // Raised-baseline guidance reaches the reconcile-path prompt too.
+    expect(startSh).toContain("Format FOR the reader, actively");
+    expect(startSh).toContain("tap-to-copy is a feature, not decoration");
+    expect(startSh).toContain("Reach for the full surface when it cuts reading effort");
+    expect(startSh).toContain("Hard floor: a one-or-two-line answer is plain prose.");
     // Operator passthrough still survives the reconcile path, prepended-after.
     expect(startSh).toContain(operatorText);
     const floorIdx = startSh.indexOf("## Formatting for Telegram");
     const opIdx = startSh.indexOf(operatorText);
     expect(opIdx).toBeGreaterThan(floorIdx);
+  });
+
+  it("keeps the floor card verbatim-in-sync with reference/telegram-formatting-guide.md", () => {
+    // The guide's "FLOOR CARD (boot-injected)" section quotes the constant
+    // VERBATIM (the reference doc is not shipped into the agent image, so the
+    // sync is by hand — this test is the tripwire that makes the hand-sync
+    // deterministic). This is an ANCHORED-EQUALITY oracle, not containment:
+    // both sides are sliced to the same shared region and compared with .toBe,
+    // so drift in EITHER direction (guide region shrinking, or content
+    // appended to the const before its tail) trips the test.
+    //
+    // Anchors — the const carries a title header and a trailing reply-tool
+    // paragraph the guide section omits, so slice both to the shared body:
+    //   const: between "## Formatting for Telegram\n\n" and "\n\nEvery turn"
+    //   guide: between "## FLOOR CARD (boot-injected)\n\n" and "\n\n---"
+    // Using the "Every turn" tail (not a bare "---") as the const end-anchor
+    // means a future divider inside the card body can't silently truncate it.
+    const guide = readFileSync(
+      join(__dirname, "..", "reference", "telegram-formatting-guide.md"),
+      "utf-8",
+    );
+    const guideHeading = "## FLOOR CARD (boot-injected)\n\n";
+    const guideStart = guide.indexOf(guideHeading);
+    expect(guideStart).toBeGreaterThanOrEqual(0);
+    const guideBodyStart = guideStart + guideHeading.length;
+    const guideEnd = guide.indexOf("\n\n---", guideBodyStart);
+    expect(guideEnd).toBeGreaterThan(guideBodyStart);
+    const guideRegion = guide.slice(guideBodyStart, guideEnd);
+
+    const cardTitle = "## Formatting for Telegram\n\n";
+    const cardStart = TELEGRAM_FORMATTING_FLOOR_CARD.indexOf(cardTitle);
+    expect(cardStart).toBeGreaterThanOrEqual(0);
+    const cardBodyStart = cardStart + cardTitle.length;
+    const cardEnd = TELEGRAM_FORMATTING_FLOOR_CARD.indexOf(
+      "\n\nEvery turn",
+      cardBodyStart,
+    );
+    expect(cardEnd).toBeGreaterThan(cardBodyStart);
+    const cardRegion = TELEGRAM_FORMATTING_FLOOR_CARD.slice(
+      cardBodyStart,
+      cardEnd,
+    );
+
+    expect(cardRegion.length).toBeGreaterThan(100);
+    expect(cardRegion).toBe(guideRegion);
   });
 
   it("settings_raw deep-merges into the generated settings.json", () => {

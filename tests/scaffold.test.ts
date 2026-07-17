@@ -3303,22 +3303,45 @@ describe("scaffoldAgent with global defaults cascade", () => {
     // The guide's "FLOOR CARD (boot-injected)" section quotes the constant
     // VERBATIM (the reference doc is not shipped into the agent image, so the
     // sync is by hand — this test is the tripwire that makes the hand-sync
-    // deterministic). The quoted region is the guide section body between the
-    // "## FLOOR CARD (boot-injected)" heading and the next "---" divider; it
-    // must appear byte-for-byte inside TELEGRAM_FORMATTING_FLOOR_CARD.
+    // deterministic). This is an ANCHORED-EQUALITY oracle, not containment:
+    // both sides are sliced to the same shared region and compared with .toBe,
+    // so drift in EITHER direction (guide region shrinking, or content
+    // appended to the const before its tail) trips the test.
+    //
+    // Anchors — the const carries a title header and a trailing reply-tool
+    // paragraph the guide section omits, so slice both to the shared body:
+    //   const: between "## Formatting for Telegram\n\n" and "\n\nEvery turn"
+    //   guide: between "## FLOOR CARD (boot-injected)\n\n" and "\n\n---"
+    // Using the "Every turn" tail (not a bare "---") as the const end-anchor
+    // means a future divider inside the card body can't silently truncate it.
     const guide = readFileSync(
       join(__dirname, "..", "reference", "telegram-formatting-guide.md"),
       "utf-8",
     );
-    const heading = "## FLOOR CARD (boot-injected)";
-    const start = guide.indexOf(heading);
-    expect(start).toBeGreaterThanOrEqual(0);
-    const afterHeading = start + heading.length;
-    const end = guide.indexOf("\n---", afterHeading);
-    expect(end).toBeGreaterThan(afterHeading);
-    const quotedRegion = guide.slice(afterHeading, end).trim();
-    expect(quotedRegion.length).toBeGreaterThan(100);
-    expect(TELEGRAM_FORMATTING_FLOOR_CARD).toContain(quotedRegion);
+    const guideHeading = "## FLOOR CARD (boot-injected)\n\n";
+    const guideStart = guide.indexOf(guideHeading);
+    expect(guideStart).toBeGreaterThanOrEqual(0);
+    const guideBodyStart = guideStart + guideHeading.length;
+    const guideEnd = guide.indexOf("\n\n---", guideBodyStart);
+    expect(guideEnd).toBeGreaterThan(guideBodyStart);
+    const guideRegion = guide.slice(guideBodyStart, guideEnd);
+
+    const cardTitle = "## Formatting for Telegram\n\n";
+    const cardStart = TELEGRAM_FORMATTING_FLOOR_CARD.indexOf(cardTitle);
+    expect(cardStart).toBeGreaterThanOrEqual(0);
+    const cardBodyStart = cardStart + cardTitle.length;
+    const cardEnd = TELEGRAM_FORMATTING_FLOOR_CARD.indexOf(
+      "\n\nEvery turn",
+      cardBodyStart,
+    );
+    expect(cardEnd).toBeGreaterThan(cardBodyStart);
+    const cardRegion = TELEGRAM_FORMATTING_FLOOR_CARD.slice(
+      cardBodyStart,
+      cardEnd,
+    );
+
+    expect(cardRegion.length).toBeGreaterThan(100);
+    expect(cardRegion).toBe(guideRegion);
   });
 
   it("settings_raw deep-merges into the generated settings.json", () => {

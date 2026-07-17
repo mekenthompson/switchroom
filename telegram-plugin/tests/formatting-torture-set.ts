@@ -215,4 +215,23 @@ export const TORTURE_SET: ReadonlyArray<TortureFixture> = [
     input: '```\n' + 'x'.repeat(600) + '\n```',
     expect: [],
   },
+
+  // ── Glued-hash heading footgun (#3252 arm 3; live-probed 2026-07-17) ──────
+  // The raw shapes Telegram promotes to a giant heading (see
+  // render/guard-linestart-note.md). Parse-accept only here — the escape
+  // itself happens at the richMessage() seam and is pinned by
+  // tests/render/line-start-guard.test.ts; these fixtures keep the shapes in
+  // the oracle's cross-check corpus.
+  {
+    name: 'glued-hash-bare-line',
+    intent: 'A bare line-start `#`+digit PR ref stays parse-valid through the pipeline',
+    input: '#3293 merged (40c957e)',
+    expect: [],
+  },
+  {
+    name: 'glued-hash-bullet-content',
+    intent: 'The recorded `- #3293:` incident shape stays parse-valid through the pipeline',
+    input: '**Landing now**\n\n- #3293: proxy-side 401s route to you as operator',
+    expect: [{ type: 'bold', text: 'Landing now' }],
+  },
 ]

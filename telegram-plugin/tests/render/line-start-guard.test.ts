@@ -4,7 +4,7 @@ import { guardAccidentalBlockConstructs } from "../../render/line-start-guard.js
 /** Strip the defusing backslashes so we can assert the reader-visible text is
  *  byte-identical to the original prose (Telegram consumes the `\`). */
 function copyText(s: string): string {
-  return s.replace(/\\([>.)])/g, "$1");
+  return s.replace(/\\([>.)#])/g, "$1");
 }
 
 describe("guardAccidentalBlockConstructs (#3252) — INTENDED formatting is never touched", () => {
@@ -19,9 +19,14 @@ describe("guardAccidentalBlockConstructs (#3252) — INTENDED formatting is neve
     expect(guardAccidentalBlockConstructs(s)).toBe(s);
   });
 
-  it("leaves `#1` (no space, not a GFM heading) untouched — Telegram renders it literally", () => {
-    const s = "#1 priority is latency";
-    expect(guardAccidentalBlockConstructs(s)).toBe(s);
+  it("escapes `#1` (no space) — LIVE-PROVED Telegram promotes it to a heading (guard-linestart-note.md)", () => {
+    // This test previously pinned the OPPOSITE (untouched) on the unverified
+    // CommonMark analogy that `#`+non-space renders literally. A live Bot API
+    // probe (2026-07-17) proved Telegram promotes it to an H1 — the recorded
+    // `- #3293:` giant-heading incident. Flipped to assert the escape.
+    const out = guardAccidentalBlockConstructs("#1 priority is latency");
+    expect(out).toBe("\\#1 priority is latency");
+    expect(copyText(out)).toBe("#1 priority is latency");
   });
 
   it("leaves `# of items` untouched — deferred (indistinguishable from a heading)", () => {
@@ -117,6 +122,95 @@ describe("guardAccidentalBlockConstructs (#3252) — accidental constructs ARE e
     const s = "Consider the timeline.\n2026. was pivotal\nThat is all.";
     const out = guardAccidentalBlockConstructs(s);
     expect(out).toBe("Consider the timeline.\n2026\\. was pivotal\nThat is all.");
+  });
+});
+
+describe("guardAccidentalBlockConstructs — accidental HEADING promotion (live-probed 2026-07-17)", () => {
+  it("REGRESSION: the recorded incident line — bullet content starting `#3293:` gets escaped", () => {
+    // Verbatim shape of gateway history.db message_id 19159, which rendered
+    // as a giant H1 on the operator's phone. The escape renders it literal.
+    const s =
+      "**Landing now**\n\n- #3293: proxy-side 401s route to you as operator instead of hitting users with a bogus re-auth card";
+    const out = guardAccidentalBlockConstructs(s);
+    expect(out).toBe(
+      "**Landing now**\n\n- \\#3293: proxy-side 401s route to you as operator instead of hitting users with a bogus re-auth card",
+    );
+    // No live heading trigger remains: every line-start / item-content `#` is escaped.
+    expect(copyText(out)).toBe(s);
+  });
+
+  it("escapes a bare line-start `#3293 foo` (probe: promoted to H1)", () => {
+    const out = guardAccidentalBlockConstructs("#3293 foo");
+    expect(out).toBe("\\#3293 foo");
+    expect(copyText(out)).toBe("#3293 foo");
+  });
+
+  it("escapes `#word` — probe proved letters promote too (NOT rendered as a hashtag)", () => {
+    const out = guardAccidentalBlockConstructs("#word probe");
+    expect(out).toBe("\\#word probe");
+  });
+
+  it("escapes a multi-hash glued run `##3293` with ONE leading backslash (probe: `\\##` renders literally)", () => {
+    const out = guardAccidentalBlockConstructs("##3293 foo");
+    expect(out).toBe("\\##3293 foo");
+    expect(out).not.toContain("\\\\");
+  });
+
+  it("escapes ordered-item content `1. #3293: foo` (probe: promoted inside the item)", () => {
+    const out = guardAccidentalBlockConstructs("1. #3293: foo");
+    expect(out).toBe("1. \\#3293: foo");
+  });
+
+  it("escapes indented bullet content `  - #3293: foo` (probe: 1-3 space indent still promotes)", () => {
+    const out = guardAccidentalBlockConstructs("  - #3293: foo");
+    expect(out).toBe("  - \\#3293: foo");
+  });
+
+  it("escapes only the offending line inside a multi-line body", () => {
+    const s = "Shipped today.\n#3293 merged (40c957e)\nAll green.";
+    const out = guardAccidentalBlockConstructs(s);
+    expect(out).toBe("Shipped today.\n\\#3293 merged (40c957e)\nAll green.");
+  });
+
+  it("leaves an intended `# Real heading` untouched (probe: renders as intended)", () => {
+    const s = "# Real heading";
+    expect(guardAccidentalBlockConstructs(s)).toBe(s);
+  });
+
+  it("leaves a spaced multi-hash `## Section` untouched — the space means an intended heading", () => {
+    const s = "## Section";
+    expect(guardAccidentalBlockConstructs(s)).toBe(s);
+  });
+
+  it("leaves a mid-sentence `see #3293 now` untouched — not a line or item-content start", () => {
+    const s = "see #3293 now";
+    expect(guardAccidentalBlockConstructs(s)).toBe(s);
+  });
+
+  it("leaves a bullet whose `#` is NOT at content start untouched (`- fix #3293 today`)", () => {
+    const s = "- fix #3293 today";
+    expect(guardAccidentalBlockConstructs(s)).toBe(s);
+  });
+
+  it("never touches `#3293` inside an inline code span", () => {
+    const s = "ref `#3293` in the log";
+    expect(guardAccidentalBlockConstructs(s)).toBe(s);
+  });
+
+  it("never touches `#` lines inside a fenced code block", () => {
+    const s = "```\n#3293 in code\n- #3293: also code\n```";
+    expect(guardAccidentalBlockConstructs(s)).toBe(s);
+  });
+
+  it("leaves a 4-space indented `#` line untouched (indented code context)", () => {
+    const s = "    #3293 indented code";
+    expect(guardAccidentalBlockConstructs(s)).toBe(s);
+  });
+
+  it("is idempotent on the heading arm — line start AND item content", () => {
+    const once = guardAccidentalBlockConstructs("#3293 foo\n- #3293: bar");
+    expect(guardAccidentalBlockConstructs(once)).toBe(once);
+    expect(once).not.toContain("\\\\");
   });
 });
 

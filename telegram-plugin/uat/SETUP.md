@@ -284,6 +284,27 @@ scenario can't smuggle it into a chat message. The session string in
 `.env` is bearer-equivalent to the driver account — treat the file
 as a long-lived secret.
 
+### Driver-less probe scenarios (bot-token only)
+
+A few scenarios don't need the mtcute driver at all — they inspect
+Telegram's server-parsed structure returned directly on a bot send
+response. `probe-heading-promotion-dm.test.ts` (the no-space `#`
+heading-promotion probe backing `render/guard-linestart-note.md`) is
+one: it only needs a bot token and a chat that bot can post to, via
+two extra env vars (also loadable from `.env`):
+
+```bash
+# Any bot token works (e.g. the test-harness bot's); the chat must be
+# one the bot can send to (a DM the bot has been started in, or a group
+# it's a member of). Probe messages are deleted immediately after capture.
+echo "TELEGRAM_UAT_PROBE_BOT_TOKEN=$(docker exec switchroom-test-harness switchroom vault get telegram-test-bot-token)" >> .env
+echo "TELEGRAM_UAT_PROBE_CHAT_ID=<chat_id>" >> .env
+```
+
+Absent either var the scenario self-skips green like the driver
+scenarios. Run it with `bun test` (NOT `vitest run` — see the run-hint
+at the top of the scenario file).
+
 ## 7. Verification checklist before running scenarios
 
 - [ ] `switchroom vault list` shows `telegram-test-bot-token`,

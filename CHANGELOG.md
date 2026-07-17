@@ -1,8 +1,38 @@
 # Changelog
 
-## Unreleased
+## v0.18.31 — Agents format Telegram replies actively for the reader, and a glued line-start # can't hijack a message into a giant heading
+
+### Features
+
+- **Agents format Telegram replies for the reader, not merely with restraint**
+  (#3) — the formatting floor card injected into every agent's system prompt
+  (at both the scaffold and reconcile sites) is rewritten from restraint-first
+  to reader-first. The hard floor is unchanged — one- or two-line answers stay
+  plain prose — but the default is raised: bold the single key fact, put every
+  identifier in a tap-to-copy code span, and use lists for 3+ genuinely
+  parallel items. It teaches the fuller Telegram surface (italic, links,
+  numbered lists, fences, tables, blockquotes, expandable blockquotes,
+  spoilers, headings), each with a use-when-it-helps heuristic, kept honest by
+  an anti-overkill outcome rule: structure exists to cut the reader's effort —
+  if it doesn't, drop it. Agents are reassured about the deterministic
+  send-time formatting net so they write for the reader instead of hand-tuning
+  syntax. A verbatim-sync test pins the formatting guide's quoted region to the
+  now-exported floor-card constant so the two can't drift.
 
 ### Fixes
+
+- **A glued line-start `#` can no longer hijack a whole message into a giant
+  heading** (#4) — the earlier line-start guard deliberately skipped the `#`
+  case on the CommonMark reasoning that `#` glued to a non-space isn't an ATX
+  heading. A live incident disproved it: `- #3293: …` rendered as a full-width
+  H1 on the operator's phone. A live Bot API round-trip probe pinned the real
+  rule — Telegram promotes ANY glued `#` run (`#3293`, `#word`, `##3293`) to a
+  heading block, both at a bare line start and at list-item-content start
+  (`- #3293:` / `1. #3293:`), while `\#` renders a literal `#`. The render
+  guard now escapes a glued line-start `#` at true line start and just past a
+  single list marker, leaving intended spaced `# headings`, mid-line `#`, code
+  spans/fences, and 4-space-indented lines untouched. A repeatable live UAT
+  probe and torture-set fixtures lock the behavior in.
 
 - **Inbound Telegram messages are never silently dropped at the routing
   layer** (#3300) — the gateway registered only content-specific handlers

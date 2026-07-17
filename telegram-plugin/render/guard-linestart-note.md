@@ -77,6 +77,24 @@ parser — the reader sees exactly the original prose.
 - Idempotent: after escaping, the content starts with `\`, which matches
   neither pattern.
 
+## Known residual false-negatives (live-probed 2026-07-17, NOT guarded)
+
+These shapes DO promote on the wire but the guard leaves them untouched — the
+`#` is still eaten into a heading. They are documented residuals (same class as
+the `>`/`2026.` arms' unprobed edges), not regressions, and are narrow enough
+that a model would rarely author them:
+
+| Input | Telegram parse | Why unguarded |
+|---|---|---|
+| `\t#3293 foo` (TAB-led) | heading — tab is NOT treated as indented-code by Telegram | The guard's indent regex is `/^ */` (spaces only); a tab-led line falls through both the true-line-start and list-marker checks. Widening to tabs risks colliding with the 4-space indented-code carve-out the `>`/`2026.` arms share, so it is deferred. |
+| `- - #3293: foo` (nested bullet) | heading nested two list levels deep | `LIST_ITEM_MARKER` strips ONE marker; after `- ` the content is `- #3293:`, which is itself a marker+content, not a bare glued `#`. Nested lists are vanishingly rare in agent replies. |
+| `- 1. #3293: foo` (bullet→ordered) | heading nested two list levels deep | Same single-marker-strip limitation. |
+
+Widening the guard to recurse markers / handle tabs is possible but expands the
+surface for over-escaping intended nested lists; left as a deferred follow-up
+because no recorded incident uses these shapes (the incident is single-level
+`- #3293:`, which IS guarded).
+
 ## Status of the OTHER two arms' assumptions
 
 The `>`+digit/`=` and `\d{4,}[.)]` arms still rest on CommonMark analogy plus

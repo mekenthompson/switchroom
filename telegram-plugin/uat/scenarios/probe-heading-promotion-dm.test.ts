@@ -1,4 +1,12 @@
 /**
+ * RUN HINT: execute with `bun test telegram-plugin/uat/scenarios/probe-heading-promotion-dm.test.ts`
+ * (the whole `uat/**` tree is excluded from the default vitest config, so
+ * `vitest run <path>` reports "No test files found"; the `vitest.uat.config.ts`
+ * runner works too but node's fetch to api.telegram.org can time out in some
+ * containers — `bun test` uses bun's runtime and is the reliable path). Needs
+ * `TELEGRAM_UAT_PROBE_BOT_TOKEN` + `TELEGRAM_UAT_PROBE_CHAT_ID` (see
+ * uat/SETUP.md § "Driver-less probe scenarios"); self-skips green without them.
+ *
  * Live-wire probe — Telegram's no-space `#` HEADING PROMOTION rule, and the
  * line-start guard's escape of it.
  *

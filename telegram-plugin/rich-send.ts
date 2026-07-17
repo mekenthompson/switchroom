@@ -45,7 +45,7 @@ export interface InputRichMessageMarkdown {
  * residual bug). Running inline-pairs FIRST escapes the tildes (`\~$5M`), then
  * the dollar guard escapes the `$` — both spans are killed. Every other pair of
  * guards is disjoint in the characters it inspects AND the characters it
- * inserts (`\_ \* \> \. \~ \=\= \|\|` vs `\$`), so no other insertion can
+ * inserts (`\_ \* \> \. \# \~ \=\= \|\|` vs `\$`), so no other insertion can
  * create or destroy a signal for a sibling. Verified by composition tests.
  */
 export function guardAccidentalFormatting(markdown: string): string {

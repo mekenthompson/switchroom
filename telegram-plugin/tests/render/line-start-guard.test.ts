@@ -177,6 +177,11 @@ describe("guardAccidentalBlockConstructs — accidental HEADING promotion (live-
     expect(guardAccidentalBlockConstructs(s)).toBe(s);
   });
 
+  it("leaves a spaced multi-hash `## Section` untouched — the space means an intended heading", () => {
+    const s = "## Section";
+    expect(guardAccidentalBlockConstructs(s)).toBe(s);
+  });
+
   it("leaves a mid-sentence `see #3293 now` untouched — not a line or item-content start", () => {
     const s = "see #3293 now";
     expect(guardAccidentalBlockConstructs(s)).toBe(s);

@@ -185,12 +185,24 @@ async function main(): Promise<void> {
   // NOT pinned, NOT a bespoke card. The narrator holds no lifecycle state a
   // gateway restart could orphan; edits are fire-and-forget, monotonic,
   // debounced, frozen-on-terminal, and 429-handled gateway-side.
+  // Card-stall fix: the narrator surfaces the first post's message_id through
+  // `onMessageId` so hostd can persist it into the self-bump resume marker, and
+  // the NEW hostd re-attaches to the SAME card across the self-bump instead of
+  // orphaning it on an early frame. The sink is assigned AFTER the server is
+  // constructed (it lives on the server); a mutable holder bridges the cycle.
+  let onNarrationMessageId:
+    | ((requestId: string, messageId: number) => void)
+    | undefined;
   const rolloutNarrator = new LogTailRolloutNarrator(
     new SocketRolloutNarrationRelay({
       resolveGatewaySocket,
       log: (m) => process.stderr.write(`hostd: rollout-narration — ${m}\n`),
     }),
-    { log: (m) => process.stderr.write(`hostd: rollout-narration — ${m}\n`) },
+    {
+      log: (m) => process.stderr.write(`hostd: rollout-narration — ${m}\n`),
+      onMessageId: (requestId, messageId) =>
+        onNarrationMessageId?.(requestId, messageId),
+    },
   );
 
   const server = new HostdServer({
@@ -231,6 +243,8 @@ async function main(): Promise<void> {
     rolloutRelay,
     rolloutNarrator,
   });
+  onNarrationMessageId = (requestId, messageId) =>
+    server.persistNarrationMessageId(requestId, messageId);
   await server.start();
 
   const paths = server.getBoundPaths();

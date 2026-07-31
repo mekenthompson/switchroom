@@ -412,4 +412,85 @@ describe("LogTailRolloutNarrator", () => {
     expect(finalText).toContain("❌");
     expect(finalText).toContain("test-harness");
   });
+
+  // ── Card-stall fix: the narration card survives a hostd self-bump ─────────
+  // The self-bump restarts hostd mid-roll (it fires on ~every version roll —
+  // hostd's baked-in CLI is one release behind the target by construction).
+  // The message_id of the already-posted card must survive that restart so the
+  // NEW hostd re-attaches and keeps EDITING the same card, instead of orphaning
+  // it on the "hostd refreshing itself" frame and re-posting.
+
+  it("surfaces the first post's message_id via onMessageId (so hostd can persist it)", async () => {
+    const seen: { requestId: string; messageId: number }[] = [];
+    const relay = makeRelay(4242);
+    const n = new LogTailRolloutNarrator(relay, {
+      debounceMs: 500,
+      onMessageId: (requestId, messageId) => seen.push({ requestId, messageId }),
+    });
+    const entry = makeEntry({ request_id: "ro-selfbump" });
+
+    // OLD hostd posts the "hostd refreshing itself" card.
+    n.onPhase(entry, phase("self-bump"));
+    await vi.runAllTimersAsync();
+
+    expect(relay.posts).toHaveLength(1);
+    // The sink fired exactly once, with the posted card's message_id — this is
+    // what hostd writes into the resume marker.
+    expect(seen).toEqual([{ requestId: "ro-selfbump", messageId: 4242 }]);
+  });
+
+  it("seedPostedMessage re-attaches across a self-bump: the SAME card is edited through the roll and terminal, with NO re-post", async () => {
+    // Model the two hostd processes the self-bump spans.
+    const REQ = "ro-selfbump";
+    const MID = 7777; // message_id the OLD hostd posted + persisted in the marker.
+
+    // ── NEW hostd (post self-bump): a FRESH narrator, as after a restart. ──
+    const relay = makeRelay(9999); // if it ever POSTS, it'd be a different id.
+    const n = new LogTailRolloutNarrator(relay, { debounceMs: 200 });
+    const entry = makeEntry({ request_id: REQ });
+
+    // Resume seeds the message_id read back from the marker BEFORE any phase.
+    n.seedPostedMessage(REQ, "overlord", MID);
+
+    // The resumed roll now streams its phases (self-bump-done → apply → canary
+    // → the rest of a 12-agent fleet → terminal).
+    n.onPhase(entry, phase("self-bump-done"));
+    n.onPhase(entry, phase("apply"));
+    n.onPhase(entry, phase("canary-start", { agent: "a1", n: 1, m: 12 }));
+    n.onPhase(entry, phase("canary-pass", { agent: "a1", n: 1, m: 12 }));
+    await vi.advanceTimersByTimeAsync(200);
+    for (let i = 2; i <= 12; i++) {
+      n.onPhase(entry, phase("agent-start", { agent: `a${i}`, n: i, m: 12 }));
+      n.onPhase(entry, phase("agent-done", { agent: `a${i}`, n: i, m: 12 }));
+      await vi.advanceTimersByTimeAsync(200);
+    }
+    n.onTerminal(makeEntry({ request_id: REQ, result: "completed", rolled: [] }));
+    await vi.runAllTimersAsync();
+
+    // OUTCOME 1: NO re-post — the card was re-attached, not duplicated.
+    expect(relay.posts).toHaveLength(0);
+    // OUTCOME 2: every edit targeted the ORIGINAL card the OLD hostd posted.
+    expect(relay.edits.length).toBeGreaterThan(0);
+    for (const e of relay.edits) expect(e.messageId).toBe(MID);
+    // OUTCOME 3: the card advanced past the early "refreshing" frame — it shows
+    // a LATER agent (n>1) at some point, i.e. it did not freeze.
+    expect(relay.edits.some((e) => /agent \d+\/12/.test(e.text))).toBe(true);
+    // OUTCOME 4: the final frame is the terminal ✅ converged state.
+    expect(relay.edits.at(-1)!.text).toContain("✅");
+  });
+
+  it("WITHOUT the seed, a fresh narrator re-posts on resume (documents the bug the fix closes)", async () => {
+    // Same resumed stream, but no seedPostedMessage — the pre-fix behavior:
+    // the fresh narrator can't reach the old card, so it POSTS a new one.
+    const relay = makeRelay(9999);
+    const n = new LogTailRolloutNarrator(relay, { debounceMs: 200 });
+    const entry = makeEntry({ request_id: "ro-selfbump" });
+
+    n.onPhase(entry, phase("self-bump-done"));
+    await vi.runAllTimersAsync();
+
+    // A fresh post (a SECOND card in the operator's chat) — the orphaning the
+    // fix prevents.
+    expect(relay.posts).toHaveLength(1);
+  });
 });

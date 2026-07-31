@@ -80,6 +80,17 @@ export interface PendingRolloutMarker {
   created_at: string;
   /** The OLD hostd's own CLI version, for the audit trail. */
   prior_hostd_version: string;
+  /**
+   * Telegram message_id of the in-chat narration card the OLD hostd already
+   * posted for this roll (the "hostd refreshing itself" frame). Persisted so
+   * the NEW hostd can RE-ATTACH to and keep EDITING that same card across the
+   * self-bump instead of re-posting a fresh one and orphaning the original on
+   * an early frame (#rollout-card-stall). Written in a second pass once the
+   * OLD hostd's narration post resolves (it isn't known at first marker
+   * write); absent when the post hadn't resolved before the recreate, in which
+   * case the NEW hostd falls back to re-posting (prior behavior).
+   */
+  narration_message_id?: number;
 }
 
 const SEMVER_PIN_RE = /^v\d+\.\d+\.\d+$/;
@@ -178,6 +189,15 @@ export function parsePendingRolloutMarker(
   if (o.allow_downgrade !== undefined && typeof o.allow_downgrade !== "boolean") {
     return null;
   }
+  if (
+    o.narration_message_id !== undefined &&
+    (typeof o.narration_message_id !== "number" ||
+      !Number.isInteger(o.narration_message_id))
+  ) {
+    // A malformed message_id must not poison the whole marker (which would
+    // block the resume entirely) — drop just the field and re-post instead.
+    delete o.narration_message_id;
+  }
   return {
     v: 1,
     request_id: o.request_id,
@@ -193,6 +213,9 @@ export function parsePendingRolloutMarker(
         : { kind: "operator" },
     created_at: o.created_at,
     prior_hostd_version: o.prior_hostd_version,
+    ...(o.narration_message_id !== undefined
+      ? { narration_message_id: o.narration_message_id as number }
+      : {}),
   };
 }
 

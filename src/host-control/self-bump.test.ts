@@ -97,6 +97,24 @@ describe("pending-rollout marker", () => {
     );
   });
 
+  it("round-trips the narration_message_id (card re-attach across self-bump)", () => {
+    const withMid: PendingRolloutMarker = { ...marker, narration_message_id: 4242 };
+    expect(
+      parsePendingRolloutMarker(encodePendingRolloutMarker(withMid)),
+    ).toEqual(withMid);
+  });
+
+  it("drops a malformed narration_message_id but still resumes the roll", () => {
+    // A bad message_id must NOT null the whole marker (that would block the
+    // resume entirely) — it's dropped, and the roll falls back to re-posting.
+    const raw = JSON.stringify({ ...marker, narration_message_id: "nope" });
+    const parsed = parsePendingRolloutMarker(raw);
+    expect(parsed).not.toBeNull();
+    expect(parsed!.narration_message_id).toBeUndefined();
+    const rawFloat = JSON.stringify({ ...marker, narration_message_id: 1.5 });
+    expect(parsePendingRolloutMarker(rawFloat)!.narration_message_id).toBeUndefined();
+  });
+
   it("round-trips the minimal (no-optionals, operator) shape", () => {
     const min: PendingRolloutMarker = {
       v: 1,

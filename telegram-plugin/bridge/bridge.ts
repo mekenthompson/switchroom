@@ -262,7 +262,7 @@ const TOOL_SCHEMAS = [
   {
     name: 'send_checklist',
     description:
-      'Send a native Telegram checklist (interactive task list) to a chat. Users can tick tasks directly in the Telegram app. Returns the message_id of the created checklist. The bot is notified when tasks are ticked — these arrive as channel events with kind="checklist_task_changed". Limit: 30 tasks per checklist.',
+      'Send a checklist message to a chat: a bold title followed by one Markdown task line each (`- [ ]` open / `- [x]` done). Returns the message_id so you can patch it later with update_checklist. Limit: 30 tasks. Note: Telegram\'s native interactive checklists require a business account, which bots do not have, so this renders a cleanly formatted message instead — the task lines are text, not tappable in the app.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -351,7 +351,7 @@ const TOOL_SCHEMAS = [
   {
     name: 'update_checklist',
     description:
-      'Patch an existing native Telegram checklist. Supports updating the title, adding new tasks, removing tasks, or marking tasks done/undone. Tasks with an id target existing items; tasks without an id are appended. Preserves existing task ids across edits.',
+      'Patch an existing checklist message (from send_checklist). Supports updating the title, adding new tasks, and marking tasks done/undone. Tasks with an id target existing items; tasks without an id are appended. Preserves existing task ids across edits. Edits the formatted checklist message in place.',
     inputSchema: {
       type: 'object',
       properties: {

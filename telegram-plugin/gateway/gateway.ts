@@ -35,6 +35,12 @@ import {
   type AskUserOutcome,
 } from '../ask-user.js'
 import { redactAskUserFields, redactChecklistFields } from '../outbound-field-redact.js'
+import {
+  type ChecklistState,
+  applyChecklistPatch,
+  initChecklistState,
+  renderChecklistFallback,
+} from '../checklist-fallback.js'
 import { parseInterruptMarker } from '../interrupt-marker.js'
 import {
   ToolFlightTracker,
@@ -1336,28 +1342,48 @@ const GRAMMY_VERSION: string = (() => {
   }
 })()
 
-// ─── sendChecklist / editMessageChecklist boot probes ─────────────────────
+// ─── sendChecklist / editMessageChecklist boot probe ──────────────────────
 // grammY 1.x exposes new Telegram Bot API methods via bot.api.raw before the
-// typed wrapper is generated. We probe for availability at boot so callers
-// can detect degraded mode gracefully instead of throwing at call time.
+// typed wrapper is generated. We still probe for native availability at boot,
+// but note the decisive constraint: per the official Bot API docs, both
+// `sendChecklist` and `editMessageChecklist` operate "on behalf of a connected
+// business account" and REQUIRE a `business_connection_id` (Required: Yes) —
+// https://core.telegram.org/bots/api#sendchecklist. Ordinary bots (which every
+// switchroom agent runs) have no business connection, so the native call always
+// fails (`400: parameter "checklist" is required`, then the missing business
+// connection). The checklist tools therefore degrade DETERMINISTICALLY to a
+// formatted GFM message (see checklist-fallback.ts) rather than ever surfacing
+// a raw Telegram 400 to the agent.
 const _rawSendChecklist = (bot.api.raw as unknown as Record<string, unknown>).sendChecklist
 const _rawEditMessageChecklist = (bot.api.raw as unknown as Record<string, unknown>).editMessageChecklist
 
-/** True when the connected Telegram Bot API supports native checklists. */
+/** True when grammY exposes the native checklist methods (informational). */
 const CHECKLIST_API_AVAILABLE =
   typeof _rawSendChecklist === 'function' &&
   typeof _rawEditMessageChecklist === 'function'
 
-if (!CHECKLIST_API_AVAILABLE) {
-  process.stderr.write(
-    `telegram gateway: sendChecklist / editMessageChecklist not available in this grammY/Bot API version (${GRAMMY_VERSION}) — checklist tools will error gracefully\n`,
-  )
-}
+process.stderr.write(
+  `telegram gateway: checklist tools use the formatted-message fallback (native sendChecklist/editMessageChecklist require a Telegram business account; grammY native methods present=${CHECKLIST_API_AVAILABLE}, version=${GRAMMY_VERSION})\n`,
+)
+
+const MAX_CHECKLIST_TASKS = 30
 
 /**
- * Send a native Telegram checklist message.
- * Wraps bot.api.raw.sendChecklist with string→number coercion (chat_id) and
- * a 30-task cap enforced before the API call.
+ * In-gateway tracking of fallback-checklist message state, keyed by
+ * `${chat_id}:${message_id}`. Populated by rawSendChecklist so
+ * rawEditMessageChecklist can apply an `update_checklist` patch (add / rename /
+ * mark done) against the prior state and re-render the same message. Bounded to
+ * the process lifetime; a miss (e.g. after a gateway restart) degrades to
+ * rendering from the patch alone.
+ */
+const checklistStates = new Map<string, ChecklistState>()
+const checklistKey = (chatId: string, messageId: number | string): string => `${chatId}:${messageId}`
+
+/**
+ * Send a checklist as a formatted GFM message (title + `- [ ]`/`- [x]` task
+ * lines), routed through the standard rich-send retry policy. Enforces the
+ * 30-task cap before send and tracks the rendered state for later patching.
+ * Returns the real Telegram message_id — never surfaces a raw checklist 400.
  */
 async function rawSendChecklist(args: {
   chat_id: string
@@ -1367,28 +1393,36 @@ async function rawSendChecklist(args: {
   reply_to_message_id?: number
   protect_content?: boolean
 }): Promise<{ message_id: number }> {
-  if (!CHECKLIST_API_AVAILABLE) {
-    throw new Error('sendChecklist is not available in this grammY/Telegram Bot API version')
+  if (args.tasks.length > MAX_CHECKLIST_TASKS) {
+    throw new Error(`checklist exceeds ${MAX_CHECKLIST_TASKS}-task limit (got ${args.tasks.length})`)
   }
-  const MAX_TASKS = 30
-  if (args.tasks.length > MAX_TASKS) {
-    throw new Error(`checklist exceeds ${MAX_TASKS}-task limit (got ${args.tasks.length})`)
-  }
-  const result = await (_rawSendChecklist as (p: Record<string, unknown>) => Promise<{ message_id: number }>)({
-    chat_id: Number(args.chat_id),
-    title: args.title,
-    tasks: args.tasks.map(t => ({ text: t.text, ...(t.done != null ? { is_completed: t.done } : {}) })),
-    ...(args.message_thread_id != null ? { message_thread_id: args.message_thread_id } : {}),
-    ...(args.reply_to_message_id != null ? { reply_to_message_id: args.reply_to_message_id } : {}),
-    ...(args.protect_content === true ? { protect_content: true } : {}),
-  })
-  return { message_id: result.message_id }
+  const state = initChecklistState(args.title, args.tasks)
+  const sent = await robustApiCall(
+    // allow-raw-bot-api: sendRichMessage routed through robustApiCall (retry policy).
+    () =>
+      lockedBot.api.sendRichMessage(
+        Number(args.chat_id),
+        richMessage(renderChecklistFallback(state)),
+        {
+          ...(args.message_thread_id != null ? { message_thread_id: args.message_thread_id } : {}),
+          ...(args.reply_to_message_id != null
+            ? { reply_parameters: { message_id: args.reply_to_message_id } }
+            : {}),
+          ...(args.protect_content === true ? { protect_content: true } : {}),
+        } as Parameters<typeof lockedBot.api.sendRichMessage>[2],
+      ),
+    { chat_id: args.chat_id, verb: 'send_checklist', ...(args.message_thread_id != null ? { threadId: args.message_thread_id } : {}) },
+  )
+  const messageId = (sent as { message_id: number }).message_id
+  checklistStates.set(checklistKey(args.chat_id, messageId), state)
+  return { message_id: messageId }
 }
 
 /**
- * Edit (patch) an existing Telegram checklist message.
- * Supports updating title, adding/removing tasks, and marking tasks done/undone.
- * Task objects with an `id` field target existing tasks; those without are added.
+ * Edit an existing fallback-checklist message: apply the patch (update title,
+ * add tasks, mark tasks done/undone — targeting existing tasks by `id`) to the
+ * tracked state, re-render, and edit the message in place through the retry
+ * policy. A tracking miss degrades to rendering from the patch alone.
  */
 async function rawEditMessageChecklist(args: {
   chat_id: string
@@ -1396,23 +1430,23 @@ async function rawEditMessageChecklist(args: {
   title?: string
   tasks?: Array<{ id?: string; text?: string; done?: boolean }>
 }): Promise<void> {
-  if (!CHECKLIST_API_AVAILABLE) {
-    throw new Error('editMessageChecklist is not available in this grammY/Telegram Bot API version')
-  }
-  await (_rawEditMessageChecklist as (p: Record<string, unknown>) => Promise<unknown>)({
-    chat_id: Number(args.chat_id),
-    message_id: Number(args.message_id),
+  const key = checklistKey(args.chat_id, args.message_id)
+  const next = applyChecklistPatch(checklistStates.get(key), {
     ...(args.title != null ? { title: args.title } : {}),
-    ...(args.tasks != null
-      ? {
-          tasks: args.tasks.map(t => ({
-            ...(t.id != null ? { id: Number(t.id) } : {}),
-            ...(t.text != null ? { text: t.text } : {}),
-            ...(t.done != null ? { is_completed: t.done } : {}),
-          })),
-        }
-      : {}),
+    ...(args.tasks != null ? { tasks: args.tasks } : {}),
   })
+  checklistStates.set(key, next)
+  await robustApiCall(
+    // allow-raw-bot-api: editMessageText routed through robustApiCall (retry policy).
+    () =>
+      lockedBot.api.editMessageText(
+        Number(args.chat_id),
+        Number(args.message_id),
+        richMessage(renderChecklistFallback(next)),
+        {} as Parameters<typeof lockedBot.api.editMessageText>[3],
+      ),
+    { chat_id: args.chat_id, verb: 'update_checklist', messageId: Number(args.message_id) },
+  )
 }
 
 const chatLock = createChatLock()

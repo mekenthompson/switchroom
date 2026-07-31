@@ -282,6 +282,14 @@ export interface RolloutNarrator {
    * final entry. Freezes the surface: no later edit may un-finalize it.
    */
   onTerminal(entry: StatusEntry): void;
+  /**
+   * Re-attach to a card a PRIOR hostd process already posted for this request
+   * (its message_id persisted across a self-bump), so the resumed narrator
+   * edits it in place instead of re-posting. Optional so lighter narrator
+   * implementations (and tests) can omit it. MUST be a no-op if called after
+   * state already exists for the request.
+   */
+  seedPostedMessage?(requestId: string, agentName: string, messageId: number): void;
 }
 
 /**
@@ -2202,6 +2210,29 @@ export class HostdServer {
       `hostd: resuming rollout ${marker.request_id} → ${marker.pin} after ` +
         `self-bump (v${marker.prior_hostd_version} → v${ownVersion})\n`,
     );
+    // Card-stall fix: re-attach to the narration card the OLD hostd already
+    // posted (its message_id was persisted into the marker once that post
+    // resolved) so the resumed narrator keeps EDITING the same card across the
+    // self-bump instead of orphaning it on the "hostd refreshing itself" frame
+    // and re-posting. MUST run before the first phase is fed so the narrator's
+    // per-request state carries the message_id from its very first edit. Falls
+    // back to the prior re-post behavior when the id wasn't captured in time.
+    if (
+      marker.narration_message_id !== undefined &&
+      caller.kind === "agent"
+    ) {
+      try {
+        this.rolloutNarrator?.seedPostedMessage?.(
+          marker.request_id,
+          caller.name,
+          marker.narration_message_id,
+        );
+      } catch (e) {
+        process.stderr.write(
+          `hostd: rollout narrator seedPostedMessage threw (non-fatal): ${(e as Error).message}\n`,
+        );
+      }
+    }
     const entry = this.launchRollout(
       {
         pin: marker.pin,
@@ -2214,6 +2245,48 @@ export class HostdServer {
       Date.now(),
     );
     this.onRolloutPhase(entry, { phase: "self-bump-done", target: marker.pin });
+  }
+
+  /**
+   * Card-stall fix: durably record the narration card's Telegram message_id
+   * into the pending self-bump marker, so the NEW hostd that resumes this roll
+   * after the self-bump can re-attach to the SAME card (seedPostedMessage)
+   * instead of re-posting. Wired as the narrator's `onMessageId` sink, so it
+   * fires the moment the OLD hostd's first narration post lands — which is
+   * after the marker was first written (the post is dispatched async by the
+   * self-bump phase). Best-effort and idempotent: no marker (a normal roll
+   * with no self-bump) or a request_id mismatch is a clean no-op; a write
+   * failure is swallowed (the card just falls back to re-posting on resume).
+   */
+  persistNarrationMessageId(requestId: string, messageId: number): void {
+    try {
+      if (!Number.isInteger(messageId)) return;
+      const markerPath = join(
+        this.hostdDirPath(),
+        SELF_BUMP_MARKER_FILENAME,
+      );
+      if (!existsSync(markerPath)) return; // no self-bump in flight — nothing to persist.
+      const marker = parsePendingRolloutMarker(readFileSync(markerPath, "utf8"));
+      if (!marker) return;
+      if (marker.request_id !== requestId) return; // a different roll's marker — leave it.
+      if (marker.narration_message_id === messageId) return; // already recorded.
+      const updated: PendingRolloutMarker = {
+        ...marker,
+        narration_message_id: messageId,
+      };
+      // Atomic write (temp + rename): this fires late, potentially during the
+      // self-bump helper's container recreate, so a mid-write SIGKILL must not
+      // truncate the marker and strand the resume. Same dir → rename is atomic.
+      const tmpPath = `${markerPath}.tmp-${process.pid}`;
+      writeFileSync(tmpPath, encodePendingRolloutMarker(updated), {
+        mode: 0o600,
+      });
+      renameSync(tmpPath, markerPath);
+    } catch (e) {
+      process.stderr.write(
+        `hostd: persistNarrationMessageId failed (non-fatal): ${(e as Error).message}\n`,
+      );
+    }
   }
 
   /** Synchronous: `switchroom agent start <name>` — fast (~1-2s for

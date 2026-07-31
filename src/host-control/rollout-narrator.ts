@@ -146,11 +146,52 @@ export class LogTailRolloutNarrator implements RolloutNarrator {
       log?: (m: string) => void;
       /** Clock seam for tests; defaults to Date.now. */
       now?: () => number;
+      /**
+       * Called once per request the moment the first narration post lands and
+       * yields a real Telegram message_id. hostd wires this to durably persist
+       * the message_id (into the self-bump resume marker) so a hostd restart
+       * mid-roll — the self-bump — can RE-ATTACH to the same card instead of
+       * orphaning it on an early frame and re-posting. Fire-and-forget: must
+       * not throw.
+       */
+      onMessageId?: (requestId: string, messageId: number) => void;
     } = {},
   ) {}
 
   private now(): number {
     return this.opts.now?.() ?? Date.now();
+  }
+
+  /**
+   * Re-attach to a narration card a PRIOR hostd process already posted for
+   * this request, so the resumed narrator EDITS it in place instead of
+   * re-posting a fresh one (the self-bump card-stall fix). Seeds per-request
+   * state with the known message_id BEFORE the first phase of the resumed roll
+   * is fed, so `scheduleRenderOrPost` takes the edit branch from the very
+   * first phase. Idempotent and non-clobbering: a no-op if state already
+   * exists for the request (e.g. a phase somehow arrived first).
+   */
+  seedPostedMessage(
+    requestId: string,
+    agentName: string,
+    messageId: number,
+  ): void {
+    if (this.states.has(requestId)) return;
+    if (agentName.length === 0) return;
+    if (!Number.isInteger(messageId)) return;
+    this.states.set(requestId, {
+      agentName,
+      lastAppliedSeq: -1,
+      messageId,
+      posting: false,
+      postAttempts: 0,
+      postFailed: false,
+      render: { target: "" },
+      agents: [],
+      frozen: false,
+      timer: null,
+      pendingEditAfterPost: false,
+    });
   }
 
   /** Upsert an agent's checklist entry (keyed by name, roll order preserved). */
@@ -427,6 +468,16 @@ export class LogTailRolloutNarrator implements RolloutNarrator {
         }
         st.messageId = mid;
         st.postFailed = false;
+        // Durably surface the message_id so a hostd self-bump mid-roll can
+        // re-attach to THIS card instead of orphaning it (card-stall fix).
+        // Fire-and-forget; a throwing sink must never break the narration.
+        try {
+          this.opts.onMessageId?.(requestId, mid);
+        } catch (e) {
+          this.opts.log?.(
+            `onMessageId sink threw (non-fatal): ${(e as Error).message}`,
+          );
+        }
         // If phases arrived while we were posting, apply the latest now.
         if (st.pendingEditAfterPost) {
           st.pendingEditAfterPost = false;

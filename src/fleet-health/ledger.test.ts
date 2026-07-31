@@ -101,6 +101,10 @@ describe("runScan (I/O) — defensive over a synthetic fleet tree", () => {
           turn_id: `${CHAT}:_#1`,
           status: "complete",
           tools: 0,
+          // route:'none' — a GENUINE silent no-op (nothing reached the user),
+          // the sev-3 case that survives the PR "turn-honesty" split. Without a
+          // route this route-less row would be aged out as pre-route backlog.
+          route: "none",
           // Real gateway rows always carry `ts`; the silent-no-op guard now
           // requires it (detect.ts). ~2026-07-02, matching the gw log line and
           // the scenario clock (below the fixed floor — see silentNoopFloorTs:0).

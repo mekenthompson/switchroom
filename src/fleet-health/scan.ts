@@ -46,6 +46,10 @@ export interface ScanOptions {
   /** Override the silent-no-op windowing floor (unix seconds). Defaults to
    *  `SILENT_NOOP_FLOOR_TS`. Exposed for tests / future re-baselining. */
   silentNoopFloorTs?: number;
+  /** Override the route-field ship floor (unix seconds) below which route-less
+   *  legacy silent-no-op candidates are aged out. Defaults to
+   *  `ROUTE_FIELD_SHIP_TS`. Exposed for tests / future re-baselining. */
+  routeFieldShipTs?: number;
 }
 
 export interface ScanResult {
@@ -128,6 +132,7 @@ export function runScan(opts: ScanOptions = {}): ScanResult {
     try {
       const res = scanAgent(agent, turnsText, gwText, {
         silentNoopFloorTs: opts.silentNoopFloorTs,
+        routeFieldShipTs: opts.routeFieldShipTs,
       });
       perAgent.push(res);
       findings.push(...res.findings);

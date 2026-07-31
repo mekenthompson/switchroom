@@ -28,6 +28,62 @@ export type DeliveryOutcome = 'delivered' | 'failed' | 'suppressed'
 export type TurnStatus = 'complete' | 'no_reply' | 'send_failed'
 
 /**
+ * The DELIVERY ROUTE a turn's answer actually took to the user — the
+ * deterministic signal the fleet-health detector uses to tell an honest
+ * backstop recovery apart from a genuine silent no-op (PR "turn-honesty").
+ *
+ *   'reply'  — the answer reached the user via the `reply` tool tail (a real
+ *              tool call, so `tools >= 1`).
+ *   'stream' — the answer reached the user via the streaming answer-lane
+ *              finalized as the turn's terminal text (the model did NOT call
+ *              reply, so this can be a `tools === 0` turn).
+ *   'flush'  — the turn-flush backstop put the model's plain terminal text on
+ *              the wire (the model called no reply tool; a `tools === 0` turn).
+ *              A `complete` + `tools:0` + `flush` row is a backstop-recovered
+ *              turn — a latency/discipline blemish, NOT user-facing silence.
+ *   'none'   — nothing reached the user (genuine no-reply, or a backstop send
+ *              that failed). A `complete` + `tools:0` + `none` row is a broken
+ *              delivery invariant — the sev-3 silent-no-op alarm.
+ *
+ * Derived ONLY from the resolved delivery state (never stamped speculatively
+ * pre-send), in the same place `computeTurnStatus` derives the status.
+ */
+export type DeliveryRoute = 'reply' | 'stream' | 'flush' | 'none'
+
+/**
+ * Derive the recorded delivery route from the turn's resolved flags. Mirrors
+ * `computeTurnStatus`'s authority order: the backstop `deliveryOutcome` (when
+ * present) reflects the REAL send resolution, so it wins; otherwise the
+ * synchronous reply/stream tail is authoritative.
+ *
+ *   deliveryOutcome 'delivered'  → 'flush'  (backstop delivered the plain text)
+ *   deliveryOutcome 'failed'     → 'none'   (backstop send failed — nothing landed)
+ *   deliveryOutcome 'suppressed' → reply/stream tail (fall through)
+ *   deliveryOutcome undefined    → reply/stream tail (legacy synchronous paths)
+ *
+ * For the tail: a delivered answer is 'stream' when it was finalized through the
+ * streaming answer-lane (deliveredViaStream), else 'reply'; an undelivered turn
+ * is 'none'. This never fabricates a route a delivery did not take.
+ */
+export function computeTurnRoute(turn: {
+  finalAnswerDelivered: boolean
+  deliveryOutcome?: DeliveryOutcome
+  deliveredViaStream?: boolean
+}): DeliveryRoute {
+  switch (turn.deliveryOutcome) {
+    case 'delivered':
+      return 'flush'
+    case 'failed':
+      return 'none'
+    // 'suppressed' and the legacy `undefined` both defer to the reply/stream
+    // tail below — the reply tool (or a stream finalized as the answer) is what
+    // actually delivered when the backstop short-circuited or never fired.
+  }
+  if (!turn.finalAnswerDelivered) return 'none'
+  return turn.deliveredViaStream ? 'stream' : 'reply'
+}
+
+/**
  * Derive the recorded turn status from the turn's flags.
  *
  * `deliveryOutcome` (when present) is authoritative — it reflects the REAL send
@@ -148,6 +204,10 @@ export interface TurnRecordRow {
   tools: number
   status: TurnStatus
   turn_id: string
+  /** The delivery route the answer took (PR "turn-honesty"). Deterministic
+   *  signal for the fleet-health detector to split a backstop-recovered turn
+   *  ('flush') from a genuine silent no-op ('none'). Derived post-send. */
+  route: DeliveryRoute
 }
 
 /**
@@ -165,6 +225,9 @@ export function buildTurnRecord(
     turnId: string
     finalAnswerDelivered: boolean
     deliveryOutcome?: DeliveryOutcome
+    /** True when the answer was finalized through the streaming answer-lane
+     *  (the model did NOT call reply). Feeds the 'stream' route. */
+    deliveredViaStream?: boolean
   },
   endedAt: number,
 ): TurnRecordRow {
@@ -175,5 +238,8 @@ export function buildTurnRecord(
     tools: turn.toolCallCount ?? 0,
     status: computeTurnStatus(turn),
     turn_id: turn.turnId,
+    // Route is derived from the SAME resolved delivery state as status — never
+    // the speculative pre-send flag.
+    route: computeTurnRoute(turn),
   }
 }

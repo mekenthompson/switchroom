@@ -35,12 +35,36 @@ export const HANG_MAXTOOLS = 2;
  */
 export const SILENT_NOOP_FLOOR_TS = 1_783_900_800;
 
+/**
+ * Route-field ship floor (unix SECONDS) = 2026-08-01T00:00:00Z. The `route`
+ * field on turns.jsonl rows (deterministic delivery route: 'reply' | 'stream' |
+ * 'flush' | 'none') ships with this PR. Rows written BEFORE the field shipped
+ * carry no `route`, so a route-less `complete` + `tools:0` row is legacy backlog
+ * we cannot classify — the live corroboration showed ~all of it was flush-
+ * recovered (delivered via the backstop), NOT genuine silence. We age those out:
+ * a route-less silent-no-op candidate only escalates when its `ts` is AT/AFTER
+ * this floor (by which point every real row carries a route, so a route-less row
+ * there is itself anomalous). This stops the stale pre-route backlog from
+ * firing sev-3 forever while keeping go-forward invariant breaks visible.
+ *
+ * FIXED epoch (like SILENT_NOOP_FLOOR_TS), param-injected so the module stays a
+ * pure function over its inputs. MUST be >= the actual rollout date — set it
+ * forward of merge, not behind it. Verify: `date -u -d @1785542400` →
+ * Sat Aug  1 00:00:00 UTC 2026.
+ */
+export const ROUTE_FIELD_SHIP_TS = 1_785_542_400;
+
 /** Options threaded into the turn detectors. Pure inputs only — no clock. */
 export interface DetectOptions {
   /** Unix-seconds floor for the silent-no-op finding. Turns with `ts` below
    *  this are NOT flagged as silent-no-ops. Defaults to `SILENT_NOOP_FLOOR_TS`.
    *  Tests pass `0` to assert detector LOGIC independent of the calendar. */
   silentNoopFloorTs?: number;
+  /** Unix-seconds floor below which a route-LESS (legacy) `complete`+`tools:0`
+   *  row is aged out instead of escalated sev-3. Defaults to
+   *  `ROUTE_FIELD_SHIP_TS`. Tests pass `0` to assert route-based LOGIC
+   *  independent of the calendar. */
+  routeFieldShipTs?: number;
 }
 
 /** One row of `turns.jsonl` — the structured per-turn oracle. */
@@ -51,6 +75,11 @@ export interface TurnRecord {
   tools?: number;
   status?: string;
   turn_id?: string;
+  /** Delivery route the answer took (PR "turn-honesty"): 'reply' | 'stream' |
+   *  'flush' | 'none'. Absent on legacy rows written before the field shipped
+   *  (see `ROUTE_FIELD_SHIP_TS`). Kept as a loose `string` so an unknown future
+   *  value never crashes the pure scan. */
+  route?: string;
 }
 
 /** The L0 failure-mode signals emitted from `turns.jsonl`. Kept as stable
@@ -59,6 +88,13 @@ export type TurnSignal =
   | "killed-incomplete-turn"
   | "hang-long-stalled"
   | "silent-no-op-candidate"
+  // A `complete` + `tools:0` turn whose answer was delivered by the turn-flush
+  // backstop (route 'flush'), NOT via the reply tool. Informational trend, NOT
+  // an alarm: the user DID get the answer — this is a latency/discipline
+  // blemish (the reply tool was bypassed), never user-facing silence. Split
+  // out of `silent-no-op-candidate` (PR "turn-honesty") so the sev-3 alarm is
+  // reserved for genuine silence (route 'none').
+  | "flush-recovered-turn"
   // A turn-flush/backstop send that failed or only partially delivered
   // (turns.jsonl status `send_failed`, new in gateway PR B). Distinct from
   // `killed-incomplete-turn` (process killed mid-run): here the run finished
@@ -143,7 +179,16 @@ export function detectTurnFindings(
 ): Finding[] {
   const findings: Finding[] = [];
   const silentNoopFloorTs = opts.silentNoopFloorTs ?? SILENT_NOOP_FLOOR_TS;
+  const routeFieldShipTs = opts.routeFieldShipTs ?? ROUTE_FIELD_SHIP_TS;
   for (const t of turns) {
+    // Cross-agent fixture guard (PR "turn-honesty"): a row whose own `agent`
+    // field disagrees with the directory being scanned is NOT this agent's turn
+    // — it is fixture/probe pollution written into a live `turns.jsonl` (the
+    // `chartestagent` rows found in carrie/overlord/klanker). Attributing it to
+    // the scanned agent inflates that agent's counts with another identity's
+    // rows. Skip it entirely. Rows with no `agent` field are trusted to the
+    // directory (can't be contradicted) — only a PRESENT mismatch is dropped.
+    if (typeof t.agent === "string" && t.agent !== agent) continue;
     const tid = t.turn_id ?? "?";
     const st = t.status;
     const tl = typeof t.tools === "number" ? t.tools : 0;
@@ -181,10 +226,26 @@ export function detectTurnFindings(
         ts,
       });
     }
-    // silent no-op: completed, zero tools, real (non-synthetic). Windowed to
-    // turns at/after the fixed floor so stale pre-fix backlog stops scoring.
-    // Rows lacking a `ts` are dropped from this finding (real gateway rows
-    // always carry `ts` — turn-record-status.ts writes it unconditionally).
+    // completed, zero tools, real (non-synthetic). Windowed to turns at/after
+    // the fixed floor so stale pre-fix backlog stops scoring. Rows lacking a
+    // `ts` are dropped (real gateway rows always carry `ts` —
+    // turn-record-status.ts writes it unconditionally).
+    //
+    // PR "turn-honesty" — the ROUTE splits this once-monolithic finding by how
+    // the answer actually reached the user (the deterministic `route` field):
+    //   route 'flush'         → `flush-recovered-turn` (informational, low sev):
+    //                           the backstop delivered the answer, reply tool
+    //                           bypassed — a blemish, NOT silence.
+    //   route 'reply'|'stream'→ the agent delivered its own answer — NO finding
+    //                           (a tools:0 stream-finalized answer lands here).
+    //   route 'none'          → `silent-no-op-candidate` (sev-3 alarm): a
+    //                           `complete` row where nothing reached the user is
+    //                           a broken delivery invariant. Should be ~empty by
+    //                           construction; a nonzero count is a real break.
+    //   route ABSENT (legacy) → aged out: only escalate sev-3 when the row's
+    //                           `ts` is AT/AFTER `routeFieldShipTs`. Pre-ship
+    //                           route-less rows are unclassifiable backlog and
+    //                           are dropped so they stop firing sev-3 forever.
     if (
       st === "complete" &&
       tl === 0 &&
@@ -192,13 +253,39 @@ export function detectTurnFindings(
       t.ts != null &&
       t.ts >= silentNoopFloorTs
     ) {
-      findings.push({
-        signal: "silent-no-op-candidate",
-        agent,
-        turn_id: tid,
-        log_pointer: `turns.jsonl:${tid} tools=0`,
-        ts,
-      });
+      const route = t.route;
+      if (route === "flush") {
+        findings.push({
+          signal: "flush-recovered-turn",
+          agent,
+          turn_id: tid,
+          log_pointer: `turns.jsonl:${tid} tools=0 route=flush`,
+          ts,
+        });
+      } else if (route === "reply" || route === "stream") {
+        // The agent delivered its own answer — not a silent no-op, not a
+        // backstop recovery. No finding.
+      } else if (route === "none") {
+        findings.push({
+          signal: "silent-no-op-candidate",
+          agent,
+          turn_id: tid,
+          log_pointer: `turns.jsonl:${tid} tools=0 route=none`,
+          ts,
+        });
+      } else if (t.ts >= routeFieldShipTs) {
+        // Route ABSENT but the row post-dates the route-field ship epoch: by
+        // construction it should carry a route, so a route-less row here is
+        // itself anomalous — escalate. (Pre-ship route-less backlog falls
+        // through with no finding — aged out.)
+        findings.push({
+          signal: "silent-no-op-candidate",
+          agent,
+          turn_id: tid,
+          log_pointer: `turns.jsonl:${tid} tools=0 route=absent`,
+          ts,
+        });
+      }
     }
   }
   return findings;

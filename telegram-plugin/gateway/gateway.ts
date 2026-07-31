@@ -3433,6 +3433,14 @@ type CurrentTurn = {
   // turn-end paths (reply-tool tail, silent-marker, genuine no-reply), where
   // the legacy `finalAnswerDelivered` reading still applies unchanged.
   deliveryOutcome?: DeliveryOutcome
+  // PR "turn-honesty" — set true when this turn's answer was finalized through
+  // the streaming answer-lane (the model emitted its terminal text and the
+  // gateway materialized the visible stream AS the answer, WITHOUT the model
+  // calling reply). Distinguishes the 'stream' delivery route from 'reply' in
+  // `buildTurnRecord`; a stream-finalized answer can be a `tools === 0` turn, so
+  // this keeps the fleet-health detector from misreading it as a silent no-op.
+  // Undefined on every other path (reply-tool tail, flush backstop, no-reply).
+  deliveredViaStream?: boolean
   // Feed-reopen-after-ack refinement — whether the reply that set
   // `finalAnswerDelivered` was a *substantive* final answer (stream
   // `done`, or ≥200 chars) as opposed to a short pinging interim ACK.
@@ -5221,6 +5229,7 @@ function emitTurnRecord(turn: CurrentTurn, endedAt: number): void {
             turnId: turn.turnId,
             finalAnswerDelivered: turn.finalAnswerDelivered,
             deliveryOutcome: turn.deliveryOutcome,
+            deliveredViaStream: turn.deliveredViaStream,
           },
           endedAt,
         ),
@@ -18783,6 +18792,12 @@ function handleSessionEvent(ev: SessionEvent): void {
           turn.answerStream = null
           streamFinalizedAsAnswer = true
           turn.finalAnswerDelivered = true
+          // PR "turn-honesty" — the answer reached the user via the streaming
+          // answer-lane (not the reply tool). Stamp the route so a tools:0
+          // stream-finalized answer records route 'stream', never a misread
+          // silent no-op. Set alongside finalAnswerDelivered so it can never
+          // drift from the delivery it describes.
+          turn.deliveredViaStream = true
           // Feed-reopen refinement: the stream is being finalized as the
           // turn's answer (the model's terminal text), i.e. done=true by
           // construction → substantive. Post-answer housekeeping must NOT

@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import {
   applyChecklistPatch,
   initChecklistState,
+  planChecklistEdit,
   renderChecklistFallback,
   type ChecklistState,
 } from '../checklist-fallback.js'
@@ -70,7 +71,7 @@ describe('checklist fallback patching (update_checklist)', () => {
     expect(renderChecklistFallback(next)).toBe('**Plan**\n\n- [ ] design\n- [ ] implement')
   })
 
-  it('degrades gracefully when prior state is unknown (post-restart)', () => {
+  it('pure builder: from undefined prior state, builds solely from the patch (the gateway does NOT call this on a miss — see planChecklistEdit)', () => {
     const next = applyChecklistPatch(undefined, {
       title: 'Recovered',
       tasks: [{ text: 'one', done: true }, { text: 'two' }],
@@ -81,6 +82,38 @@ describe('checklist fallback patching (update_checklist)', () => {
   it('does not throw on an unknown id (treats it as an add, never a raw error)', () => {
     const next = applyChecklistPatch(base, { tasks: [{ id: '999', text: 'stray' }] })
     expect(next.tasks.map(t => t.text)).toContain('stray')
+  })
+})
+
+/**
+ * MAJOR guard (post-restart clobber). The tracked-state Map is in-memory, so
+ * after a gateway/agent restart an `update_checklist` patch arrives with NO
+ * prior state. The DOMINANT patch is mark-done-only (`{id, done}`, no text) —
+ * rebuilding from that alone yields an EMPTY checklist that renders the
+ * degenerate `****`, and editing the live message to that silently destroys the
+ * user's checklist. planChecklistEdit must REFUSE the edit on a tracking miss.
+ */
+describe('planChecklistEdit — refuses to clobber on a tracking miss', () => {
+  it('mark-done-only patch against unknown prior state → state_lost (NO edit)', () => {
+    const plan = planChecklistEdit(undefined, { tasks: [{ id: 1, done: true }] })
+    expect(plan.action).toBe('state_lost')
+    // Never yields an edit body — so the live message is left untouched, not
+    // overwritten with `****`.
+    expect(plan).not.toHaveProperty('state')
+  })
+
+  it('any patch against unknown prior state → state_lost (never rebuilds from patch)', () => {
+    // Even a content-bearing patch is refused: rebuilding would drop the
+    // message's untracked tasks. Resend is the honest recovery.
+    expect(planChecklistEdit(undefined, { title: 'x', tasks: [{ text: 'a' }] }).action).toBe('state_lost')
+  })
+
+  it('patch against tracked state → edit with the correctly-patched render', () => {
+    const tracked = initChecklistState('Plan', [{ text: 'design' }, { text: 'build' }])
+    const plan = planChecklistEdit(tracked, { tasks: [{ id: 1, done: true }] })
+    expect(plan.action).toBe('edit')
+    if (plan.action !== 'edit') throw new Error('expected edit')
+    expect(renderChecklistFallback(plan.state)).toBe('**Plan**\n\n- [x] design\n- [ ] build')
   })
 })
 
@@ -109,11 +142,17 @@ describe('gateway checklist wiring — degrades instead of calling native API', 
     expect(body).not.toMatch(/_rawSendChecklist\s*as/)
   })
 
-  it('rawEditMessageChecklist patches state and edits via editMessageText', () => {
+  it('rawEditMessageChecklist plans via planChecklistEdit, edits via editMessageText, and refuses on state_lost', () => {
     const body = fnBody('rawEditMessageChecklist')
-    expect(body).toMatch(/applyChecklistPatch\(/)
+    expect(body).toMatch(/planChecklistEdit\(/)
     expect(body).toMatch(/renderChecklistFallback\(/)
     expect(body).toMatch(/editMessageText\(/)
+    // The state_lost branch returns BEFORE the editMessageText call — the guard
+    // that prevents the post-restart `****` clobber.
+    const stateLostIdx = body.indexOf("'state_lost'")
+    const editIdx = body.indexOf('editMessageText(')
+    expect(stateLostIdx).toBeGreaterThan(0)
+    expect(editIdx).toBeGreaterThan(stateLostIdx)
     expect(body).not.toMatch(/_rawEditMessageChecklist\s*as/)
   })
 

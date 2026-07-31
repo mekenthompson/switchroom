@@ -106,3 +106,31 @@ export function renderChecklistFallback(state: ChecklistState): string {
   const lines = state.tasks.map(t => `- [${t.done ? 'x' : ' '}] ${t.text}`)
   return state.tasks.length > 0 ? `${header}\n\n${lines.join('\n')}` : header
 }
+
+/** Outcome of planning an `update_checklist` edit against tracked state. */
+export type ChecklistEditPlan =
+  | { action: 'edit'; state: ChecklistState }
+  | { action: 'state_lost' }
+
+/**
+ * Decide whether an `update_checklist` patch can be safely applied to a live
+ * message, WITHOUT clobbering it.
+ *
+ * The tracked-state Map is in-memory only and gateway/agent restarts are
+ * routine, so a patch can arrive for a message whose prior state we no longer
+ * hold (`prev === undefined`). Editing from the patch alone would corrupt the
+ * live checklist — the DOMINANT mark-done-only patch (`{id, done}`, no text)
+ * reconstructs to an EMPTY checklist and renders the degenerate `****`, and
+ * even a content patch would silently drop the message's untracked tasks. So on
+ * a tracking miss (or any resulting empty/degenerate state) we refuse the edit
+ * and signal the caller to resend, rather than destroy the user's checklist.
+ */
+export function planChecklistEdit(
+  prev: ChecklistState | undefined,
+  patch: { title?: string; tasks?: PatchTask[] },
+): ChecklistEditPlan {
+  if (prev === undefined) return { action: 'state_lost' }
+  const state = applyChecklistPatch(prev, patch)
+  if (state.title === '' && state.tasks.length === 0) return { action: 'state_lost' }
+  return { action: 'edit', state }
+}

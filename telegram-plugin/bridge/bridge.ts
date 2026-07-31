@@ -262,7 +262,7 @@ const TOOL_SCHEMAS = [
   {
     name: 'send_checklist',
     description:
-      'Send a checklist message to a chat: a bold title followed by one task line each (☐ open / ☑ done). Returns the message_id so you can patch it later with update_checklist. Limit: 30 tasks. Note: Telegram\'s native interactive checklists require a business account, which bots do not have, so this renders a cleanly formatted message instead — the task lines are text, not tappable in the app.',
+      'Send a checklist message to a chat: a bold title followed by one Markdown task line each (`- [ ]` open / `- [x]` done). Returns the message_id so you can patch it later with update_checklist. Limit: 30 tasks. Note: Telegram\'s native interactive checklists require a business account, which bots do not have, so this renders a cleanly formatted message instead — the task lines are text, not tappable in the app.',
     inputSchema: {
       type: 'object',
       properties: {

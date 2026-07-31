@@ -37,8 +37,8 @@ import {
 import { redactAskUserFields, redactChecklistFields } from '../outbound-field-redact.js'
 import {
   type ChecklistState,
-  applyChecklistPatch,
   initChecklistState,
+  planChecklistEdit,
   renderChecklistFallback,
 } from '../checklist-fallback.js'
 import { parseInterruptMarker } from '../interrupt-marker.js'
@@ -1372,12 +1372,27 @@ const MAX_CHECKLIST_TASKS = 30
  * In-gateway tracking of fallback-checklist message state, keyed by
  * `${chat_id}:${message_id}`. Populated by rawSendChecklist so
  * rawEditMessageChecklist can apply an `update_checklist` patch (add / rename /
- * mark done) against the prior state and re-render the same message. Bounded to
- * the process lifetime; a miss (e.g. after a gateway restart) degrades to
- * rendering from the patch alone.
+ * mark done) against the prior state and re-render the same message. In-memory
+ * only: a miss (e.g. after a gateway restart) does NOT edit — it returns a soft
+ * "state lost, resend" signal rather than clobbering the live message (see
+ * planChecklistEdit). Bounded to MAX_CHECKLIST_STATES entries (FIFO eviction of
+ * the oldest) so a long-lived gateway can't grow it without limit; an evicted
+ * entry just re-enters the same graceful state-lost path on its next update.
  */
+const MAX_CHECKLIST_STATES = 500
 const checklistStates = new Map<string, ChecklistState>()
 const checklistKey = (chatId: string, messageId: number | string): string => `${chatId}:${messageId}`
+function trackChecklistState(key: string, state: ChecklistState): void {
+  // Refresh recency (delete+set moves the key to the tail) so eviction sheds
+  // the least-recently-touched checklist first.
+  checklistStates.delete(key)
+  checklistStates.set(key, state)
+  while (checklistStates.size > MAX_CHECKLIST_STATES) {
+    const oldest = checklistStates.keys().next().value
+    if (oldest === undefined) break
+    checklistStates.delete(oldest)
+  }
+}
 
 /**
  * Send a checklist as a formatted GFM message (title + `- [ ]`/`- [x]` task
@@ -1414,7 +1429,7 @@ async function rawSendChecklist(args: {
     { chat_id: args.chat_id, verb: 'send_checklist', ...(args.message_thread_id != null ? { threadId: args.message_thread_id } : {}) },
   )
   const messageId = (sent as { message_id: number }).message_id
-  checklistStates.set(checklistKey(args.chat_id, messageId), state)
+  trackChecklistState(checklistKey(args.chat_id, messageId), state)
   return { message_id: messageId }
 }
 
@@ -1422,31 +1437,42 @@ async function rawSendChecklist(args: {
  * Edit an existing fallback-checklist message: apply the patch (update title,
  * add tasks, mark tasks done/undone — targeting existing tasks by `id`) to the
  * tracked state, re-render, and edit the message in place through the retry
- * policy. A tracking miss degrades to rendering from the patch alone.
+ * policy.
+ *
+ * If the prior state is no longer tracked (routine after a gateway/agent
+ * restart — the Map is in-memory) the edit is REFUSED: reconstructing from the
+ * patch alone would clobber the live checklist (a mark-done-only patch renders
+ * the degenerate `****`; a content patch drops untracked tasks). We return
+ * `{ status: 'state_lost' }` so the tool can tell the agent to resend, instead
+ * of silently destroying the user's checklist.
  */
 async function rawEditMessageChecklist(args: {
   chat_id: string
   message_id: string
   title?: string
   tasks?: Array<{ id?: string; text?: string; done?: boolean }>
-}): Promise<void> {
+}): Promise<{ status: 'edited' | 'state_lost' }> {
   const key = checklistKey(args.chat_id, args.message_id)
-  const next = applyChecklistPatch(checklistStates.get(key), {
+  const plan = planChecklistEdit(checklistStates.get(key), {
     ...(args.title != null ? { title: args.title } : {}),
     ...(args.tasks != null ? { tasks: args.tasks } : {}),
   })
-  checklistStates.set(key, next)
+  if (plan.action === 'state_lost') {
+    return { status: 'state_lost' }
+  }
+  trackChecklistState(key, plan.state)
   await robustApiCall(
     // allow-raw-bot-api: editMessageText routed through robustApiCall (retry policy).
     () =>
       lockedBot.api.editMessageText(
         Number(args.chat_id),
         Number(args.message_id),
-        richMessage(renderChecklistFallback(next)),
+        richMessage(renderChecklistFallback(plan.state)),
         {} as Parameters<typeof lockedBot.api.editMessageText>[3],
       ),
     { chat_id: args.chat_id, verb: 'update_checklist', messageId: Number(args.message_id) },
   )
+  return { status: 'edited' }
 }
 
 const chatLock = createChatLock()
@@ -13314,7 +13340,19 @@ async function executeUpdateChecklist(args: Record<string, unknown>): Promise<{ 
     (t) => redactOutboundText(t, 'update_checklist'),
   )
 
-  await rawEditMessageChecklist({ chat_id, message_id, title: redactedTitle, tasks: redactedTasks })
+  const result = await rawEditMessageChecklist({ chat_id, message_id, title: redactedTitle, tasks: redactedTasks })
+
+  if (result.status === 'state_lost') {
+    process.stderr.write(`telegram gateway: update_checklist: state lost (likely a restart) chatId=${chat_id} messageId=${message_id} — not editing; asked agent to resend\n`)
+    return {
+      content: [
+        {
+          type: 'text',
+          text: `checklist ${message_id}'s tracked state was lost (likely a gateway restart), so it can't be patched safely — the existing message was left untouched. Resend the full checklist with send_checklist to continue tracking it.`,
+        },
+      ],
+    }
+  }
 
   process.stderr.write(`telegram gateway: update_checklist: updated chatId=${chat_id} messageId=${message_id}\n`)
   return { content: [{ type: 'text', text: `checklist updated (id: ${message_id})` }] }

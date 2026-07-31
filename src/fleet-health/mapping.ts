@@ -54,6 +54,18 @@ export const SIGNAL_MAP: Record<L0Signal, SignalMapping> = {
     job_spec: "know-what-my-agent-is-doing",
     signature: "silent-no-op:completed-zero-tools",
   },
+  "flush-recovered-turn": {
+    // A `complete` + `tools:0` turn whose answer WAS delivered — via the
+    // turn-flush backstop, not the reply tool. The user got the answer, so this
+    // is NOT the silent no-op it used to be miscounted as; it is an
+    // informational latency/discipline trend (the reply tool was bypassed and
+    // the backstop safety net absorbed the delivery). severity 1 — it never
+    // opens a sev-3 issue and never escalates on its own.
+    failure_mode: "drift",
+    severity: 1,
+    job_spec: "know-what-my-agent-is-doing",
+    signature: "flush-recovered:reply-tool-bypassed",
+  },
   "duplicate-delivery-represent": {
     failure_mode: "duplicate",
     severity: 2,

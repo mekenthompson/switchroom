@@ -6,6 +6,7 @@ import {
   detectGatewayFindings,
   HANG_MS,
   SILENT_NOOP_FLOOR_TS,
+  ROUTE_FIELD_SHIP_TS,
 } from "./detect.js";
 
 /**
@@ -40,25 +41,29 @@ describe("detectTurnFindings", () => {
   it("flags a silent no-op (complete, zero tools, real turn)", () => {
     // Fixture base ts (1_782_600_000 ≈ 2026-06-27) is BELOW the default
     // SILENT_NOOP_FLOOR_TS (2026-07-13), so pass floor:0 to assert the detector
-    // LOGIC independent of the calendar window.
-    const turns = parseTurns(turn(10, { tools: 0 }));
+    // LOGIC independent of the calendar window. `route:'none'` isolates the
+    // silent-noop path from the PR "turn-honesty" route age-out (a genuine
+    // silence: nothing reached the user).
+    const turns = parseTurns(turn(10, { tools: 0, route: "none" }));
     const f = detectTurnFindings("alpha", turns, { silentNoopFloorTs: 0 });
     expect(f.map((x) => x.signal)).toContain("silent-no-op-candidate");
   });
 
   it("windows OUT a silent no-op whose ts is below the floor (Fix 2)", () => {
-    // Same complete/zero-tool turn, but under the default floor its 2026-06-27
-    // ts is pre-fix backlog → it must NOT be flagged.
-    const turns = parseTurns(turn(10, { tools: 0 }));
+    // Same complete/zero-tool route:'none' turn, but under the default floor its
+    // 2026-06-27 ts is pre-fix backlog → it must NOT be flagged. (route:'none'
+    // so the ONLY thing suppressing it is the silent-noop floor, not the route
+    // age-out.)
+    const turns = parseTurns(turn(10, { tools: 0, route: "none" }));
     const f = detectTurnFindings("alpha", turns);
     expect(f.map((x) => x.signal)).not.toContain("silent-no-op-candidate");
   });
 
   it("flags a silent no-op whose ts is AT/ABOVE the default floor (Fix 2)", () => {
-    // A post-fix turn (ts at the 2026-07-13 floor) is still a real signal — the
-    // windowing must not swallow go-forward silent no-ops.
+    // A post-fix route:'none' turn (ts at the 2026-07-13 floor) is still a real
+    // signal — the windowing must not swallow go-forward silent no-ops.
     const turns = parseTurns(
-      turn(10, { tools: 0, ts: SILENT_NOOP_FLOOR_TS + 100 }),
+      turn(10, { tools: 0, route: "none", ts: SILENT_NOOP_FLOOR_TS + 100 }),
     );
     const f = detectTurnFindings("alpha", turns);
     expect(f.map((x) => x.signal)).toContain("silent-no-op-candidate");
@@ -101,6 +106,92 @@ describe("detectTurnFindings", () => {
     // and a send_failed turn with tools:0 must NOT be a silent-no-op (it is an
     // honest delivery failure, not a benign complete-zero-tools turn).
     expect(signals).not.toContain("silent-no-op-candidate");
+  });
+
+  // PR "turn-honesty" — the delivery ROUTE splits the once-monolithic
+  // silent-no-op finding. These assert the OUTCOME per route and would FAIL on
+  // pre-PR code (which flagged EVERY complete+tools:0 row as sev-3 silent-no-op
+  // regardless of route, and had no `flush-recovered-turn` signal at all).
+  it("route 'flush' → flush-recovered-turn, NOT a silent no-op (turn-honesty)", () => {
+    // A complete/tools:0 turn the backstop DELIVERED. The user got the answer —
+    // it must be the informational flush-recovered signal, never the sev-3 alarm.
+    const turns = parseTurns(turn(20, { tools: 0, route: "flush" }));
+    const signals = detectTurnFindings("alpha", turns, {
+      silentNoopFloorTs: 0,
+    }).map((x) => x.signal);
+    expect(signals).toContain("flush-recovered-turn");
+    expect(signals).not.toContain("silent-no-op-candidate");
+  });
+
+  it("route 'none' → keeps the sev-3 silent-no-op alarm (turn-honesty)", () => {
+    // A complete row where NOTHING reached the user is a broken delivery
+    // invariant — it must still escalate as a silent no-op.
+    const turns = parseTurns(turn(21, { tools: 0, route: "none" }));
+    const signals = detectTurnFindings("alpha", turns, {
+      silentNoopFloorTs: 0,
+    }).map((x) => x.signal);
+    expect(signals).toContain("silent-no-op-candidate");
+    expect(signals).not.toContain("flush-recovered-turn");
+  });
+
+  it("route 'reply' / 'stream' → NO finding (agent delivered its own answer)", () => {
+    for (const route of ["reply", "stream"] as const) {
+      const turns = parseTurns(turn(22, { tools: 0, route }));
+      const signals = detectTurnFindings("alpha", turns, {
+        silentNoopFloorTs: 0,
+      }).map((x) => x.signal);
+      expect(signals).not.toContain("silent-no-op-candidate");
+      expect(signals).not.toContain("flush-recovered-turn");
+    }
+  });
+
+  it("route ABSENT + ts BELOW the ship floor → aged out, no sev-3 (turn-honesty)", () => {
+    // Legacy pre-route backlog: complete/tools:0, no `route`, ts above the
+    // silent-noop floor but below the route-field ship epoch. It must NOT fire
+    // sev-3 (that is the 131-turn backlog the PR stops from firing forever).
+    const turns = parseTurns(
+      turn(23, { tools: 0, ts: ROUTE_FIELD_SHIP_TS - 100 }),
+    );
+    const signals = detectTurnFindings("alpha", turns, {
+      silentNoopFloorTs: 0,
+    }).map((x) => x.signal);
+    expect(signals).not.toContain("silent-no-op-candidate");
+    expect(signals).not.toContain("flush-recovered-turn");
+  });
+
+  it("route ABSENT + ts AT/ABOVE the ship floor → sev-3 (anomalous post-ship row)", () => {
+    // After the route field ships every real row carries a route; a route-less
+    // complete/tools:0 row dated after the ship epoch is itself anomalous and
+    // must escalate.
+    const turns = parseTurns(
+      turn(24, { tools: 0, ts: ROUTE_FIELD_SHIP_TS + 100 }),
+    );
+    const signals = detectTurnFindings("alpha", turns, {
+      silentNoopFloorTs: 0,
+    }).map((x) => x.signal);
+    expect(signals).toContain("silent-no-op-candidate");
+  });
+
+  it("drops a row whose `agent` field disagrees with the scanned agent (turn-honesty)", () => {
+    // The `chartestagent` fixture rows written into a LIVE turns.jsonl must NOT
+    // be attributed to the agent whose directory is being scanned.
+    const turns = parseTurns(
+      turn(25, { tools: 0, route: "none", agent: "chartestagent" }),
+    );
+    const findings = detectTurnFindings("alpha", turns, {
+      silentNoopFloorTs: 0,
+    });
+    expect(findings).toHaveLength(0);
+  });
+
+  it("keeps a row with a MATCHING `agent` field (guard is a mismatch drop only)", () => {
+    const turns = parseTurns(
+      turn(26, { tools: 0, route: "none", agent: "alpha" }),
+    );
+    const signals = detectTurnFindings("alpha", turns, {
+      silentNoopFloorTs: 0,
+    }).map((x) => x.signal);
+    expect(signals).toContain("silent-no-op-candidate");
   });
 
   it("flags a hang only when long AND stalled (few tools)", () => {
@@ -157,5 +248,24 @@ describe("scanAgent escalation decision", () => {
     const res = scanAgent("alpha", turn(1, {}) + "\n" + turn(2, {}), "");
     expect(res.escalate).toBe(false);
     expect(res.findings).toHaveLength(0);
+  });
+
+  it("does NOT escalate a flush-recovered turn (informational, turn-honesty)", () => {
+    // A flush-delivered complete/tools:0 turn produces one flush-recovered
+    // finding and zero silent-no-op findings, and MUST NOT escalate — the user
+    // got the answer; it is a latency trend, not an alarm.
+    const res = scanAgent("alpha", turn(30, { tools: 0, route: "flush" }), "", {
+      silentNoopFloorTs: 0,
+    });
+    expect(res.findings.map((f) => f.signal)).toEqual(["flush-recovered-turn"]);
+    expect(res.escalate).toBe(false);
+  });
+
+  it("escalates a route:'none' complete/tools:0 turn (broken invariant)", () => {
+    const res = scanAgent("alpha", turn(31, { tools: 0, route: "none" }), "", {
+      silentNoopFloorTs: 0,
+    });
+    expect(res.findings.map((f) => f.signal)).toContain("silent-no-op-candidate");
+    expect(res.escalate).toBe(true);
   });
 });

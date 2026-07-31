@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   computeTurnStatus,
+  computeTurnRoute,
   backstopSendOutcome,
   finalizeBackstopSend,
   buildTurnRecord,
@@ -36,6 +37,46 @@ describe('computeTurnStatus — recorded turn status reflects real outcome', () 
     expect(computeTurnStatus({ finalAnswerDelivered: false, deliveryOutcome: undefined })).toBe(
       'no_reply',
     )
+  })
+})
+
+/**
+ * PR "turn-honesty" — the recorded `route` is the deterministic signal the
+ * fleet-health detector uses to split a backstop-recovered turn ('flush') from
+ * a genuine silent no-op ('none'). It is derived from the SAME resolved
+ * delivery state as status, never a speculative pre-send flag.
+ */
+describe('computeTurnRoute — recorded delivery route reflects real outcome', () => {
+  it("backstop delivered → 'flush'", () => {
+    expect(
+      computeTurnRoute({ finalAnswerDelivered: true, deliveryOutcome: 'delivered' }),
+    ).toBe('flush')
+  })
+
+  it("backstop send failed → 'none' (nothing reached the user)", () => {
+    expect(
+      computeTurnRoute({ finalAnswerDelivered: false, deliveryOutcome: 'failed' }),
+    ).toBe('none')
+  })
+
+  it("reply tool short-circuited the flush → 'reply'", () => {
+    expect(
+      computeTurnRoute({ finalAnswerDelivered: true, deliveryOutcome: 'suppressed' }),
+    ).toBe('reply')
+  })
+
+  it("synchronous reply-tool tail (no outcome) → 'reply'", () => {
+    expect(computeTurnRoute({ finalAnswerDelivered: true })).toBe('reply')
+  })
+
+  it("stream finalized as the answer (tools:0, no reply tool) → 'stream'", () => {
+    expect(
+      computeTurnRoute({ finalAnswerDelivered: true, deliveredViaStream: true }),
+    ).toBe('stream')
+  })
+
+  it("genuine no-reply turn → 'none'", () => {
+    expect(computeTurnRoute({ finalAnswerDelivered: false })).toBe('none')
   })
 })
 
@@ -85,6 +126,20 @@ describe('turn-flush wiring → recorded turns.jsonl status', () => {
 
   it('send SUCCEEDS (all chunks delivered) → complete', () => {
     expect(recordAfterSend({ threw: false, sentCount: 2, chunkCount: 2 }).status).toBe('complete')
+  })
+
+  it("turn-honesty — a delivered backstop send records route 'flush'", () => {
+    // The wired record the fleet-health detector reads: a complete + tools:0
+    // turn the backstop delivered carries route 'flush' → flush-recovered, not
+    // a silent no-op. Pre-PR this field did not exist.
+    const rec = recordAfterSend({ threw: false, sentCount: 2, chunkCount: 2 })
+    expect(rec.route).toBe('flush')
+  })
+
+  it("turn-honesty — a failed backstop send records route 'none'", () => {
+    const rec = recordAfterSend({ threw: true, sentCount: 0, chunkCount: 1 })
+    expect(rec.route).toBe('none')
+    expect(rec.status).toBe('send_failed')
   })
 
   it('send THROWS (simulated FLOOD_WAIT_ACTIVE) → send_failed, never complete', () => {
